@@ -1,0 +1,362 @@
+arXiv:2502.14145v3 [cs.CL] 3 Jun 2026
+
+
+
+
+
+
+
+
+
+
+     LLM-Enhanced Dialogue Management for Full-Duplex Spoken Dialogue
+                                  Systems
+
+Hao Zhang∗1, Weiwei Li2, Rilin Chen3, Vinay Kothapally1, Meng Yu1, Dong Yu1
+        1Tencent     AI Lab, Bellevue, USA
+        2Tencent     AI Lab, Shenzhen, China
+        3Tencent     AI Lab, Beijing, China
+        aaronhzhang@global.tentcent.com
+
+   Abstract                                                                   tuned an LLM with a time-division multiplexing strategy for
+                                                                              duplex dialogue. VITA [21] incorporated state tokens and a
+                   Achieving full-duplex communication in spoken dialogue     duplex scheme for non-awakening and audio-interrupt interac-
+    systems (SDS) requires real-time coordination between listen-             tions, while Moshi [22] integrated a base LLM with a smaller
+    ing, speaking, and thinking.             This paper proposes a seman-     Transformer for real-time streaming predictions. Mai et al. [23]
+    tic voice activity detection (VAD) module as a dialogue man-              introduced RTTL-DG, a textless spoken dialogue model incor-
+    ager (DM) to efficiently manage turn-taking in full-duplex SDS.           porating backchannels and laughter for natural turn-taking.
+    Implemented as a lightweight (0.5B) LLM fine-tuned on full-               To balance conversational quality, stability, and inference
+    duplex conversation data, the semantic VAD predicts four con-             efficiency, this paper proposes a semantic voice activity de-
+    trol tokens to regulate turn-switching and turn-keeping, distin-          tection (VAD) as a dialogue manager (DM) for full-duplex
+    guishing between intentional and unintentional barge-ins while            SDS. While an acoustic VAD mitigates interference from back-
+    detecting query completion for handling user pauses and hesita-           ground speakers using acoustic cues, the semantic VAD lever-
+    tions. By processing input speech in short intervals, the seman-          ages LLM capabilities to detect user states and intentions
+    tic VAD enables real-time decision-making, while the core di-             based on semantic information. We implement the semantic
+    alogue engine (CDE) is only activated for response generation,            VAD by fine-tuning a smaller (0.5B) LLM on carefully de-
+    reducing computational overhead. This design allows indepen-              signed full-duplex text conversations. It predicts four control
+    dent DM optimization without retraining the CDE, balancing                tokens-start-speaking, start-listening, continue-speaking, and
+    interaction accuracy and inference efficiency for scalable, next-         continue-listening-to dynamically guide system interaction.
+    generation full-duplex SDS.                                               Operating at short intervals, the DM enables real-time interac-
+    Index Terms: full-duplex, spoken dialogue system, voice ac-               tion management, distinguishing between intentional and un-
+    tivity detection, dialog management, large language model                 intentional barge-ins and detecting query completion to handle
+                                                                              user pauses and hesitations. Our method improves upon prior
+1. Introduction                                                               work by balancing DM performance and computational effi-
+    Spoken dialogue systems (SDS) [1, 2, 3, 4] have advanced sig-             ciency: leveraging the semantic understanding of LLMs enable
+    nificantly with large language models (LLMs), enabling more               precise dialogue management, while a lightweight LLM cuts
+    natural and context-aware interactions [5, 6]. However, achiev-           computational costs. Independent DM and CDE optimization
+    ing full-duplex communication, where SDS can listen and speak             further ensures scalability.
+    simultaneously, remains challenging [7, 8, 9, 10]. Many SDSs
+    still operate in a turn-based (half-duplex) or "pseudo" full-    2. Full-duplex spoken dialogue system
+    duplex manner [11, 12], leading to less fluid interactions due to         2.1. Key challenges in full-duplex SDS
+    lack of understanding of the user's state and intention. In con-
+    trast, human conversations involve seamless turn-taking [13].             Achieving seamless full-duplex communication in SDS re-
+    Beyond turn-taking, full-duplex SDS must handle challenges                quires accurately detecting and differentiating user activities,
+    like interfering speakers, user hesitations, and distinguishing           states, and intentions. However, real-time turn-taking remains
+    between intentional and unintentional interruptions to improve            challenging due to issues such as interfering speakers, ambigu-
+    naturalness and efficiency [14, 15, 16].                                  ous pauses, and unintentional interruptions:
+                      Achieving full-duplex communication in SDS has been     • Interfering Speakers: Background speech can cause ASR
+    widely studied. Early approaches relied on separate neural net-                and dialogue management errors, leading to unintended acti-
+    work modules for detection and classification tasks, limiting             vations or responses.
+    stability and robustness. Shin et al.          [17] used speech event     • User Pauses & Hesitations: Silence alone does not indicate
+    detection for real-time query updates but lacked broader inter-                query completion, often resulting in premature responses or
+    action handling. Lin et al.            [18] introduced Duplex Conver-     unnecessary delays.
+    sation, leveraging a multimodal model for user state detection            • Unintentional  Interruptions:                 Acknowledgments,
+    and turn management. Recent methods embed interaction han-                           backchanneling, or speech directed at others may mis-
+    dling directly into LLMs, improving automation but increasing             takenly halt SDS responses,      disrupting conversational
+    inference overhead. Wang et al. [19] proposed NeuralFSM,
+    fine-tuning an LLM with a finite state machine for synchro-               flow.
+    nized speaking and listening. Similarly, Zhang et al. [20] fine-          Addressing these challenges requires integrating both acoustic
+                                                                              and semantic information for robust, context-aware full-duplex
+    *Corresponding author                                                     interaction.
+
+                                                    User Input                                                                                  Hello!        (Completed query)
+                 AEC                  Acoustic     "Listening"        ASR                                                                                   <|S-S|> Hi, how are you?   <|S-L|>
+                                      VAD                                                                                                       What's the         (Unfinished query)
+    Hello!                                                          Dialog                                           Core Dialog                                                       <|C-L|>
+                                                                    Manager                                         Engine                      weather   like in Seattle?
+                                                           TTS    (0.5B LLM)                                        (Larger LLM)                              <|S-S|> Today   in Seattle, it's
+                                                                                                                                                                            mostly cloudy with
+    Hi, how are you?    System Response                                                                                                 (a)     I see.        (Acknowledgment back-channel)
+                                                        "Speaking"                                                                                                  <|C-S|> a slight chance of
+             <Incomplete Q>                                           <|C-L|>                                                                   Can you   tell me     (Inquiry interruption)
+             <Real INT/Finished A>                                    <|S-L|>                                                                                                          <|S-L|>
+             <Fake INT/Noisy Q>          Dialog                       <|C-S|>
+             <Completed Q>               Manager                      <|S-S|>            /                           TTS                        the weather for    tomorrow?
+                                                                                                                                        (b)              <|S-S|> Tomorrow, it's expected to be
+                                                      Today in Seattle,          a     slight                       Tomorrow, it's                                    partly sunny with a high
+                                                      it's mostly                chance      of                     expected to be …            Pass me the
+    SDS responses                                     cloudy     with                                                                           salt, please.        Speaking to others
+    Output tokens CDE                                                 …                  …      <eos>                                               <|C-S|> of 65°F and a low of 50°F. <|S-L|>     (d)
+
+    Input tokens CDE                  …                               …                  …               …                     …                                   13%
+    Actions                           Listening                              Speaking                  Listening     Speaking
+    Control tokens                                                                                                                                          19%        47%
+
+    Input tokens DM                   …                                                            …                                                               21%
+    User queries        …  What's the weather like                        I  see.        Can you   the   weather
+    Times                              in Seattle?                                       tell me   for   tomorrow?                      (c)     Normal      Real INT  Fake INT     Incomplete Q    (e)
+                                      !               "                          #           $                      %
+
+    Figure 1: (a) The proposed system architecture; (b) Control tokens and their corresponding actions; (c) Interactions between the DM
+    and CDE; (d) An example of a full-duplex conversation; and (e) Distribution of interaction scenarios in the generated full-duplex
+    conversation dataset.
+
+
+    2.2. Proposed full-duplex SDS design                                                                                 ment. Compared to integrating DM directly into CDE (larger
+                                                                                                                    models) [19, 21, 20, 22], our method reduces inference costs by
+    The proposed SDS consists of six key modules: acoustic echo                                                     offloading frequent decisions to a lightweight LLM while ensur-
+    cancellation (AEC) [24, 25], acoustic VAD, automatic speech                                                        ing scalability through independent DM and CDE optimization.
+    recognition (ASR), semantic VAD, an LLM serving as the core
+    dialogue engine (CDE), and text-to-speech (TTS), as shown in
+    Figure 1(a). User speech is processed sequentially, with the                                                                            3. Semantic VAD for dialogue management
+    first four modules operating in short intervals to ensure real-                                                 3.1. Interaction scenarios and action tokens
+    time responsiveness. The CDE is activated only when needed,
+    minimizing computational overhead.                                                                                       Most user-SDS interactions follow a standard question-
+    We combine acoustic and semantic VAD to handle the pre-                                                              answering flow without interruptions. However, when inter-
+    viously mentioned challenges, enabling robust and seamless                                                       ruptions occur, we prioritize user experience in our design by
+    full-duplex interaction:                                                                                        allowing only user-initiated interruptions.
+    • Acoustic VAD: Our designed acoustic VAD is speaker- and                                                                The DM enables SDS to switch between speaking and lis-
+             distance-aware, leveraging distance information and speaker                                             tening modes by performing two key tasks, each associated with
+           embeddings (if provided) to isolate target speaker's activity                                            specific action tokens (shown in Figure 1(b)):
+    and mitigate interference from other speakers.                                                                     • User State Detection: Determines whether the user has fin-
+    • Semantic VAD: Serving as the DM and implemented as a                                                          ished speaking.
+             fine-tuned 0.5B LLM, it leverages the LLM's semantic under-                                                         - Query Incomplete: The DM predicts <|Continue-Lis
+             standing and contextual awareness to predict control tokens                                                       tening|> (<|C-L|>), allowing the system to keep lis-
+              for dynamic turn-taking management. This enables effective                                                 tening and cache historical queries until a complete query
+            handling of hesitations and accurate differentiation between                                            is identified.
+    real and fake interruptions.                                                                                                 - Query Complete: The DM prompts the SDS to <|Star
+    This study focuses on introducing the semantic VAD.                                                                           t-Speaking|> (<|S-S|>). Once the response is fin-
+    Rather than improving question-answering capabilities, our                                                                    ished, the SDS transitions to <|Start-Listening|>
+    goal is to train the DM to follow structured rules and take                                                     (<|S-L|>) again and awaits further input.
+    appropriate actions in various full-duplex interaction scenarios                                                    • User Intention Analysis: Determines whether a user barge-
+    through instruction tuning [26, 19]. This approach requires only
+    a small amount of high-quality data and minimal fine-tuning,                                                    in requires a response.
+    making it efficient and practical. Unlike NN-based DMs that                                                          - Intentional Interruption (Real INT): If the user intends
+    rely on shallow features [17, 18], the fine-tuned LLM lever-                                                           to redirect the conversation, the SDS stops speaking and
+    ages semantic understanding for precise interaction manage-                                                                      switches to <|Start-Listening|> (<|S-L|>). Ex-
+
+
+
+
+
+
+
+
+
+
+  Semantic VAD
+
+
+
+
+
+    Actions
+
+
+
+
+
+
+
+
+DialogManagement
+   "Thinking"
+
+Algorithm 1: Full-Duplex Data Prompts Generation                           Table 1: Confusion matrix full-duplex SDS evaluation. "GT"
+         Input : Topic Pool T; Speaking Style Pool S;                      denotes ground truth, and "Est" denotes estimation.
+            Hyperparameters: Nconv (number of                             GT\Est      <|C-L|> <|S-S|> <|S-L|> <|C-S|>                   Recall
+         conversations), Preal (probability of Real INT), Pfake           <|C-L|>       926         74     0        0                    0.926
+         (Fake INT), Pincomplete (incomplete Q)                           <|S-S|>       11         989     0        0                    0.989
+         Output: Generated prompts for full-duplex                        <|S-L|>        1           0    999       0                    0.999
+            conversation data                                             <|C-S|>        0           0     0      1000                   1.000
+1 for i ← 1 to Nconv do                                                   Precision    0.987    0.930    1.000    1.000    Accuracy:
+2         Randomly select topic t and speaking style s;                   F1 Score     0.956    0.959    0.999    1.000     0.9785
+3         Set QA rounds n ∼ Uniform(2, 12);
+4         Initialize conversation C with t and s;
+5         for j ← 1 to n do
+6           Randomly assign QA type with probability P∗:                   datasets meet these criteria, we used LLM API, Yuanbao [27],
+            if QA round is Real INT (Preal) then                           to generate diverse and natural full-duplex dialogues.
+     Add real interruption scenario to C;                                  we designed an algorithm as shown in Algorithm 1.               The
+7                                                                                 To generate prompts to create full duplex conversation data,
+8  else if QA round is Fake INT (Pfake) then
+                    Add fake interruption scenario to C;                   full-duplex conversation data annotated with control tokens.
+9                                                                          prompts were designed to instruct LLMs on how to generate
+   10       else                                                           Each prompt includes the following elements:
+   11             Add normal QA exchange to C;                             • Objective: Generate a conversation transcript where the user
+   12       Randomly truncate user queries for incomplete                  can interrupt the assistant.
+            queries (Pincomplete);                                         • Assistant's Behavior: Specify the meanings of control to-
+   13    Generate a prompt by explaining control tokens                    kens and corresponding actions.
+            placement and usage with examples;                             • Output    Format:     Conversations   are     formatted       as:
+   14     Append prompt to prompt set;                                     {Round X (dialogue type); User:                 <user's
+15 Return the set of generated prompts;                                    query or barge-in>; Sys:                         <assistant's
+                                                                           response with control tokens>}.
+                                                                           • Custom Instructions: Specify the number of QA rounds,
+                                                                           topic,     and speaking style. For example:                 "Please
+           amples include denial or discontent, further inquiries, and     generate 5 rounds of conversation.                  The
+         topic changes.                                                    user initiates the conversation with a
+          - Unintentional Interruption (Fake INT): If the interruption     topic related to travel, speaking in a
+               is non-disruptive, the SDS continues speaking with <|Co     casual and conversational style.                    The
+                         ntinue-Speaking|> (<|C-S|>). Examples include    assistant maintains a friendly tone and
+              affirmative acknowledgments, back-channeling, speech di-     references the previous context."
+         rected at someone else, and unrelated comments.                                  The topic pool covers 200 common conversation themes
+                                                                           (e.g., weather, travel, restaurants), while the speaking style pool
+3.2. Dialogue management                                                   includes 10 user personas. Topics and styles are randomly se-
+                                                                           lected, with probabilities adjusted for realism.
+As shown in Figure 1(c), the DM processes two primary inputs:
+(1) user query tokens from ASR and (2) historical response to-             3.4. Data preparation and model training
+kens from the CDE. For clarity and due to space constraints,               Data preparation consists of four stages: data generation, clean-
+the historical response tokens are not explicitly depicted in the          ing, post-processing, and augmentation 1.        We generated full-
+diagram as DM input. The DM regulates interaction flow by                  duplex conversations using 20,000 prompts with Yuanbao [27],
+analyzing these inputs to determine the next action.                       but found that not all generated data align fully with the in-
+                 The DM serves as the primary decision-maker, continu-     tended structure due to limited command-following abilities. To
+ously managing listening and speaking states, while the CDE                address this, we applied strict data cleaning, filtering malformed
+focuses on generating high-quality responses when required.                outputs, and incorrect control tokens, resulting in a retention
+The CDE is activated only when the DM predicts <|S-S|>,                    rate of 60%. Given this, we also adopted an alternative strat-
+prompting it to perform standard LLM inference using past user             egy: first generating standard QA dialogues, which LLMs han-
+queries and system responses. By relying on the DM for fre-                dle more effectively, and then introduce various interaction pat-
+quent real-time decisions and selectively invoking the CDE, the            terns via controlled post-processing. The final training dataset
+system optimizes both computational efficiency and conversa-               combines conversations from both strategies.
+tional quality, ensuring a scalable and effective full-duplex SDS.                     We further augmented the data by modifying the punctua-
+                                                                           tion at the end of user queries to better match the ASR output.
+3.3. Full-duplex conversation data                                         The final dataset includes 11,990 conversations with 80,338
+This section focuses on the core of the semantic VAD, detailing            dialogue rounds covering diverse interaction scenarios (Fig-
+the data generation and the methodology for designing tailored             ure 1(e)). Furthermore, we examine extreme cases with a high
+prompts.                                                                   proportion (over 50%) or exclusively real/fake interruptions or
+             Creating high-quality training data for the dialogue man-     incomplete queries, which led to overfitting and degraded per-
+ager (DM) requires annotated full-duplex conversations with                    1The data preparation scripts are available at: https://github.
+the four control tokens, as shown in Figure 1(d). As no public             com/HaoZhang6720/fullduplex-dialogue-data
+
+                                                   Table 2: Comparison with related studies.
+
+                    Tasks & Actions                         Precision                 Recall                        F1
+DuplexConv           RTTL-DG  SemanticVAD            [18]   [23]  SemanticVAD  [18]   [23]  SemanticVAD   [18]  [23]  SemanticVAD
+           [18]            [23]      (proposed)
+    User state       Remain      Continue listening         0.81     0.99             0.89     0.93             0.85     0.96
+                     silent      <|C-L|>             /                           /                        0.91
+    detection        Initiate     Start speaking
+                     speaking    <|S-S|>                    0.62     0.93             0.43     0.99             0.52     0.96
+    User intention   Stop        Start listening            0.75     0.99      0.86   0.53     0.93       0.89  0.62     0.96
+                     speaking    <|S-L|>             0.91
+    detection        Keep        Continue speaking
+                     speaking    <|C-S|>                    0.94     1.00             0.96     1.00             0.95     1.00
+
+                         Table 3: Testing using real recorded data with manually labeled user query completion.
+
+                                            AcousticVAD                               + SemanticVAD
+Threshold                        GT\Est   <|C-L|> <|S-S|>       <|C-L|> <|S-S|> Recall Precision         F1   Accuracy
+ 300 ms                          <|C-L|>    0        532              495       37     0.930   0.887  0.908     0.935
+                                 <|S-S|>    0        1008             63        945    0.937   0.962  0.949
+ 500 ms                          <|C-L|>    0        324        ⇒     307       17     0.949   0.892  0.920     0.962
+                                 <|S-S|>    0        1078             37       1041    0.966   0.984  0.975
+ 800 ms                          <|C-L|>    0        228              218       10     0.956   0.861  0.905     0.966
+                                 <|S-S|>    0        1091             35       1056    0.968   0.991  0.979
+ 1800 ms                         <|C-L|>    0        132              128        4     0.970   0.800  0.880     0.971
+                                 <|S-S|>    0        1108             32       1076    0.971   0.996  0.983
+
+
+
+    formance, reinforcing the need for balanced training data. To               to their model checkpoints or test datasets, we can only present
+    mitigate potential degradation of the base LLM's capabilities,              the results reported in their studies directly for reference. Both
+    we included the corresponding uninterrupted dialogues along-                studies framed user state and barge-in detection as classification
+    side full-duplex samples in the training set.                               tasks based on acoustic and linguistic patterns with limited se-
+                  For fine-tuning, we used a small version of Hunyuan [28],     mantic understanding. In contrast, our semantic VAD leverages
+    0.5B-dense-8k model, on the curated dataset. The initial study              LLM-driven semantic comprehension, enabling more context-
+    focuses on Chinese dialogues and the dataset exclusively con-               aware and reliable full-duplex interaction, achieving relatively
+    sists of Chinese full-duplex dialogues.            The training follows     better performance.
+    standard LLM fine-tuning with four added control tokens, run-
+    ning for 1500 steps with a batch size of 128 and a learning rate            4.3. Evaluation on real-recordings
+    of 0.001, linearly decayed to 0.0001 for stable optimization.               We further tested our system using internal recordings from user
+                                                                                interactions with a half-duplex SDS, focusing on user state de-
+4. Experimental results                                                         tection (start-speaking and continue-listening). Users were in-
+    4.1. Test sets                                                              structed to include natural hesitations to simulate scenarios with
+                                                                                incomplete queries. The recordings were labeled using both
+    As no benchmark datasets exist for full-duplex evaluation, we               VAD techniques and manual annotation for evaluation. Table 3
+    generate 1,000 test samples for each interaction scenario. Fol-             presents the results. Since acoustic VAD relies solely on acous-
+    lowing Sect. 3.3, we reconstruct the topic and speaking style               tic information and determines the completion of the query by
+    pools, and generate 2,000 multi-round conversations.               From     comparing the silence duration against a fixed threshold (e.g.
+    these, 1,000 samples per scenario are randomly selected to eval-            300 ms), it can only predict <|S-S|>-assuming the user has
+    uate the semantic VAD's control token predictions.                          finished speaking. Semantic VAD refinement significantly im-
+                                                                                proved accuracy, achieving over 93.5% across all cases. Fur-
+    4.2. Evaluation results                                                     ther error analysis indicated that some mispredictions were in-
+                                                                                troduced due to ASR errors rather than limitations of the VAD
+    The evaluation results presented in Table 1 confirm the effec-              itself.
+    tiveness of the proposed semantic VAD in predicting control
+    tokens across all scenarios. Notably, the detection performance
+    for user barge-in (determining whether the system should con-    5. Conclusion
+    tinue speaking or switch to start listening) is exceptionally high,         This paper introduces a semantic VAD-based dialogue manager
+    benefiting from contextual cues during simultaneous speech,                 (DM) for full-duplex SDS, leveraging a fine-tuned 0.5B LLM to
+    making it more stable. In contrast, user state detection (dis-              regulate turn-taking through control tokens. The proposed ap-
+    tinguishing between finished and unfinished queries) is slightly            proach effectively distinguishes between intentional and unin-
+    lower as it relies solely on semantic completeness, which varies            tentional barge-ins, detects query completion, and reduces com-
+    with speaking style and linguistic nuances, introducing ambigu-             putational overhead by selectively invoking the core dialogue
+    ity and making it inherently more challenging for the proposed              engine (CDE). Experimental results demonstrate improved in-
+    method.                                                                     teraction fluidity and intent recognition. Future work will ad-
+                   Table 2 compares our approach with two recently proposed     dress system delay and robustness while extending this method
+    full-duplex SDS methods [18, 23]. As we do not have access                  to support large multimodal models.
+
+6. References                                                                         [20] X. Zhang, Y. Chen, S. Hu, X. Han, Z. Xu, Y. Xu, W. Zhao,
+    [1] K. Jokinen and M. McTear, Spoken dialogue systems.          Morgan     M. Sun, and Z. Liu, "Beyond the turn-based game: Enabling
+    & Claypool Publishers, 2009.                                               real-time conversations with duplex models," arXiv preprint
+                                                                               arXiv:2406.15718, 2024.
+           [2] O. Lemon and O. Pietquin, "Machine learning for spoken dia-        [21] C. Fu, H. Lin, Z. Long, Y. Shen, M. Zhao, Y. Zhang, S. Dong,
+    logue systems," in European Conference on Speech Communica-                X. Wang, D. Yin, L. Ma et al., "Vita: Towards open-source inter-
+    tion and Technologies (Interspeech'07), 2007, pp. 2685-2688.               active omni multimodal llm," arXiv preprint arXiv:2408.05211,
+         [3] J. Edlund, J. Gustafson, M. Heldner, and A. Hjalmarsson, "To-     2024.
+    wards human-like spoken dialogue systems," Speech communica-                                                                            egou, ´  [22] A. Defossez, L. Mazar´    e, M. Orsini, A. Royer, P. P´    erez, H. J´
+    tion, vol. 50, no. 8-9, pp. 630-645, 2008.                                 E. Grave, and N. Zeghidour, "Moshi: a speech-text foundation
+           [4] L. Zhou, J. Gao, D. Li, and H.-Y. Shum, "The design and im-     model for real-time dialogue," arXiv preprint arXiv:2410.00037,
+    plementation of xiaoice, an empathetic social chatbot," Computa-           2024.
+    tional Linguistics, vol. 46, no. 1, pp. 53-93, 2020.                      [23] L. Mai and J. Carson-Berndsen, "Real-time textless dialogue gen-
+       [5] OpenAI, "ChatGPT can now see, hear, and speak," https://openai.     eration," arXiv preprint arXiv:2501.04877, 2025.
+    com/blog/chatgpt-can-now-see-hear-and-speak., 2023, [Online;                   [24] H. Zhang and D. Wang, "Deep learning for acoustic echo can-
+    accessed 2025-02-11].                                                      cellation in noisy and double-talk scenarios," Training, vol. 161,
+           [6] --, "Introducing ChatGPT," https://openai.com/blog/chatgpt#     no. 2, p. 322, 2018.
+    OpenAI, 2023, [Online; accessed 2025-02-11].                                   [25] --, "Neural cascade architecture for multi-channel acoustic
+    [7] M. U. Hadi, R. Qureshi, A. Shah, M. Irfan, A. Zafar, M. B. Shaikh,     echo suppression," IEEE/ACM Transactions on Audio, Speech,
+    N. Akhtar, J. Wu, S. Mirjalili et al., "Large language models: a           and Language Processing, vol. 30, pp. 2326-2336, 2022.
+    comprehensive survey of its applications, challenges, limitations,                  [26] L. Ouyang, J. Wu, X. Jiang, D. Almeida, C. Wainwright,
+    and future prospects," Authorea Preprints, 2023.                           P. Mishkin, C. Zhang, S. Agarwal, K. Slama, A. Ray et al., "Train-
+          [8] M. F. McTear, "Spoken dialogue technology: enabling the con-     ing language models to follow instructions with human feedback,"
+    versational user interface," ACM Computing Surveys (CSUR),                 Advances in neural information processing systems, vol. 35, pp.
+    vol. 34, no. 1, pp. 90-169, 2002.                                          27 730-27 744, 2022.
+      [9] Q. Zhou, B. Li, L. Han, and M. Jou, "Talking to a bot or a wall?       [27] Yuanbao, "Tencent yuanbao chat," https://yuanbao.tencent.com/
+    how chatbots vs. human agents affect anticipated communication             chat/, 2025, [Online; accessed 2025-02-11].
+    quality," Computers in Human Behavior, vol. 143, p. 107674,                    [28] X. Sun, Y. Chen, Y. Huang, R. Xie, J. Zhu, K. Zhang, S. Li,
+    2023.                                                                      Z. Yang, J. Han, X. Shu et al., "Hunyuan-large: An open-source
+       [10] Y. Mou and K. Xu, "The media inequality: Comparing the initial     moe model with 52 billion activated parameters by tencent," arXiv
+    human-human and human-ai social interactions," Computers in                preprint arXiv:2411.02265, 2024.
+    Human Behavior, vol. 72, pp. 432-440, 2017.
+   [11] H. Sacks, E. A. Schegloff, and G. Jefferson, "A simplest systemat-
+    ics for the organization of turn-taking for conversation," language,
+    vol. 50, no. 4, pp. 696-735, 1974.
+        [12] G. Skantze, "Turn-taking in conversational systems and human-
+    robot interaction: a review," Computer Speech & Language,
+    vol. 67, p. 101178, 2021.
+          [13] D. H. Zimmermann and C. West, "Sex roles, interruptions and
+    silences in conversation," in Amsterdam Studies in the Theory and
+    History of Linguistic Science Series 4. John Benjamins BV, 1996,
+    pp. 211-236.
+    [14] C. Liu, J. Jiang, C. Xiong, Y. Yang, and J. Ye, "Towards building
+    an intelligent chatbot for customer service: Learning to respond at
+    the appropriate time," in Proceedings of the 26th ACM SIGKDD
+    international conference on Knowledge Discovery & Data Min-
+    ing, 2020, pp. 3377-3385.
+            [15] M. Marge, C. Espy-Wilson, N. G. Ward, A. Alwan, Y. Artzi,
+    M. Bansal, G. Blankenship, J. Chai, H. Daume III, D. Dey ´ et al.,
+    "Spoken language interaction with robots: Recommendations
+    for future research," Computer Speech & Language, vol. 71, p.
+    101255, 2022.
+         [16] C. Wang, H. Pan, Y. Liu, K. Chen, M. Qiu, W. Zhou, J. Huang,
+    H. Chen, W. Lin, and D. Cai, "Mell: Large-scale extensible user
+    intent classification for dialogue systems with meta lifelong learn-
+    ing," in Proceedings of the 27th ACM SIGKDD conference on
+    knowledge discovery & data mining, 2021, pp. 3649-3659.
+    [17] D. Shin, "Llm-based natural conversational agent with speech col-
+    lision detection for early prompt abort," 2024.
+        [18] T.-E. Lin, Y. Wu, F. Huang, L. Si, J. Sun, and Y. Li, "Duplex
+    conversation: Towards human-like interaction in spoken dialogue
+    systems," in Proceedings of the 28th ACM SIGKDD Conference
+    on Knowledge Discovery and Data Mining, 2022, pp. 3299-3308.
+      [19] P. Wang, S. Lu, Y. Tang, S. Yan, W. Xia, and Y. Xiong, "A full-
+    duplex speech dialogue scheme based on large language models,"
+    arXiv preprint arXiv:2405.19487, 2024.

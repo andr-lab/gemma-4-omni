@@ -1,0 +1,330 @@
+arXiv:2603.09180v1 [cs.CL] 10 Mar 2026
+
+
+
+
+
+
+
+
+
+
+DuplexCascade: Full-Duplex Speech-to-Speech Dialogue with VAD-Free
+     Cascaded ASR-LLM-TTS Pipeline and Micro-Turn Optimization
+
+        Jianing Yang1,2, Yusuke Fujita1, Yui Sudo1
+
+        1 SB Intuitions Corp., Japan, 2 The University of Tokyo, Japan
+        baleyang@g.ecc.u-tokyo.ac.jp, yusuke.fujita@sbintuitions.co.jp,
+        yui.sudo@sbintuitions.co.jp
+
+
+
+   Abstract                                                              In this work, we propose DuplexCascade1,                a cascaded
+    Spoken dialog systems with cascaded ASR-LLM-TTS mod-                 streaming pipeline that achieves full-duplex speech-to-speech
+    ules retain strong LLM's intelligence, but VAD segmentation          dialogue while preserving the intelligence benefits of an LLM-
+    often forces half-duplex turns and brittle control. On the other     centered design.  The key idea is to transform conventional
+    hand, VAD-free end-to-end model supports full-duplex inter-          utterance-wise long turns into chunk-wise micro-turn interac-
+    action but is hard to maintain conversational intelligence. In       tions, enabling more natural full-duplex dialogue. We further
+    this paper, we present DuplexCascade, a VAD-free cascaded            introduce a carefully designed set of conversational special to-
+    streaming pipeline for full-duplex speech-to-speech dialogue.        kens to explicitly regulate LLM behaviors critical for duplex
+    Our key idea is to convert conventional utterance-wise long          interaction, enabling VAD-free turn-taking control and mak-
+    turns into chunk-wise micro-turn interactions, enabling rapid        ing the overall policy more stable and controllable. With only
+    bidirectional exchange while preserving the strengths of a capa-     50k multi-turn text dialogues, we perform lightweight LoRA
+    ble text LLM. To reliably coordinate turn-taking and response        adaptation [13] for 5k steps, achieving strong full-duplex per-
+    timing, we introduce a set of conversational special control to-     formance on Full-Duplex-Bench [14]. Moreover, the text-only
+    kens that steer the LLM's behavior under streaming constraints.      adaptation avoids cross-modal alignment issues, yielding strong
+    On Full-Duplex-Bench and VoiceBench, DuplexCascade deliv-            conversational intelligence performace on VoiceBench [12].
+    ers state-of-the-art full-duplex turn-taking and strong conver-
+    sational intelligence among open-source speech-to-speech dia-    2. Related Works
+    logue systems.                                                       2.1. VAD-Based Turn Taking Control
+    Index Terms: Full-Duplex Dialogue; Speech-To-Speech Sys-
+    tems; Cascaded Architectures; Turn-Taking Control                    Most recent speech-to-speech dialogue systems in practice fol-
+                                                                         low a cascaded design with ASR, LLM, and TTS compo-
+1. Introduction                                                          nents, and rely on an external VAD to decide turn bound-
+                                                                         aries [6, 15, 16]. However, VAD-based endpointing is funda-
+    Recent advances in large language models (LLMs) have signif-         mentally limited because it has difficulty leveraging conversa-
+    icantly improved the quality and usability of spoken dialogue        tional semantics and intent, which are often crucial for making
+    systems, bringing speech-to-speech assistants closer to natural,     precise turn-taking decisions [7, 17]. As a result, cascaded sys-
+    low-friction interaction [1]. In practice, most deployed systems     tems often suffer from unstable turn-taking behaviors: they may
+    adopt a cascaded design in which automatic speech recognition        interrupt the user when a pause is semantically meaningful, or
+    (ASR) transcribes user speech [2], an LLM performs dialogue          remain silent when an immediate response or backchannel is ex-
+    reasoning in the text domain, and text-to-speech (TTS) synthe-       pected [8,18,19]. Recent cascade-style systems such as Freeze-
+    sizes the system response [3, 4]. This modular architecture re-      Omni [5] inherit this difficulty, and VAD errors frequently be-
+    mains attractive because it is straightforward to engineer and       come the dominant failure mode for turn-taking quality.
+    iterate on, and it inherits the strong instruction-following and
+    reasoning capabilities of modern text LLMs.                          2.2. VAD-Free Time-Division-Multiplexing Approach To-
+    Despite their strong conversational intelligence, cascaded           ward Full-Duplex Interaction
+    systems typically depend on an external voice activity detec-
+    tor (VAD) to segment user speech into turns. This reliance           Beyond VAD-driven cascades, recent work has explored mak-
+    often forces a half-duplex "listen-then-speak" interaction style     ing LLM-centered systems behave in a full-duplex manner by
+    and makes turn control brittle under pauses, overlaps, and           restructuring interaction into short, alternating segments with-
+    noise, leading to unnatural turn-taking behaviors such as miss-      out using external VAD [20-22]. MiniCPM-Duplex [20] in-
+    ing backchannels or failing to handle mid-utterance interrup-        troduces the concept of Time-Division-Multiplexing encoding-
+    tions [5-8].                                                         decoding, which divides an interaction into time slices and pro-
+    In contrast, recent end-to-end (E2E) speech-text models              cesses each input slice immediately to produce the correspond-
+    aim to remove explicit VAD-based segmentation and directly           ing output slice. While this formulation enables pseudo full-
+    support concurrent listening and speaking, enabling more nat-        duplex interaction after fine-tuning, it does not explicitly model
+    ural full-duplex turn control [9-11]. However, this VAD-free         or control turn-taking decisions; consequently, performance can
+    duplex capability often comes with a practical downside: com-        degrade in realistic dialogue settings.
+    pared with strong text LLMs, conversational intelligence can
+    degrade due to the difficulty of jointly learning robust cross-      1https://sbintuitions.github.io/
+    modal representations and dialogue policies [12].                    DuplexCascadeDemo
+
+    System Audio
+        Streaming TTS
+    Conversational Special Tokens:        uh-huh        It is Tokyo
+    <SystemBackchannel>
+    <Userisspeaking>        <System> <User finish speaking>
+    <User finish speaking>      <System> <System Backchannel> <EOS>        It is Tokyo          <EOS>
+    <Userisinterrupting>
+    …
+                                          LLM finetuned with Conversational-style Micro-Turn Sequence
+
+                                                              <System> <System                               <System> <User
+    (Micro-turn history)      <User> What is the capital <EOS>  Backchannel>    <User> of Japan <EOS>    finish speaking> It is
+                                                                    <EOS>                                      Tokyo <EOS>
+                           ∆ = 0.6        ∆     = 0.6        …
+        Buffer: send a sequence of words received during the latest ∆     seconds
+        What      is        the      capital        of        Japan
+        Streaming ASR
+    User Audio
+
+    Figure 1: Overview of DuplexCascade. User audio is transcribed by a streaming ASR and periodically flushed into text micro-turns
+    (∆t = 0.6 s). The LLM consumes the dialogue history and the latest micro-turn to generate the next system micro-turn together
+    with conversational special tokens (e.g., wait, respond, or backchannel). The generated text is then synthesized by a streaming TTS to
+    produce system audio, enabling full-duplex interaction.
+
+
+3. DuplexCascade                                                               sponding; this token is followed by the system utterance con-
+    3.1. Overview                                                              tent.
+                                                                                                               • <user is interrupting>: output when the user in-
+    Fig. 1 illustrates the overall proposed streaming pipeline. Un-            terrupts while the system is speaking, to represent the system
+    like conventional cascaded systems, the proposed pipeline does             should stop generation; the system micro-turn ends immedi-
+    not rely on VAD. Instead, user audio is continuously fed into              ately with <EOS>.
+    a streaming ASR module to produce partial text outputs in real                                          • <user backchannel>: output when the user produces a
+    time. The partial text outputs are periodically, e.g. every 0.6 s,         backchannel while the system is speaking, to represent the
+    aggregated into a "micro-turn" and sent to an LLM.                         system should ignore it and continue its current utterance.
+                   The proposed LLM is designed to handle a micro-turn se-                               • <user is thinking>: output when the user is silent af-
+    quence, where user and system micro-turns are interleaved us-              ter the system finishes response and is likely thinking, to rep-
+    ing a dedicated end-of-turn token <EOS>. Given the micro-turn              resent the system should take no action; the system micro-
+    history, the LLM predicts the next system micro-turn and then              turn ends immediately with <EOS>.
+    sends it to a streaming TTS module, which synthesizes system
+    audio incrementally. Importantly, the micro-turn does not nec-            • <system backchannel>:      output when the system
+    essarily contain speech content, but can contain special tokens            should emit a short backchannel during user speech; once
+    that control the conversational flow.                                      the LLM outputs <system backchannel>, we immedi-
+                                                                               ately play a pre-synthesised backchannel audio clip (sampled
+    3.2. Conversational Special Tokens                                         at random) and end the micro-turn with <EOS>.
+    To make turn-taking decisions controllable under streaming  3.3. Dynamic Construction of Duplex Training Data
+    constraints, we introduce conversational special tokens.
+
+    3.2.1. User's special token.                                               User's Turn     <S>     User's Turn with  System's Turn <S>     System's Turn with
+                                                                                               special token                                   special token
+    • <no voice>: insert when the buffer is flushed but no text
+            has been recognized, to represent user silence for the current     What is the capital of Japan?        It is Tokyo.
+    ∆t interval.                                                                               Split utterance-wise long-turns into chunk-wise micro-turns.
+    3.2.2. System's special tokens.                                            What is     the capital  of Japan?      It is    Tokyo.
+    • <user is speaking>:                    output when the user is still                     Insert corresponding micro-turns with special token.
+            speaking, to represent the system should stay silent; the sys-     What is     <S>  the capital <S>    of Japan?    <S>It is  <S>  Tokyo.      <S>
+    tem micro-turn ends immediately with <EOS>.
+    • <user finish speaking>: output when the user has                                                Figure 2: Proposed dynamic construction pipeline for duplex
+               finished speaking, to represent the system should start re-    training sequences from text-only dialogues.
+
+Table 1: Full-Duplex-Bench results. The best-performing duplex dialogue model is shown in bold, and the second best is underlined.
+§ means the results are infered from offical checkpoints. † means the results directly obtained from the paper.
+
+Dimension          Pause Handling            Backchannel                   Smooth Turn Taking          User Interruption                  Averaged
+                 Synthetic    Candor                ICC                     Candor                            Synthetic                  Turn-Taking
+Data Metric       TOR (↓)     TOR (↓)    TOR (↓)   Freq (↑)     JSD (↓)     TOR (↑)   Latency (↓)  TOR (↑)    GPT-4o(↑)    Latency (↓)    Accuracy
+dGSLM†             0.934       0.935      0.691     0.015       0.934      0.975      0.352         0.917       0.201         2.531         0.466
+Moshi†             0.985       0.980      1.000     0.001       0.957      0.941      0.265         1.000       0.765         0.257         0.395
+Freeze-Omni†       0.642       0.481      0.636     0.001       0.997      0.336      0.953         0.867       3.615         1.409         0.489
+PersonaPlex†       0.358       0.431      0.273     0.042       0.662      0.908      0.170         0.950       4.290         0.240         0.759
+MiniCPM-Duplex§    0.613       0.731      0.582     0.003       0.960      0.916      0.610          1.0        1.14          0.447         0.598
+Gemini Live†       0.255       0.310      0.091     0.012       0.896      0.655      1.301         0.891       3.376         1.183         0.778
+DuplexCascade      0.058       0.222      0.218     0.009       0.949      0.832      1.724         0.955       4.016         1.225         0.858
+DuplexCascade-β    0.343       0.458      0.309     0.034       0.811      0.899      0.567         0.950       4.011         0.850         0.748
+
+
+
+Real full-duplex dialogue corpora with turn-taking anno-               ongoing response.
+tations are scarce.  We therefore randomly sample 50k dia-             System backchannels.             Because text-only dialogues rarely
+logues from UltraChat [23] and construct duplex-style train-           contain explicit system backchannels, we post-process user
+ing sequences dynamically by simulating 6 key interaction phe-         turns with Qwen2-72B-Instruct2         to insert marker <BC/> after
+nomena.                                                                sentence-level units where a backchannel is appropriate. Dur-
+                                                                       ing training, these markers are used to supervise the system to
+3.3.1. Convert text dialogue into micro-turn segmentation              output the token <system backchannel>.
+As illustrated in Fig. 2, we split both user and system utterance-     User thinking.           After the system finishes its response, we
+wise long-turns into chunk-wise micro-turns. After each user           randomly insert 1-20 additional silent user micro-turns repre-
+micro-turn, we insert a system micro-turn that contains only           sented by <no voice>. For these inserted silent micro-turns,
+<user is speaking> to indicate that the user continues.                the corresponding system micro-turns are supervised to output
+After each system micro-turn, we insert a user micro-turn <no          <user is thinking>, indicating that the system should
+voice> to represent that the user is silent. For the first system      wait while the user is processing the response.
+micro-turn of each original system turn, we prepend <user
+finish speaking> before the content to prompt the sys-    4. Experiments
+tem to take the turn.  During training, we apply next-token            4.1. Implementation Details
+prediction LoRA fine-tuning [13] only on system micro-turns,
+which helps preserve the backbone LLM's conversational intel-          We implement the proposed cascaded pipeline with stream-
+ligence.                                                               ing ASR and streaming TTS based on DSM-ASR and DSM-
+                                                                       TTS [24].                 Following Freeze-Omni, we adopt Qwen2-7B-
+3.3.2. Simulating duplex interaction phenomena                         Instruct3          as the text LLM backbone and perform lightweight
+                                                                       adaptation on our dynamically constructed duplex training set
+To better approximate real dialogue conditions, we simulate the        using LoRA [13] on the query and value projections (LoRA
+following interaction phenomena.                                       rank r=16, α=32). The embedding parameters of the conver-
+Randomized micro-turn length. To emulate the variability of            sational special tokens are initialized from a zero-mean Gaus-
+streaming ASR text emission, we sample the user micro-turn             sian distribution.
+length uniformly from 1-7 tokens randomly. For training sta-                        During adaptation, we fully fine-tune the original to-
+bility, we fix the system micro-turn length to 10 tokens.              ken embedding matrix, the embeddings of the newly intro-
+Natural pauses. After each user micro-turn that are split from         duced special tokens, and the token prediction head, while
+the original long turn, with probability 0.10 we randomly in-          the remaining backbone parameters are updated through
+sert 1-5 additional silent user micro-turns represented by <no         LoRA. To address class imbalance among conversational spe-
+voice>. For these inserted silent micro-turns, the correspond-         cial tokens, we use a weighted loss with the following
+ing system micro-turns are supervised to output <user is               weights: <user is speaking> = 1, <user finish
+speaking>, indicating that the system should refrain from              talking> = 10, <user is interrupting> = 5,
+taking the turn.                                                       <user backchannel> = 2, <user is thinking> =
+User interruption. For each system long turn, with probabil-           1, and <system    backchannel> = 3.
+ity 0.30 we simulate an interruption by letting the user start the                    We train two variants: DuplexCascade (without system
+next question at a randomly selected system micro-turn bound-          backchannels) and DuplexCascade-β (with system backchan-
+ary. Upon receiving the first interrupting user micro-turn, the        nels),                to evaluate whether training LLM with <system
+system is supervised to output <user is interrupting>                  backchannel> affects overall model performance. Duplex-
+and abandon the remainder of the interrupted response; during          Cascade does not include the <system backchannel> to-
+the subsequent user continuation, system micro-turns are super-        ken and is trained without any system-backchannel supervision,
+vised to output <user is speaking>.                                    whereas DuplexCascade-β enables this token and is trained
+User backchannels. While the system is speaking, each system           with the corresponding simulation described in Sec. 3.3.
+micro-turn independently has a probability of 0.01 of replacing                     Optimization uses AdamW [25] with learning rate 1×10-5
+the next user <no voice> with a short textual backchannel
+(e.g., "yes", "okay"). In this case, the system is supervised to      2https://huggingface.co/Qwen/Qwen2-72B-Instruct
+output <user backchannel> and continue generating the                 3https://huggingface.co/Qwen/Qwen2-7B-Instruct
+
+Table 2: VoiceBench results. The best-performing duplex dialogue model is shown in bold, and the second best is underlined.  § means
+the results are infered from offical checkpoints. † means the results directly obtained from the paper.
+
+Model         AlpacaEval CommonEval WildVoice   SD-QA MMSU OBQA BBH IFEval AdvBench Overall
+DSM-ASR+         4.57    3.87   3.73            46.42   58.52   72.09   58.10                          51.29   97.12         69.66
+Qwen2-7B-Instruct
+Freeze-Omni†     4.03    3.46   3.15            53.45   28.14   30.98   50.70                          23.40   97.30         55.20
+Moshi†           2.01    1.60   1.30            15.64   24.04   25.93   47.40                          10.12   44.23         29.51
+PersonaPlex§     2.69    2.25   1.95            18.77   24.92   24.40   49.40                          11.95   8.07          30.59
+
+DuplexCascade    4.40    3.64   3.56            45.56   52.86   56.04   59.80                          43.38   99.04         65.41
+DuplexCascade-β  4.38    3.70   3.53            46.35   52.84   58.46   59.00                          44.45   99.03         65.81
+
+
+
+and a linear warmup schedule for 500 steps. We set the batch                                             0.94           Accuracy & Latency vs. t                3.50
+size to 32, fine-tune for 5k steps, and use a maximum sequence                                           0.92       Turn-Taking Accuracy                        3.25
+length of 4096 tokens. Each model was trained using 8 NVIDIA                                             0.90       Turn Taking Latency                         3.00
+H100 GPUs for only 5 hours.                                                                              0.88                                                   2.75
+                                                                         Averaged Turn-Taking Accuracy   0.86                                                   2.50 Smooth Turn Taking Latency
+4.2. Full-Duplex-Bench Results                                                                           0.84                                                   2.25
+We evaluate DuplexCascade on Full-Duplex-Bench [14] against                                              0.82                                                   2.00
+other state-of-the-art models.           The benchmark reports Take-                                     0.80                                                   1.75
+                                                                                                         0.78
+Over Rate (TOR) for each condition; however, TOR has mixed                                                   0.3    0.6        0.9        1.2       1.5    1.8  1.50
+directions across subsets, making it inconvenient to summarize                                                          t
+overall turn-taking quality.
+                To provide an aggregated view, we introduce Averaged     Figure 3: Effect of the micro-turn duration ∆t on Averaged
+Turn-Taking Accuracy. For subsets where lower TOR is bet-                Turn-Taking Accuracy and turn-taking latency on Full-Duplex-
+ter (Pause Handling and Backchannel), we define accuracy as              Bench.
+1-TOR. For subsets where higher TOR is better (Smooth Turn
+Taking and User Interruption), we define accuracy as TOR. Av-
+eraged Turn-Taking Accuracy is the unweighted mean of these
+accuracies across all TOR-reported subsets.                              gap, suggesting that our text-only adaptation largely retains the
+            Table 1 shows that DuplexCascade achieves the best Aver-     backbone LLM's capabilities despite operating under stream-
+aged Turn-Taking Accuracy among the evaluated open systems,              ing micro-turn constraints. Notably, DuplexCascade-β demon-
+indicating consistently strong turn-taking decisions across di-          strates that our method enables the LLM to produce backchan-
+verse duplex scenarios. In contrast, Freeze-Omni, which uses             nels while preserving its core capabilities.
+VAD-driven approaches that rely on an external endpointing
+head, exhibits noticeably weaker turn-taking robustness, high-           4.4. Micro-Turn ∆t Analysis
+lighting the benefit of explicitly modeling duplex control deci-         We study how the micro-turn duration ∆t affects turn-taking
+sions via LLM tokens rather than inferring them from external            accuracy and response latency. Specifically, we evaluate ∆t ∈
+endpointing head.                                                        {0.3, 0.6, 0.9, 1.2, 1.5, 1.8} s on Full-Duplex-Bench, and re-
+             And DuplexCascade-β achieved the second-best results on     port the resulting Averaged Turn-Taking Accuracy and Smooth
+backchannel-related metrics (ICC Freq and JSD), while com-               Turn-Taking Latency in Fig. 3. We observe that Averaged Turn-
+petitive on overall turn-taking accuracy. The results suggest            Taking Accuracy improves as ∆t increases up to 1.2 s, after
+that our proposed method can control system's reaction styles            which it degrades. In contrast, Smooth Turn-Taking Latency
+by text-only LLM training.                                               increases monotonically with larger ∆t, since the system must
+4.3. VoiceBench Results                                                  wait longer before each buffer flush. These results suggest that,
+                                                                         under our simulation setting, ∆t=1.2 s provides the strongest
+A practical spoken dialogue system must also preserve the rea-           turn-taking performance, but at the cost of higher latency. We
+soning and instruction-following capability of the underlying            therefore choose ∆t=0.6 s as a practical trade-off between turn-
+text LLM. We therefore evaluate conversational intelligence us-          taking accuracy and latency.
+ing VoiceBench [12]. In addition to other state-of-the-art duplex
+models, to assess how our method affects the LLM's conversa-    5. Conclusion
+tional intelligence, we also implement a naive pipeline as de-
+fined in VoiceBench [12], which combines DSM-ASR [24] and                In this work, we presented DuplexCascade, a practical cas-
+Qwen2-7B-Instruct.                                                       caded pipeline for full-duplex speech-to-speech dialogue. By
+               As shown in Table 2, our models substantially outper-     adapting a strong text LLM with only a small amount of text-
+form prior duplex systems across nearly all VoiceBench di-               only dialogues via lightweight LoRA fine-tuning, DuplexCas-
+mensions, suggesting that LoRA fine-tuning with text (instead            cade achieves VAD-free and robust turn-taking ability while
+of speech) helps preserve conversational intelligence by avoid-          largely preserving the conversational intelligence of the under-
+ing cross-modality alignment issues. Compared with the naive             lying LLM. These results highlight that full-duplex interaction
+DSM-ASR+Qwen2-7B-Instuct pipeline, DuplexCascade and                     can be enabled within a modular cascade without sacrificing the
+DuplexCascade-β achieve competitive scores with a moderate               strengths of modern text LLMs.
+
+6. Generative AI Use Disclosure                                                                  [18] A. Maier, J. Hough, and D. Schlangen, "Towards Deep End-of-
+                                                                                                  Turn Prediction for Situated Spoken Dialogue Systems," in Proc.
+                       Generative AI tools were used for language editing and improv-    Interspeech, 2017, pp. 1676-1680.
+    ing the phrasing of this manuscript.                                                   [19] G. Castillo-Lopez ´ et al., "A Survey of Recent Advances on Turn-
+                                                                                                      taking Modeling in Conversational Systems," in Proc. IWSDS,
+         7. References                                                                   2025, pp. 254-271.
+              [1] S. Ji, Y. Chen, M. Fang, J. Zuo, J. Lu, H. Wang, Z. Jiang, L. Zhou,       [20] X. Zhang, Y. Chen, S. Hu, X. Han, Z. Xu, Y. Xu, W. Zhao, M. Sun,
+    S. Liu, X. Cheng, X. Yang, Z. Wang, Q. Yang, J. Li, Y. Jiang,                                     and Z. Liu, "Beyond the Turn-Based Game: Enabling Real-Time
+    J. He, Y. Chu, J. Xu, and Z. Zhao, "WavChat: A Survey of Spoken                                  Conversations with Duplex Models," in Proc. EMNLP, 2024, pp.
+    Dialogue Models," 2024.                                                              11 543-11 557.
+                   [2] Y. Shangguan, J. Li, L. Qiao, R. Alvarez, and I. McGraw, "Ana-      [21] B. Veluri, B. N. Peloquin, B. Yu, H. Gong, and S. Gollakota, "Be-
+    lyzing the Quality and Stability of a Streaming End-to-End On-                                    yond Turn-Based Interfaces: Synchronous LLMs as Full-Duplex
+    Device Speech Recognizer," in Proc. INTERSPEECH, 2020.                               Dialogue Agents," in Proc. EMNLP, 2024, pp. 21 390-21 402.
+                 [3] T. Saeki, S. Takamichi, and H. Saruwatari, "Incremental text-to-               [22] Q. Zhang, L. Cheng, C. Deng, Q. Chen, W. Wang, S. Zheng,
+    speech synthesis using pseudo lookahead with large pretrained                                    J. Liu, H. Yu, C. Tan, Z. Du, and S. Zhang, "OmniFlatten: An
+    language model," IEEE Signal Processing Letters, vol. 28, pp.                                       End-to-end GPT Model for Seamless Voice Conversation," in
+    857-861, 2021.                                                                       Proc. ACL, 2025, pp. 14 570-14 580.
+                           [4] N. Torgashov, G. E. Henter, and G. Skantze, "VoXtream:            [23] N. Ding, Y. Chen, B. Xu, Y. Qin, S. Hu, Z. Liu, M. Sun, and
+    Full-Stream Text-to-Speech with Extremely Low Latency,"                                             B. Zhou, "Enhancing chat language models by scaling high-
+    arXiv:2509.15969, 2025.                                                                       quality instructional conversations," in Proc. EMNLP, 2023, pp.
+                                                                                         3029-3051.
+               [5] X. Wang, Y. Li, C. Fu, , Y. Zhang, Y. Shen, L. Xie, K. Li, X. Sun,                                                                 V. Volhejn,    [24] N.  Zeghidour,  E.  Kharitonov,  M. Orsini,
+    and L. Ma, "Freeze-Omni: A Smart and Low Latency Speech-to-                          G. de Marmiesse, E. Grave, P. Perez, L. Mazar ´e, and A. D´    efossez,´
+    speech Dialogue Model with Frozen LLM," ICML, 2025.                                  "Streaming                    Sequence-to-Sequence Learning with Delayed
+                      [6] M. Shannon, G. Simko, S.-Y. Chang, and C. Parada, "Improved    Streams Modeling," Tech. Rep., 2025.
+    End-of-Query Detection for Streaming Speech Recognition," in                               [25] I. Loshchilov and F. Hutter, "Decoupled Weight Decay Regular-
+    Proc. Interspeech, 2017, pp. 1909-1913.                                              ization," in Proc. ICLR, 2017.
+                       [7] D. Liang, H. Su, T. Singh, J. Mahadeokar, S. Puri, J. Zhu,
+    E. Thomaz, and M. Seltzer, "Dynamic speech endpoint detection
+    with regression targets," in Proc. ICASSP.     IEEE, 2023, pp. 1-5.
+                    [8] G. Skantze, "Turn-taking in conversational systems and human-
+    robot interaction:     a review," Computer Speech & Language,
+    vol. 67, p. 101178, 2021.
+    [9] A. Defossez, L. Mazar´  e, M. Orsini, A. Royer, P. P´    erez, H. J´  egou, ´
+    E. Grave, and N. Zeghidour, "Moshi: a speech-text foundation
+    model for real-time dialogue," Tech. Rep., 2024.
+              [10] R. Roy, J. Raiman, S.-g. Lee, T.-D. Ene, R. Kirby, S. Kim, J. Kim,
+    and B. Catanzaro, "PersonaPlex: Voice and Role Control for Full
+    Duplex Conversational Speech Models," 2026.
+                       [11] T. A. Nguyen, E. Kharitonov, J. Copet, Y. Adi, W.-N. Hsu,
+    A. Elkahky, P. Tomasello, R. Algayres, B. Sagot, A. Mohamed
+    et al., "Generative spoken dialogue language modeling," Trans-
+    actions of the Association for Computational Linguistics, vol. 11,
+    pp. 250-266, 2023.
+                        [12] Y. Chen, X. Yue, C. Zhang, X. Gao, R. T. Tan, and H. Li,
+    "VoiceBench:     Benchmarking LLM-Based Voice Assistants,"
+    arXiv preprint arXiv:2410.17196, 2024.
+                     [13] E. J. Hu, Y. Shen, P. Wallis, Z. Allen-Zhu, Y. Li, S. Wang,
+    L. Wang, and W. Chen, "LoRA: Low-Rank Adaptation of Large
+    Language Models," in Proc. ICLR, 2022.
+               [14] G.-T. Lin, J. Lian, T. Li, Q. Wang, G. Anumanchipalli, A. H. Liu,
+    and H.-y. Lee, "Full-duplex-bench: A benchmark to evaluate full-
+    duplex spoken dialogue models on turn-taking capabilities," arXiv
+    preprint arXiv:2503.04721, 2025.
+                      [15] R. Maas, A. Rastrow, C. Ma, G. Lan, K. Goehner, G. Tiwari,
+    S. Joseph, and B. Hoffmeister, "Combining Acoustic Embed-
+    dings and Decoding Features for End-of-Utterance Detection in
+    Real-Time Far-Field Speech Recognition Systems," in Proc. IEEE
+    ICASSP, 2018, pp. 5544-5548.
+                [16] J. H. Ko, J. Fromm, M. Philipose, I. Tashev, and S. Zarar, "Lim-
+    iting Numerical Precision of Neural Networks to Achieve Real-
+    Time Voice Activity Detection," in Proc. IEEE ICASSP, 2018, pp.
+    2236-2240.
+                     [17] A. Raux and M. Eskenazi, "Optimizing Endpointing Thresholds
+    using Dialogue Features in a Spoken Dialogue System," in Proc.
+    SIGDIAL, 2008, pp. 1-10.

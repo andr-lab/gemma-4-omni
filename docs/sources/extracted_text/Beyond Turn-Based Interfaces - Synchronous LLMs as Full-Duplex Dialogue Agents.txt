@@ -1,0 +1,753 @@
+           Beyond Turn-Based Interfaces:
+  Synchronous LLMs as Full-Duplex Dialogue Agents
+
+Bandhav Veluri1,2, Benjamin N Peloquin1, Bokai Yu1,
+        Hongyu Gong1, Shyamnath Gollakota2
+        1Meta AI, 2University of Washington
+{bandhav,gshyam}@cs.washington.edu hygong@meta.com
+
+
+                      Abstract                                  Torreira, 2015a; Nguyen et al., 2022). Research
+    Despite broad interest in modeling spoken di-               indicates that in human conversations intra-turn
+    alogue agents, most approaches are inherently               pauses (pauses within a speaker's turn) are usu-
+  "half-duplex" - restricted to turn-based interac-             ally longer than the intervals between turns across
+   tion with responses requiring explicit prompt-               speakers (Heldner and Edlund, 2010; Brady, 1968;
+   ing by the user or implicit tracking of inter-               ten Bosch et al., 2005). English speakers often
+    ruption or silence events. Human dialogue, by               begin their turns without waiting for pauses, us-
+  contrast, is "full-duplex" allowing for rich syn-             ing grammatical, prosodic, and pragmatic cues to
+     chronicity in the form of quick and dynamic                seamlessly initiate their next turn while minimizing
+   turn-taking, overlapping speech, and backchan-               overlaps and gaps (Stivers et al., 2009).
+    neling. Technically, the challenge of achiev-               Human spoken dialogue is inherently full-
+     ing full-duplex dialogue with LLMs lies in
+      modeling synchrony as pre-trained LLMs do                 duplex, allowing for seamless, bi-directional com-
+    not have a sense of "time".   To bridge this                munication where both parties can simultaneously
+     gap, we propose Synchronous LLMs for full-                 speak and listen.  This mode of interaction en-
+    duplex spoken dialogue modeling.             We de-         ables immediate feedback, interruptions for clari-
+    sign a novel mechanism to integrate time in-                fication, and real-time adjustments in information
+   formation into Llama3-8b so that they run syn-               flow (Reece et al., 2023; Levinson and Torreira,
+    chronously with the real-world clock. We also               2015b). Unlike half-duplex systems that process
+  introduce a training recipe that uses 212k hours              text or speech based on full utterances in each
+     of synthetic spoken dialogue data generated
+   from text dialogue data to create a model that               turn, human dialogue frequently contains verbal
+     generates meaningful and natural spoken di-                backchannels - short, overlapping phrases such
+    alogue, with just 2k hours of real-world spo-               as "yeah" or "uh-huh" - signals from the listener
+     ken dialogue data. Synchronous LLMs outper-                to the speaker that they understand and that the
+    form state-of-the-art in dialogue meaningful-               speaker may continue. Such synchronous dynam-
+    ness while maintaining naturalness. Finally,                ics allow the interaction to flow smoothly and cre-
+   we demonstrate the model's ability to partici-               ate a rhythm absent in written text (Heldner and
+   pate in full-duplex dialogue by simulating in-               Edlund, 2010). While humans learn turn-taking
+   teraction between two agents trained on differ-
+   ent datasets, while considering Internet-scale               cues from infancy to minimize speech overlaps and
+      latencies of up to 240ms. Webpage: https:                 silence duration (Nguyen et al., 2021), overlapping
+    //syncllm.cs.washington.edu/.                               speech as well as long silences are common in hu-
+    1 Introduction                                              man spoken dialogue as they enrich conversations
+                                                                providing additional pragmatic cues. For example,
+    Existing spoken dialogue models are predomi-                overlapping speech and frequent backchanneling
+nantly turn-based interfaces that are half-duplex in            often signifies engaged listening. Similarly the
+ nature (Lakhotia et al., 2021; Zhang et al., 2023a;            length of silences can vary across cultures and is
+    Hassid et al., 2024; Borsos et al., 2023).           To     influenced by the promptness of responses (Stivers
+   achieve a change of turn, these systems rely on              et al., 2009; Nguyen et al., 2022). In both cases,
+ either explicit user inputs or pauses at the end of            these dynamics make conversation sound more "hu-
+   a user's utterance (Zhang et al., 2023a). Human              man."
+ spoken dialogue, by contrast, does not rely on si-             Developing a full-duplex spoken dialog agent
+ lence as its primary turn-taking cue (Levinson and             is challenging for four reasons: 1) Understanding
+                                                  21390
+Proceedings of the 2024 Conference on Empirical Methods in Natural Language Processing, pages 21390-21402
+                  November 12-16, 2024 ©2024 Association for Computational Linguistics
+
+      Chunk N-1      Chunk N                                     Chunk N+1
+  …
+
+      SyncLLM
+
+  …
+
+Vocoder Tokenizer     Vocoder     Tokenizer                  Vocoder Tokenizer
+      User        User                                           User
+  … Chunk N-2        Chunk N-1                                   Chunk N        Chunk N+1
+      LLM's chunk      User's chunk                              User's chunk estimate
+  Figure 1: SyncLLM as a full-duplex dialogue agent. At current time step (chunk N in the figure), SyncLLM's
+  context contains interleaved chunks of the LLM's speech until the current chunk, and the user's speech corresponding
+  to all but the current chunk. To be in synchrony with the user, the LLM must generate its next chunk (chunk N+1)
+  before the end of the current chunk. As a result, SyncLLM first generates an estimated user's chunk, which is in-turn
+  appended to the context and used to predict its next chunk.
+  and generating turn-taking cues in spoken dialogue         pability of spoken dialogue model (Nguyen et al.,
+  requires the model to have a common reference              2022). Instead, we train our model to predict dedu-
+  clock with the real-world. However, current LLMs           plicated token sequences, with timing information
+  do not have such a sense of "time". 2) Compared            maintained by our periodic synchronization tokens.
+  to text-based chat datasets, spoken dialogue data          • Human voice interactions rely on the ability to
+  is limited. A combination of all significant spoken        model the other person's response on the short-
+  dialogue datasets (Cieri et al., 2004; Godfrey et al.,     term.  We can take turns with gaps as small
+  1992; Reece et al., 2023) would still result in only       as 200ms, while language generation latency is
+  ∼3k hours of spoken dialogue data. 3) Full-duplex          around 600ms (Levinson and Torreira, 2015b).
+  dialogue entails model to be always listening and          This implies we anticipate the next few words of
+  should always be ready to speak, because back-             what the other person would say and respond ap-
+  channels or overlaps could occur at arbitrary points       propriately. We use this insight to predict speech
+  in time. This requires the model to be streaming for       units for both speakers, into the future, in chunk
+  the duration of the dialogue. 4) Since the spoken          sizes of 160-240 ms. This ensures resiliency to
+  dialogue agent might run on cloud infrastructure,          Internet latencies of up to 240 ms.
+  it must address the fundamental latency inherent           • We propose a three-stage training recipe that
+  in Internet transmissions. Thus, the model may             leverages synthetic spoken dialogue generated from
+  not have immediate access to the current tokens or         text dialogue data to mitigate the limited availabil-
+  speech generated by the user and must operate with         ity of real-world spoken dialogue data. Specifically,
+  delayed input (Fig. 1).                                    we use 212k hours of synthetic spoken dialogue
+  In this paper, we make multiple contributions to           data and just 2k hours of real-world spoken dia-
+  develop a full-duplex dialogue agent:                      logue data to develop a model that generates mean-
+  • We introduce Synchronous LLMs, in short Syn-             ingful spoken dialogue with naturalistic turn-taking,
+  cLLM, for full-duplex spoken dialogue. SyncLLM             overlaps, and backchannels.
+  achieves synchrony modeling by integrating time            • With an experimental setup based on Llama3-8b
+  information into LLMs so that they can run syn-            (at Meta, 2024) and extensive user-study (n=32),
+  chronously with the real-world clock. We generate          we show that our method achieves +2.2-point Mean
+  a periodic synchronization token to provide a com-         Opinion Score (MOS) improvement in dialogue
+  mon time frame for both sides of the dialogue. This        content Meaningfulness over state-of-the-art full-
+  however requires us to address duplicate tokens,           duplex voice model dGSLM (Nguyen et al., 2022),
+  caused by silence within and across utterances. Du-        while maintaining turn-taking Naturalness. Further,
+  plicate tokens can adversely affect the semantic ca-       our results show that our model fine-tuned on the
+      21391
+
+Fisher training set (Cieri et al., 2004) can general-     both speech and transcripts of user input as instruc-
+ize to the out-of-distribution Candor testset (Reece      tion data. Unlike models that use speech tokens,
+et al., 2023), while preserving both dialog content       Spectron (Nachmani et al., 2023) directly manipu-
+meaningfulness and naturalness.                           lates spectrograms for tasks such as spoken QA and
+• Finally, by simulating full-duplex dialogue be-         speech continuation. However, these prior works
+tween two finetuned Llama3-8b models, we show             are limited to the turn-taking setting, where the di-
+how this approach can enable latency-tolerant and         alogue model is explicitly prompted to speak in its
+streaming full-duplex voice interfaces. Further,          own turn. Human spoken dialogue is more com-
+SyncLLM can perform a coherent conversation               plex, involving implicit turn-taking cues and over-
+even when the user's side of the conversation is gen-     lapping speech, such as interruptions and backchan-
+erated by a model trained with a different dataset.       neling (Schegloff, 2000).
+                                                          The closest work to ours is dGSLM (Lakhotia
+2 Related work                                            et al., 2021), which models simultaneous dialogue
+                                                          using a dual-tower Transformer that attends to two
+Multimodal language models. The success of                channels. It demonstrates superior performance
+text language models like GPT-4 (OpenAI, 2023),           than cascaded architecture which consists of au-
+LLAMA (Touvron et al., 2023), and Mistral (Jiang          tomatic speech recognition (ASR), text LLM and
+et al., 2023) has inspired explorations into mul-         text-to-speech (TTS). One weakness of dGSLM
+timodal models. Here, we focus our discussion             is its reliance on speech-only training, which does
+on speech and text modalities. Initialization from        not fully utilize textual knowledge. In contrast, our
+a pretrained text LLM has been shown to bene-             work leverages the generative intelligence of lan-
+fit multimodal training (Hassid et al., 2023). Re-        guage models, equipping them with multimodal
+cent works have proposed extending the vocabu-            and synchronous capabilities. Moreover, in its em-
+lary of text LLMs with discrete speech tokens to          pirical study, dGSLM does not consider delays
+enable the model to handle speech inputs and out-         in real-life scenarios and assumes that the hidden
+puts (Rubenstein et al., 2023). Models are trained        states of one interlocutor are immediately accessi-
+with cross-modal knowledge from aligned speech-           ble to the other. In contrast, we explicitly discuss
+text data, including tasks like automatic speech          how our model handles delayed responses in spo-
+recognition (ASR), text-to-speech synthesis (TTS),        ken dialogue.
+speech-to-text (S2T), and speech-to-speech trans-
+lation (S2ST). Multitask learning with these tasks        3 SyncLLM
+has been adopted by VioLA (Wang et al., 2023),
+AudioPaLM (Rubenstein et al., 2023), VoxtLM               SyncLLM is an auto-regressive transformer de-
+(Maiti et al., 2023), and SUTLM (Chou et al.,             coder architecture, that natively models discrete
+2023). SpiRit-LM (Nguyen et al., 2024) interleaves        speech units in a wall-clock synchronous fashion.
+speech and text tokens and trains the model with          SyncLLM is trained to predict interleaving chunks
+next token prediction, demonstrating both speech          of speech units corresponding to both sides of the
+understanding and generation.                             dialogue as shown in Fig. 1. In each time step,
+Spoken dialogue models. Prior work on spoken              the model predicts speech units corresponding to a
+dialogue research covers various topics such as           fixed duration, referred to as the model's chunk size,
+dialogue state tracking (Zhang et al., 2023b), turn-      for its side of the dialogue followed by speech units
+taking prediction (Skantze, 2021; Lin et al., 2022),      corresponding to user's side of the dialogue. With
+and response generation (Zhang et al., 2020). Re-         this approach, the model is capable of generating
+cent works leverage LLMs in dialogue systems              two streams of speech synchronized with a real-
+(Zhao et al., 2020).  Initialized from LLAMA,             world clock. This allows our method to model all
+SpeechGPT (Zhang et al., 2023a) is finetuned se-          conversational cues such as backchannels, overlaps,
+quentially on speech-only data and multimodal in-         interruptions etc. Furthermore, since we use the
+struction sets to perform spoken question answer-         same architecture as existing LLMs, our approach
+ing (QA) tasks. USDM (Kim et al., 2024) con-              can leverage large scale pre-training of LLMs.
+tinues pretraining Mistral with interleaved speech-       The model trained to predict interleaved chunks
+text data to capture multimodal semantics. For            of token sequences can be used for full-duplex
+dialogue finetuning, it constructs templates using        voice interaction if we could replace one of the
+    21392
+
+two token streams, with that corresponding to the         mainly caused by silence within and across utter-
+real-world user. In Fig. 1, purple boxes correspond       ances. The number of repetitions of each unique
+to token sequences of the LLM's side of the conver-       token denote the duration of the acoustic unit rep-
+sation in each time chunk and the green boxes corre-      resented by the token. The semantic content, how-
+spond to the user's side of the dialogue. We achieve      ever, can be modeled by only considering unique
+full-duplex LLM-user voice interaction by discard-        tokens while deduplicating the token sequence
+ing the LLM's predictions of user's response and          (Kharitonov et al., 2022; Nguyen et al., 2022). Du-
+replace it with the user's speech.                        plicate token sequences can adversely affect the
+3.1  Latency tolerant interaction                         semantic capability of the final spoken dialogue
+                                                          model (Nguyen et al., 2022), because as shown in
+In Fig. 1, consider the Nth time chunk to be current
+time step. We could interleave the LLM's output           per token compared to deduplicated sequences.
+speech chunks until the Nth chunk, with the user's        So, instead, SyncLLM is trained to predict dedu-
+input chunks corresponding to only N-1 chunks.            plicated HuBERT sequences, with coarse timing
+The reasoning here is that the user's input for the       information maintained by periodically interleaved
+Nth chunk is not available until the end of Nth           special tokens, [S0] and [S1], as in the second row
+time step. To handle this intrinsic latency, similar      of Fig. 2. In the first chunk of the example in Fig. 2,
+to the way humans anticipate the next few words           the two speaker streams contained 4 repetitions of
+of what the other person taking part in the dia-          [75] and [89], respectively. After deduplication,
+logue would say (Levinson and Torreira, 2015b),           the interleaved token sequence corresponding to the
+the LLM's output for the next chunk (N+1) is com-         first chunk would be [S0][75][S1][89]. In the
+puted by first estimating the user's response for the     second chunk, speaker 0 has 2 new tokens ([17] &
+Nth time chunk (depicted in the figure with green         [338]), but speaker 1 tokens are just a repetition
+boxes with dotted border). We then append this            of the last token in the previous chunk, [89]. So,
+estimated chunk to the LLM's context to gener-            the second chunk's token sequence would just be
+ate the LLM's next chunk (N+1). For generating            [S0][17][338]. Note that when a chunk contains
+subsequent chunks (N+2, N+3, ...), we discard the         no novel tokens corresponding to speaker 1, we ex-
+estimated user's chunk for Nth time step and re-          clude speaker 1's special token [S1] as well. How-
+place that with the user's real-world input, thus         ever, this is not the case for speaker 0, as we need
+grounding the subsequent interaction with actual          one of the speaker's special token to be present in
+input from the user.                                      all chunks to unambiguously distinguish chunks.
+3.2  Token sequence format                                This is shown in the third chunk of Fig. 2.
+                                                          Interpolation. While deduplicated token se-
+Following prior works in spoken language model-           quences are beneficial for auto-regressive model-
+ing (Nguyen et al., 2022, 2024), we use HuBERT            ing, to generate token sequences suitable for speech
+(Hsu et al., 2021) to represent speech. We use the        synthesis, we need periodic HuBERT tokens in the
+tokenization parameters from (Nguyen et al., 2024),       original format. Since the speaker tag [S0] main-
+with a token sampling rate of 25 Hz - resulting in        tains the timing information, we know the number
+one token for every 40 ms of audio - and a vo-            of tokens removed after deduplication within each
+cabulary size of 501. To model dialog between             chunk. We use this to interpolate the deduplicated
+two speakers 0 & 1, we define two special tokens          token to match the expected number of token in
+[S0] and [S1], referred to as speaker tags, spec-         each chunk. For example, in the first chunk of
+ifying the start of each speaker's token sequence,        Fig. 2, speaker 0's stream only has one token after
+respectively. We represent dialogue as two parallel       deduplication. But since chunk size in that case
+speech streams, one for each speaker, interleaved,        is 160ms, each chunk would contain 160/40 = 4
+as shown in the top row of Fig. 2. For each stream,       tokens. So as shown in the third row of Fig. 2, we
+we embed a periodic speaker tag, with the time            repeat the deduplicated token thrice to reconstruct
+period equal to chunk size of the model.                  the chunk. If a chunk has multiple deduplicated
+Deduplication. The fixed time period of Hu-               tokens, like the second in Fig. 2, we repeat each
+BERT tokens is useful for modeling time in the            token by an equal amount. We note this approach
+full-duplex dialogue.   However, raw HuBERT               could result in an error because the original chunk
+sequences consist of significant repeated tokens,         may not follow this heuristic. We observed that the
+    21393
+
+    Original spoken
+    dialogue tokenized   S0 75 75 75 75 S1 89 89 89 89 S0 17 338 338 338 S1 89 89 89 89 S0 338 338 338 338 S1 338 338 338 338
+    and interleaved
+    Deduplicated
+    (next-token          S0 75        S1 89                     S0 17 338                      S0      S1 338
+    prediction target)
+
+    Interpolation for
+    speech synthesis     S0 75 75 75 75 S1 89 89 89 89 S0 17 17 338 338 S1 89 89 89 89 S0 338 338 338 338 S1 338 338 338 338
+                                      0-160 ms                               160-320 ms        320-480 ms
+    Speaker 0's  Speaker 1's          Interpolated              Interpolated
+ tokens            tokens             Speaker 0's               Speaker 1's
+                                           tokens               tokens
+    Figure 2: SyncLLM's token sequence format visualized with a chunk size of 160 ms. (Top row) We represent
+    spoken dialogue as interleaved chunks of HuBERT tokens, where the chunk size determines the frequency of
+    the synchronization token [S0]. (Middle row) We train SyncLLM to generate interleaved chunks of deduplicated
+    HuBERT tokens along with periodic synchronization tokens. (Bottom row) We interpolate deduplicated tokens in
+    each chunk to obtain spoken dialogue sequence in the original format.
+        no deduplication                       deduplication                                  Epoch 0    Epoch 1          Epoch >= 2
+    0.20                                                                                   0.025
+                                                                                           0.020
+    0.15                                                                                   0.015
+    0.10                                                                                   0.010
+                                                                                           0.005
+    0.05                                                                                   0.0000  20    40  60   80             100
+                                                                                               Speech percentage in training samples
+    0.00    10             20     30   40      50   60                       Figure 4: We sample speech percentages from truncated
+        Tokens per second of speech                                          normal distribution, so we obtain samples with all possi-
+    Figure 3: Tokens required for representing a second                      ble combinations of text-speech interleaving throughout
+    of speech with/without deduplication. Histogram com-                     the training process, with a bias for higher speech per-
+    puted over 15 hr of dialog data in the Fisher dataset                    centages as the training progresses. This resulted in
+    (Cieri et al., 2004).                                                    stable training when starting out with a text-only LLM.
+    Table 1: Data used for training in different stages. We
+    convert text based data to speech using TTS.                             ken dialogue data, we generate synthetic speech
+  Stage                                Source    Speech                      data from large-scale text dialogue datasets. We
+                                      modality    (hrs)                      use supervised finetuning (SFT) datasets, as our
+    Supervised                    1     Text      193k                       source text-dialogue datasets. We used Bark TTS
+    finetuning (SFT)                                                         (AI, 2023) model to generate spoken versions of
+    Dialogue                      2     Text       20k                       text-dialogue datasets, with its 10 speaker presets.
+    Spoken dialogue               3    Speech     1927                       Since Llama3-8b is a text-only LLM, in the first
+                                                                             stage, we aim to achieve text-speech alignment in
+    effect of this is imperceptible even with a chunk                        the context of dialogues. Given a spoken question,
+    size of 240 ms, likely because the error in the pre-                     we train the model to generate a spoken response.
+    dicted duration of each token is upper bounded by                        We expand the vocabulary of Llama3 to include
+    the chunk size. Further, in chunks with more novel                       501 HuBERT tokens, in addition to the speaker
+    tokens, the error would be even smaller.                                 tags, [S0] and [S1]. A turn-based dialog could be
+                                                                             defined as made of turns, which in turn are made
+    4 Training                                                               of sentences. We finetuned Llama3 with dialog
+                                                                             sequences in the following format:
+    We use Llama3-8b (at Meta, 2024) as our base                             [S1]<sent0>[S0]<sent0><sent1>[S1]..
+    model and employ a three stage training procedure
+    that uses synthetic spoken dialogue data predom-                         Each sentence is randomly chosen to either be
+    inantly and relatively small amount of real-world                        text or deduplicated speech token sequences dur-
+    spoken dialogue data to develop a full-duplex voice                      ing training. For each training sample, we sample
+    agent.                                                                   the percentage of speech sentences in the training
+    Stage 1: Turn-based spoken dialogue model                                sequence from the truncated normal distribution
+    with synthetic speech data. Given the limited spo-                       (Fig. 4). Training only with fully speech sequences
+                                                                21394
+
+
+
+
+
+
+
+
+
+
+Density
+
+
+
+
+
+
+
+
+
+
+  Probability
+
+    or step-wise increment of speech percentage re-
+    sulted in unstable training. Sentence level text-              120
+    speech interleaving not only trains the model to               100                 dGSLM
+                                                                                       Ground-truth
+    be capable of performing dialog, but also achieves              80                 SyncLLM-F (160ms)
+    text/speech alignment in the context of dialog.                 60                 SyncLLM-F (200ms)
+                                                                                       SyncLLM-F (240ms)
+                                                                    40
+    Stage 2: Full-duplex dialogue assuming no over-                 20
+    laps. Turn-based spoken dialogue is special case                      10  15  20       25      30
+    of full-duplex dialogue with no overlaps. Based                       Duration of the generated dialogue (s)
+    on this observation, we could treat synthetic spo-        Figure 5: Perplexity of transcriptions of spoken dia-
+    ken dialogue data as full-duplex spoken dialogue          logues generated by different models. Perplexity is
+    data where during one speaker's turn, other speaker       measured with respect to a text dialogue model's predic-
+    is completely silent. In this stage, we create syn-       tions.
+    thetic spoken dialogue data from text-dialogue data       5 Experiments
+    similarly to the previous stage with one main differ-
+    ence: From each turn in the dialogue, we generate         We evaluate SyncLLM in both continuation and in-
+    a speech utterance corresponding to one speaker           teraction settings. In the continuation setting, given
+    and silence of equal duration corresponding to the        a spoken dialogue prompt, the model generates
+    other speaker. We then tokenize the parallel speech       both sides of the dialogue. For interaction setting,
+    dialog data in the format shown in the second row         we simulate interaction between two instances of
+    of Fig. 2. This way, we can further leverage text-        SyncLLM as described in §3.1. We denote Syn-
+    dialogue data for help our model learn the token          cLLM trained on Fisher in continuation setting as
+    sequence format in Fig. 2. This stage of finetuning       SyncLLM-F and use dGSLM as the continuation
+    models timing within an utterance. The model can-         setting baseline. Both dGSLM and SyncLLM-F
+    not learn turn-taking cues such as back-channeling        use Fisher as the only real-world spoken dialogue
+    or overlaps between two speakers yet.                     dataset for training. We denote SyncLLM trained
+                                                              on Fisher interacting with an instance trained on
+    For the the previous stage, most samples in SFT           Fisher as SyncLLM-F-F, and SyncLLM trained
+    datasetswould contain one speaker (user of the            on Fisher interacting with an instance trained on
+    LLM) taking a short turn and the other speaker (the       CANDOR (Reece et al., 2023) as SyncLLM-F-C.
+    LLM) giving a long response. Spoken dialogues             5.1   Semantic evaluation
+    however contain more frequent turn-taking taking
+    with short utterances. Therefore for this stage, we       We evaluate the semantics of SyncLLM in the text
+    use text-dialogue datasets comprising of shorter          domain by converting spoken generations to text
+    turns, equivalent to around 20k hrs of synthetic          using ASR. We transcribe the generated spoken di-
+    spoken dialogue.                                          alogues into turn-based text dialogues ignoring any
+                                                              overlapping speech. We then compute perplexity
+    Stage 3: Modeling with real-world spoken dia-             of transcribed dialogues generated with 10 second
+    logue data. Finally, we finetune the model to learn       spoken dialogue prompts, with respect a text-only
+    turn-taking cues from real-world spoken dialogue          dialogue model. To account for outliers (samples
+    data. We use the Fisher (Cieri et al., 2004) dataset      with abnormally high perplexities), we consider
+    with 2000 hours of spoken dialogues, where each           median perplexity over the testset.
+    speaker's speech in a dialogue is separated into          Fig. 5 compares the semantic quality of spoken
+    independent audio channels. We split the dataset          dialogues generated by SyncLLM with different
+    into train, val and test split with 98:1:1 ratio, re-     chunk sizes to the prior state-of-the-art full-duplex
+    spectively. Each audio channel in the dialogue is         dGSLM model (Nguyen et al., 2022) and ground-
+    separately tokenized and interleaved in the full-         truth continuations. We find that dGSLM has a
+    duplex dialogue format used in the previous stage.        perplexity drop of ∼70 relative to the ground-truth,
+    In this stage in addition to learning timing within
+    utterances, the model learns effective turn-taking,       also compares median perplexities measured with
+    conversational cues like accurate distribution of         prompts sampled from Fisher and Candor test splits
+    pauses between turn and backchanneling.                   separately, with all models trained only on Fisher
+        21395
+
+
+
+
+
+
+
+
+
+
+Median perplexity
+
+Table 2: Comparison of Pearson correlation of turn-taking event durations between generations and ground-truth
+continuations, given same set of prompts. SyncLLM's chunk sizes are shown in parenthesis.
+     Model                           Fisher (in-distribution)                           Candor (out-of-distribution)
+                                     ipu      pause                       Average       ipu      pause     fto    Average fto
+     dGSLM                           0.48     0.41                 0.10    0.33         0.30     0.02      0.09    0.14
+     SyncLLM-F (160 ms)              0.60     0.50                 0.20    0.43         0.45     0.09      0.14    0.23
+     SyncLLM-F (200 ms)              0.60     0.49                 0.19    0.43         0.44     0.28      0.14    0.29
+     SyncLLM-F (240 ms)              0.58     0.40                 0.25    0.41         0.45     0.27      0.21    0.31
+     Prompt                          0.72     0.53                 0.31    0.52         0.54     0.30      0.12    0.32
+     Resynth-GT                      0.92     0.92                 0.53    0.79         0.90     0.86      0.37    0.71
+                  120                                                      sampled from the test splits and generate 90s di-
+                                                                           alogues with different model configurations. We
+                  100            dGSLM (in distr.)                         then compute pair-wise correlation of turn-taking
+    Median         80            SyncLLM-F (in distr.)                     event durations between the dialogue generations
+    perplexity                   dGSLM (ood)
+                   60            SyncLLM-F (ood)                           and ground-truth continuations, given the same
+                   40                                                      prompt. We first compute voice activities of each
+                                                                           side of dialogue (generated in separate audio chan-
+                         10  15  20      25       30                       nels) using the pyannote.audio library (Bredin
+                         Duration of the generated dialogue (s)            et al., 2020). We then measure the start and end
+Figure 6: In-distribution and out-of-distribution testing.                 timestamps for each turn-taking event. We measure
+training split. Here, Candor test split is an out-of-                      the average duration of the turn-taking events in
+distribution testset.                                                      generated dialogues and then compute the Pearson
+                                                                           correlation between the average durations observed
+These evaluations show that our approach of us-                            in generations of different models and those in the
+ing the standard auto-regressive architecture, thus                        ground-truth.
+leveraging vast text pre-training, results in much                         Table. 2 compares this correlation with in-
+more semantically coherent spoken dialogue model,                          distribution Fisher (Cieri et al., 2004) test-split
+compared to a custom architecture proposed for                             and out-of-distribution Candor test-split. We ob-
+speech-only training. Furthermore, our three-stage                         serve that, generations with our models achieve
+training approach leveraging large amount of syn-                          better turn-taking event correlation with ground-
+thetic spoken dialogue data generated from text                            truth continuations compared to dGSLM for both
+dialogues, allows us to converge much faster on                            in-distribution and out-of-distribution testsets. In
+limited real-world dual-channel spoken dialogue                            addition to this, we provide turn-taking event cor-
+data. This results in a general model that has supe-                       relation with prompts and re-synthesized ground-
+rior out-of-distribution (ood) performance.                                truth continuations (Resynth-GT). Resynth-GT is
+5.2      Naturalness evaluation                                            obtained by re-synthesizing the tokenized ground-
+                                                                           truth continuation. Resynth-GT does not perfectly
+Appropriate timing of pauses, speaker transitions                          correlate with ground-truth owing to variance in
+and overlaps are integral part of spoken-dialogue                          timing introduced by the tokenization process, and
+which convey essential information required for                            serves as a topline for our method.
+natural spoken conversation. To evaluate these as-
+pect of our generated spoken dialogues, we con-                            5.3     Human Evaluation
+sider the turn-taking events proposed in (Nguyen                           We conduct an evaluation study with 32 annotators
+et al., 2022) that evaluate overall naturalness of gen-                    recruited via a third party vendor with the require-
+erated spoken dialogues: inter-pausal units (IPUs),                        ment that they had native-level English proficiency.
+pauses, and floor-transfer offset (FTO). FTO is the                        We adapt the Mean Opinion Score (MOS) proto-
+duration of between turn-transitions, which is a                           col (a 5-pt Likert scale) (ITU-T Recommendation
+combination of overlaps and gaps - negative FTOs                           P.808, 2018) to evaluate Naturalness (N-MOS) of
+represent overlaps and positive FTOs represent                             turn-taking and Meaningfulness (M-MOS) of di-
+gaps.                                                                      alogue content. For both N-MOS and M-MOS,
+Similar to dGSLM's setup, we use 30s prompts                               annotators are presented with the prompt- and
+                                                                   21396
+
+Table 3: Meaningfulness (Meaning.) and Naturalness (Nat.) (scores 1-5) mean estimates and standard errors (in
+parentheses), aggregated overall and for Fisher and CANDOR subsets. We use a 160ms chunk size for this study.
+            Overall                                                         Fisher          CANDOR
+Model       Meaning. ↑     Nat. ↑              Meaning. ↑  Nat. ↑                           Meaning. ↑  Nat. ↑
+dGSLM       1.55 (0.06)  3.95 (0.08)           1.67 (0.09)                  4.21 (0.08)     1.43 (0.08)   3.70 (0.12)
+SyncLLM-C   3.40 (0.07)  3.96 (0.06)           3.14 (0.10)                  3.97 (0.08)     3.66 (0.08)   3.94 (0.08)
+SyncLLM-F   3.74 (0.06)  3.90 (0.06)           3.82 (0.08)                  3.98 (0.08)     3.67 (0.09)   3.82 (0.10)
+Re-synth    3.87 (0.06)  4.03 (0.05)           4.04 (0.08)                  4.14 (0.08)     3.69 (0.07)   3.91 (0.06)
+GT          4.96 (0.02)  4.96 (0.02)           4.96 (0.03)                  4.94 (0.04)     4.97 (0.02)   4.98 (0.02)
+
+continuation-audio. Annotators are instructed to                               120
+first read the descriptions of N-MOS and M-MOS,                                100
+listen to the prompt audio, then listen to the contin-                                          dGSLM-F
+                                                                                                  Ground-truth
+uation audio. Finally, they are asked to provide a            Median        80                  SyncLLM-F
+                                                              perplexity                           SyncLLM-F-C
+rating considering the quality of the continuation                          60                     SyncLLM-F-F
+audio relative to the information contained in the                          40
+prompt. Each annotator assigned to a given prompt                           20
+/ continuation pair provides a rating for both N-                               10      15  20            25  30
+                                                                          Duration of the generated dialogue (s)
+MOS and M-MOS (see §B.1).                                 Figure 7: Comparison of ASR perplexity between con-
+In total, nannot = 32 annotators provided ratings         tinuation mode and interaction-mode.
+for nitems = 180 items divided evenly between
+the CANDOR and Fisher datasets. Each sample               (+0.03).                 We note that dGSLM (Nguyen et al.,
+received a rating from 1 - Bad,..., 5 - Excellent         2022) uses speech representations fine-tuned on
+by three unique raters. We compute item-level             the Fisher dataset, while our method uses general-
+scores by taking the median score per item. To            purpose speech representations for all domains of
+compute system-level scores we take the mean of           speech. This results in our method outperforming
+item scores for a given system. We compute 95%            the baseline on the out-of-distribution Candor test-
+confidence intervals via bootstrapping, resampling        set in naturalness, as judged by human evaluators
+at the item level for nb = 1000 iterations.               in Table. 3.
+Overall results. The two left-most columns of Ta-
+ble. 3 indicate that nearly all models are at parity      5.4      Full-duplex interaction
+in perceived Naturalness (N-MOS) of turn-taking,          We simulate LLM-user interaction using LLM-
+while close to re-synthesized ground-truth val-           LLM interaction with one-chunk latency. We eval-
+ues. On the perceived Meaningfulness (M-MOS)              uate our model trained with different chunk sizes,
+of the dialogue content, SyncLLM-based mod-               thus simulating different latencies. We also train a
+els significantly outperform dGSLM, approaching           version of SyncLLM with Candor training split in
+re-synthesized ground-truth values. Resynth-GT            the third training stage, and simulate its interaction
+here accounts for the tokenization process and is         with the original model trained with only Fisher.
+the topline number for the implementation of our                        In Fig. 7, we compare median perplexities ob-
+method using the HuBERT tokenizer.                        tained with prompts sampled from Fisher and Can-
+In-distribution and OOD. Table. 3 also highlights         dor test splits.             We also show the perplexity of
+the difference between in-distribution (Fisher) and       ground-truth and samples generated in the dialog
+OOD (CANDOR) between dGSLM and Fisher-                    continuation setting for reference. We find that
+trained SyncLLM-F. While dGSLM suffers from               SyncLLM in the LLM-LLM interaction setting is
+significant degradation OOD (dropping -0.24 and           able to closely match the performance of the con-
+-0.51 in M-MOS and N-MOS ratings), these de-              tinuation setting, and perform significantly better
+clines are reduced in SyncLLM-F only dropping             than dGSLM in continuation setting. Furthermore,
+-0.15 and -0.16 moving OOD. SyncLLM trained               we find that interaction between instances of Syn-
+on CANDOR dataset (SyncLLM-C) shows a de-                 cLLM trained with Fisher and Candor datasets,
+cline OOD on M-MOS (-0.52), but not N-MOS                 respectively is are almost the same signifying that
+                                               21397
+
+SyncLLM can perform a coherent conversation                    responses and toxicity mitigation may be needed
+even when user's side of the conversation is gener-             for speech outputs. As for unintended use, one
+ated by a model trained with a different dataset.        example is that bad actors misuse the model for on-
+Human evaluation. Table. 4 shows ratings for                  line scams. Speech watermarking is one potential
+dGSLM, the Fisher-trained continuation model,            approach to counter abuse of the technology.
+and LLM-LLM interactions. Results corroborate
+findings in §5.4 - LLM-LLM interactions outper-          Acknowledgments
+form dGSLM on M-MOS, but are slightly worse                       The University of Washington researchers are
+compared to the single model continuation setting.       partly supported by the Meta AI Mentorship pro-
+Table 4: Human evaluation results for Meaningfulness              gram, Moore Inventor Fellow award #10617, UW
+(Meaning.) and Naturalness (Nat.) mean estimates and     CoMotion fund, and the NSF.
+standard errors (in parentheses) across all data.
+Model                Meaning. ↑       Nat. ↑
+dGSLM                1.55 (0.06)    3.95 (0.08)          References
+SyncLLM-F            3.74 (0.06)    3.90 (0.06)          Suno AI. 2023.  Bark tts.  https://github.com/
+SyncLLM-F-C          3.39 (0.06)    3.78 (0.06)         suno-ai/bark.
+SyncLLM-F-F          3.47 (0.06)    3.72 (0.06)          AT at Meta. 2024. Meta llama 3. https://github.
+                                                        com/meta-llama/llama3.
+6 Conclusion                                             Zalán Borsos, Raphaël Marinier, Damien Vincent, Eu-
+We present Synchronous LLMs, a novel post-              gene Kharitonov, Olivier Pietquin, Matt Sharifi,
+training framework that converts an auto-regressive     Dominik Roblek, Olivier Teboul, David Grangier,
+                                                        Marco Tagliasacchi, and Neil Zeghidour. 2023. Au-
+LLM into a full-duplex spoken dialogue agent.           diolm: a language modeling approach to audio gen-
+Synchronous LLMs outperform state-of-the-art in         eration. Preprint, arXiv:2209.03143.
+dialogue meaningfulness while maintaining turn-          Paul T. Brady. 1968. A statistical analysis of on-off
+taking naturalness.  Finally, by simulating full-       patterns in 16 conversations. Bell System Technical
+duplex dialogue between two agents, we show ro-         Journal, 47:73-91.
+bustness to delayed input from Internet-scale la-        Hervé Bredin, Ruiqing Yin, Juan Manuel Coria, Gre-
+tencies, where the agents do not have immediate         gory Gelly, Pavel Korshunov, Marvin Lavechin,
+access to the speech generated by their users.          Diego Fustes, Hadrien Titeux, Wassim Bouaziz, and
+                                                        Marie-Philippe Gill. 2020. pyannote.audio: neural
+7 Limitations and Risks                                 building blocks for speaker diarization. In ICASSP
+Limitations. The performance of Synchronous             2020, IEEE International Conference on Acoustics,
+LLMs could be further improved in terms of speech       Speech, and Signal Processing, Barcelona, Spain.
+quality. Currently, we use a simple HiFi-GAN             Ju-Chieh Chou, Chung-Ming Chien, Wei-Ning Hsu,
+vocoder for speech synthesis, and higher-quality        Karen Livescu, Arun Babu, Alexis Conneau, Alexei
+speech could be synthesized from semantic units         Baevski, and Michael Auli. 2023. Toward joint lan-
+                                                        guage modeling for speech units and text. Preprint,
+with a more advanced speech generator. Moreover,        arXiv:2310.08715.
+we have not studied expressivity and non-verbal
+sounds in dialogue such as laughter, which could         Christopher Cieri, David Miller, and Kevin Walker.
+make the spoken dialogue more human-like. An-           2004. The fisher corpus: a resource for the next
+other limitation is the context length; synchronous     generations of speech-to-text. In International Con-
+                                                        ference on Language Resources and Evaluation.
+LLMs are initialized from Llama-3, and therefore         Alexandre Défossez, Jade Copet, Gabriel Synnaeve, and
+have the same sequence length limit which con-          Yossi Adi. 2022. High fidelity neural audio compres-
+strained the long-context modeling in dialogue as       sion. arXiv preprint arXiv:2210.13438.
+well as the use of more expressive multi-codebook
+tokenizers like EnCodec (Défossez et al., 2022)          J.J. Godfrey, E.C. Holliman, and J. McDaniel. 1992.
+that have higher token rate.                            Switchboard: telephone speech corpus for research
+Ethical considerations. The proposed model is           and development.  In [Proceedings] ICASSP-92:
+intended for spoken dialogue agents. In case of         1992 IEEE International Conference on Acoustics,
+                                                        Speech, and Signal Processing, volume 1, pages 517-
+failure, the system might generate inappropriate        520 vol.1.
+                                        21398
+
+     Michael Hassid, Tal Remez, Tu Anh Nguyen, Itai Gat,     Stephen C Levinson and Francisco Torreira. 2015b.
+Alexis Conneau, Felix Kreuk, Jade Copet, Alexan-             Timing in turn-taking and its implications for pro-
+dre Défossez, Gabriel Synnaeve, Emmanuel Dupoux,             cessing models of language. Frontiers in psychology,
+Roy Schwartz, and Yossi Adi. 2023. Textually pre-            6:731.
+trained speech language models. In Advances in
+Neural Information Processing Systems 36: Annual                  Ting-En Lin, Yuchuan Wu, Fei Huang, Luo Si, Jian
+Conference on Neural Information Processing Sys-             Sun, and Yongbin Li. 2022. Duplex conversation:
+tems 2023, NeurIPS 2023, New Orleans, LA, USA,               Towards human-like interaction in spoken dialogue
+December 10 - 16, 2023.                                      systems. In Proceedings of the 28th ACM SIGKDD
+                                                             Conference on Knowledge Discovery and Data Min-
+          Michael Hassid, Tal Remez, Tu Anh Nguyen, Itai     ing, KDD '22. ACM.
+Gat, Alexis Conneau, Felix Kreuk, Jade Copet,                Soumi Maiti, Yifan Peng, Shukjae Choi, Jee-weon Jung,
+Alexandre Defossez, Gabriel Synnaeve, Emmanuel               Xuankai Chang, and Shinji Watanabe. 2023. Voxtlm:
+Dupoux, Roy Schwartz, and Yossi Adi. 2024. Tex-              unified decoder-only models for consolidating speech
+tually pretrained speech language models. Preprint,          recognition/synthesis and speech/text continuation
+arXiv:2305.13009.                                            tasks. CoRR, abs/2309.07937.
+     Mattias Heldner and Jens Edlund. 2010. Pauses, gaps     Eliya Nachmani, Alon Levkovitch, Roy Hirsch, Ju-
+and overlaps in conversations. Journal of Phonetics,         lian Salazar, Chulayuth Asawaroengchai, Soroosh
+38(4):555-568.                                               Mariooryad, Ehud Rivlin, RJ Skerry-Ryan, and
+     Wei-Ning Hsu, Benjamin Bolte, Yao-Hung Hubert Tsai,     Michelle Tadmor Ramanovich. 2023.              Spoken
+Kushal Lakhotia, Ruslan Salakhutdinov, and Abdel-            question answering and speech continuation using
+rahman Mohamed. 2021. Hubert: Self-supervised                spectrogram-powered llm. In The Twelfth Interna-
+speech representation learning by masked prediction          tional Conference on Learning Representations.
+of hidden units. Preprint, arXiv:2106.07447.                           Tu Anh Nguyen, Maureen de Seyssel, Patricia
+      ITU-T Recommendation P.808. 2018. Subjective eval-     Rozé, Morgane Rivière, Evgeny Kharitonov, Alexei
+uation of speech quality with a crowdsourcing ap-            Baevski, Ewan Dunbar, and Emmanuel Dupoux.
+proach.                                                      2020. The zero resource speech benchmark 2021:
+                                                             Metrics and baselines for unsupervised spoken lan-
+    Albert Q. Jiang, Alexandre Sablayrolles, Arthur Men-     guage modeling. Preprint, arXiv:2011.11588.
+sch, Chris Bamford, Devendra Singh Chaplot, Diego              Tu Anh Nguyen, Eugene Kharitonov, Jade Copet, Yossi
+de Las Casas, Florian Bressand, Gianna Lengyel,              Adi, Wei-Ning Hsu, Ali Elkahky, Paden Tomasello,
+Guillaume Lample, Lucile Saulnier, Lélio Re-                 Robin Algayres, Benoit Sagot, Abdelrahman Mo-
+nard Lavaud, Marie-Anne Lachaux, Pierre Stock,               hamed, and Emmanuel Dupoux. 2022.              Genera-
+Teven Le Scao, Thibaut Lavril, Thomas Wang, Timo-            tive spoken dialogue language modeling. Preprint,
+thée Lacroix, and William El Sayed. 2023. Mistral            arXiv:2203.16502.
+7b. CoRR, abs/2310.06825.                                    Tu Anh Nguyen, Benjamin Muller, Bokai Yu, Marta R.
+          Eugene Kharitonov, Ann Lee, Adam Polyak, Yossi     Costa-jussa, Maha Elbayad, Sravya Popuri, Paul-
+Adi, Jade Copet, Kushal Lakhotia, Tu-Anh Nguyen,             Ambroise Duquenne, Robin Algayres, Ruslan Mav-
+Morgane Rivière, Abdelrahman Mohamed, Em-                    lyutov, Itai Gat, Gabriel Synnaeve, Juan Pino, Benoit
+manuel Dupoux, and Wei-Ning Hsu. 2022. Text-free             Sagot, and Emmanuel Dupoux. 2024. Spirit-lm:
+prosody-aware generative spoken language modeling.           Interleaved spoken and written language model.
+Preprint, arXiv:2109.03264.                                  Preprint, arXiv:2402.05755.
+           Heeseung Kim, Soonshin Seo, Kyeongseok Jeong,        Vivian T Nguyen, Otto Versyp, Christopher Cox, and
+Ohsung Kwon, Jungwhan Kim, Jaehong Lee, Eu-                  Riccardo Fusaroli. 2021. A systematic review and
+nwoo Song, Myungwoo Oh, Sungroh Yoon, and                    bayesian meta-analysis of the development of turn
+Kang Min Yoo. 2024. Unified speech-text pretraining          taking in adult-child vocal interactions. Child devel-
+for spoken dialog modeling. CoRR, abs/2402.05706.            opment.
+       Kushal Lakhotia, Evgeny Kharitonov, Wei-Ning Hsu,     OpenAI. 2023.  GPT-4 technical report.          CoRR,
+Yossi Adi, Adam Polyak, Benjamin Bolte, Tu-Anh               abs/2303.08774.
+Nguyen, Jade Copet, Alexei Baevski, Adelrahman                     Andrew Reece, Gus Cooney, Peter Bull, Christine
+Mohamed, and Emmanuel Dupoux. 2021. Gener-                   Chung, Bryn Dawson, Casey Fitzpatrick, Tamara
+ative spoken language modeling from raw audio.               Glazer, Dean Knox, Alex Liebscher, and Sebastian
+Preprint, arXiv:2102.01192.                                  Marin. 2023. The candor corpus: Insights from a
+      Stephen C. Levinson and Francisco Torreira. 2015a.     large multimodal dataset of naturalistic conversation.
+Timing in turn-taking and its implications for pro-          Science Advances, 9(13):eadf3197.
+cessing models of language. Frontiers in Psychology,         Paul K. Rubenstein, Chulayuth Asawaroengchai,
+6.                                                           Duc Dung Nguyen, Ankur Bapna, Zalán Borsos,
+    21399
+
+Félix de Chaumont Quitry, Peter Chen, Dalia El                      Speechgpt: Empowering large language models with
+Badawy, Wei Han, Eugene Kharitonov, Hannah                                                                        In  intrinsic cross-modal conversational abilities.
+Muckenhirn, Dirk Padfield, James Qin, Danny Rozen-            Findings of the Association for Computational Lin-
+berg, Tara Sainath, Johan Schalkwyk, Matt Sharifi,                   guistics: EMNLP 2023, Singapore, December 6-10,
+Michelle Tadmor Ramanovich, Marco Tagliasacchi,                    2023, pages 15757-15773. Association for Computa-
+Alexandru Tudor, Mihajlo Velimirovic, Damien Vin- ´           tional Linguistics.
+cent, Jiahui Yu, Yongqiang Wang, Vicky Zayats, Neil
+Zeghidour, Yu Zhang, Zhishuai Zhang, Lukas Zilka,                   Haoning Zhang, Junwei Bao, Haipeng Sun, Youzheng
+and Christian Frank. 2023. Audiopalm: A large lan-                          Wu, Wenye Li, Shuguang Cui, and Xiaodong
+guage model that can speak and listen. Preprint,                         He. 2023b. Monet: Tackle state momentum via
+arXiv:2306.12925.                                               noise-enhanced training for dialogue state tracking.
+                                                              Preprint, arXiv:2211.05503.
+       Emanuel A Schegloff. 2000. Overlapping talk and the      Yizhe Zhang, Siqi Sun, Michel Galley, Yen-Chun Chen,
+organization of turn-taking for conversation. Lan-
+guage in society, 29(1):1-63.                                      Chris Brockett, Xiang Gao, Jianfeng Gao, Jingjing
+                                                                    Liu, and Bill Dolan. 2020. Dialogpt: Large-scale
+      Gabriel Skantze. 2021. Turn-taking in conversational       generative pre-training for conversational response
+systems and human-robot interaction: A review.                generation. In ACL, system demonstration.
+Comput. Speech Lang., 67:101178.                                       Xueliang Zhao, Wei Wu, Can Xu, Chongyang Tao,
+           Tanya Stivers, Nick J. Enfield, Penelope Brown,               Dongyan Zhao, and Rui Yan. 2020. Knowledge-
+Christina Englert, Makoto Hayashi, Trine Heine-                   grounded dialogue generation with pre-trained lan-
+mann, Gertie Hoymann, Federico Rossano, Jan Pe-                     guage models. In Proceedings of the 2020 Confer-
+ter De Ruiter, Kyung-Eun Yoon, Stephen C. Levin-                       ence on Empirical Methods in Natural Language
+son, Paul Kay, and Krishna Y. 2009. Universals                       Processing, EMNLP 2020, Online, November 16-20,
+and cultural variation in turn-taking in conversation.               2020, pages 3377-3390. Association for Computa-
+Proceedings of the National Academy of Sciences,              tional Linguistics.
+106:10587 - 10592.
+         Louis ten Bosch, Nelleke Oostdijk, and Lou Boves.    A Additional training details
+2005. On temporal aspects of turn taking in con-              A.1 Hyperparameters
+versational dialogues. Speech Commun., 47:80-86.                       We trained SyncLLM with the Llama3-8b's orig-
+        Hugo Touvron, Louis Martin, Kevin Stone, Peter Al-         inal sequence length 8192. In the first stage, we
+bert, Amjad Almahairi, Yasmine Babaei, Nikolay                      train with a per-gpu batch size of 1 on 128 A100
+Bashlykov, Soumya Batra, Prajjwal Bhargava, Shruti                 GPUs, equivalent to a total batch of 8192 x 128 =
+Bhosale, Dan Bikel, Lukas Blecher, Cristian Canton-
+Ferrer, Moya Chen, Guillem Cucurull, David Esiobu,                 1M tokens. We use a learning rate of 3×10-5, with
+Jude Fernandes, Jeremy Fu, Wenyin Fu, Brian Fuller,                 500 step warmup and train for 40k iterations. In
+Cynthia Gao, Vedanuj Goswami, Naman Goyal, An-                    the second stage, we reduce the batch size to 512k
+thony Hartshorn, Saghar Hosseini, Rui Hou, Hakan
+Inan, Marcin Kardas, Viktor Kerkez, Madian Khabsa,                    tokens, learning rate to 2.2 × 10-5 and warmup
+Isabel Kloumann, Artem Korenev, Punit Singh Koura,               steps to 200, and train for 6000 iterations. In the
+Marie-Anne Lachaux, Thibaut Lavril, Jenya Lee, Di-            last stage, we train with a batch size of 256k tokens,
+ana Liskovich, Yinghai Lu, Yuning Mao, Xavier Mar-            and 100 warmup
+tinet, Todor Mihaylov, Pushkar Mishra, Igor Moly-             steps, for 2000 iterations.
+bog, Yixin Nie, Andrew Poulton, Jeremy Reizen-
+stein, Rashi Rungta, Kalyan Saladi, Alan Schelten,            A.2 Benchmarking interleaving strategies
+Ruan Silva, Eric Michael Smith, Ranjan Subrama-
+nian, Xiaoqing Ellen Tan, Binh Tang, Ross Tay-                    We explore two text-speech interleaving strategies
+lor, Adina Williams, Jian Xiang Kuan, Puxin Xu,                 in stage 1 of our training: i) Sentence-level inter-
+Zheng Yan, Iliyan Zarov, Yuchen Zhang, Angela Fan,                   leaving: each sentence is chosen randomly to be
+Melanie Kambadur, Sharan Narang, Aurélien Ro-                     either text modality or speech modality. ii) Turn-
+driguez, Robert Stojnic, Sergey Edunov, and Thomas                  level interleaving: each turn is chosen randomly
+Scialom. 2023. Llama 2: Open foundation and fine-
+tuned chat models. CoRR, abs/2307.09288.                          to be either text modality or speech modality, re-
+       Tianrui Wang, Long Zhou, Ziqiang Zhang, Yu Wu, Shu-      sulting in consistent modality for all the sentences
+jie Liu, Yashesh Gaur, Zhuo Chen, Jinyu Li, and Furu                  within the turn. We compare them by evaluating
+Wei. 2023. Viola: Unified codec language models for                 on a set of spoken language understanding bench-
+speech recognition, synthesis, and translation. CoRR,             marks proposed in (Nguyen et al., 2020). We report
+abs/2305.16107.                                                 these results in Table 5. On these tasks, we observe
+               Dong Zhang, Shimin Li, Xin Zhang, Jun Zhan,        that sentence-level interleaving outperforms turn-
+Pengyu Wang, Yaqian Zhou, and Xipeng Qiu. 2023a.              level interleaving across all benchmarks.
+    21400
+
+Table 5: Ablation evaluations over interleaving level. WUGGY, BLIMP, Topic-StoryCloze, and StoryCloze assess
+the knowledge and capacity of the model in lexical, syntactical, and semantic levels respectively. We report the
+accuracy based on negative-log-likelihood - normalized by the number of tokens - minimization prediction. The
+tasks are evaluated in the zero-shot setting.
+
+                  Interleaving     WUGGY↑ BLIMP↑               StoryCloze↑ Topic-StoryCloze↑
+                  Turn-level             63.0     56.0    76.5    55.1
+                  Sentence-level         70.3     56.3    83.0    61.8
+
+Table 6: Comparison of average Pearson correlation           B.1  N-MOS & M-MOS
+of turn-taking event durations between generation and              We provide the complete protocol used for human
+ground-truth continuation with SyncLLM in the two-
+model interaction setting. Measured on testsets compris-        evaluation of turn-taking Naturalness and dialogue
+ing both Fisher and Candor testsets.                         content Meaningfulness.
+Latency      SyncLLM-F-F SyncLLM-F-C                         Audios presented
+160 ms            0.32                0.36                   Please base your rating on the impression you
+200 ms            0.31                0.35                    have that two people are talking and listening natu-
+240 ms            0.28                0.32                     rally with one-another in the "continuation" audio.
+                                                                   5. Excellent - basically indistinguishable from
+B Naturalness-MOS Instructions                               human-like turn-taking
+Naturalistic turn-taking between two people is char-                   4. Good - minor differences from human-like
+acterized by smooth transitions where each partic-           turn-taking
+ipant listens to the other, responds appropriately,              3. Fair - substantial differences from human-like
+and allows for pauses or silences, creating a bal-           turn-taking
+anced and dynamic interaction. Typically, the par-                 2. Poor - very little in common with human-like
+ticipants try to avoid overlapping speech, although          turn-taking
+this may occur especially when one participant pro-                    1. Bad - essentially nothing in common with
+vides information that they understood the other by          human-like turn-taking
+using words like "yeah" or "uh-huh." Hesitations,            B.1.1  Meaningfulness-MOS
+pausing, silence, and repairs are also natural events           In this task you will listen to a dialogue between
+that occur in a conversation between two people.                  two people and provide a rating for how meaning-
+          Here, you will listen to a dialogue between two         ful their conversation is. By meaningful we mean
+people and provide a rating for how natural the turn-             the degree to which the content of the conversa-
+taking sounds regardless of its content (the meaning            tion is coherent and plausible (can you understand
+of the words used) and the clarity of voices.                    the intent of the speakers and does it sound like
+               Some of the samples are generated by an AI           something people would reasonably talk about).
+model, some are actual recordings of humans in                  Just as in everyday conversations, the content may
+conversation, and some are actual recordings of                   or may not be perfectly grammatical, but must be
+people, but with AI generated voices overlayed.                 understandable in the context of the conversation.
+Please try to assess the naturalness of the turn-            To begin, first listen to the "prompt" audio in its
+taking without taking into consideration the sound           entirety. This is the first part of the conversation.
+of the voices.                                                  Then listen to the "continuation" audio in its en-
+      To begin, first listen to the "prompt" audio in its     tirety. This is the second part of the conversation.
+entirety. This is the first part of the conversation.             Note that in many cases the voices in the prompt
+Then listen to the "continuation" audio in its en-             may differ from the voices in the continuation (in-
+tirety. This is the second part of the conversation.           cluding the perceived gender of the speakers). Your
+Note that in many cases the voices in the prompt                rating should reflect how meaningful the "continu-
+may differ from the voices in the continuation (in-          ation" audio is, given the "prompt."
+cluding the perceived gender of the speakers). Your          Audios presented
+rating should reflect how natural the "continuation"         Please base your rating on the impression you
+audio sounds given the turn-taking characteristics             have that the continuation is a meaningful "contin-
+you observe in the "prompt."                                    uation" of the prompt audio - that it represents a
+                                                    21401
+
+    Table 7: Comparison of Pearson correlation of turn-taking event durations between prompt and generation.
+    Model                         Fisher (in-distribution)                           Candor (out-of-distribution)
+                                  ipu           pause                    Average     ipu      pause     fto    Average fto
+    dGSLM                         0.60          0.34              0.23    0.39       0.43     0.20      0.09    0.24
+    SyncLLM-F (160 ms)            0.69          0.34              0.35    0.46       0.64     0.12      0.24    0.33
+    SyncLLM-F (200 ms)            0.57          0.49              0.29    0.45       0.61     0.34      0.13    0.36
+    SyncLLM-F (240 ms)            0.63          0.49              0.33    0.48       0.59     0.23      0.19    0.34
+    GT                            0.72          0.53              0.31    0.52       0.54     0.30      0.12    0.32
+
+              36                                                           D Turn-taking event correlation between
+              34                                                           prompt and generation
+                            Latency = 160 ms                               Similar to the naturalness evaluation in Table 2,
+    Median                  Latency = 200 ms
+    perplexity32            Latency = 240 ms                               where we consider ground-truth continuation as the
+              30                                                           reference for turn-taking event statistics, we could
+                                                                           also consider prompt as the reference. In a way, this
+                    10  15  20            25                30             measures style consistency between prompt and the
+                    Duration of the generated dialogue (s)                 continuation. In Table 7, we compare turn-taking
+Figure 8: Effect of latency on two-model interaction.                      event correlation of generations of our method in
+                                                                           continuation setting, with that of dGSLM method.
+                     plausible direction the conversation would go and     We observed that our method demonstrates better
+    is coherent.                                                           turn-taking correlation with the prompts as well.
+                     5. Excellent - all of the conversation content is
+    plausible and coherent
+                         4. Good - most of the conversation content is
+    plausible and coherent
+                   3. Fair - some of the conversation content is plau-
+    sible and coherent
+                 2. Poor - little of the conversation content is plau-
+    sible and coherent
+                      1. Bad - basically none of the conversation con-
+    tent is plausible and coherent
+
+    C Effect of latency on full-duplex
+    interaction
+                      In Fig. 8, we compare the performance in the in-
+                   teraction setting with different latencies. We find
+                     that our method is robust to a latency as much as
+                        200 ms, but the performance drops with latency
+                   greater than that. Similar to our naturalness eval-
+                  uation in the continuation setting in §5.2, to eval-
+                      uate turn-taking capability of SyncLLM in inter-
+                     action setting, we compare Pearson correlation of
+                  the duration of turn-taking events in generation and
+                    ground-truth continuations. In Table 6, we observe
+                    that on a combined test set of in-distribution and
+                   out-of-distribution prompts, performance in the in-
+                  teraction setting closely matches with latencies 160
+    ms and 200 ms, but drops with 240 ms.
+                                                                  21402

@@ -1,0 +1,12 @@
+{
+  "id": "andrlab/gemma4-fixrapid-v10",
+  "title": "gemma4-fixrapid-v10",
+  "code_file": "gemma4-fixrapid-v10.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "machine_shape": "NvidiaTeslaT4",
+  "dataset_sources": ["andrlab/gemma-4-omni-module", "andrlab/gemma4-ep2-final-ckpt"]
+}

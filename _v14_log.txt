@@ -1,0 +1,128 @@
+0.00s - Debugger warning: It seems that frozen modules are being used, which may
+0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off
+0.00s - to python to disable frozen modules.
+0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.
+0.00s - Debugger warning: It seems that frozen modules are being used, which may
+0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off
+0.00s - to python to disable frozen modules.
+0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.
+Input dataset files: ['qwen_subtalker.py', 'extract_qwen_subtalker.py', 'code2wav_weights', 'qwen_subtalker', 'checkpoints', 'data', 'kaggle_pipeline.py', 'code2wav_decoder.py']
+_INPUT = /kaggle/input/datasets/andrlab/gemma-4-omni-module | _CKPT_INPUT = /kaggle/input/datasets/andrlab/gemma4-ep2-final-ckpt
+parquet 50h presente: True
+ckpt ep2 md5(adapter): 86a854e9 (atteso 86a854e9)
+=== SETUP COMPLETATO ===
+GPU rilevata: Tesla T4 | compute capability: 7
+>>> GPU Volta+ rilevata: stack normale cu128 <<<
+stack cu128 rc: 0 s behaviour is the source of the following dependency conflicts.
+bigframes 2.39.0 requires google-cloud-bigquery-storage<3.0.0,>=2.30.0, which is not installed.
+google-adk 1.29.0 requires google-cloud-bigquery-storage>=2.0.0, which is not installed.
+
+transformers: 5.5.0
+unsloth: 2026.8.12
+peft: 0.19.1
+torch: 2.10.0+cu128
+check cuda: cuda ok: True Tesla T4
+🦥 Unsloth: Will patch your computer to enable 2x faster free finetuning.
+🦥 Unsloth Zoo will now patch everything to make training faster!
+[Pipeline Inizializzata] Modello Backbone: unsloth/gemma-4-E2B-it
+[Pipeline Inizializzata] Device attivo: cuda
+[Pipeline Secrets] Avviso caricamento secret Kaggle: Connection error trying to communicate with service.
+[FIX v14] frame parlati pesati >= 5.0x (monkeypatch __getitem__)
+=== FIX TRAIN v14: {'RESUME': 'checkpoints/gemma4_duplex_sota_ckpt', 'START_STEP': '24236', 'LR': '5e-5', 'MAX_GN': '1.0', 'SPEECH_WEIGHT': 5.0} ===
+[Fase 2 - Unsloth] Caricamento Unsloth Gemma 4 E2B (unsloth/gemma-4-E2B-it)...
+[Fase 2 - Unsloth] NOTA: Assicurati che il kernel Kaggle sia stato RIAVVIATO dopo la Fase 1.
+[Fase 2 - Unsloth] Configurazione single-GPU: target_device_map='cuda:0' (multi-GPU Kaggle 2xT4 non stabile).
+==((====))==  Unsloth 2026.8.12: Fast Gemma4 patching. Transformers: 5.5.0.
+   \\   /|    Tesla T4. Num GPUs = 1. Max memory: 14.562 GB. Platform: Linux.
+O^O/ \_/ \    Torch: 2.10.0+cu128. CUDA: 7.5. CUDA Toolkit: 12.8. Triton: 3.6.0
+\        /    Bfloat16 = FALSE. FA [Xformers = 0.0.35. FA2 = False]
+ "-____-"     Free license: http://github.com/unslothai/unsloth
+Unsloth: Fast downloading is enabled - ignore downloading bars which are red colored!
+Unsloth: Using float16 precision for gemma4 won't work! Using float32.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+[Fase 2 - Unsloth] Inizializzazione adattatori QLoRA su target modules...
+Unsloth: Explicit target_modules are constrained by the finetune_(vision|language|attention|mlp) filters; adapters attach only where both select.
+[Fase 2 - Unsloth] Token audio nativi dal config: audio=258881, boa=256000, eoa=258883, bos=2.
+[Fase 2 - Unsloth] Inizializzazione Gemma4FullDuplexModel (Hidden Size: 1536)...
+[Coupling] ✅ SUB-TALKER Qwen3-TTS caricato e congelato (qwen_subtalker). I codebook acustici 1..15 sono generati dal sub-talker (qualità nativa Qwen); Gemma impara h_t (adapter) + cb0.
+
+====================================================================
+=== AVVIO FASE 2: TRAINING GEMMA 4 FULL-DUPLEX ===
+====================================================================
+
+[Disco] File temporanei pesanti su: /root/kaggle_big
+[Fase 1/2 - Memmap] Conversione parquet -> binari .dat (RAM peak ~3.3GB/file, una tantum)...
+  mel_user.dat scritto (3.56 GB).
+  mel_agent.dat scritto (3.56 GB).
+  codes.dat scritto (55.7 MB).
+[Fase 1/2 - Memmap] Conversione completata.
+[Fase 2 - DataLoad] Caricamento dati da cache Parquet: data/train_tokens_50.0h_2500s.parquet...
+[Fase 2 - DataLoad] Sidecar iperparametri non trovato (data/train_tokens_50.0h_2500s_hyperparams.json); uso i default del modulo.
+[Fase 2 - DataLoad] MEMORY-MAPPED: 1740383 frame agente (mel utente 13923064x128 float16 mmap, mel agente 13923064x128 mmap) in 0.00s (0 copie in RAM).
+[Fase 2 - DataLoad] Testo risposta agente: 20116/27194 finestre.
+[Fase 2 - DataLoad] Caricati 1740383 frame agente (mel utente 13923064x128, mel agente 13923064x128) da Parquet in 1.1989s.
+[Fase 2 - Training] SELF_LISTENING=True (doppio canale mel interleavato 2x8x128 per frame), USE_FRAME_WEIGHTING=True (open=5.0, yield=3.0, co-talk=3.0), TEXT_BLOCK_LEN=48 (supervisione testuale, peso 0.5).
+[Fase 2 - Training] VALIDATION SPLIT: 24474 finestre train (frame 0..1566344), 2719 finestre val (frame 1566344..1740383) (90.0% train, confine di segmento).
+[Fase 2 - Training] Supervisione testuale ATTIVA: 20116/27194 finestre con testo risposta agente (LM head condivisa, tied embeddings).
+[Fase 2 - Training] Target cb0 agente: 1920 token unici, dominante 1720 al 8.5%.
+[Fase 2 - Training] ⚠️ Fase 1 NON ha usato l'encoder neurale reale (REAL_ENCODING assente/false): dati fallback FFT/sintetici -> la loss tenderà a collassare. NON procedere oltre: rigenera la Fase 1.
+[Fase 2 - Training] ✅ COUPLING ATTIVO (ADR-005): codebook 1..15 dal sub-talker Qwen congelato (loss peso 0.6, warm-up 200 step con h_t.detach()).
+[Fase 2 - Training] Optimizer: AdamW lr=5e-05, wd=0.01 | max_grad_norm=1.0
+[Fase 2 - Checkpoint] LoRA ricaricata da checkpoints/gemma4_duplex_sota_ckpt/lora_adapters.
+[Fase 2 - Checkpoint] Teste custom ricaricate da checkpoints/gemma4_duplex_sota_ckpt/custom_duplex_heads.pt.
+[Fase 2 - Training] RESUME da 'checkpoints/gemma4_duplex_sota_ckpt' (start_step=24236).
+[Fase 2 - Testo] lm_head trovata: model.lm_head (loss testo ATTIVA, vocab 262144).
+[Fase 2 - Training] SMOKE: fermato dopo 3 batch (PHASE2_SMOKE_BATCHES).
+[Fase 2 - Validation] Epoca 1: val_loss=29.2802 | val_text=2.2527
+[Fase 2 - Checkpoint] Salvataggio adattatori LoRA e pesi custom su: checkpoints/gemma4_duplex_sota...
+[Fase 2 - Checkpoint] Coupling (ADR-005): adapter h_t incluso nel checkpoint (sub-talker NON salvato: congelato, si ricarica da qwen_subtalker).
+[Fase 2 - Checkpoint] Checkpoint unificato salvato con successo in: checkpoints/gemma4_duplex_sota
+[Code2Wav] transformers non carica il decoder (The checkpoint you are trying to load has model type `qwen3_tts_tokenizer_12hz` but Transformers does not recognize this architecture. This could be because of an issue with the checkpoint, or because your version of Transformers is out of date.
+
+You can update Transformers with the command `pip install --upgrade transformers`. If this does not work, and the checkpoint is very new, then there may not be a release version that supports this model yet. In this case, you can get the most up-to-date code by installing Transformers from source with the command `pip install git+https://github.com/huggingface/transformers.git`): provo la replica standalone...
+[Code2Wav] ✅ Replica standalone torch pura caricata (code2wav_weights, 271 tensori, upsample x1920).
+Ignored unknown kwarg option close
+Ignored unknown kwarg option close
+Ignored unknown kwarg option open
+Ignored unknown kwarg option close
+Ignored unknown kwarg option content_args
+Ignored unknown kwarg option open_pattern
+Ignored unknown kwarg option repeats
+Ignored unknown kwarg option transform
+Ignored unknown kwarg option close
+Ignored unknown kwarg option close
+Ignored unknown kwarg option open
+Ignored unknown kwarg option close
+Ignored unknown kwarg option content_args
+Ignored unknown kwarg option open_pattern
+Ignored unknown kwarg option repeats
+Ignored unknown kwarg option transform
+[Fase 2 - Sintesi] Avviso sintesi di esempio (module 'numpy.fft' has no attribute 'dct').
+
+🎤 PER PARLARE COL MODELLO (demo):
+  - carica il tuo parlato come wav (il kernel Kaggle non ha microfono):
+      * samples/user_input.wav  oppure  /kaggle/input/<dataset>/parlato.wav
+  - poi esegui:  demo_talk(duplex_model)
+  - conversazione a catena multi-turno: demo_conversation(duplex_model, synth_ds)
+  - per ascoltare senza riallenare (kernel riavviato): 
+      load_gemma4_duplex_system() -> load_gemma4_duplex_checkpoint(m) -> demo_talk(m)
+
+🔗 COUPLING (ADR-005): l'audio è renderizzato dal SUB-TALKER Qwen congelato (cb1..cb15) + decoder Code2Wav; la qualità vocale attesa è quella nativa Qwen.
+  - wav ascoltabili generati a fine training in samples/ (generated_* = modello, oracle_* = codici GT decodificati).
+
+====================================================================
+=== FASE 2 COMPLETATA CON SUCCESSO ===
+====================================================================
+
+=== FIX TRAIN v14 COMPLETATO === (TDD check: {'speech_pesati': 192, 'check': 3, 'min_fw_speech': 5.0})
+/usr/local/lib/python3.12/dist-packages/mistune.py:435: SyntaxWarning: invalid escape sequence '\|'
+  cells[i][c] = re.sub('\\\\\|', '|', cell)
+/usr/local/lib/python3.12/dist-packages/nbconvert/filters/filter_links.py:36: SyntaxWarning: invalid escape sequence '\_'
+  text = re.sub(r'_', '\_', text) # Escape underscores in display text
+[NbConvertApp] Converting notebook __notebook__.ipynb to notebook
+[NbConvertApp] Writing 108478 bytes to __notebook__.ipynb
+[NbConvertApp] Converting notebook __notebook__.ipynb to html
+[NbConvertApp] Writing 403724 bytes to __results__.html

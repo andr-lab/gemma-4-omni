@@ -1,0 +1,1339 @@
+arXiv:2410.03751v2 [cs.CL] 20 Jan 2025
+
+
+
+
+
+
+
+
+
+
+    JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021    1
+
+
+                       Recent Advances in Speech Language Models: A
+                                          Survey
+
+Wenqian Cui, Dianzhi Yu, Xiaoqi Jiao, Ziqiao Meng, Guangyan Zhang, Qichao Wang, Yiwen Guo,
+                               and Irwin King, Fellow, IEEE
+
+
+
+
+                          Abstract-Large Language Models (LLMs) have recently gar-        which converts it into text. The LLM then generates a text
+    nered significant attention, primarily for their capabilities in text-             response based on this transcription. Finally, the TTS module
+    based interactions. However, natural human interaction often                      transforms the text response back into speech, which is played
+    relies on speech, necessitating a shift towards voice-based models.                back to the user. However, this naive solution mainly suffers
+    A straightforward approach to achieve this involves a pipeline of
+    "Automatic Speech Recognition (ASR) + LLM + Text-to-Speech                        from the following three problems.
+    (TTS)", where input speech is transcribed to text, processed                            1) Information loss. Speech signals not only contain se-
+    by an LLM, and then converted back to speech. Despite being
+    straightforward, this method suffers from inherent limitations,                             mantic information (i.e., the meaning of the speech)
+    such as information loss during modality conversion, significant                       but also paralinguistic information (e.g., pitch, timbre,
+    latency due to the complex pipeline, and error accumulation                          tonality, etc.). Putting a text-only LLM in the middle will
+    across the three stages. To address these issues, Speech Language                          cause the complete loss of paralinguistic information
+    Models (SpeechLMs)-end-to-end models that generate speech                               in the input speech [8], [9]. Recognizing paralinguistic
+    without converting from text-have emerged as a promising
+    alternative. This survey paper provides the first comprehensive                            features allows for a more engaging and immersive in-
+    overview of recent methodologies for constructing SpeechLMs,                           teraction, as the model can respond with greater context.
+    detailing the key components of their architecture and the various                   Moreover, it enables the model to interpret a user's intent
+    training recipes integral to their development. Additionally, we                        more accurately in certain situations, as the meaning of
+    systematically survey the various capabilities of SpeechLMs,                      speech can vary depending on tone.
+    categorize their evaluation metrics, and discuss the challenges
+    and future research directions in this rapidly evolving field.1                         2) Significant latency. The sequential operation of ASR,
+                           Index Terms-Speech Language Models, Speech Interaction,              LLM, and TTS leads to considerable delays due to the
+    Large Language Models.                                                                      inherently complex structures and pipelines of these
+                                                                                               modules [9]-[11]. For instance, ASR often includes an
+                                                                                           additional text generator [12], [13], while TTS typically
+I. INTRODUCTION                                                                              relies on a text tokenizer, both of which increase com-
+                                Large Language Models (LLMs) have demonstrated re-               putational demands. Moreover, implementing advanced
+    markable capabilities in generating text and performing a wide                             decoding techniques, such as beam search for ASR text
+    array of natural language processing tasks [1]-[3], serving as                            decoding, can further contribute to delays [12], [13].
+    powerful foundation models for AI-driven language under-                                    Consequently, developing an end-to-end speech gener-
+    standing and generation. Their success has also spurred nu-                       ation model can help significantly minimize latency.
+    merous applications in various other domains, yet the reliance                         3) Cumulative error. A staged approach like this can eas-
+    solely on text-based modalities presents a significant limita-                       ily lead to cumulative errors throughout the pipeline, par-
+    tion. This leads to the development of speech-based generative                          ticularly in the ASR-LLM stage [14], [15]. Specifically,
+    models, which allow to interact with humans more naturally                                transcription errors that occur when converting speech
+    and intuitively. The inclusion of speech not only facilitates                                to text in the ASR module can negatively impact the
+    real-time voice interactions but also enriches communication                               language generation performance of the LLM. Addition-
+    by combining both text and speech information [4], [5].                                  ally, the TTS performance can deteriorate significantly
+                           Given the extensive mutual information between text and             if the LLM generates text that cannot be synthesized.
+    speech, it is natural to modify existing LLMs to enable speech                           Consequently, developing a unified architecture plays a
+    interaction capabilities. A straightforward approach is to adopt                  crucial role in reducing accumulated errors.
+    an "Automatic Speech Recognition (ASR) + LLM + Text-to-                                      The limitations of the naive ASR + LLM + TTS frame-
+    Speech (TTS)" framework (Figure 1a) [6], [7]. In this setup,                                 work have led to the development of Speech Language
+    the user's spoken input is first processed by the ASR module,                             Models (SpeechLMs, Figure 1b). Unlike the naive frame-
+            Wenqian Cui (wenqian.cui@link.cuhk.edu.hk), Dianzhi Yu, and Irwin King             work, SpeechLMs directly encode speech waveforms into
+    (king@cse.cuhk.edu.hk) are with the Chinese University of Hong Kong, Hong            tokens or representations, capturing essential features and
+    Kong, China. Ziqiao Meng is with the National University of Singapore,               information from audio (section III-A). Although individual
+    Singapore. Xiaoqi Jiao and Guangyan Zhang are with the Lightspeed Studios,              speech tokens may not carry word-level semantic meaning,
+    Tencent, China. Qichao Wang is with the AI Lab, Tencent, China. Yiwen Guo
+    is an Independent Researcher.                                                         they capture the semantic information of speech utterances
+    1Github: https://github.com/dreamtheater123/Awesome-SpeechLM-Survey               and retain valuable paralinguistic information, which prevents
+
+    JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021    2
+
+
+
+
+    Speech    ASR  Text      Language      Text      TTS
+                 The quick    Model    the lazy dog.
+                 brown fox
+                jumps over
+
+        (a) Illustration of the "ASR + LLM + TTS" framework.
+
+
+    Speech        Speech        Vocoder
+        Tokenizer
+Transcription: The quick        Language    Transcription:
+  brown fox jumps over        Model          the lazy dog.
+
+    Text      The quick brown fox jumps over     the lazy dog.
+
+(b) Illustration of the architecture of a SpeechLM.
+    Fig. 1. Architectures of the "ASR + LLM + TTS" framework and a SpeechLM. We emphasize that, for SpeechLM, the same content can be used across both
+    speech and text modalities, meaning that any input modality will yield any output modality of the same results. This intentional repetition of input/output
+    contents in the figure highlights this point.
+
+
+                             TABLE I                                      more intricate and diverse applications. First, SpeechLMs can
+                 NOTATIONS USED IN THIS SURVEY.                           capture speaker-specific information and emotional nuances
+    Notation     Description                                              (Figure 2), which allows them to distinguish between differ-
+                                                                          ent speakers during a conversation and to comprehend and
+    a            A speech audio waveform                                  generate speech imbued with specific emotional tones. Such
+    ˆa           Model-reconstructed speech audio waveform
+    t            A text span                                              advancements are crucial for applications in areas like person-
+    M            A multi-modal sequence containing speech and/or text     alized assistants, emotion-aware systems, and more nuanced
+    θ            Model parameters                                         human-computer interaction scenarios. Second, SpeechLMs
+    fE(·)        Speech encoder
+    d(·)         Speech quantizer                                         can be designed to enable real-time voice interaction, where
+    LM           Language model                                           the model can be interrupted by humans or choose to speak
+    v            Encoded speech representations                           while the user is still speaking, mimicking the dynamics of
+    s            Speech tokens
+    m            Multi-modal tokens (speech and/or text)                  human conversations more naturally. Furthermore, because
+    V            Vocabulary of a language model                           SpeechLMs are trained directly on speech data, they have the
+    E            Embedding matrix of a language model                     potential to facilitate communication in rare languages where
+    De           Transformer decoder blocks
+    V o          Vocoder                                                  spoken content is more prevalent than written material.
+    G            Generator in a Generative Adversarial Network                                         Contributions. In this survey, we present the first com-
+    D            Discriminator in a Generative Adversarial Network        prehensive overview of recent endeavors in constructing
+    ms           Mel-spectrogram of a speech audio waveform
+    F0           Fundamental frequency                                    SpeechLMs. We explore the various components that con-
+                                                                          stitute their architecture (section III) and the training recipes
+                                                                          (section IV) involved in their development. we aim to elucidate
+     the information loss. SpeechLMs then model these tokens              the current state of the field by analyzing these models
+  autoregressively, without solely relying on text input, which           from the above perspectives. Additionally, we survey the
+ allows them to use the additional paralinguistic information to          downstream applications of SpeechLMs (section V), classify
+  generate more expressive and nuanced speech (section III-B).            metrics to evaluate SpeechLMs (section VI), discuss the chal-
+  Finally, the generated tokens are synthesized back to speech            lenges encountered in this rapidly evolving area, and outline
+(section III-C). This integrated approach eliminates the need to          promising future research directions that could drive further
+  chain together three separate modules, significantly reducing           advancements in SpeechLM technology (section VII). Our
+   latency. Additionally, by working directly with the encoded            contributions are summarized as follows:
+  speech tokens, SpeechLMs effectively mitigate the cumulative    • We present the first survey in the field of SpeechLMs.
+errors, as their training is integrated with the speech encoding,                                       • We propose a novel taxonomy (Figure 3) of classifying
+    whereas the training of LLMs (language modeling) is com-                                                   SpeechLMs from the underlying components and the
+   pletely independent of the ASR (speech recognition) module            training recipes.
+    in the naive framework.                                              • We propose a novel classification system for the
+    Speech Language Models (SpeechLMs) have the capabil-                 evaluation methods for SpeechLMs.
+    ity to go beyond simple conversational tasks and address             • We identify several challenges in building SpeechLMs.
+
+    JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021    3
+
+
+
+                                                                         Speech-to-Speech
+    Semantic     The quick brown       the lazy dog.
+                 fox jumps over        The quick brown fox jumps over    Automatic Speech
+                                                                            Recognition
+
+Here are two speeches. Do they
+  come from the same speaker?
+    Speaker      Speech 1 from man     No, they do not come from the          Speaker ALT
+                     SpeechLM          same speaker.                       Verification
+        Speech 2 from woman
+
+
+                                                                                              Speech
+                      I would like a pizza.        I would like a  Can I have the steak,    Separation
+                        Can I have the steak, please?      pizza.    please?
+    Paralinguistic    (Two people speak simultaneously)                                         ALT
+                      What emotion does      It seems that the speaker is pretty shocked      Emotion
+                      the speech convey?        and angry about something.                  Recognition
+
+                 What are you doing
+
+
+    Fig. 2. Applications of a SpeechLM. We use ALT to represent the "ASR + LLM + TTS" framework.
+
+
+  II. PROBLEM FORMULATION                                                 use the language modeling architecture (e.g., decoder-only
+            In this section, we provide a formal definition of Speech     transformer) to model speech autoregressively in the format
+               Language Models. A Speech Language Model (SpeechLM) is     of audio waveforms. Since both the input and output of a
+           an autoregressive foundation model that processes and gen-     language model are tokens, additional modules need to be
+         erates speech end-to-end, utilizing contextual understanding     attached to the language model to handle the I/O format.
+          for coherent sequence generation. This capability allows it     Specifically, the speech tokenizer first transforms continuous
+            to perform a variety of tasks through speech-based inter-     audio waveforms into tokens or representations to serve as
+             actions. Although SpeechLMs are required to perform end-     input to the language model, then the language model performs
+          to-end speech interactions, they can also incorporate text,     the next-token prediction based on the input speech tokens.
+         enabling cross-modal functionalities such as speech-in-text-     Finally, the vocoder transforms the tokens outputted by the
+             out and vice versa. We note that the concept of SpeechLM     language model back into audio waveforms. We note that
+       is in contrast to traditional text-based language models, such     our focus here is on how the three components are grouped
+           as LLM, where the only modality being processed within the     together to form a SpeechLM rather than a comprehensive
+          model is text. Therefore, to avoid confusion, we call those     overview of each component. Therefore, for speech tokenizer
+           text-based language models TextLMs throughout this survey.     and vocoder, we mainly summarize the methods used in
+                  We offer a unified framework in which SpeechLMs can     existing SpeechLMs. Table II summarizes the popular choices
+     process and generate speech data, text data, or even interleaved     of the three components in various SpeechLM papers.
+          speech and text data. Specifically, a speech audio waveform
+     a = (a1, a2, . . . , aQ) consists of a sequence of audio samples     A. Speech Tokenizer
+                    ai ∈ R of length Q, where 1 ≤ q ≤ Q. Similarly, a     Speech tokenizer is the first component in SpeechLMs,
+    text span t = (t1, t2, . . . , tK) consists of a sequence of text     which encodes continuous audio signals (waveforms) into
+          tokens tj (word, subword, character, etc.) of length K. Let     tokens. Speech tokenizer aims to capture essential features of
+            M = (M1, M2, . . . , MN ) denote a multimodal sequence of     the audio while reducing its dimensionality and allows the
+                length N, where each element Mi ∈ {ai, tj}. We define     audio input to be effectively processed by a language model
+    Min = (Min   1 , Min, . . . , Min ) as   the input multimodal se-
+                   2  Nin
+    quence and Mout = (Mout, Mout    , . . . , Mout ) as   the output     for autoregressive generation. Speech tokenizer operates by en-
+                      1      2        Nout                                coding the audio segment by segment, producing two possible
+               multimodal sequence, where Nin ≥ 0 and Nout ≥ 0. Then,     types of tokens (features): discrete tokens and continuous
+            A SpeechLM parameterized by θ can then be represented as:     tokens. Discrete tokens (Section IV-A1) use a specific index
+ Mout = SpeechLM(Min; θ).                                         (1)     to represent each speech segment, while continuous tokens
+                                                                          (Section IV-A2) use an embedding to represent the segment2        .
+III. COMPONENTS IN SPEECHLM                                               Both token types can be utilized as input for a language model
+                                                                          in autoregressive modeling. In this section, we categorize
+                   There are three main components within a SpeechLM,     speech tokenizers based on their focus on modeling different
+         namely speech tokenizer, language model, and token-to-speech     aspects of the raw audio.
+        synthesizer (vocoder), as illustrated in Figure 1. The funda-
+           mental reason for such a three-staged design pattern is to     2For simplicity, we unify both types of representations as "tokens"
+
+    JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021    4
+
+
+                   Speech Tokenizer            Contrastive Predictive Coding [16], Wav2vec 2.0 [17], vq-wav2vec [18],
+                    (section III-A)            w2v-bert [19], HuBERT [20], SpeechTokenizer [21], Mimi [9], Sound-
+                                               Stream [22], Google USM [23], WavLM [24]
+
+   Components       Language Model             Transformer [25], LLaMA [26], LLaMA 2 [27], LLaMA 3 [2], OPT [3],
+  (section III)     (section III-B)            Qwen2 [28], GLM [29], Mixtral [30]
+
+                        Vocoder                WaveNet [31], Tacotron 2 [32], WaveGlow [33], HiFi-GAN [34], Token-
+                    (section III-C)            based HiFi-GAN [35], EnCodec [36]
+
+                                                         Semantic Tokens:
+                                                         GSLM [37], TWIST [38], SpeechGPT [8],
+                                                         AudioPaLM [39], OmniFlatten [40], SLAM-Omni
+                                                         [41]
+
+                                                         Paralinguistic Token:
+                                     Discrete Features   pGSLM [42], SPIRIT-LM [5]
+                                      (section IV-A1)
+                                                         Acoustic Token:
+    SpeechLM       Features Modeled                      VioLA [43], Li et al. [44], Parrot [45]
+                    (section IV-A)                       Mixed Token:
+                                                         Moshi [9], SpeechGPT-Gen [46]
+                                        Continuous       Spectron [47], tGSLM [48], Mini-Omni [10],
+                                         Features        LauraGPT [49], SLAM-Omni [41]
+                                      (section IV-A2)
+                                                         Cold Initialization:
+                                                         GSLM [37], SUTLM [50], pGSLM [42], LSLM
+                                                         [51], VioLA [43]
+                                      LM Pre-Training    Continued Pre-Training:
+                                      (section IV-B)     TWIST [38], AudioPaLM [39], SPIRIT-LM [5],
+                                                         AudioChatLlama [14], Spectron [47], SLAM-
+Training Recipes    Training Stages                      Omni [41], OmniFlatten [40], Mini-Omni [10],
+  (section IV)      (section IV-B)                       Mini-Omni 2 [52], Freeze-Omni [53], Moshi [9],
+                                                         Parrot [45]
+                                      LM Instruction-    SpeechGPT [8], SpeechGPT-Gen [46], COSMIC
+                                          Tuning         [54], Llama-Omni [11], Moshi [9]
+                                      (section IV-B)
+
+                                        Traditional
+                                        Generation       TWIST [38], SPIRIT-LM [5], AudioPaLM [39],
+                                         Paradigm        SpeechGPT [8]
+                                      (section IV-C)
+
+                   Speech Generation     Real-Time       dGSLM [4], Parrot [45], LSLM [51], VITA [55],
+                       Paradigm         Interaction      Moshi [9], Mini-Omni 2 [52], OmniFlatten [40],
+                    (section IV-C)    (section IV-C)     SALMONN-omni [56]
+
+                                       Silence Mode      VITA [55]
+                                      (section IV-C)
+
+    Fig. 3. Taxonomy of Speech Language Models.
+
+
+    1) Semantic Understanding Objective: Speech tokenizers                The key design choices lie in how to effectively encode
+    designed with a semantic understanding objective aim to               (and quantize) speech into tokens. Wav2vec 2.0 [17] uses
+    convert speech waveforms into tokens that accurately capture          a convolutional encoder followed by a product quantization
+    the content and meaning of the speech. These tokenizers focus         module [57] to discretize the continuous waveform. Then,
+    on extracting semantic features from the waveforms, which             a portion of the quantized representations is masked and
+    enhances tasks like ASR.                                              modeled using a contrastive loss. W2v-BERT [19] is built
+    A semantic understanding speech tokenizer typically com-              upon wav2vec 2.0 and proposes to use Masked Language
+    prises a speech encoder and a quantizer. The speech en-               Modeling (MLM) loss [58] in addition to contrastive loss.
+    coder encodes the essential information from the waveform             Similarly, HuBERT [20] uses the k-means algorithm to cluster
+    into continuous embeddings. Then, a quantizer is typically            the speech utterances into a number of hidden units, and then
+    incorporated to convert continuous embeddings into discrete           perform MLM to predict the target hidden units from the
+    indexes. Let fE(·) denote the speech encoder parameterized            masked speech utterances. To better align the representation
+    by θfE , we have v = fE(a; θfE ), where v = (v1, v2, . . . , vP )     of text and speech modalities, Google USM [23] utilizes text-
+    represents the encoded embeddings. Since v is still continuous,       injection loss [59] at the second pre-training stage to improve
+    a quantizer d(·) is utilized to discretize the embeddings.            the performance and robustness of the downstream tasks.
+    Depending on different design choices, the speech tokens              WavLM [24] adds the speech denoising objective during pre-
+    s = (s1, s2, . . . , sP ) can either be derived from a or v.          training. While the majority of speech tokenizer studies focus
+    Therefore, we have s = d(v; θd) or s = d(a; θd) for discrete          on semantic-related tasks such as ASR and TTS, WavLM
+    tokens and s = v for continuous tokens. After that, s can be          shows that speech denoising can boost the performance of
+    used to train the speech tokenizer as a target label (such as         non-semantic tasks such as speaker verification and speech
+    masking amask ⊂ a and reconstructing its corresponding label          separation. Section V presents a full list of downstream tasks.
+    smask ⊂ s [20]) or to train the following language model.
+
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021                                                                               5
+
+            2) Acoustic Generation Objective: Speech tokenizers with     in section III-A. When using discrete tokens, Et ∈ R|Vt|×h is
+an acoustic generation objective focus on capturing the acous-           changed to a speech embedding matrix Es ∈ R|Vs|×h, where
+tic features necessary for generating high-quality speech wave-          |Vs| represents the vocabulary size of the speech tokenizer. The
+forms. These tokenizers prioritize the preservation of essential         output embedding matrix is also changed from E't ∈  R     h×|Vt|
+acoustic characteristics over semantic content, making them              to E's ∈ Rh×|Vs|.           As a result, the language model in a
+suitable for speech (re)synthesis tasks.                                 SpeechLM is represented as
+          To generate high-quality speech waveforms, acoustic gener-         s  out ∼ LM(s in        ,(Es, De, E')).                  (3)
+ation speech tokenizers employ a speech synthesis or speech                                                     s
+reconstruction objective. To achieve this, the architecture typ-                  Because the language model architecture of SpeechLMs is
+ically includes an encoder, a quantizer, and a decoder. Same             borrowed from TextLMs, it is natural that the resulting model
+as before, the encoder fE(·) and quantizer d(·) transform the            can jointly model both text and speech modalities [5], [8]. To
+original waveform into tokens. After that, the decoder fD(·)             achieve this, a naive and most adopted approach is to expand
+reconstructs these tokens back into speech waveforms. This               the vocabulary of the original TextLM to incorporate both text
+process is represented by ˆa = fD(s; θfE ), where ˆa is the              and speech tokens. Specifically, the speech embedding matrix
+generated or reconstructed waveform.                                     is usually appended to the end of the text embedding matrix,
+         Neural audio codecs are very suitable for and are primarily     resulting in a larger embedding matrix Em ∈ R(|Vt|+|Vs|)×h.
+employed as acoustic generation speech tokenizers [22], [36].            Let m be a token sequence containing both speech and text
+These codecs utilize the advanced modeling capabilities of               tokens, the resulting language model becomes
+deep neural networks to compress audio waveforms into
+a compact representation, typically in the form of discrete                  mout ∼ LM(min,(Ej , De, E'    j         )).              (4)
+tokens. Using the encoder-quantizer-decoder architecture, the            By doing so, the model can generate both text and speech in
+encoder compresses the audio into latent representations, the            a single sequence, enabling much more diverse applications
+quantizer discretizes these representations (commonly through            (see section V). In contrast, when modeling with continuous
+vector quantization (VQ) [60] or residual vector quantization            tokens, the embeddings derived from the speech tokenizer
+(RVQ) [22]), and the decoder reconstructs the discrete tokens            are directly fed into the language model. In this case, the
+back into audio waveforms. Therefore, the encoder and/or the             architecture of the language model remains unchanged.
+quantizer are utilized as an acoustic speech tokenizer.
+           3) Mixed Objective: Speech tokenizers with a mixed objec-     C. Token-to-Speech Synthesizer (Vocoder)
+tive aim to balance both semantic understanding and acoustic
+generation. The goal is to harness the advantages of both types              After the tokens have been autoregressively generated by the
+of tokenizers. Currently, the development of these tokenizers            language model component, a token-to-speech module, often
+is in its early stages. Most existing mixed speech tokenizers            known as vocoder, is utilized to synthesize all the speech
+primarily adopt the architecture of acoustic generation speech           tokens back into speech waveforms. This process involves
+tokenizers and focus on distilling information from semantic             converting the linguistic and paralinguistic information repre-
+tokenizers into the acoustic tokenizer. SpeechTokenizer [21]             sented by the generated speech tokens into audio waveforms
+utilizes the RVQ-GAN [22], [36] architecture, distilling se-             that can be heard. This can be seen as a reverse process to the
+mantic information from HuBERT [20] to the first layer of                speech tokenizer and therefore can be represented as
+RVQ. Inspired by SpeechTokenizer, Mimi [9] employs a single    a = V o(s; θVo ),                                                      (5)
+VQ to extract information from WavLM [24] and incorporates
+another RVQ module to learn the acoustic information.                    where V o is the vocoder model parameterized by θVo.
+                                                                                    The pipeline of the SpeechLM vocoder can vary depend-
+B. Language Model                                                        ing on the underlying vocoder model. There are two main
+                                                                         pipelines: Direct synthesis and input-enhanced synthesis. Di-
+                  Due to the success of TextLMs [1], [2], [86], most     rect synthesis is the pipeline where the vocoder directly
+SpeechLMs follow their architectures. They primarily employ              converts speech tokens generated by the language model into
+transformers [25] or decoder-only architectures (such as OPT             audio waveforms. For example, Polyak et al. [35] adapts
+[3], LLaMA [26]) to generate speech in an autoregressive                 the HiFi-GAN [34] architecture and takes speech tokens as
+manner. To formally define it, given |Vt| as the vocabulary size         inputs. In contrast, input-enhanced synthesis employs an
+and h as the hidden dimension, a typical text-based decoder-             additional module to transform the tokens into a continuous
+only transformer language model consists of an embedding                 latent representation before they are fed into the vocoder
+matrix Et ∈ R|Vt|×h, a sequence of L transformer decoder                 [87], [88]. The main reason for using this pipeline is that
+blocks De = {De1, De2, . . . , DeL}, and an output embedding             vocoders typically require intermediate audio representations,
+matrix E't ∈ Rh×|Vt|        . Therefore, the language model (LM) can     such as mel-spectrograms [34], [89], [90], as input. For exam-
+be represented as                                                        ple, CosyVoice [61] introduces a Conditional Flow-Matching
+                    tout ∼ LM(tin,(Et, De, E't)).                (2)     (CFM) model to convert speech tokens into mel-spectrogram,
+                                                                         and then leverages a HiFi-GAN to synthesize the final wave-
+        To adapt the language model to generate speech, the original     form. When comparing the two pipelines, direct synthesis is
+text tokenizer is changed to the speech tokenizers illustrated           generally simpler and faster than input-enhanced synthesis.
+
+    JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021    6
+
+
+
+                                                        TABLE II
+  SUMMARIZATION OF THE ARCHITECTURAL CHOICE OF SPEECH TOKENIZER, LANGUAGE MODEL, AND VOCODER IN POPULAR SPEECHLMS. "-"
+REPRESENTS NON-EXISTENCE OR NOT INDICATED, * MEANS THE ARCHITECTURE IS MAINLY BASED ON THE WRITTEN ONE, "A, B" MEANS THE
+   AUTHORS EXPERIMENTED WITH BOTH A AND B AS THE COMPONENT, AND "A + B" MEANS "A" AND "B" ARE COMBINED TO SERVE AS THE
+                              COMPONENT.
+
+    Approach              Speech Tokenizer                                 Language Model              Vocoder
+    SLAM-Omni [41]        Whisper Encoder [12] + Linear Projector          Qwen2 [28]                  -
+    OmniFlatten [40]      CosyVoice Encoder [61]                           Qwen2                       CosyVoice Decoder
+    SyncLLM [62]          HuBERT [20]                                      LLaMA-3 [2]                 HiFi-GAN [34], [35]
+    EMOVA [63]            SPIRAL [64]                                      LLaMA-3                     VITS [65]
+    Freeze-Omni [53]      Transformer [25]                                 Qwen2                       TiCodec [66]
+    IntrinsicVoice [67]   HuBERT                                           Qwen2                       HiFi-GAN
+    Mini-Omni2 [52]       Whisper                                          Qwen2                       Mini-Omni [10]
+    SALMONN-omni [56]     Mamba Streaming Encoder [68]                     -                           VoiceCraft [69] + Codec Decoder
+    Zeng et al. [70]      Whisper + ASR                                    GLM [29]                    CosyVoice
+    Parrot [45]           VQ-VAE                                           LLaMA-3, Mistral, Gemma 2   HiFi-GAN
+    GPST [71]             EnCodec [36]                                     Transformer                 Codec Decoder
+    Moshi [9]             Mimi [9]                                         Transformer*                Mimi
+    VITA [55]             CNN + Transformer + MLP [55]                     Mixtral [30]                Text-to-Speech Toolkit [55]
+    LSLM [51]             vq-wav2vec [18]                                  Decoder-Only Transformer    UniVATS [72]
+    SPIRIT-LM [5]         HuBERT, VQ-VAE [60], speechprop                  LLaMA-2 [27]                HiFi-GAN
+    TWIST [38]            HuBERT                                           OPT [3], LLaMA [26]         HiFi-GAN
+    VOXTLM [73]           HuBERT                                           OPT [3]                     HiFi-GAN
+    Voicebox [74]         EnCodec                                          Transformer* [25]           HiFi-GAN
+    VioLA [43]            EnCodec                                          Transformer*                Codec Decoder [36]
+    FunAudioLLM [75]      SAN-M [76]                                       Transformer*                HiFTNet [77]
+    SpeechGPT-Gen [46]    SpeechTokenizer [21]                             LLaMA-2                     SpeechTokenizer decoder [21]
+    LauraGPT [49]         Conformer*                                       Qwen [78]                   Transformer + Codec Decoder
+    Spectron [47]         Conformer*                                       PaLM 2* [79]                WaveFit [80]
+    AudioLM [81]          w2v-BERT [19]                                    Decoder-Only Transformer*   SoundStream* [22]
+    UniAudio [82]         EnCodec, Hifi-codec [83], Improved RVQGAN [84]   Transformer*                Codec Decoder
+    Llama-Omni [11]       Whisper                                          LLaMA-3.1                   HiFi-GAN
+    Mini-Omni [10]        Whisper + ASR Adapter [10]                       Qwen2                       TTS Adapter [10]
+    tGSLM [48]            Segmentation + SSE [85] + Lexical embedder       Transformer*                Tacotron-2 + Waveglow [32], [33]
+    SpeechGPT [8]         HuBERT                                           LLaMA                       HiFi-GAN
+    dGSLM [4]             HuBERT                                           Dialogue Transformer [4]    HiFi-GAN
+    SUTLM [50]            HuBERT                                           Transformer*                -
+    pGSLM [42]            HuBERT                                           MS-TLM [42]                 HiFi-GAN
+    GSLM [37]             HuBERT, CPC [16], Wav2vec 2.0 [17]               Transformer*                Tacotron-2 + Waveglow
+
+
+
+    However, the choice of pipeline depends on the type of tokens             and
+    used as input. Tokens from acoustic generation tokenizers                 LGAN(D; G) = E(x,ms)     h(D(x) - 1)2 + (D(G(ms)))2i,
+    contain sufficient acoustic information, making them suitable
+    for direct synthesis. Conversely, tokens from semantic under-                                                                           (7)
+    standing tokenizers provide rich semantic information but lack            respectively. In these loss functions, x represents the ground
+    fine acoustic details, particularly in higher frequencies. There-         truth audio and ms represents its mel-spectrogram. Second,
+    fore, these tokens are better enhanced into an acoustic-rich              most GAN-based vocoders synthesize speech waveform from
+    representation, such as mel-spectrograms, before synthesizing             mel-spectrograms, so mel-spectrogram loss is proposed to
+    the final speech.                                                         align the mel-spectrogram synthesized by the generator and
+            Vocoders can be categorized by their architectural choice. In     the mel-spectrogram transformed from the ground-truth wave-
+    the following sections, we summarize vocoders that are mostly             form, in order to improve the fidelity of the generated speech.
+    adopted in the development of SpeechLMs.                                  Mel-spectrogram loss (LMel(G)) works by minimizing the
+                     1) GAN-based Vocoder: Generative Adversarial Network     L1 distance between the two versions of mel-spectrograms
+    (GAN) is the most adopted architecture of the vocoders                    mentioned above. Its formula is shown below:
+    [34], [35], [89]-[91]. It is well known for its fast and high-               LMel(G) = E(x,ms) [∥ϕ(x) - ϕ(G(ms))∥1] ,                   (8)
+    fidelity generation in speech synthesis tasks. The architecture           where ϕ(·) is the function to transform a waveform into
+    of GAN includes a generator and a discriminator. Specifically,            the corresponding mel-spectrogram. Third, to further enhance
+    the generator creates realistic audio waveforms from random               the generation fidelity, feature matching loss (LFM(G; D))
+    noise or input features, while the discriminator evaluates the            is proposed to align the discriminator-encoded features of
+    authenticity of the generated audio against real audio samples.           the ground truth sample and the generated sample with L1
+               To utilize GAN to synthesize high-fidelity speech, various     distance, which has the following formula:
+    training objectives are designed, focusing on different aspects.                                    "X
+    First, GAN loss is utilized as the fundamental objective for the          LFM(G; D) = E(x,ms)        T 1  Di(x) - Di(G(ms)) #           ,
+    operation of the generator and the discriminator. Specifically,                                    i=1 Ni        1
+    the typical choice of GAN loss for the generator (G) and                                                                                (9)
+    discriminator (D) is to use the least squares loss function.              where Di(·) and Ni denote the features and the number of
+    The GAN loss for the generator (LGAN(G; D)) and the dis-                  features in the i-th layer of the discriminator, respectively.
+    criminator (LGAN(D; G)) are                                               For architectural choices, GAN-based vocoders focus on
+    LGAN(G; D) = Ems h        (D(G(ms)) - 1)2   i                     (6)     injecting inductive biases to generate audio waveforms. Mel-
+                                                                              GAN [89] adds residual blocks with dilations in the generator
+
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021    7
+
+
+to model the long-range correlation among the audio time steps                                     TABLE III
+and proposes a multi-scale architecture for the discriminator             A SUMMARY OF POPULAR DATASETS USED IN THE PRE-TRAINING AND
+                                                                           INSTRUCTION-TUNING PHASE OF SPEECHLMS. * MEANS IT IS THE
+to model the different frequency ranges of the audio. Based             SPEECH VERSION OF THE TEXT DATASET SYNTHESIZED USING TTS. S2ST
+on the idea of the multi-scale discriminator, HiFi-GAN [34]                   AND S2TT REPRESENT SPEECH-TO-SPEECH TRANSLATION AND
+proposes a multi-period discriminator to model the diverse                         SPEECH-TO=TEXT TRANSLATION, RESPECTIVELY.
+periodic patterns within the audio waveforms. To preserve               Dataset                           Type                       Phase                  Hours     Year
+high-frequency content, Fre-GAN [91] employs the Discrete               LibriSpeech [98]                  ASR                        Pre-Training           1k        2015
+Wavelet Transform (DWT) to downsample and learn spectral                Multilingual LibriSpeech [99]     ASR                        Pre-Training           50.5k     2020
+                                                                        LibriLight [100]                  ASR                        Pre-Training           60k       2019
+distributions across multiple frequency bands. Unlike tradi-            People dataset [101]              ASR                        Pre-Training           30k       2021
+tional approaches like Average Pooling (AP), DWT efficiently            VoxPopuli [102]                   ASR                        Pre-Training           1.6k      2021
+                                                                        Gigaspeech [103]                  ASR                        Pre-Training           40k       2021
+decomposes the signal into low-frequency and high-frequency             Common Voice [104]                ASR                        Pre-Training           2.5k      2019
+                                                                        VCTK [105]                        ASR                        Pre-Training           0.3k      2017
+sub-bands. BigVGAN [90] introduces a periodic activation                WenetSpeech [106]                 ASR                        Pre-Training           22k       2022
+function called snake function along with an anti-aliased               LibriTTS [107]                    TTS                        Pre-Training           0.6k      2019
+                                                                        CoVoST2 [108]                     S2TT                       Pre-Training           2.8k      2020
+representation to reduce the high-frequency artifacts in the            CVSS [109]                        S2ST                       Pre-Training           1.9k      2022
+                                                                        VoxCeleb [110]                    Speaker Identification     Pre-Training           0.4k      2017
+synthesized audio.                                                      VoxCeleb2 [111]                   Speaker Identification     Pre-Training           2.4k      2018
+                   2) GAN-based Neural Audio Codec: Given that many     Spotify Podcasts [112]            Podcast                    Pre-Training           47k       2020
+                                                                        Fisher [113]                      Telephone conversation     Pre-Training           2k        2004
+neural audio codecs employ a GAN architecture, they can                 SpeechInstruct* [8]               Instruction-following      Instruction-Tuning     -         2023
+be effectively discussed within the context of GAN-based                InstructS2S-200K* [11]            Instruction-following      Instruction-Tuning     -         2024
+                                                                        VoiceAssistant-400K* [10]         Instruction-following      Instruction-Tuning     -         2024
+vocoders. In contrast to speech tokenizers, the decoder in the
+codec is leveraged as the vocoder [22], [36]. Polyak et al.
+[35] utilizes HiFi-GAN [34] as the vocoder backbone and                  reconstruction of the original data [60], [94]. However, VAE
+proposes to disentangle the input features of a vocoder into            is seldom explored as the underlying architecture of vocoders.
+distinct properties [35], which include semantic tokens, pitch                                                 Diffusion-based Vocoder. Diffusion models have emerged
+tokens, and speaker embeddings. Such a design choice enables             in recent years as a powerful class of generative models that
+the codec to better perform on pitch and speaker-related tasks           can be used for high-fidelity speech synthesis. They work by
+such as voice conversion and F0 manipulation.                           gradually adding noise to the input data (e.g. audio waveforms)
+              3) Other Types of Vocoder: The variety of vocoders is    to create a sequence of increasingly noisy representations, then
+not restricted to the ones mentioned earlier, as those are the          learning to reverse this process to generate new samples [95]-
+ones commonly employed in SpeechLMs. This section briefly                 [97]. For instance, DiffWave [95] uses Denoising Diffusion
+outlines other potential vocoder types that are seldom explored        Probabilistic Models (DDPM) to synthesize audio.
+as a component in SpeechLMs.
+             Pure Signal Processing Vocoder. Pure signal processing                          IV. TRAINING RECIPES
+vocoders are traditional methods relying on deterministic al-                                               In this section, we categorize and summarize the commonly
+gorithms rather than deep learning models to synthesize speech            used training recipes found in recent SpeechLM papers. This
+[92], [93]. However, this kind of vocoder introduces noticeable            includes an overview of the types of features modeled in
+artifacts in the synthesized audio and is rarely used.                    SpeechLMs, the various training stages along with the tech-
+           Autoregressive Vocoder. Autoregressive vocoders generate       niques employed in each stage, and the different paradigms
+audio waveforms one sample at a time, with each sample                 for generating speech.
+conditioned on the previously generated samples [31]. This
+approach allows for high-quality audio synthesis due to its
+sequential nature and the ability to capture intricate temporal        A. Features Modeled
+dependencies within the audio signal. However, the sequential                                                  The features modeled refer to the types of features or
+generation process can be computationally expensive and                     tokens outputted by the speech tokenizer and modeled by
+time-consuming, making autoregressive models less efficient                  the language model component within a SpeechLM. These
+compared to parallelized methods like GAN-based vocoders.                features play a crucial role in determining the capabilities
+           Flow-based Vocoder. Flow-based vocoder aims to establish         and performance of SpeechLMs. Different features model
+a series of invertible transformations that map a simple dis-            the speech waveforms from different aspects. In this section,
+tribution, such as a Gaussian, to the complex distribution of                we summarize commonly used features in SpeechLMs and
+audio samples. This mechanism allows for efficient sampling                focus on how different features affect the performance of
+and density evaluation, enabling the model to synthesize                  SpeechLMs. Based on recent developments, we can categorize
+audio in parallel rather than sequentially, which significantly             the features modeled by SpeechLMs into two main types:
+enhances both speed and quality [33]. Compared to GAN-                 discrete features and continuous features.
+based vocoders, Flow-based vocoders typically need more                                                  1) Discrete Features: Discrete features (or discrete tokens)
+parameters and memory to train the model, which hinders                  refer to quantized representations of speech signals that can
+them from being effectively utilized [89].                               be represented as distinct, countable units or tokens. These
+                VAE-based Vocoders. Variational Autoencoders (VAEs)       features are typically derived from speech signals through
+are powerful generative models that learn to encode input                 various encoding and quantization processes, resulting in a
+data into a compressed latent space while allowing for the               finite set of possible values. Discrete features are the most
+
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021    8
+
+
+used features by SpeechLMs as they can be represented as               from SoundStream [22], which ultimately generates speech.
+tokens and be modeled exactly the same as the text tokens              However, this kind of approach increases sequence length,
+within a TextLM.                                                       which increases modeling complexity. The second strategy
+Most SpeechLMs only employ semantic tokens (gener-                     leverages mixed tokens (Section III-A3) to jointly model
+ated by semantic understanding tokenizers, Section III-A1)             semantic and acoustic information, showing promising results
+to represent speech, as semantic information plays the most            in Moshi [9] and SpeechGPT-Gen [46].
+crucial role in spoken communication. GSLM [37], the first-            2) Continuous Features: Continuous features (or continu-
+ever SpeechLM, compares three tokenizers, which include                ous tokens), in contrast to discrete features, are unquantized,
+Contrastive Predictive Coding (CPC) [16], wav2vec 2.0 [17],            real-valued representations of speech signals that exist on a
+and HuBERT [20]. It concludes that HuBERT performs the                 continuous scale (continuous tokens). Continuous features can
+best on various tasks such as speech resynthesis and speech            include spectral representations like mel-spectrograms or latent
+generation. A large number of works follow this setting and            representations extracted from neural networks. Spectron [47]
+use HuBERT as the speech tokenizer [5], [8], [38]. Au-                 performs speech continuation by predicting the spectrograms
+dioPaLM [39] experiments the choice between w2v-bert [19],             frame-by-frame. Mini-Omni [10] and SLAM-Omni [41] ex-
+USM-v1 [23], and USM-v2 [39] (a modified version of USM-               tract intermediate representations from a frozen Whisper en-
+v1), and it concludes that USM-v2 is the best-performing               coder as input for the SpeechLM, whereas LauraGPT [49]
+speech tokenizer on ASR and Speech Translation (ST) tasks.             employs an audio encoder trained alongside the language
+Although semantic tokens excel at generating semantically              model to derive latent representations from input speech. Con-
+meaningful speech because of the modeling of the contextual            tinuous features can capture fine-grained, nuanced aspects of
+information within speech waveforms, researchers find out              speech that may be lost in discretization processes. However,
+that the speech generated solely upon semantic tokens lacks            utilizing these features often necessitates modifying the off-
+expressive information such as prosody and different pitches           the-shelf training pipeline of language models, as traditional
+or timbres [5], [114]. To conquer this limitation, paralinguistic      text-based models are built to handle discrete units. Moreover,
+tokens can be integrated into the modeling process to capture          continuous features demand more storage capacity compared
+expressive information with speeches. pGSLM [42] proposes              to their discrete counterparts.
+to use the fundamental frequency (F0) and unit duration
+as prosody features to complement the HuBERT semantic                  B. Training Stages
+tokens, and trains a multi-stream transformer language model
+to predict the semantic tokens, pitch (F0), and unit duration          Training a SpeechLM involves training the three main
+separately. Similarly, SPIRIT-LM [5] complements the Hu-               components: speech tokenizer, language model, and vocoder.
+BERT semantic tokens with pitch and style tokens [115]. This           Similar to TextLMs, the key to training SpeechLMs lies in
+incorporation of extra acoustic tokens allows SpeechLMs to             effectively modeling speech continuation, which is primarily
+more effectively capture expressive elements without signifi-          the responsibility of the language model. The speech tok-
+cantly compromising semantic understanding [5].                        enizer and vocoder usually rely on established methods and
+Another type is acoustic tokens, which are tokens aiming to            are trained using distinct training datasets specific to each
+capture essential acoustic features to reconstruct high-fidelity       SpeechLM approach. Therefore, This section reviews the main
+speech, primarily obtained from neural audio codec models              techniques used to train the language model component. Fol-
+(Section III-A2). Some studies directly model the codec tokens         lowing TextLMs, we divide the training process of SpeechLMs
+in a language model, which is often regarded as Codec                  into three stages, including pre-training, instruction-tuning,
+Language Models (CodecLMs). For example, Viola [43] trains             and post-alignment.
+a CodecLM capable of performing ASR, TTS, and Machine                  1) Language Model Pre-Training: The pre-training of the
+Translation. Parrot [45] trains on VQ-VAE [60] tokens for              language model in SpeechLMs is a critical phase that sig-
+modeling dual-channel spoken dialogue data.                            nificantly influences the model's ability to generate coherent
+Discussion. Different types of tokens influence the speech             and contextually relevant speech. This phase typically involves
+quality of SpeechLMs in different ways, often resulting in             training the language model to autoregressively predict the
+trade-offs [81]. For example, while semantic tokens align well         next token on a large corpus of speech tokens. The primary
+with text and excel in producing semantically coherent speech,         objective during this stage is to learn the statistical patterns
+the generated speech often lacks acoustic details, such as high-       and dependencies inherent in the speech data, enabling the
+frequency information. Recovering and enhancing these details          model to predict the next token in a sequence based on the
+typically requires post-processing, like a diffusion model,            preceding context.
+which significantly increases the model's latency. Conversely,         Training data. SpeechLMs pre-training mainly lever-
+acoustic tokens can facilitate the generation of high-fidelity au-     ages large-scale open-sourced speech data. Commonly used
+dio but often struggle with inaccuracies in content generation         datasets include those for ASR [98], [100]-[102], TTS [107],
+[21]. Researchers have tried two ways to balance these trade-          ST [102], [109], podcasts [112], and dialogues [113]. Table III
+offs. The first involves combining semantic and acoustic tokens        includes popular datasets used in the pre-training stage. Some
+into a single sequence. AudioLM [81] proposes a hierarchical           datasets consist solely of speech data, while others include
+modeling scheme that first models semantic tokens from w2v-            both speech and corresponding text transcripts. The inclusion
+bert [19] and then uses these tokens to predict acoustic tokens        of text transcripts can enhance the model's representation by
+
+    JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021    9
+
+
+                         TABLE IV
+FOUR DIFFERENT METHODS OF MODELING SPEECH AND TEXT TOKENS.
+
+    Modeling Method            Example                                            Explanation
+    Speech-only                [SPEECH] S12 S34 S33 ... S11 S59                   Only the speech sequence is provided.
+    Text-only                  [TEXT] A quick brown fox jumps over a lazy dog.    Only the text sequence is provided.
+    Concatenated speech-text   [SPEECH] S12 S34 S33 ... S11 S59 [TEXT] A quick    The speech sequence and text sequence are concate-
+                               brown fox jumps over a lazy dog.                   nated together.
+    Alternating speech-text    [SPEECH] S12 S34 S33 [TEXT] brown fox jumps over   The sequence is interleaved with speech and text
+                               a lazy [SPEECH] S11 S59                            tokens.
+
+
+    allowing it to learn the relationship between spoken language       SpeechLM benefits from both an increased size of the pre-
+    and its written form, which will be discussed later.                trained checkpoint and a larger training dataset.
+    Cold Initialization. Some SpeechLMs use cold initializa-            The performance of SpeechLMs can be further enhanced
+    tion during the pre-training phase, where model parameters          by aligning the text and speech modality representations.
+    are initialized randomly. The pioneering SpeechLM-GSLM              Some works align the text and speech representations in
+    [37]-trained a transformer [25] from scratch to serve as the        a single sequence. SPIRIT-LM [5] found that continually
+    language model. This study demonstrated the effectiveness           pretraining on TextLM checkpoints using interleaving text and
+    of the SpeechLM pipeline and compared performance across            speech tokens can significantly boost the model's performance
+    various speech tokenizer options. They found that HuBERT            on speech understanding and generation. Additionally, their
+    [20] outperformed CPC [16] and wav2vec 2.0 [17] in un-              visualizations demonstrate that the similarity between text and
+    derstanding speech content and generating natural speech.           speech features is notably higher in models trained with inter-
+    SUTLM [50] also uses a transformer as the language model.           leaved token sequences compared to those trained without this
+    They studied the critical problem of jointly modeling speech        approach. Spectron [47] solve the text-speech representation
+    and text tokens by comparing four different modeling methods:       alignment problem by jointly supervising multiple objectives.
+    speech-only, text-only, concatenated speech-text, and alternat-     Specifically, the input speech prompt is first transcribed into
+    ing (interleaving) speech-text. They showed that the setting        its text tokens, and then the model predicts the text token
+    of alternating speech-text performs the best in cross-modal         response. Finally, the text response is synthesized to output
+    evaluations. Table IV illustrates the four modeling methods.        speech. SpeechGPT [8] also adopts this concept but applies
+    Some works leverage a different architecture from the               it during the instruction-tuning phase. Some other methods
+    standard transformer. These models are typically trained from       perform multi-sequence representation alignment. This ap-
+    scratch when the architecture deviates from a standard trans-       proach simultaneously generates the text sequence and speech
+    former or TextLM too much. For example, pGSLM [42] pro-             sequence(s). For example, Llama-Omni uses the LLM output
+    poses a multi-stream transformer language model (MS-TLM)            hidden state to decode text tokens and generate discrete speech
+    that takes multiple streams of input and predicts multiple          tokens simultaneously. Mini-Omni [10] generates a single
+    streams of output to generate speech units, duration, and           sequence of text tokens and seven sequences of acoustic tokens
+    pitch embeddings simultaneously. dGSLM [4] introduced a             in parallel, all aligned at the sentence level. Similarly, Moshi
+    dialogue transformer language model (DLM) to jointly model          [9] generates one sequence of text tokens, one sequence of
+    the dialogue speech data from the two speakers. To enable the       semantic tokens, and seven sequences of acoustic tokens in
+    listening ability of SpeechLMs while speaking, LSLM [51]            parallel, which are aligned at the word level.
+    proposes to attach a streaming self-supervised learning (SSL)       Discussion. The primary goal of aligning text and speech
+    Encoder to an autoregressive token-based TTS Model.                 representations is to leverage the strengths of text-based mod-
+    Continued Pre-Training. In contrast to cold initializa-             els to enhance speech-based models. Researchers have found
+    tion, continued Pre-Training involves initializing the language     that training a SpeechLM is significantly more challenging
+    model with pre-trained weights from a TextLM and then               than training a TextLM. This difficulty arises because text
+    adapting it to handle speech tokens. This approach leverages        serves as a concentrated form of knowledge, while speech
+    the linguistic knowledge embedded in TextLMs, allowing for          requires models to independently learn the rules of spo-
+    more efficient and effective training of SpeechLMs. Hassid          ken language. Aligning text and speech representations has
+    et al. [38] found that starting with a textually pre-trained        demonstrated effectiveness, but it involves various trade-offs.
+    language model (OPT [3] and LLaMA [26]) can enhance                 First, text primarily conveys semantic information, which can
+    the model's convergence rate and significantly improve its          improve a SpeechLM's semantic modeling capabilities but
+    speech understanding capabilities. They also demonstrated that      may compromise its ability to capture paralinguistic features,
+    while training from text-pretrained checkpoints outperforms         such as tone and emotion, during alignment. Second, there are
+    cold initialization, training from image-pretrained checkpoints     two main inference approaches for the aligned models: text-
+    yields poorer results compared to cold initialization. This         present and text-independent. Text-present inference decodes
+    indicates that not all pre-trained checkpoints are equally ef-      text and speech simultaneously, which may increase latency
+    fective. Additionally, AudioPaLM [39] trained the SpeechLM          but enhances the SpeechLM's reasoning abilities [10] and re-
+    using PaLM and PaLM-2 [116], [117], showing that the                duces possible hallucinations [9]. Conversely, text-independent
+
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021    10
+
+
+inference is more efficient but may lack stability. Furthermore,      techniques to align the language model's output with the
+the question of whether to incorporate text modality to enhance       distribution of the "golden" tokens. Despite its importance,
+SpeechLM performance remains an open question, especially             the post-alignment of SpeechLMs remains under-explored. A
+considering that humans typically acquire spoken language             critical application of post-alignment is to mitigate the safety
+skills before mastering written language.                             risks associated with generative models. Thus, future research
+2) Language Model Instruction-Tuning: Instruction-tuning              should prioritize identifying and addressing the unique safety
+refers to the process of fine-tuning SpeechLMs to follow              challenges posed by SpeechLMs (see Section VII-D).
+specific instructions to perform a wide range of tasks. This
+phase is crucial for enhancing the pre-trained model's gener-         C. Speech Generation Paradigm
+alization capabilities and making it more adaptable to diverse
+applications. Therefore, the key focus is on creating effective       Most approaches covered in earlier sections follow the
+instruction-following datasets.                                       traditional generation paradigm of SpeechLMs, which involves
+Several approaches have been proposed to construct                    taking a predefined input sequence and generating a complete
+instruction-following datasets for SpeechLMs. SpeechGPT [8]           response. However, this approach does not reflect the natural
+and SpeechGPT-Gen [46] propose a two-stage instruction-               flow of voice interactions. For instance, during a conversation,
+tuning, including cross-modal instruction fine-tuning and             one person may interrupt another, switching from listening to
+chain-of-modality instruction fine-tuning. In the first stage,        speaking. Additionally, a person might choose not to respond
+instruction data are generated based on ASR datasets by               if the other is engaged in a conversation with someone else.
+appending the instruction to paired ASR data, asking the              Based on these observations, we identify two key aspects of
+model to convert speech into text. Similarly, paired data is          advanced voice interaction skills for SpeechLMs: real-time
+also used to create instruction data for performing TTS. In           interaction and interactive period recognition.
+the second stage, they construct a speech-in-speech-out dataset       Real-time   Interaction   refers  to  the      capability     of
+by transforming a text-based instruction-following dataset us-        SpeechLMs to engage with users instantaneously. This
+ing TTS. Llama-Omni [11] also creates instruction-following           interaction consists of two key components.     1)          User
+data by synthesizing text-based datasets, adhering to specific        Interruption: SpeechLMs should be able to be interrupted by
+constraints. First, they transform the input text prompt into a       users and should respond appropriately to new instructions
+format that mimics natural speech patterns. Next, they discard        provided during the conversation. 2) Simultaneous Response:
+the original text response and employ a TextLM to generate            SpeechLMs should be capable of generating responses
+answers to the converted prompts, ensuring these responses            while the user is still speaking. This requires the model to
+also follow natural speech patterns. Finally, they synthesize the     effectively perform speech understanding (processing input)
+prompt/response pairs using TTS. COSMIC [54] constructed              and speech generation (producing output) simultaneously.
+speech QA data by asking GPT-3.5 to generate question-                Some literature refers to the ability as full-duplex modeling.
+answer pairs based on the transcriptions of English TED talk          dGSLM [4] introduces a dual-transformer architecture to
+speeches. They showed the model trained on their proposed             model two-speaker dialogues, using one transformer to handle
+speech QA dataset can generalize to unseen tasks such as              speech from each speaker. A cross-attention transformer layer
+speech-to-text translation using in-context learning.                 is included to capture the interactions between the speakers'
+3) Language Model Post-Alignment: Post-alignment is the               content. However, most approaches rely on a single language
+critical process of refining a language model's behavior to           model architecture to manage both channels in a dialogue.
+align with human preferences, ensuring that its outputs are           Parrot  [45]  introduces  the  "next-token-pair      prediction"
+both safe and reliable. This stage is typically regarded as           approach, which uses a single decoder-only transformer to
+the final phase of language model training. It often employs          model both channels simultaneously by predicting tokens
+techniques like Reinforcement Learning from Human Feed-               for both channels at each time step. Moshi [9] concatenates
+back (RLHF), specifically methods such as Proximal Policy             the user input channel and the model response channel and
+Optimization (PPO) [118] and Direct Preference Optimization           employs an RQ-Transformer that first processes data along the
+(DPO) [119].                                                          temporal dimension and then along the channel dimension.
+Post-alignment in SpeechLMs focuses on addressing the                 LSLM [51] utilizes a decoder-only Transformer focusing on
+unique challenges inherent in the speech interaction pipeline.        modeling one speaker's speech in the dialogue. This model
+Align-SLM [120] identifies that SpeechLMs often generate              incorporates a streaming SSL encoder that continuously
+inconsistent semantic content when given the same prompt.             processes input from the listening channel and fuses its
+It tackles this by using a TextLM to choose the preferred re-         embeddings with those from the speaking channel.
+sponse from SpeechLMs after transcribing them via ASR and             Interactive Period Recognition (IPR) refers to the ability
+then aligning those preferences using DPO. On the other hand,         of SpeechLMs to discern whether users are actively interacting
+SpeechAlign [121] concentrates on the acoustic quality of             with them or not. During interactive periods, the model
+SpeechLMs. It observes that differences between the "golden"          provides responses, while during non-interactive periods, it
+speech tokens and those generated by the language model               remains silent. IPR is essential for maintaining a natural
+lead to subpar acoustic quality in the generated speech as            conversational flow, preventing unnecessary interruptions, and
+the vocoder synthesizes speech from generated tokens during           ensuring the model only participates when appropriate. It is
+inference. To mitigate this, it employs various optimization          crucial for situations where a small group of users is having
+
+    JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021    11
+
+
+    a discussion, as the SpeechLM needs to discern when to join           directly in speech, which is a more natural way of commu-
+    in and when to stay silent. Additionally, it is important for the     nication. Note that SpeechLMs can not only perform speech-
+    model to learn when to disregard instructions when users are          only dialogues but also perform cross-modal dialogues, such
+    not speaking at it.                                                   as taking texts as input and responding in speech format.
+    Interactive Period Recognition (IPR) refers to the ability                     Speech Translation. Speech translation (ST) is the process
+    to recognize whether the users are interacting with it or not.        of converting spoken language from one language to another.
+    SpeechLMs should provide response during the interactive              Similar to Spoken dialogue, SpeechLMs can perform ST in
+    period and remain silent during the non-interactive period. IPR       both single-modal and cross-modal settings. Specifically, the
+    is essential for creating a natural conversational flow, allowing     input and output of the ST task can be either in text or speech
+    the model to avoid unnecessary interruptions. It is crucial for       format.
+    situations where a small group of users is having a discussion,                     Automated Speech Recognition. Automatic speech recog-
+    as the SpeechLM needs to discern when to join in and when to          nition (ASR) enables systems to convert spoken language into
+    stay silent. Additionally, it is important for the model to learn     text. The input of ASR is a speech waveform, and the system
+    when to disregard instructions when users are not speaking at         outputs the transcription in textual form. For SpeechLMs, the
+    it. One approach to achieving IPR is through a Voice Activity         input would be a combination of the speech waveform and
+    Detection (VAD) module. MiniCPM-o 2.6 [122] integrates a              the instruction to tell the model to perform ASR on the given
+    VAD module to ensure the model responds only when the                 speech.
+    input audio surpasses a predefined VAD threshold. Inputs                             Keyword Spotting. Keyword spotting can be considered
+    below this threshold are considered noise and ignored. VITA           a special type of ASR, where its primary objective is to
+    [55] takes a different approach by training the SpeechLM to           identify specific words or phrases within continuous speech.
+    distinguish between query speech and non-query audio. The             While traditional ASR systems aim to transcribe entire spoken
+    model learns to output an end-of-sequence token to terminate          utterances into text, keyword spotting focuses specifically on
+    its response when non-query audio is detected.                        identifying and extracting predefined keywords or phrases
+                                                                          within continuous speech. The primary application of key-
+V. DOWNSTREAM APPLICATIONS                                                word spotting is to build voice-activated assistants in smart
+    Unlike traditional speech systems like ASR and TTS,                   home devices. Those devices are activated when the specific
+    which usually focus on specific tasks, SpeechLMs function             keywords are triggered. Therefore, although SpeechLMs are
+    as generative foundation models. They can handle a diverse            capable of spotting and understanding more than just a couple
+    array of speech-only, text-only, and multi-modal tasks by             of words, keyword spotting can be used to efficiently trigger
+    following various instructions. In this section, we explore the       SpeechLMs to respond to user inputs.
+    primary downstream applications of SpeechLMs. The tasks                          Text-to-Speech Synthesis. Text-to-speech synthesis (TTS)
+    discussed here primarily consist of traditional speech-related        enables systems to synthesize written text into spoken lan-
+    tasks, along with some that are unique to SpeechLMs. In               guage. In contrast to ASR, TTS takes text as input and outputs
+    contrast to TextLMs, which generate text containing only              the converted speech waveform. Similarly, the input of the
+    semantic information, SpeechLMs can model both semantic               SpeechLMs would be a combination of the text to synthesize
+    and paralinguistic information-such as pitch and timbre-              and the instruction, and the output is the synthesized speech.
+    making them more powerful models. We thereby categorize                   Intent Classification. Intent classification is a critical task
+    the downstream applications of SpeechLMs into three main              that identifies the underlying intention behind a user's input
+    classes: semantic-related applications, speaker-related appli-        speech. The AI system can then perform certain actions
+    cations, and paralinguistic applications. Table V provides an         based on the identified user intent (e.g., book a flight). Intent
+    example for each downstream task.                                     classification is particularly important in applications such as
+                                                                          virtual assistants, customer service bots, and interactive voice
+                                                                          response systems. To perform Intent Classification, it is more
+    A. Semantic-Related Applications                                      natural for SpeechLMs to take speech inputs and classify the
+    Semantic-related applications encompass key tasks that                results in text since it is easier to parse and classify the intent
+    facilitate meaningful interactions between humans and ma-             classification result in text than speech.
+    chines. These applications require SpeechLMs to understand                 Slot Filling. Slot filling is an important task in spoken lan-
+    the semantic meaning of the input and generate responses that         guage understanding that involves identifying and extracting
+    are not only contextually relevant but also logically coherent.       specific pieces of information from user inputs into predefined
+    The primary Semantic-related applications of SpeechLMs are            classes, such as intents, entities, and parameters that are es-
+    as follows.                                                           sential for completing a task. For example, slot filling extracts
+    Spoken Dialogue. Spoken dialogue is the most natural                  the phrase "I want to fly from New York to San Francisco
+    application of SpeechLMs. Spoken dialogue systems are de-             on June 5th." into distinct slots like "departure city" (New
+    signed to facilitate natural conversations between humans             York), "destination city" (San Francisco), and "date" (June
+    and machines in spoken format. They can engage users in               5th). Similar to Intent Classification, it is more natural for
+    interactive exchanges, understanding and generating responses         SpeechLMs to take speech inputs and extract the pieces in
+    based on the context of the conversation. Unlike TextLMs,             texts.
+    SpeechLMs are able to perform conversations with humans                                   Query by Example Spoken Term Detection. Another
+
+    JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021    12
+
+
+
+                      TABLE V
+EXAMPLES OF THE VARIOUS CAPABILITIES OF SPEECHLMS.
+
+    Task                       Input                                                        Output
+
+           Semantic-related Applications
+    Spoken Dialogue            Speech(I am so angry right now!)                             Speech(Sorry to hear that. What happened?)
+    Speech Translation         Speech(Good morning my friend!) Please translate the         Speech(Bonjour mon ami !)
+        speech into French.
+Automatic Speech Recog- Speech(A river is on your left side.) Please perform The transcribed speech is: A river is on your left side.
+    nition                     automatic speech recognition to the speech
+    Keyword Spotting           Speech(How's your day? (Speaking to somebody else)           Keyword detected: "Hey, Siri."
+                               Hey, Siri.) Please detect if the given speech contains any
+                               pre-defined keywords.
+    Text-to-Speech Synthesis   Please synthesize the following text into speech: "A river   Sure. Here is the synthesized speech: Speech(A river is
+                               is on your left side."                                       on your left side.)
+    Intent Classification      Speech(Can you help me book a flight?) Please detect         Intent detected: "Book a flight".
+                               the intent of the given speech.
+    Slot Filling               Speech(I want to fly from New York to San Francisco          Sure. Here are the filled slots. Departure city: New York.
+        on June 5th.) Please fill the following slots based on the Destination city: San Francisco. Date: June 5th.
+        given speech: departure city, destination city, and date
+Query by Example Spo- Speech(Can you retrieve the audio documents that con- Sure. I have found documents 2 and 4 contain the word
+    ken Term Detection         tain the word "happy"?) [A batch of audio documents]         happy.
+
+                                   Speaker-related Applications
+    Speaker Identification     The following speech comes from Lucy: "[Lucy's               The speaker of the following speech: "[Unknown
+                               speech]". The following speech comes from Bob: "Bob's        speech]" is Bob.
+                               speech". Question: Who is the speaker of the following
+                               speech [Unknown speech]
+    Speaker Verification       Here are two speeches. Speech 1: [Speech 1]. Speech 2:       No, they do not come from the same speaker.
+                               [Speech 2]. Do they come from the same speaker?
+    Speaker Diarization        [An audio file of the meeting] Please provide the speaker    Sure. Here is the speaker diarization result: 00:00 - 00:15:
+                               diarization output in the following format: [Start Time] -   Alice, 00:16 - 00:40: Bob, 00:41 - 01:00: Carol, 01:01 -
+                               [End Time]: Speaker [Speaker].                               01:20: Alice, 01:21 - 01:45: Bob and Carol (overlapping
+        speech), 01:46 - 02:00: Carol.
+Voice-Conditioned Speech Can you use a robotic voice to say "Hello world!" to me? Sure. Speech([In robotic voice] Hello world!)
+Generation
+
+                                   Paralinguistic Applications
+    Emotion Recognition        Speech(What are you doing) What emotion does the             It seems that the speaker is pretty shocked and angry
+                               speech convey?                                               about something.
+    Speech Separation          Speech([Two overlapping speeches]) Can you separate          Sure. Here is the speech separation result. Speech 1:
+                               the two speeches?                                            Speech(Should I go for this one?). Speech 2: Speech(That
+                                                                                            one seems good.)
+    Paralinguistics-Enhanced   Speech(Please generate a speech that sounds happy.)          Speech([In happy mood] My friend just gave me a
+    Generation                                                                              candy!!)
+
+
+
+    spoken term detection task is query by example spoken term                    Speaker Identification. Speaker identification is the pro-
+    detection (QbE-STD), which allows users to identify specific           cess of recognizing a person's identity based on their voice
+    spoken terms or phrases within a larger audio stream by                characteristics. It is a multi-class classification of a given
+    providing an example of the desired term. Unlike traditional           speech as input. SpeechLMs can perform this task by tak-
+    keyword spotting methods that rely on predefined lists of              ing an input speech and outputting the classification result
+    keywords, QbE-STD leverages the flexibility of example-based           in text or speech format. Moreover, SpeechLMs can also
+    querying, enabling users to specify their search terms through         identify different speakers implicitly. Specifically, it can chat
+    audio samples.                                                         with multiple speakers at the same time, distinguishing the
+                                                                           words from different speakers and responding to each speaker
+    B. Speaker-Related Applications                                        appropriately.
+    Speaker-related applications refer to the tasks that involve                  Speaker Verification. Speaker verification involves deter-
+    the processing of information related to speaker identity. It          mining whether the speakers of a pair of speeches match with
+    could involve classification tasks such as identifying, verifying,     each other. Unlike speaker identification, which is a multi-
+    and distinguishing individual speakers based on their unique           class classification process, speaker verification is a binary
+    vocal characteristics, as well as generation tasks such as             classification process.
+    maintaining or modifying the timbre of a given speech. While                  Speaker Diarization. Speaker diarization is the process of
+    we acknowledge that voice characteristics can be considered            partitioning an audio stream into segments according to the
+    paralinguistic information, we believe that speaker-related            identity of the speakers. It predicts "who is speaking when"
+    applications are unique because they enable SpeechLMs to               for each timestamp [123]. A natural way to integrate speaker
+    function in complex scenarios such as participating in multi-          diarization into SpeechLMs is to have the model generate the
+    speaker conversations. In this section, we survey common               transcript of each audio segment along with the identification
+    speaker-related applications of SpeechLMs.                             of the speaker.
+
+    JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021    13
+
+
+                   Voice-Conditioned Speech Generation. Voice-conditioned                                         TABLE VI
+    speech generation involves synthesizing speech based on the                             A SUMMARY OF POPULAR BENCHMARKS FOR THE EVALUATION OF
+                                                                                       SPEECHLMS. I/O, A, AND T REPRESENT INPUT/OUTPUT FORMAT, AUDIO,
+    vocal characteristics of a specific speaker. This could involve                                        AND TEXT, RESPECTIVELY.
+    voice cloning and voice conversion. Voice cloning utilizes a
+    sample of the speaker's voice as a reference, enabling the               Name                   Eval Type         # Tasks     Audio Type               I/O
+    model to reproduce the speaker's timbre when generating                  ABX [124]-[126]        Representation    1           Speech                   A → -
+                                                                             sWUGGY [126]           Linguistic        1           Speech                   A → -
+    speech from input text. Voice conversion, on the other hand,             sBLIMP [126]           Linguistic        1           Speech                   A → -
+                                                                             sStoryCloze [38]       Linguistic        1           Speech                   A/T → -
+    modifies an existing speech signal to sound like it was                  STSP [5]               Paralinguistic    1           Speech                   A/T → A/T
+                                                                             MMAU [127]             Downstream       27           Speech, Sound, Music     A → T
+    produced by a different speaker while retaining the original             Audiobench [128]       Downstream        8           Speech, Sound            A → T
+    content. Additionally, instead of giving the target vocal charac-        AIR-Bench [129]        Downstream       20           Speech, Sound, Music     A → T
+                                                                             SD-Eval [130]          Downstream        4           Speech                   A → T
+    teristics, SpeechLMs should also be able to adapt their output           SUPERB [131]           Downstream       10           Speech                   A → T
+                                                                             Dynamic-SUPERB [131]   Downstream       180          Speech, Sound, Music     A → T
+    timbre based on various speech or text instructions.                     SALMON [132]           Downstream        8           Speech                   A → -
+                                                                             VoiceBench [133]       Downstream        8           Speech                   A → A
+                                                                             VoxEval [134]          Downstream       56           Speech                   A → A
+    C. Paralinguistic Applications
+                Paralinguistics refers to the non-verbal elements of com-     A. Automatic (Objective) Evaluation
+    munication that accompany spoken language. It encompasses
+    various vocal attributes that convey meaning beyond the actual                                          Automatic evaluation methods are essential for providing
+    words spoken. These elements can significantly influence how                         quick and consistent assessments of SpeechLMs. These meth-
+    messages are interpreted and understood. The key elements of                       ods typically rely on quantitative metrics that can be computed
+    paralinguistics include pitch, timbre, column, rate of speech,                        without human intervention. Below, we outline some of the
+    pauses, etc. Since combining elements in paralinguistics in               most commonly used automatic evaluation techniques.
+    different ways can result in a speech with different emotions,                                          Representation Evaluation. Representation (embedding) is
+    we include emotion-related tasks as paralinguistic applications                       a crucial component in SpeechLMs (and TextLMs). It refers
+    as well.                                                                           to how input data, such as speech or text, is transformed into
+                   Emotion Recognition. Emotion recognition task involves               a format that the model can understand and process. Effective
+    identifying and classifying the emotion carried by a given                         representation lays a solid foundation for models to understand
+    speech into predefined classes. Similar to speaker identifica-                    lexical, syntax, and contextual information, which are vital for
+    tion, SpeechLMs are capable of not only directly perform-                 generating coherent and contextually relevant outputs.
+    ing this task but also implicitly recognizing users' emotions                                             In the context of SpeechLMs, representation evaluation
+    through their speech queries and responding accordingly.                             focuses on how well the model encodes speech features into
+               Speech Separation. Speech separation refers to the process                  meaningful vectors. GSLM [37] uses between-speaker ABX
+    of isolating individual speech signals from a mixture of                            score to measure the embedding similarity. It quantifies how
+    sounds, such as when multiple speakers are talking simultane-                       well-separated the phonetic categories are. Specifically, It
+    ously. When separating the input speech, SpeechLMs can not                            works by comparing three sound samples: two from the same
+    only output the contents of each person in speech but also in                       category (A) and one from a different category (B). The test
+    text format (i.e., transcriptions).                                                  measures how often the system correctly identifies that two
+Paralinguistics-Enhanced                     Generation. Paralinguistics-                sounds from category A are more similar to each other than
+    enhanced generation refers to the process of instructing                                one sound from A is to a sound from B. Another way of
+    SpeechLMs to produce speech that exhibits specific paralin-                        evaluating representations is through speech resynthesis [37].
+    guistic characteristics. Users can define these characteristics                     Specifically, an input speech is encoded into tokens and then
+    in their prompts, allowing the model to generate speech that                           synthesized back to speech. Then, word error rate (WER)
+    aligns with their specifications. Examples of paralinguistics-                        or character error rate (CER) can be computed on the ASR
+    enhanced generation include synthesizing speech with a spe-                         results of the input and resynthesized speech. This measures
+    cific style, speaking at a fast pace, and even singing. This                        the information loss caused by discretizing the input speech
+    capability distinguishes SpeechLMs from TextLMs and facili-                         into speech tokens, thereby evaluating the robustness of the
+    tates a more engaging and interactive form of communication               latent representations.
+    with the AI models.                                                                                  Linguistic Evaluation. Linguistics, including lexical, syn-
+                                                                                         tactic, and semantic evaluation methods, assess the model's
+VI. EVALUATIONS                                                                         ability to generate and understand the rules for constructing
+                          Similar to TextLMs, SpeechLMs have a wide range               words, sentences, and meaningful contents. These evaluations
+    of capabilities, making it challenging to compare differ-                           focus on the correctness and appropriateness of word choices,
+    ent SpeechLMs. Consequently, it's essential to evaluate                              the grammatical structure of the outputs, and the coherence
+    SpeechLMs from various perspectives to determine their effec-                       and relevance of the generated content. In terms of benchmark
+    tiveness. In this section, we review the commonly used meth-                           datasets, sWUGGY [126] assesses at the lexical level by
+    ods and benchmarks (Table VI) for evaluating SpeechLMs. We                            determining if the model can distinguish a real word from
+    categorize these evaluation methods into automatic and human                         a (real, non-real) word pair. sBLIMP [126] evaluates at the
+    assessments, each containing distinct evaluation aspects.                             syntactic level by determining if the model can identify
+
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021    14
+
+
+the grammatically correct sentence from a (grammatical, un-           these turn-taking events closely resemble those found in hu-
+grammatical) sentence pair. Spoken StoryCloze [38] evaluates          man dialogues. Another method involves speech continuation,
+semantic comprehension by assessing the model's capability            where the generated speech is considered more natural if the
+to select the genuine ending of a story from a pair of ending         turn-taking statistics of the speech prompts align closely with
+choices. All the evaluation is conducted by comparing the             those of the subsequent continuations. Additionally, evaluating
+model's negative log-likelihood of the data pair.                     SpeechLM's usefulness as an AI assistant in real-time interac-
+Paralinguistic Evaluation. In contrast to linguistic evalu-           tion is crucial. The Parrot model [45] suggests using reflective
+ation, paralinguistic evaluation focuses on the non-verbal as-        pauses and interruptions to assess usefulness, where reflective
+pects of communication that accompany speech. Some works              pause evaluates the SpeechLM's ability to remain silent while
+choose to utilize paralinguistic tokens alongside semantic            the user speaks, and interruption measures the SpeechLM's
+tokens to enhance the paralinguistic abilities of SpeechLMs           capability to cease speaking when interrupted.
+[5], [42], so one way is to evaluate the paralinguistic to-           Downstream Evaluation. Downstream evaluation refers to
+kens. pGSLM [42] measures the correctness, consistency, and           evaluating the ability of SpeechLMs to perform specific tasks,
+expressiveness of the prosodic tokens. Correctness evaluates          such as ASR, TTS, Speaker Identification, etc. The evaluation
+the model's ability to generate accurate prosodic profiles by         can be performed on pre-trained models by adding few-shot
+calculating the minimal mean absolute error (min-MAE) of              example(s) at the start of the prompt or on the instruction-
+the prosodic tokens from 20 generated samples against the             tuned models by directly instructing them to do so. Several
+prosodic tokens from the reference, consistency is assessed           benchmarks compile a broad array of downstream tasks to
+through the Pearson correlation between the mean values of            provide a comprehensive assessment of SpeechLMs. SU-
+the prompt prosodic and its generated continuation prosodic           PERB [123] includes a variety of speech understanding tasks.
+tokens, and expressiveness is measured by the standard devia-         SD-Eval [130] assesses the paralinguistic understanding of
+tion of the generated prosody token values, with the expecta-         SpeechLMs using the emotion, age, environment, and age clas-
+tion that it matches the variability of the ground truth. We note     sification tasks. SALMON [132] tests the SpeechLMs' ability
+that the same metrics can also be applied to other paralinguistic     to generate speech with consistent paralinguistic and envi-
+tokens. Instead of evaluating from the token level, SPIRIT-           ronmental characteristics. Dynamic-SUPERB [131], MMAU
+LM [5] proposes to measure on the perceptual level. They              [127], AirBench [129], and AudioBench [128] extend beyond
+introduced a speech-text sentiment preservation benchmark             traditional speech tasks to include sound and/or music-related
+(STSP), which requires the model to generate a text or speech         challenges as well.
+sequence of tokens that preserves the sentiment of the prompt.        While these benchmarks offer comprehensive coverage of
+A sentiment classifier is used to assess the sentiment in the         audio-related tasks, they primarily require models to respond
+generated speech. It should be noted that although they only          in text, which creates a barrier to end-to-end speech interaction
+apply the preservation approach on sentiment, this idea can be        evaluation. To address this limitation, newer benchmarks have
+generalized to other paralinguistic features, such as timbre or       emerged that support speech output. VoxEval [134] focuses
+prosody.                                                              on benchmarking the knowledge understanding capabilities
+Generation Quality and Diversity. Quality and diversity               of SpeechLMs, providing question-answer pairs in compre-
+are two crucial aspects of model generation. Typically, there         hensive subjects in speech format, along with an evaluation
+is a trade-off between these dimensions when sampling model           pipeline tailored for speech output. Additionally, it presents
+responses at different temperatures, so GSLM [37] suggests            questions under various input audio conditions for evaluating
+using the Area Under the Curve (AUC) with various temper-             the model's robustness. Similarly, VoiceBench [133] supports
+ature values. Specifically, AUC on perplexity and VERT are            speech output while focusing on assessing general knowledge,
+employed to assess these factors, where VERT represents the           instruction following, and response safety of SpeechLMs.
+geometric mean of the ratio of k-grams in the generated speech
+that appears at least once. Additionally, the ChatGPT score can       B. Human (Subjective) Evaluation.
+be utilized to evaluate the quality of the generated speech. In       Human evaluation plays a crucial role in assessing the
+this process, the generated speech is transcribed using state-        performance of SpeechLMs, as ultimately, speech is designed
+of-the-art ASR models and then sent to ChatGPT for quality            to be heard and perceived by humans. This type of evalua-
+(and diversity) assessment.                                           tion relies on human judgment to assess the quality of the
+Real-Time Interaction Evaluation. Real-time interaction               outputs generated by SpeechLMs. Below, we outline several
+evaluation involves assessing the ability of SpeechLMs to             commonly used human evaluation methods.
+interact in real-time, which is crucial for those models that         Mean Opinion Score. Mean opinion score (MOS) is a
+facilitate full-duplex communication. Current research focuses        widely used metric in the field of speech evaluation that
+on evaluating the naturalness and usefulness of speech gen-           quantifies the perceived quality of speech output as judged
+erated in real-time. dGSLM [4] examines the naturalness               by human listeners. Typically, a group of evaluators listens
+of dialogues between two speakers by introducing different            to a series of audio samples generated by the SpeechLM and
+turn-taking events, such as speech segments (Inter-Pausal             rates each sample on a predefined scale, often from 1 (poor
+Unit, IPU), pauses within speech (pause), pauses between              quality) to 5 (excellent quality).
+speeches (gaps), and overlapping speech (overlap). The gen-           MOS is calculated by averaging the scores given by all
+erated speech is considered more natural if the statistics of         evaluators for each audio sample, providing a single score that
+
+    JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021    15
+
+
+    reflects the overall quality as perceived by humans. Variations          inference pipeline. One potential solution to improve latency
+    of MOS focus on different aspects of speech quality, including           is to develop a streamable pipeline, allowing the speech input
+    MMOS, PMOS, and SMOS [42], [46]. They evaluate the                       and output to be processed and generated in chunks. Another
+    aspects of naturalness, prosody, and timbre similarity of the            option could involve the SpeechLM autonomously generating
+    given speech, respectively.                                              audio samples in waveform. Overall, this area of real-time
+              Typically, evaluating naturalness or timbre similarity in-     speech generation remains underexplored and requires further
+    volves collecting human opinions. However, this process can              investigation.
+    be complicated due to the challenges of recruiting participants
+    and gathering their evaluations. As a result, researchers often          D. Safety Risks in SpeechLMs
+    turn to machine-based evaluations. They commonly employ
+    neural network models specifically trained for these tasks. For          Safety is a highly significant subject in the field of Machine
+    instance, a naturalness prediction model [135] can assess the            Learning, particularly when it comes to large-scale generative
+    naturalness of generated outputs, while a speaker identification         AI models. While there has been extensive research on safety
+    model can evaluate timbre similarity.                                    concerns in TextLMs, the safety issues in SpeechLMs have
+                                                                             not been thoroughly investigated. The safety challenges in
+VII. CHALLENGES AND FUTURE DIRECTIONS                                        SpeechLMs present both similarities and unique aspects com-
+                                                                             pared to TextLMs, as highlighted in OpenAI's recent report on
+                 While SpeechLMs have demonstrated impressive abilities,     the safety issues of GPT-4o's voice model [136]. Therefore, it
+    the research in this area is still under explored. In this sec-          is crucial for future research to explore safety vulnerabilities
+    tion, we survey challenges, unsolved questions, and possible             in SpeechLMs and develop safer SpeechLMs.
+    directions for future research in the study of SpeechLMs.                Primary concerns for the safety issues in SpeechLMs in-
+                                                                             clude but are not limited to toxicity and privacy. Toxicity refers
+    A. Understanding Different Component Choices                             to the harmful nature of the content generated by SpeechLMs.
+                      Current research on SpeechLMs encompasses key com-     For instance, these models might produce semantically dan-
+    ponents such as speech tokenizers, language models, and                  gerous content, such as instructions for making explosives.
+    vocoders, each offering a diverse range of options. While some           Additionally, they could generate acoustically inappropriate
+    studies have compared various component choices-primarily                content, like erotic speech [136], which presents a unique
+    focusing on speech tokenizers-the comparisons tend to be                 challenge. Privacy involves the risk of revealing personal
+    limited in scope and depth [37], [39]. Consequently, there               information from the speech input after it has been processed
+    remains a significant gap in understanding the advantages and            by a SpeechLM. For example, the model might infer the
+    disadvantages of different component selections. Therefore,              speaker's identity based on the semantic content or acoustic
+    studies aimed at comprehensively comparing these choices are             features of the input. Even more concerning is the potential for
+    essential. Such an investigation would yield valuable insights           the model to make biased inferences about the speaker, such as
+    and serve as a guide for selecting more efficient components             their ethnicity or religious beliefs, based on insufficient (e.g.,
+    when developing SpeechLMs.                                               acoustic) information [136].
+
+    B. End-to-End Training                                                   E. Performance on Rare Languages
+                 Although SpeechLMs can generate speech directly without     SpeechLMs directly model speech data, which allows them
+    relying on text signals, some studies train the three components         to more effectively handle "low-resource" languages compared
+    separately. This separate optimization may hinder the model's            to TextLMs. "Low-resource" languages are those that lack
+    overall potential. Consequently, it would be worthwhile to               extensive textual data, making it challenging for TextLMs
+    investigate whether training can be conducted in an end-to-              to model them efficiently. In contrast, SpeechLM provides a
+    end manner, allowing gradients to be back-propagated from                better solution by modeling the speech data of these "low-
+    the vocoder's output to the tokenizer's input. By exploring              resource" languages, which often have more available audio
+    this fully end-to-end approach, we could potentially enable              data than text [37]. Therefore, future research could focus on
+    SpeechLMs to produce more coherent, contextually relevant,               training SpeechLMs in "low-resource" languages or dialects
+    and high-fidelity speech outputs.                                        to expand their capabilities.
+
+    C. Real-Time Speech Generation    VIII. CONCLUSIONS
+    Enabling  real-time      speech      generation  is  crucial      in     This survey provides a comprehensive overview of recent
+    SpeechLM as it fosters a more interactive way of engaging                advancements in Speech Language Models (SpeechLMs). We
+    with humans. However, the most adopted approaches de-                    begin by addressing the limitations of the naive framework
+    scribed in section III still result in noticeable delays between         that combines Automatic Speech Recognition (ASR), Large
+    input and output speech generation. This delay occurs because            Language Models (LLMs), and Text-to-Speech (TTS) systems
+    a typical vocoder must wait for the entire sequence of output            for voice interactions. Next, we highlight the key advantages
+    tokens to be generated by the language model before func-                offered by SpeechLMs. Following this, we explore the ar-
+    tioning, making it the most time-consuming process in the                chitectures of SpeechLMs, detailing the components involved
+
+    JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021    16
+
+
+                           and their training recipes. We also discuss their capabilities               [17] A. Baevski, Y. Zhou, A. Mohamed, and M. Auli, "wav2vec 2.0: A
+                            in various downstream applications as well as their different     framework for self-supervised learning of speech representations," Ad-
+                                                                                              vances in neural information processing systems, vol. 33, pp. 12 449-
+                            evaluation methods. Finally, we identify the major challenges     12 460, 2020.
+                             in developing SpeechLMs and outline potential directions for         [18] A. Baevski, S. Schneider, and M. Auli, "vq-wav2vec: Self-supervised
+                           future research. We hope this survey will illuminate the field     learning of discrete speech representations," in Proceedings of the 8th
+                              and assist the research community in creating more powerful     International Conference on Learning Representations (ICLR), 2020.
+                                                                                              [Online]. Available: https://openreview.net/forum?id=rylwJxrYDS
+    Speech Language Models.                                                                           [19] Y.-A. Chung, Y. Zhang, W. Han, C.-C. Chiu, J. Qin, R. Pang, and
+                                                                                              Y. Wu, "W2v-bert: Combining contrastive learning and masked lan-
+REFERENCES                                                                                    guage modeling for self-supervised speech pre-training," in 2021 IEEE
+                                                                                              Automatic Speech Recognition and Understanding Workshop (ASRU).
+                  [1] J. Achiam, S. Adler, S. Agarwal, L. Ahmad, I. Akkaya, F. L. Aleman,     IEEE, 2021, pp. 244-250.
+    D. Almeida, J. Altenschmidt, S. Altman, S. Anadkat et al., "Gpt-4                          [20] W.-N. Hsu, B. Bolte, Y.-H. H. Tsai, K. Lakhotia, R. Salakhutdinov, and
+    technical report," arXiv preprint arXiv:2303.08774, 2023.                                 A. Mohamed, "Hubert: Self-supervised speech representation learning
+                   [2] A. Dubey, A. Jauhri, A. Pandey, A. Kadian, A. Al-Dahle, A. Letman,     by masked prediction of hidden units," IEEE/ACM transactions on
+    A. Mathur, A. Schelten, A. Yang, A. Fan et al., "The llama 3 herd of                      audio, speech, and language processing, vol. 29, pp. 3451-3460, 2021.
+    models," arXiv preprint arXiv:2407.21783, 2024.                                                 [21] X. Zhang, D. Zhang, S. Li, Y. Zhou, and X. Qiu, "Speechtokenizer:
+                         [3] S. Zhang, S. Roller, N. Goyal, M. Artetxe, M. Chen, S. Chen,     Unified speech tokenizer for speech large language models," in
+    C. Dewan, M. Diab, X. Li, X. V. Lin et al., "Opt: Open pre-trained                        Proceedings of the 12th International Conference on Learning
+    transformer language models," arXiv preprint arXiv:2205.01068, 2022.                      Representations (ICLR), 2024. [Online]. Available: https://openreview.
+                [4] T. A. Nguyen, E. Kharitonov, J. Copet, Y. Adi, W.-N. Hsu, A. Elkahky,
+    P. Tomasello, R. Algayres, B. Sagot, A. Mohamed et al., "Generative                       net/forum?id=AF9Q8Vip84
+    spoken dialogue language modeling," Transactions of the Association                           [22] N. Zeghidour, A. Luebs, A. Omran, J. Skoglund, and M. Tagliasacchi,
+    for Computational Linguistics, vol. 11, pp. 250-266, 2023.                                "Soundstream: An end-to-end neural audio codec," IEEE/ACM Trans-
+                       [5] T. A. Nguyen, B. Muller, B. Yu, M. R. Costa-Jussa, M. Elbayad,     actions on Audio, Speech, and Language Processing, vol. 30, pp. 495-
+    S. Popuri, P.-A. Duquenne, R. Algayres, R. Mavlyutov, I. Gat et al.,                      507, 2021.
+    "Spirit-lm: Interleaved spoken and written language model," arXiv                           [23] Y. Zhang, W. Han, J. Qin, Y. Wang, A. Bapna, Z. Chen, N. Chen, B. Li,
+    preprint arXiv:2402.05755, 2024.                                                          V. Axelrod, G. Wang et al., "Google usm: Scaling automatic speech
+                   [6] R. Huang, M. Li, D. Yang, J. Shi, X. Chang, Z. Ye, Y. Wu, Z. Hong,     recognition beyond 100 languages," arXiv preprint arXiv:2303.01037,
+    J. Huang, J. Liu et al., "Audiogpt: Understanding and generating                          2023.
+    speech, music, sound, and talking head," in Proceedings of the AAAI                           [24] S. Chen, C. Wang, Z. Chen, Y. Wu, S. Liu, Z. Chen, J. Li, N. Kanda,
+    Conference on Artificial Intelligence, vol. 38, no. 21, 2024, pp. 23 802-                 T. Yoshioka, X. Xiao et al., "Wavlm: Large-scale self-supervised pre-
+    23 804.                                                                                   training for full stack speech processing," IEEE Journal of Selected
+                  [7] Y. Shen, K. Song, X. Tan, D. Li, W. Lu, and Y. Zhuang, "Hugginggpt:     Topics in Signal Processing, vol. 16, no. 6, pp. 1505-1518, 2022.
+    Solving ai tasks with chatgpt and its friends in hugging face," Advances                         [25] A. Vaswani, N. Shazeer, N. Parmar, J. Uszkoreit, L. Jones, A. N.
+    in Neural Information Processing Systems, vol. 36, 2024.                                  Gomez, L. u. Kaiser, and I. Polosukhin, "Attention is all you need,"
+                    [8] D. Zhang, S. Li, X. Zhang, J. Zhan, P. Wang, Y. Zhou, and X. Qiu,     in Advances in Neural Information Processing Systems, I. Guyon,
+    "SpeechGPT: Empowering large language models with intrinsic                               U. V. Luxburg, S. Bengio, H. Wallach, R. Fergus, S. Vishwanathan,
+    cross-modal conversational abilities," in Findings of the Association                     and R. Garnett, Eds., vol. 30.      Curran Associates, Inc., 2017.
+    for Computational Linguistics: EMNLP 2023, H. Bouamor, J. Pino,                           [Online].  Available: https://proceedings.neurips.cc/paper files/paper/
+    and K. Bali, Eds.      Singapore: Association for Computational                           2017/file/3f5ee243547dee91fbd053c1c4a845aa-Paper.pdf
+    Linguistics,     Dec. 2023, pp.     15 757-15 773. [Online]. Available:                            [26] H. Touvron, T. Lavril, G. Izacard, X. Martinet, M.-A. Lachaux,
+    https://aclanthology.org/2023.findings-emnlp.1055                                         T. Lacroix, B. Roziere, N. Goyal, E. Hambro, F. Azhar`       et al., "Llama:
+    [9] A. Defossez, L. Mazar´    e, M. Orsini, A. Royer, P. P´    erez, H. J´    egou, ´     Open and efficient foundation language models," arXiv preprint
+    E. Grave, and N. Zeghidour, "Moshi: a speech-text foundation model                        arXiv:2302.13971, 2023.
+    for real-time dialogue," Kyutai, Tech. Rep., September 2024. [Online].                       [27] H. Touvron, L. Martin, K. Stone, P. Albert, A. Almahairi, Y. Babaei,
+    Available: http://kyutai.org/Moshi.pdf                                                    N. Bashlykov, S. Batra, P. Bhargava, S. Bhosale et al., "Llama
+                        [10] Z. Xie and C. Wu, "Mini-Omni: Language Models Can Hear, Talk     2: Open foundation and fine-tuned chat models," arXiv preprint
+    While Thinking in Streaming," arXiv preprint arXiv:2408.16725, 2024.                      arXiv:2307.09288, 2023.
+                     [11] Q. Fang, S. Guo, Y. Zhou, Z. Ma, S. Zhang, and Y. Feng, "Llama-           [28] A. Yang, B. Yang, B. Hui, B. Zheng, B. Yu, C. Zhou, C. Li, C. Li,
+    omni: Seamless speech interaction with large language models," arXiv                      D. Liu, F. Huang et al., "Qwen2 technical report," arXiv preprint
+    preprint arXiv:2409.06666, 2024.                                                          arXiv:2407.10671, 2024.
+                         [12] A. Radford, J. W. Kim, T. Xu, G. Brockman, C. McLeavey, and                [29] T. GLM, A. Zeng, B. Xu, B. Wang, C. Zhang, D. Yin, D. Zhang,
+    I. Sutskever, "Robust speech recognition via large-scale weak super-                      D. Rojas, G. Feng, H. Zhao et al., "Chatglm: A family of large
+    vision," in International Conference on Machine Learning.                       PMLR,
+    2023, pp. 28 492-28 518.                                                                  language models from glm-130b to glm-4 all tools," arXiv preprint
+                         [13] H. Le, J. Pino, C. Wang, J. Gu, D. Schwab, and L. Besacier,     arXiv:2406.12793, 2024.
+    "Dual-decoder transformer for joint automatic speech recognition                             [30] A. Q. Jiang, A. Sablayrolles, A. Roux, A. Mensch, B. Savary, C. Bam-
+    and multilingual speech translation," in Proceedings of the 28th                          ford, D. S. Chaplot, D. de las Casas, E. B. Hanna, F. Bressand,
+    International Conference on Computational Linguistics, D. Scott,                          G. Lengyel, G. Bour, G. Lample, L. R. Lavaud, L. Saulnier, M.-A.
+    N. Bel, and C. Zong, Eds.      Barcelona, Spain (Online): International                   Lachaux, P. Stock, S. Subramanian, S. Yang, S. Antoniak, T. L. Scao,
+    Committee on Computational Linguistics, Dec. 2020, pp. 3520-3533.                         T. Gervet, T. Lavril, T. Wang, T. Lacroix, and W. E. Sayed, "Mixtral
+    [Online]. Available: https://aclanthology.org/2020.coling-main.314                        of Experts," Jan. 2024.
+                      [14] Y. Fathullah, C. Wu, E. Lakomkin, K. Li, J. Jia, Y. Shangguan,                [31] A. v. d. Oord, S. Dieleman, H. Zen, K. Simonyan, O. Vinyals,
+    J. Mahadeokar, O. Kalinli, C. Fuegen, and M. Seltzer, "Audiochatllama:                    A. Graves, N. Kalchbrenner, A. Senior, and K. Kavukcuoglu, "Wavenet:
+    Towards general-purpose speech abilities for llms," in Proceedings of                     A generative model for raw audio," in Proc. 9th ISCA Workshop on
+    the 2024 Conference of the North American Chapter of the Association                      Speech Synthesis Workshop (SSW 9), 2016, p. 125.
+    for Computational Linguistics: Human Language Technologies (Volume                       [32] J. Shen, R. Pang, R. J. Weiss, M. Schuster, N. Jaitly, Z. Yang, Z. Chen,
+    1: Long Papers), 2024, pp. 5522-5532.                                                     Y. Zhang, Y. Wang, R. Skerrv-Ryan et al., "Natural tts synthesis by
+                       [15] C. Tang, W. Yu, G. Sun, X. Chen, T. Tan, W. Li, L. Lu, Z. Ma,     conditioning wavenet on mel spectrogram predictions," in 2018 IEEE
+    and C. Zhang, "SALMONN: Towards Generic Hearing Abilities for                             international conference on acoustics, speech and signal processing
+    Large Language Models," in Proceedings of the 12th International                          (ICASSP).  IEEE, 2018, pp. 4779-4783.
+    Conference on Learning Representations (ICLR), 2024. [Online].                                    [33] R. Prenger, R. Valle, and B. Catanzaro, "Waveglow: A flow-based
+    Available: https://openreview.net/forum?id=14rn7HpKVk                                     generative network for speech synthesis," in ICASSP 2019-2019 IEEE
+                 [16] A. v. d. Oord, Y. Li, and O. Vinyals, "Representation learning with     International Conference on Acoustics, Speech and Signal Processing
+    contrastive predictive coding," arXiv preprint arXiv:1807.03748, 2018.                    (ICASSP).  IEEE, 2019, pp. 3617-3621.
+
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021    17
+
+
+      [34] J. Kong, J. Kim, and J. Bae, "Hifi-gan: Generative adversarial networks              [51] Z. Ma, Y. Song, C. Du, J. Cong, Z. Chen, Y. Wang, Y. Wang, and
+for efficient and high fidelity speech synthesis," Advances in neural                  X. Chen, "Language model can listen while speaking," arXiv preprint
+information processing systems, vol. 33, pp. 17 022-17 033, 2020.                      arXiv:2408.02622, 2024.
+          [35] A. Polyak, Y. Adi, J. Copet, E. Kharitonov, K. Lakhotia, W.-N. Hsu,          [52] Z. Xie and C. Wu, "Mini-omni2: Towards open-source gpt-4o with vi-
+A. Mohamed, and E. Dupoux, "Speech resynthesis from discrete dis-                      sion, speech and duplex capabilities," arXiv preprint arXiv:2410.11190,
+entangled self-supervised representations," in Proc. Interspeech 2021,                 2024.
+2021, pp. 3615-3619.                                                                         [53] X. Wang, Y. Li, C. Fu, L. Xie, K. Li, X. Sun, and L. Ma, "Freeze-
+[36] A. Defossez, J. Copet, G. Synnaeve, and Y. Adi, "High fidelity neural´            omni: A smart and low latency speech-to-speech dialogue model with
+audio compression," Transactions on Machine Learning Research,                         frozen llm," arXiv preprint arXiv:2411.00774, 2024.
+2023.                                                                                            [54] J. Pan, J. Wu, Y. Gaur, S. Sivasankaran, Z. Chen, S. Liu, and
+          [37] K. Lakhotia, E. Kharitonov, W.-N. Hsu, Y. Adi, A. Polyak, B. Bolte,     J. Li, "Cosmic: Data efficient instruction-tuning for speech in-context
+T.-A. Nguyen, J. Copet, A. Baevski, A. Mohamed et al., "On gen-                        learning," arXiv preprint arXiv:2311.02248, 2023.
+erative spoken language modeling from raw audio," Transactions of                         [55] C. Fu, H. Lin, Z. Long, Y. Shen, M. Zhao, Y. Zhang, X. Wang, D. Yin,
+the Association for Computational Linguistics, vol. 9, pp. 1336-1354,                  L. Ma, X. Zheng et al., "Vita: Towards open-source interactive omni
+2021.                                                                                  multimodal llm," arXiv preprint arXiv:2408.05211, 2024.
+             [38] M. Hassid, T. Remez, T. A. Nguyen, I. Gat, A. Conneau, F. Kreuk,                [56] W. Yu, S. Wang, X. Yang, X. Chen, X. Tian, J. Zhang, G. Sun,
+J. Copet, A. Defossez, G. Synnaeve, E. Dupoux et al., "Textually                       L. Lu, Y. Wang, and C. Zhang, "Salmonn-omni: A codec-free llm
+pretrained speech language models," Advances in Neural Information                     for full-duplex speech understanding and generation," arXiv preprint
+Processing Systems, vol. 36, 2024.                                                     arXiv:2411.18138, 2024.
+         [39] P. K. Rubenstein, C. Asawaroengchai, D. D. Nguyen, A. Bapna, Z. Bor-        [57] H. Jegou, M. Douze, and C. Schmid, "Product quantization for nearest
+sos, F. d. C. Quitry, P. Chen, D. E. Badawy, W. Han, E. Kharitonov                     neighbor search," IEEE transactions on pattern analysis and machine
+et al., "Audiopalm: A large language model that can speak and listen,"                 intelligence, vol. 33, no. 1, pp. 117-128, 2010.
+arXiv preprint arXiv:2306.12925, 2023.                                                           [58] J. Devlin, M.-W. Chang, K. Lee, and K. Toutanova, "BERT: Pre-
+             [40] Q. Zhang, L. Cheng, C. Deng, Q. Chen, W. Wang, S. Zheng, J. Liu,     training of deep bidirectional transformers for language understanding,"
+H. Yu, and C. Tan, "Omniflatten: An end-to-end gpt model for seamless                  in Proceedings of the 2019 Conference of the North American Chapter
+voice conversation," arXiv preprint arXiv:2410.17799, 2024.                            of the Association for Computational Linguistics: Human Language
+                      [41] W. Chen, Z. Ma, R. Yan, Y. Liang, X. Li, R. Xu, Z. Niu,     Technologies, Volume 1 (Long and Short Papers), J. Burstein,
+Y. Zhu, Y. Yang, Z. Liu et al., "Slam-omni: Timbre-controllable                        C. Doran, and T. Solorio, Eds.  Minneapolis, Minnesota: Association
+voice interaction system with single-stage training," arXiv preprint                   for Computational Linguistics, Jun. 2019, pp. 4171-4186. [Online].
+arXiv:2412.15649, 2024.                                                                Available: https://aclanthology.org/N19-1423
+             [42] E. Kharitonov, A. Lee, A. Polyak, Y. Adi, J. Copet, K. Lakhotia,              [59] Z. Chen, Y. Zhang, A. Rosenberg, B. Ramabhadran, P. J. Moreno,
+T. A. Nguyen, M. Riviere, A. Mohamed, E. Dupoux, and W.-N.                             A. Bapna, and H. Zen, "Maestro: Matched speech text representations
+Hsu, "Text-free prosody-aware generative spoken language modeling,"                    through modality matching," in Proceedings of Interspeech, 2022, pp.
+in Proceedings of the 60th Annual Meeting of the Association for                       4093-4097.
+Computational Linguistics (Volume 1: Long Papers), S. Muresan,                             [60] A. Van Den Oord, O. Vinyals et al., "Neural discrete representation
+P. Nakov, and A. Villavicencio, Eds.      Dublin, Ireland: Association                 learning," Advances in neural information processing systems, vol. 30,
+for Computational Linguistics, May 2022, pp. 8666-8681. [Online].                      2017.
+Available: https://aclanthology.org/2022.acl-long.593                                        [61] Z. Du, Q. Chen, S. Zhang, K. Hu, H. Lu, Y. Yang, H. Hu, S. Zheng,
+      [43] T. Wang, L. Zhou, Z. Zhang, Y. Wu, S. Liu, Y. Gaur, Z. Chen, J. Li, and     Y. Gu, Z. Ma et al., "Cosyvoice: A scalable multilingual zero-shot
+F. Wei, "Viola: Conditional language models for speech recognition,                    text-to-speech synthesizer based on supervised semantic tokens," arXiv
+synthesis, and translation," IEEE/ACM Transactions on Audio, Speech,                   preprint arXiv:2407.05407, 2024.
+and Language Processing, 2024.                                                                    [62] B. Veluri, B. N. Peloquin, B. Yu, H. Gong, and S. Gollakota,
+               [44] J. Li, D. Wang, X. Wang, Y. Qian, L. Zhou, S. Liu, M. Yousefi,     "Beyond turn-based interfaces: Synchronous LLMs as full-duplex
+C. Li, C.-H. Tsai, Z. Xiao et al., "Investigating neural audio codecs                  dialogue agents," in Proceedings of the 2024 Conference on Empirical
+for speech language model-based speech generation," arXiv preprint                     Methods in Natural Language Processing, Y. Al-Onaizan, M. Bansal,
+arXiv:2409.04016, 2024.                                                                and Y.-N. Chen, Eds.   Miami, Florida, USA: Association for
+             [45] Z. Meng, Q. Wang, W. Cui, Y. Zhang, B. Wu, I. King, L. Chen, and     Computational Linguistics, Nov. 2024, pp. 21 390-21 402. [Online].
+P. Zhao, "Parrot: Autoregressive spoken dialogue language modeling                     Available: https://aclanthology.org/2024.emnlp-main.1192/
+with decoder-only transformers," in Audio Imagination: NeurIPS 2024                         [63] K. Chen, Y. Gou, R. Huang, Z. Liu, D. Tan, J. Xu, C. Wang, Y. Zhu,
+Workshop AI-Driven Speech, Music, and Sound Generation, 2024.                          Y. Zeng, K. Yang et al., "Emova: Empowering language models to see,
+         [46] D. Zhang, X. Zhang, J. Zhan, S. Li, Y. Zhou, and X. Qiu, "Speechgpt-     hear and speak with vivid emotions," arXiv preprint arXiv:2409.18042,
+gen: Scaling chain-of-information speech generation," arXiv preprint                   2024.
+arXiv:2401.13527, 2024.                                                                  [64] W. Huang, Z. Zhang, Y. T. Yeung, X. Jiang, and Q. Liu, "Spiral: Self-
+        [47] E. Nachmani, A. Levkovitch, R. Hirsch, J. Salazar, C. Asawaroengchai,     supervised perturbation-invariant representation learning for speech
+S. Mariooryad, E. Rivlin, R. Skerry-Ryan, and M. T. Ramanovich,                        pre-training," arXiv preprint arXiv:2201.10207, 2022.
+"Spoken      question      answering      and      speech      continuation  using      [65] J. Kim, J. Kong, and J. Son, "Conditional variational autoencoder with
+spectrogram-powered llm," in Proceedings of the 12th International                     adversarial learning for end-to-end text-to-speech," in International
+Conference on Learning Representations (ICLR), 2024. [Online].                         Conference on Machine Learning.  PMLR, 2021, pp. 5530-5540.
+Available: https://openreview.net/forum?id=izrOLJov5y                                 [66] Y. Ren, T. Wang, J. Yi, L. Xu, J. Tao, C. Y. Zhang, and J. Zhou, "Fewer-
+             [48] R. Algayres, Y. Adi, T. Nguyen, J. Copet, G. Synnaeve, B. Sagot,     token neural speech codec with time-invariant codes," in ICASSP 2024-
+and E. Dupoux, "Generative spoken language model based on                              2024 IEEE International Conference on Acoustics, Speech and Signal
+continuous word-sized audio tokens," in Proceedings of the 2023                        Processing (ICASSP).  IEEE, 2024, pp. 12 737-12 741.
+Conference on Empirical Methods in Natural Language Processing,                                     [67] X. Zhang, X. Lyu, Z. Du, Q. Chen, D. Zhang, H. Hu, C. Tan,
+H. Bouamor, J. Pino, and K. Bali, Eds.      Singapore: Association                     T. Zhao, Y. Wang, B. Zhang et al., "Intrinsicvoice: Empowering
+for Computational Linguistics, Dec. 2023, pp. 3008-3028. [Online].                     llms with intrinsic real-time voice interaction abilities," arXiv preprint
+Available: https://aclanthology.org/2023.emnlp-main.182                                arXiv:2410.08035, 2024.
+              [49] Z. Du, J. Wang, Q. Chen, Y. Chu, Z. Gao, Z. Li, K. Hu, X. Zhou,                     [68] A. Gu and T. Dao, "Mamba: Linear-time sequence modeling
+J. Xu, Z. Ma, W. Wang, S. Zheng, C. Zhou, Z. Yan, and S. Zhang,                        with selective state spaces," in First Conference on Language
+"LauraGPT: Listen, Attend, Understand, and Regenerate Audio with                       Modeling, 2024. [Online]. Available: https://openreview.net/forum?id=
+GPT," https://arxiv.org/abs/2310.04673v4, Oct. 2023.                                   tEYskw1VY2
+[50] J.-C.     Chou, C.-M. Chien, W.-N. Hsu, K. Livescu, A. Babu,                                  [69] P. Peng, P.-Y. Huang, S.-W. Li, A. Mohamed, and D. Harwath,
+A. Conneau, A. Baevski, and M. Auli, "Toward joint language                            "VoiceCraft: Zero-shot speech editing and text-to-speech in the wild,"
+modeling for speech units and text," in Findings of the Association                    in Proceedings of the 62nd Annual Meeting of the Association
+for Computational Linguistics: EMNLP 2023, H. Bouamor, J. Pino,                        for Computational Linguistics (Volume 1: Long Papers), L.-W. Ku,
+and K. Bali, Eds.      Singapore: Association for Computational                        A. Martins, and V. Srikumar, Eds. Bangkok, Thailand: Association for
+Linguistics, Dec. 2023, pp. 6582-6593. [Online]. Available: https:                     Computational Linguistics, Aug. 2024, pp. 12 442-12 462. [Online].
+//aclanthology.org/2023.findings-emnlp.438                                             Available: https://aclanthology.org/2024.acl-long.673/
+
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021    18
+
+
+
+       [70] A. Zeng, Z. Du, M. Liu, L. Zhang, S. Jiang, Y. Dong, and J. Tang,     (ICLR), 2023. [Online]. Available: https://openreview.net/forum?id=
+"Scaling speech-text pre-training with synthetic interleaved data," arXiv         iTtGCMDEzS
+preprint arXiv:2411.17607, 2024.                                                  [91] J.-H. Kim, S.-H. Lee, J.-H. Lee, and S.-W. Lee, "Fre-gan: Adversarial
+         [71] Y. Zhu, D. Su, L. He, L. Xu, and D. Yu, "Generative pre-trained     frequency-consistent audio synthesis," in Proceedings of Interspeech,
+speech language model with efficient hierarchical transformer," in                2021, pp. 2197-2201.
+Proceedings of the 62nd Annual Meeting of the Association for                        [92] D. Griffin and J. Lim, "Signal estimation from modified short-time
+Computational Linguistics (Volume 1: Long Papers), L.-W. Ku,                      fourier transform," IEEE Transactions on acoustics, speech, and signal
+A. Martins, and V. Srikumar, Eds.   Bangkok, Thailand: Association                processing, vol. 32, no. 2, pp. 236-243, 1984.
+for Computational Linguistics, Aug. 2024, pp. 1764-1775. [Online].                        [93] M. Morise, F. Yokomori, and K. Ozawa, "World: a vocoder-based
+Available: https://aclanthology.org/2024.acl-long.97                              high-quality speech synthesis system for real-time applications," IEICE
+   [72] C. Du, Y. Guo, F. Shen, Z. Liu, Z. Liang, X. Chen, S. Wang, H. Zhang,     TRANSACTIONS on Information and Systems, vol. 99, no. 7, pp. 1877-
+and K. Yu, "Unicats: A unified context-aware text-to-speech framework             1884, 2016.
+with contextual vq-diffusion and vocoding," in Proceedings of the AAAI                    [94] W.-C. Huang, Y.-C. Wu, H.-T. Hwang, P. L. Tobing, T. Hayashi,
+Conference on Artificial Intelligence, vol. 38, no. 16, 2024, pp. 17 924-         K. Kobayashi, T. Toda, Y. Tsao, and H.-M. Wang, "Refined wavenet
+17 932.                                                                           vocoder for variational autoencoder based voice conversion," in 2019
+      [73] S. Maiti, Y. Peng, S. Choi, J.-w. Jung, X. Chang, and S. Watanabe,     27th European Signal Processing Conference (EUSIPCO).                IEEE,
+"Voxtlm: Unified decoder-only models for consolidating speech recog-              2019, pp. 1-5.
+nition, synthesis and speech, text continuation tasks," in ICASSP 2024-             [95] Z. Kong, W. Ping, J. Huang, K. Zhao, and B. Catanzaro, "Diffwave: A
+2024 IEEE International Conference on Acoustics, Speech and Signal                versatile diffusion model for audio synthesis," in Proceedings of the 9th
+Processing (ICASSP).  IEEE, 2024, pp. 13 326-13 330.                              International Conference on Learning Representations (ICLR), 2021.
+   [74] M. Le, A. Vyas, B. Shi, B. Karrer, L. Sari, R. Moritz, M. Williamson,     [Online]. Available: https://openreview.net/forum?id=a-xFK8Ymz5J
+V. Manohar, Y. Adi, and J. Mahadeokar, "Voicebox: Text-guided                                   [96] N. Chen, Y. Zhang, H. Zen, R. J. Weiss, M. Norouzi, and
+multilingual universal speech generation at scale," Advances in neural            W. Chan, "Wavegrad: Estimating gradients for waveform generation,"
+information processing systems, vol. 36, 2024.                                    in Proceedings of the 9th International Conference on Learning
+         [75] T. SpeechTeam, "FunAudioLLM: Voice Understanding and Generation     Representations (ICLR), 2021. [Online]. Available: https://openreview.
+Foundation Models for Natural Interaction Between Humans and                      net/forum?id=NsMLjcFaO8O
+LLMs," arXiv preprint arXiv:2407.04051, 2024.  H. Kim, C. Shin, X. Tan, C. Liu,                                                                     Q. Meng,  [97] S.-g.  Lee,
+               [76] Z. Gao, S. Zhang, M. Lei, and I. McLoughlin, "San-m: Mem-     T. Qin, W. Chen, S. Yoon, and T.-Y. Liu, "Priorgrad: Improving
+ory equipped self-attention for end-to-end speech recognition," arXiv             conditional denoising diffusion models with data-dependent adaptive
+preprint arXiv:2006.01713, 2020.                                                  prior," in Proceedings of the 10th International Conference on
+    [77] Y. A. Li, C. Han, X. Jiang, and N. Mesgarani, "Hiftnet: A fast high-     Learning Representations (ICLR), 2022. [Online]. Available: https:
+quality neural vocoder with harmonic-plus-noise filter and inverse short          //openreview.net/forum?id= BNiN4IjC5
+time fourier transform," arXiv preprint arXiv:2309.09493, 2023.                        [98] V. Panayotov, G. Chen, D. Povey, and S. Khudanpur, "Librispeech:
+        [78] J. Bai, S. Bai, Y. Chu, Z. Cui, K. Dang, X. Deng, Y. Fan, W. Ge,     an asr corpus based on public domain audio books," in 2015 IEEE
+Y. Han, F. Huang et al., "Qwen technical report," arXiv preprint                  international conference on acoustics, speech and signal processing
+arXiv:2309.16609, 2023.                                                           (ICASSP).  IEEE, 2015, pp. 5206-5210.
+       [79] R. Anil, A. M. Dai, O. Firat, M. Johnson, D. Lepikhin, A. Passos,         [99] V. Pratap, Q. Xu, A. Sriram, G. Synnaeve, and R. Collobert, "Mls:
+S. Shakeri, E. Taropa, P. Bailey, Z. Chen et al., "Palm 2 technical               A large-scale multilingual dataset for speech research," in Interspeech
+report," arXiv preprint arXiv:2305.10403, 2023.                                   2020, 2020, pp. 2757-2761.
+           [80] Y. Koizumi, K. Yatabe, H. Zen, and M. Bacchiani, "Wavefit: An      [100] J. Kahn, M. Riviere, W. Zheng, E. Kharitonov, Q. Xu, P.-E. Mazare,´
+iterative and non-autoregressive neural vocoder based on fixed-point              J. Karadayi, V. Liptchinsky, R. Collobert, C. Fuegen et al., "Libri-light:
+iteration," in 2022 IEEE Spoken Language Technology Workshop (SLT).               A benchmark for asr with limited or no supervision," in ICASSP 2020-
+IEEE, 2023, pp. 884-891.                                                          2020 IEEE International Conference on Acoustics, Speech and Signal
+         [81] Z. Borsos, R. Marinier, D. Vincent, E. Kharitonov, O. Pietquin,     Processing (ICASSP).      IEEE, 2020, pp. 7669-7673.
+M. Sharifi, D. Roblek, O. Teboul, D. Grangier, M. Tagliasacchi                       [101] D. Galvez, G. Diamos, J. Ciro, J. F. Ceron, K. Achorn, A. Gopi, ´
+et al., "Audiolm: a language modeling approach to audio generation,"              D. Kanter, M. Lam, M. Mazumder, and V. J. Reddi, "The people's
+IEEE/ACM transactions on audio, speech, and language processing,                  speech: A large-scale diverse english speech recognition dataset for
+vol. 31, pp. 2523-2533, 2023.                                                     commercial usage," in Proceedings of the 35th Annual Conference on
+  [82] D. Yang, J. Tian, X. Tan, R. Huang, S. Liu, X. Chang, J. Shi, S. Zhao,     Neural Information Processing Systems (NeurIPS), 2021.
+J. Bian, and X. Wu, "Uniaudio: An audio foundation model toward                            [102] C. Wang, M. Riviere, A. Lee, A. Wu, C. Talnikar, D. Haziza,
+universal audio generation," arXiv preprint arXiv:2310.00704, 2023.               M. Williamson, J. Pino, and E. Dupoux, "VoxPopuli: A large-
+   [83] D. Yang, S. Liu, R. Huang, J. Tian, C. Weng, and Y. Zou, "Hifi-codec:     scale multilingual speech corpus for representation learning, semi-
+Group-residual vector quantization for high fidelity audio codec," arXiv          supervised learning and interpretation," in Proceedings of the 59th
+preprint arXiv:2305.02765, 2023.                                                  Annual Meeting of the Association for Computational Linguistics
+             [84] R. Kumar, P. Seetharaman, A. Luebs, I. Kumar, and K. Kumar,     and the 11th International Joint Conference on Natural Language
+"High-fidelity audio compression with improved RVQGAN," in Thirty-                Processing (Volume 1: Long Papers), C. Zong, F. Xia, W. Li,
+seventh Conference on Neural Information Processing Systems, 2023.                and R. Navigli, Eds.      Online:     Association for Computational
+[Online]. Available: https://openreview.net/forum?id=qjnl1QUnFA                   Linguistics, Aug. 2021, pp. 993-1003. [Online]. Available: https:
+    [85] R. Algayres, A. Nabli, B. Sagot, and E. Dupoux, "Speech sequence em-     //aclanthology.org/2021.acl-long.80
+beddings using nearest neighbors contrastive learning," in Interspeech                  [103] G. Chen, S. Chai, G. Wang, J. Du, W.-Q. Zhang, C. Weng, D. Su,
+2022, 2022, pp. 2123-2127.                                                        D. Povey, J. Trmal, J. Zhang et al., "Gigaspeech: An evolving,
+ [86] G. Team, R. Anil, S. Borgeaud, Y. Wu, J.-B. Alayrac, J. Yu, R. Soricut,     multi-domain asr corpus with 10,000 hours of transcribed audio," in
+J. Schalkwyk, A. M. Dai, A. Hauth et al., "Gemini: a family of highly             Proceedings of the Annual Conference of the International Speech
+capable multimodal models," arXiv preprint arXiv:2312.11805, 2023.                Communication Association, INTERSPEECH, vol. 6.              International
+   [87] P. Anastassiou, J. Chen, J. Chen, Y. Chen, Z. Chen, Z. Chen, J. Cong,     Speech Communication Association, 2021, pp. 4376-4380.
+L. Deng, C. Ding, L. Gao et al., "Seed-tts: A family of high-quality                [104] R. Ardila, M. Branson, K. Davis, M. Kohler, J. Meyer, M. Henretty,
+versatile speech generation models," arXiv preprint arXiv:2406.02430,             R. Morais, L. Saunders, F. Tyers, and G. Weber, "Common
+2024.                                                                             voice: A massively-multilingual speech corpus," in Proceedings
+    [88] J. Betker, "Better speech synthesis through scaling," arXiv preprint     of the Twelfth Language Resources and Evaluation Conference,
+arXiv:2305.07243, 2023.                                                           N. Calzolari, F. Bechet, P. Blache, K. Choukri, C. Cieri, T. Declerck,´
+  [89] K. Kumar, R. Kumar, T. De Boissiere, L. Gestin, W. Z. Teoh, J. Sotelo,     S. Goggi, H. Isahara, B. Maegaard, J. Mariani, H. Mazo, A. Moreno,
+A. De Brebisson, Y. Bengio, and A. C. Courville, "Melgan: Generative              J. Odijk, and S. Piperidis, Eds. Marseille, France: European Language
+adversarial networks for conditional waveform synthesis," Advances in             Resources Association, May 2020, pp. 4218-4222. [Online]. Available:
+neural information processing systems, vol. 32, 2019.                             https://aclanthology.org/2020.lrec-1.520
+   [90] S.-g. Lee, W. Ping, B. Ginsburg, B. Catanzaro, and S. Yoon, "Bigvgan:     [105] C. Veaux, J. Yamagishi, and S. King, "The voice bank corpus: Design,
+A universal neural vocoder with large-scale training," in Proceedings             collection and data analysis of a large regional accent speech database,"
+of the 11th International Conference on Learning Representations                  in 2013 international conference oriental COCOSDA held jointly with
+
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021    19
+
+
+
+2013 conference on Asian spoken language research and evaluation                 [Online]. Available: https://www.sciencedirect.com/science/article/pii/
+(O-COCOSDA/CASLRE). IEEE, 2013, pp. 1-4.                                         S187705091630045X
+      [106] B. Zhang, H. Lv, P. Guo, Q. Shao, C. Yang, L. Xie, X. Xu, H. Bu,        [125] E. Dunbar, R. Algayres, J. Karadayi, M. Bernard, J. Benjumea, X.-
+X. Chen, C. Zeng et al., "Wenetspeech: A 10000+ hours multi-domain               N. Cao, L. Miskic, C. Dugrain, L. Ondel, A. W. Black, L. Besacier,
+mandarin corpus for speech recognition," in ICASSP 2022-2022 IEEE                S. Sakti, and E. Dupoux, "The zero resource speech challenge 2019:
+International Conference on Acoustics, Speech and Signal Processing              Tts without t," in Interspeech 2019, 2019, pp. 1088-1092.
+(ICASSP).  IEEE, 2022, pp. 6182-6186.                                           [126] T. A. Nguyen, M. de Seyssel, P. Roze, M. Rivi ´ere, E. Kharitonov,`
+[107] H. Zen, V. Dang, R. Clark, Y. Zhang, R. J. Weiss, Y. Jia, Z. Chen, and     A. Baevski, E. Dunbar, and E. Dupoux, "The zero resource speech
+Y. Wu, "Libritts: A corpus derived from librispeech for text-to-speech,"         benchmark 2021: Metrics and baselines for unsupervised spoken lan-
+in Proc. Interspeech 2019, 2019, pp. 1526-1530. [Online]. Available:             guage modeling," in Proceedings of the Workshop on Self-Supervised
+http://www.openslr.org/60/                                                       Learning for Speech and Audio Processing.  NeurIPS, 2020.
+     [108] C. Wang, A. Wu, and J. Pino, "Covost 2 and massively multilingual         [127] S. Sakshi, U. Tyagi, S. Kumar, A. Seth, R. Selvakumar, O. Nieto,
+speech-to-text translation," in Proc. Interspeech 2021, 2021, pp. 2247-          R. Duraiswami, S. Ghosh, and D. Manocha, "Mmau: A massive multi-
+2251.                                                                            task audio understanding and reasoning benchmark," arXiv preprint
+              [109] Y. Jia, M. Tadmor Ramanovich, Q. Wang, and H. Zen, "CVSS     arXiv:2410.19168, 2024.
+corpus and massively multilingual speech-to-speech translation," in                 [128] B. Wang, X. Zou, G. Lin, S. Sun, Z. Liu, W. Zhang, Z. Liu, A. Aw,
+Proceedings of the Thirteenth Language Resources and Evaluation                  and N. F. Chen, "Audiobench: A universal benchmark for audio large
+Conference, N. Calzolari, F. Bechet, P. Blache, K. Choukri, C. Cieri,´           language models," arXiv preprint arXiv:2406.16020, 2024.
+T. Declerck, S. Goggi, H. Isahara, B. Maegaard, J. Mariani, H. Mazo,                      [129] Q. Yang, J. Xu, W. Liu, Y. Chu, Z. Jiang, X. Zhou, Y. Leng,
+J. Odijk, and S. Piperidis, Eds. Marseille, France: European Language            Y. Lv, Z. Zhao, C. Zhou et al., "Air-bench: Benchmarking large
+Resources Association, Jun. 2022, pp. 6691-6703. [Online]. Available:            audio-language models via generative comprehension," arXiv preprint
+https://aclanthology.org/2022.lrec-1.720                                         arXiv:2402.07729, 2024.
+   [110] A. Nagrani, J. S. Chung, and A. Zisserman, "Voxceleb: a large-scale              [130] J. Ao, Y. Wang, X. Tian, D. Chen, J. Zhang, L. Lu, Y. Wang,
+speaker identification dataset," arXiv preprint arXiv:1706.08612, 2017.          H. Li, and Z. Wu, "Sd-eval: A benchmark dataset for spoken dialogue
+   [111] J. S. Chung, A. Nagrani, and A. Zisserman, "Voxceleb2: Deep speaker     understanding beyond words," arXiv preprint arXiv:2406.13340, 2024.
+recognition," in Interspeech 2018, 2018, pp. 1086-1090.                          [131] C.-y. Huang, W.-C. Chen, S.-w. Yang, A. T. Liu, C.-A. Li, Y.-X. Lin,
+    [112] A. Clifton, A. Pappu, S. Reddy, Y. Yu, J. Karlgren, B. Carterette,     W.-C. Tseng, A. Diwan, Y.-J. Shih, J. Shi et al., "Dynamic-superb
+and R. Jones, "The spotify podcast dataset,"                  arXiv preprint     phase-2: A collaboratively expanding benchmark for measuring the
+arXiv:2004.04270, 2020.                                                          capabilities of spoken language models with 180 tasks," arXiv preprint
+    [113] C. Cieri, D. Miller, and K. Walker, "The fisher corpus: A resource     arXiv:2411.05361, 2024.
+for the next generations of speech-to-text." in LREC, vol. 4, 2004, pp.          [132] G. Maimon, A. Roth, and Y. Adi, "A suite for acoustic language model
+69-71.                                                                           evaluation," arXiv preprint arXiv:2409.07437, 2024.
+[114] T. A. Nguyen, W.-N. Hsu, A. d'Avirro, B. Shi, I. Gat, M. Fazel-Zarani,    [133] Y. Chen, X. Yue, C. Zhang, X. Gao, R. T. Tan, and H. Li, "Voicebench:
+T. Remez, J. Copet, G. Synnaeve, M. Hassid et al., "Expresso: A                  Benchmarking llm-based voice assistants," CoRR, vol. abs/2410.17196,
+benchmark and analysis of discrete expressive speech resynthesis," in            2024. [Online]. Available: https://doi.org/10.48550/arXiv.2410.17196
+Proceedings of INTERSPEECH 2023, 2023, pp. 4823-4827.                               [134] W. Cui, X. Jiao, Z. Meng, and I. King, "Voxeval: Benchmarking the
+             [115] P.-A. Duquenne, K. Heffernan, A. Mourachko, B. Sagot, and     knowledge understanding capabilities of end-to-end spoken language
+H. Schwenk, "Sonar expressive: Zero-shot expressive speech-to-speech             models," arXiv preprint arXiv:2501.04962, 2025.
+translation," Meta AI Research, 2023.                                               [135] G. Mittag, B. Naderi, A. Chehadi, and S. Moller, "Nisqa: A deep ¨
+  [116] A. Chowdhery, S. Narang, J. Devlin, M. Bosma, G. Mishra, A. Roberts,     cnn-self-attention model for multidimensional speech quality prediction
+P. Barham, H. W. Chung, C. Sutton, and S. Gehrmann, "Palm: Scaling               with crowdsourced datasets," in Proceedings of Interspeech 2021, 2021,
+language modeling with pathways," Journal of Machine Learning                    pp. 2127-2131.
+Research, vol. 24, no. 240, pp. 1-113, 2023.                                                   "Gpt-4o     system                                        on  [136] OpenAI,  card,"  2024,  online;  Accessed
+     [117] R. Anil, A. M. Dai, O. Firat, M. Johnson, D. Lepikhin, A. Passos,     6-September-2024.         [Online].  Available:  https://openai.com/index/
+S. Shakeri, E. Taropa, P. Bailey, Z. Chen et al., "Palm 2 technical              gpt-4o-system-card/
+report," arXiv preprint arXiv:2305.10403, 2023.
+[118] J. Schulman, F. Wolski, P. Dhariwal, A. Radford, and O. Klimov, "Prox-
+imal policy optimization algorithms," arXiv preprint arXiv:1707.06347,
+2017.
+     [119] R. Rafailov, A. Sharma, E. Mitchell, C. D. Manning, S. Ermon, and
+C. Finn, "Direct preference optimization: Your language model is se-
+cretly a reward model," in Advances in Neural Information Processing
+Systems 36: Annual Conference on Neural Information Processing
+Systems 2023, NeurIPS 2023, New Orleans, LA, USA, December 10
+- 16, 2023, A. Oh, T. Naumann, A. Globerson, K. Saenko, M. Hardt,
+and S. Levine, Eds., 2023.
+         [120] G.-T. Lin, P. G. Shivakumar, A. Gourav, Y. Gu, A. Gandhe, H.-
+y. Lee, and I. Bulyko, "Align-slm: Textless spoken language mod-
+els with reinforcement learning from ai feedback," arXiv preprint
+arXiv:2411.01834, 2024.
+       [121] D. Zhang, Z. Li, S. Li, X. Zhang, P. Wang, Y. Zhou, and X. Qiu,
+"Speechalign: Aligning speech generation to human preferences," in
+Proceedings of the 38th Conference on Neural Information Process-
+ing Systems (NeurIPS 2024), December 2024, poster presentation on
+December 11, 2024, from 11 a.m. to 2 p.m. PST.
+     [122] OpenBMB, "Minicpm-o 2.6: A gpt-4.0 level mllm for vision, speech,
+and multimodal live streaming on your phone," https://huggingface.co/
+openbmb/MiniCPM-o-2 6-int4, 2024.
+ [123] S.-w. Yang, P.-H. Chi, Y.-S. Chuang, C.-I. J. Lai, K. Lakhotia, Y. Y.
+Lin, A. T. Liu, J. Shi, X. Chang, G.-T. Lin et al., "Superb: Speech
+processing universal performance benchmark," in Proc. Interspeech,
+2021, pp. 1194-1198.
+              [124] M. Versteegh, X. Anguera, A. Jansen, and E. Dupoux, "The
+zero resource speech challenge 2015: Proposed approaches and
+results," Procedia Computer Science, vol. 81, pp. 67-72, 2016,
+sLTU-2016 5th Workshop on Spoken Language Technologies for
+Under-resourced languages 09-12 May 2016 Yogyakarta, Indonesia.

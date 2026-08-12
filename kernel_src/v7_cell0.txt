@@ -1,0 +1,82 @@
+# -*- coding: utf-8 -*-
+# ============================================================================
+# CELLA 0 - IMPORTS & SETUP (commit epoca 2)
+# Batch session (Save & Run All / commit): niente idle timeout, 9h.
+# Gestisce il dataset input sia come cartelle sia come ZIP (dir-mode zip).
+# ============================================================================
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # Force single-GPU su Kaggle
+import sys
+import json
+import time
+import gc
+import shutil
+import zipfile
+
+# Il dataset input puo' montare in piu' path: provali tutti
+_CANDIDATES = [
+    "/kaggle/input/andrlab/gemma-4-omni-module",
+    "/kaggle/input/datasets/andrlab/gemma-4-omni-module",
+    "/kaggle/input/andrlab/gemma4-ep2-data",
+    "/kaggle/input/datasets/andrlab/gemma4-ep2-data",
+]
+_INPUT = None
+for c in _CANDIDATES:
+    if os.path.isdir(c):
+        _INPUT = c
+        break
+print("Input dataset files:", os.listdir(_INPUT) if _INPUT else "MANCANTE")
+print("_INPUT =", _INPUT)
+sys.stdout.flush()
+
+def _extract_zip(zpath, dst):
+    with zipfile.ZipFile(zpath) as z:
+        # estrai mantenendo le sottocartelle come nel zip
+        z.extractall(dst)
+
+def _copy_tree(src, dst):
+    for item in os.listdir(src):
+        s = os.path.join(src, item)
+        d = os.path.join(dst, item)
+        if os.path.islink(s):
+            continue
+        if os.path.isdir(s):
+            os.makedirs(d, exist_ok=True)
+            _copy_tree(s, d)
+        else:
+            os.makedirs(os.path.dirname(d), exist_ok=True)
+            if not os.path.exists(d):
+                shutil.copy2(s, d)
+
+if _INPUT:
+    # moduli python: copia diretta
+    for f in ("kaggle_pipeline.py", "code2wav_decoder.py", "extract_qwen_subtalker.py",
+              "qwen_subtalker.py", "_epoca2.py"):
+        s = os.path.join(_INPUT, f)
+        if os.path.isfile(s):
+            d = os.path.join("/kaggle/working", f)
+            if not os.path.exists(d):
+                shutil.copy2(s, d)
+    # dati: cartelle o zip
+    for sub in ("data", "checkpoints", "code2wav_weights", "qwen_subtalker"):
+        s = os.path.join(_INPUT, sub)
+        z = os.path.join(_INPUT, sub + ".zip")
+        if os.path.isdir(s):
+            _copy_tree(s, sub)
+        elif os.path.isfile(z):
+            os.makedirs(sub, exist_ok=True)
+            _extract_zip(z, sub)
+            print(f"zip estratto: {sub}.zip -> {sub}/")
+    # eventuale file_cleanup
+    for f in os.listdir(_INPUT):
+        if f.endswith(('.dat', '.log')):
+            s = os.path.join(_INPUT, f)
+            if not os.path.exists(os.path.join("/kaggle/working", f)):
+                shutil.copy2(s, "/kaggle/working")
+
+sys.path.insert(0, "/kaggle/working")
+# verifica parquet
+import glob
+par = glob.glob("data/train_tokens_50.0h_2500s_mel.parquet")
+print("parquet 50h presente:", bool(par), par[:2])
+sys.stdout.flush()
