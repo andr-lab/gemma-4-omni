@@ -378,7 +378,7 @@ try:
         import copy as _copy
         _cp_cfg = _copy.deepcopy(TCFG.code_predictor_config)
         _cp_cfg._attn_implementation = "eager"
-        cp_eager = _M.Qwen3TTSTalkerCodePredictor(_cp_cfg, TCFG).to(device="cuda", dtype=torch.bfloat16)
+        cp_eager = _M.Qwen3TTSTalkerCodePredictorModelForConditionalGeneration(_cp_cfg, TCFG).to(device="cuda", dtype=torch.bfloat16)
         _miss, _unexp = cp_eager.load_state_dict(talker.code_predictor.state_dict(), strict=False)
         if _miss:
             raise RuntimeError(f"code_predictor eager: pesi mancanti {_miss[:5]}")
