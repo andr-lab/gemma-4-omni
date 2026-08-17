@@ -19,6 +19,7 @@ try:
 
     EXTRACT_N = int(os.environ.get("FITEX_N", "1000"))
     SANITY = os.environ.get("FITEX_SANITY", "1") == "1"
+    FIDELITY = os.environ.get("FIDELITY", "0") == "1" or os.environ.get("FIDELITY_PROBE", "0") == "1"
     START_IDX = int(os.environ.get("FITEX_START", "0"))
     SMOKE_B = os.environ.get("SMOKE_B", "0") == "1"
     SMOKE_B_STEPS = int(os.environ.get("SMOKE_B_STEPS", "300"))
@@ -282,7 +283,7 @@ try:
         n_real = int((item["audio_targets"][:, 0] != PAD).sum().item())
         if n_real <= 0:
             return None
-        if SANITY:
+        if SANITY or FIDELITY:
             active = _mel_active_mask(ds, idx, n_real)
             if int(active.sum()) == 0:
                 return None
@@ -295,9 +296,252 @@ try:
         if w is None:
             continue
         train_wins.append(w)
-        if len(train_wins) >= EXTRACT_N:
+        if len(train_wins) >= (1 if FIDELITY else EXTRACT_N):
             break
-    print(f"raccolte {len(train_wins)} finestre train (EXTRACT_N={EXTRACT_N})", flush=True)
+    print(f"raccolte {len(train_wins)} finestre train (EXTRACT_N={EXTRACT_N}, FIDELITY={FIDELITY})", flush=True)
+
+    # ---- SEZIONE OPZIONALE: FIDELITY_PROBE (Confronto rigoroso Teacher CodePredictor vs QwenSubTalker) ----
+    if FIDELITY and train_wins:
+        print("\n" + "=" * 78, flush=True)
+        print("=== FIDELITY PROBE DECISIVO: CONFRONTO TEACHER CODE_PREDICTOR vs SUB-TALKER ===", flush=True)
+        print("=" * 78, flush=True)
+
+        sub_candidates = [
+            "/kaggle/input/datasets/andrlab/gemma-4-omni-module/qwen_subtalker",
+            "/kaggle/input/andrlab/gemma-4-omni-module/qwen_subtalker",
+            "qwen_subtalker",
+            "/kaggle/working/qwen_subtalker",
+        ]
+        sub_path = next((p for p in sub_candidates if os.path.isdir(p)), sub_candidates[0])
+        sub_bf16, sub_cfg = QS.load_qwen_subtalker(sub_path, device="cuda", dtype=torch.bfloat16)
+        sub_bf16.eval()
+        print(f"[Probe] Sub-talker caricato in bf16 da: {sub_path}", flush=True)
+
+        # 2. Confronto Configurazione
+        tch_cp_cfg = getattr(TCFG, "code_predictor_config", None)
+        if tch_cp_cfg is None:
+            tch_cp_cfg = getattr(CFG, "code_predictor_config", None)
+
+        keys_to_compare = [
+            ("hidden_size", 1024),
+            ("num_hidden_layers", 5),
+            ("num_attention_heads", 16),
+            ("num_key_value_heads", 8),
+            ("head_dim", 128),
+            ("intermediate_size", 3072),
+            ("rms_norm_eps", 1e-6),
+            ("vocab_size", 2048),
+            ("num_code_groups", 16),
+            ("max_position_embeddings", 65536),
+            ("rope_theta", 10000.0),
+            ("cb0_vocab_size", 3072),
+        ]
+
+        config_report = {}
+        mismatches_cfg = []
+        print("\n--- 1. CONFRONTO CONFIGURAZIONE ---", flush=True)
+        for k, default_val in keys_to_compare:
+            tch_val = getattr(tch_cp_cfg, k, None) if tch_cp_cfg is not None else None
+            if tch_val is None:
+                if k == "cb0_vocab_size":
+                    tch_val = getattr(TCFG, "vocab_size", 3072)
+                elif k == "talker_hidden_size":
+                    tch_val = getattr(TCFG, "hidden_size", 2048)
+                else:
+                    tch_val = getattr(TCFG, k, default_val)
+            sub_val = sub_cfg.get(k, None)
+            match = (tch_val == sub_val) or (
+                isinstance(tch_val, (int, float)) and isinstance(sub_val, (int, float)) and abs(float(tch_val) - float(sub_val)) < 1e-7
+            )
+            config_report[k] = {"teacher": tch_val, "sub": sub_val, "match": bool(match)}
+            status = "OK" if match else "MISMATCH"
+            print(f"  [{status:8s}] {k:24s}: teacher={tch_val} | sub={sub_val}", flush=True)
+            if not match:
+                mismatches_cfg.append(f"{k}: teacher={tch_val} != sub={sub_val}")
+
+        # 3. Mappatura e Confronto Pesi per Modulo (89 tensori)
+        print("\n--- 2. CONFRONTO PESI PER MODULO (89 TENSIORI ATTESI) ---", flush=True)
+        mapping = {
+            "cb0_embedding.weight": "talker.model.codec_embedding.weight",
+            "small_to_mtp_projection.weight": "talker.code_predictor.small_to_mtp_projection.weight",
+            "small_to_mtp_projection.bias": "talker.code_predictor.small_to_mtp_projection.bias",
+            "norm.weight": "talker.code_predictor.model.norm.weight",
+        }
+        for i in range(15):
+            mapping[f"group_embeddings.{i}.weight"] = f"talker.code_predictor.model.codec_embedding.{i}.weight"
+            mapping[f"lm_head.{i}.weight"] = f"talker.code_predictor.lm_head.{i}.weight"
+        for l in range(5):
+            mapping[f"layers.{l}.input_layernorm.weight"] = f"talker.code_predictor.model.layers.{l}.input_layernorm.weight"
+            mapping[f"layers.{l}.self_attn.q_proj.weight"] = f"talker.code_predictor.model.layers.{l}.self_attn.q_proj.weight"
+            mapping[f"layers.{l}.self_attn.k_proj.weight"] = f"talker.code_predictor.model.layers.{l}.self_attn.k_proj.weight"
+            mapping[f"layers.{l}.self_attn.v_proj.weight"] = f"talker.code_predictor.model.layers.{l}.self_attn.v_proj.weight"
+            mapping[f"layers.{l}.self_attn.o_proj.weight"] = f"talker.code_predictor.model.layers.{l}.self_attn.o_proj.weight"
+            mapping[f"layers.{l}.self_attn.q_norm.weight"] = f"talker.code_predictor.model.layers.{l}.self_attn.q_norm.weight"
+            mapping[f"layers.{l}.self_attn.k_norm.weight"] = f"talker.code_predictor.model.layers.{l}.self_attn.k_norm.weight"
+            mapping[f"layers.{l}.post_attention_layernorm.weight"] = f"talker.code_predictor.model.layers.{l}.post_attention_layernorm.weight"
+            mapping[f"layers.{l}.mlp.gate_proj.weight"] = f"talker.code_predictor.model.layers.{l}.mlp.gate_proj.weight"
+            mapping[f"layers.{l}.mlp.up_proj.weight"] = f"talker.code_predictor.model.layers.{l}.mlp.up_proj.weight"
+            mapping[f"layers.{l}.mlp.down_proj.weight"] = f"talker.code_predictor.model.layers.{l}.mlp.down_proj.weight"
+
+        tch_sd = teacher.state_dict()
+        sub_sd = sub_bf16.state_dict()
+
+        weight_diffs = {}
+        max_w_diff_global = 0.0
+        total_params_compared = 0
+        weights_mismatch = []
+
+        module_groups = {
+            "cb0_embedding (1x)": ["cb0_embedding.weight"],
+            "group_embeddings (15x)": [f"group_embeddings.{i}.weight" for i in range(15)],
+            "small_to_mtp_projection (2x)": ["small_to_mtp_projection.weight", "small_to_mtp_projection.bias"],
+            "layers (5 x 11 = 55x)": [k for k in mapping if k.startswith("layers.")],
+            "norm (1x)": ["norm.weight"],
+            "lm_head (15x)": [f"lm_head.{i}.weight" for i in range(15)],
+        }
+
+        for group_name, keys in module_groups.items():
+            group_max_diff = 0.0
+            for sub_k in keys:
+                tch_k = mapping[sub_k]
+                if sub_k not in sub_sd:
+                    weights_mismatch.append(f"CHIAVE MANCANTE in SUB: {sub_k}")
+                    continue
+                if tch_k not in tch_sd:
+                    weights_mismatch.append(f"CHIAVE MANCANTE in TEACHER: {tch_k}")
+                    continue
+                w_sub = sub_sd[sub_k]
+                w_tch = tch_sd[tch_k]
+                if tuple(w_sub.shape) != tuple(w_tch.shape):
+                    weights_mismatch.append(f"SHAPE MISMATCH per {sub_k}: sub={tuple(w_sub.shape)} vs tch={tuple(w_tch.shape)}")
+                    continue
+                diff = (w_sub.to(torch.float32) - w_tch.to(torch.float32)).abs().max().item()
+                weight_diffs[sub_k] = {"teacher_key": tch_k, "shape": list(w_sub.shape), "max_diff": diff}
+                if diff > group_max_diff:
+                    group_max_diff = diff
+                if diff > max_w_diff_global:
+                    max_w_diff_global = diff
+                if diff > 1e-4:
+                    weights_mismatch.append(f"{sub_k} <-> {tch_k}: max_diff={diff:.6e} (shape {list(w_sub.shape)})")
+                total_params_compared += w_sub.numel()
+
+            status_grp = "IDENTICI (max diff=0)" if group_max_diff < 1e-6 else f"DIFF={group_max_diff:.2e}"
+            print(f"  Modulo: {group_name:28s} | {len(keys):2d} tensori | max |w_sub - w_tch| = {group_max_diff:.6e} -> {status_grp}", flush=True)
+
+        print(f"\n  TOTALE TENSIORI CONFRONTATI: {len(mapping)}/89 ({total_params_compared/1e6:.2f}M parametri)", flush=True)
+        print(f"  MAX WEIGHT DIFF GLOBALE    : {max_w_diff_global:.6e} (soglia identita: <1e-4)", flush=True)
+
+        # 4. Confronto Forward Pass in BF16
+        print("\n--- 3. CONFRONTO FORWARD PASS (STESSO DTYPE BF16, STESSO INPUT) ---", flush=True)
+        w0 = train_wins[0]
+        idx0 = w0["idx"]
+        n_real0 = w0["n_real"]
+        item0 = ds_train[idx0]
+        text0 = text_by_window[idx0] if text_by_window is not None else ""
+        gt0 = item0["audio_targets"][:n_real0].to("cuda").long()  # (T_audio, 16)
+        act0 = torch.from_numpy(w0["active"]).to("cuda") if "active" in w0 else torch.ones(n_real0, dtype=torch.bool, device="cuda")
+
+        ht_corr_np = extract_ht(item0, n_real0, text0, return_shifted=False)
+        ht_corr_bf16 = torch.from_numpy(ht_corr_np).to("cuda", dtype=torch.bfloat16)
+
+        with torch.inference_mode():
+            # Teacher forward
+            logits_tch, _ = talker.forward_sub_talker_finetune(gt0, ht_corr_bf16)
+            # Sub-talker forward (bf16)
+            logits_sub = sub_bf16.forward_sub_talker_finetune(ht_corr_bf16.unsqueeze(0), gt0.unsqueeze(0)).squeeze(0)
+
+            # Delta logits
+            diff_logits = (logits_tch.float() - logits_sub.float()).abs()
+            max_logit_diff = float(diff_logits.max().item())
+            mean_logit_diff = float(diff_logits.mean().item())
+
+            max_coord = torch.nonzero(diff_logits == diff_logits.max())[0].tolist()
+            max_frame, max_channel, max_vocab = max_coord[0], max_coord[1], max_coord[2]
+
+            # Cross entropy
+            per_tch = F.cross_entropy(
+                logits_tch.reshape(-1, 2048), gt0[:, 1:].reshape(-1),
+                reduction="none", ignore_index=-100,
+            ).reshape(n_real0, 15)
+            ce_tch_act = float(per_tch[act0].mean().item()) if int(act0.sum()) else float(per_tch.mean().item())
+            ce_tch_all = float(per_tch.mean().item())
+
+            per_sub = F.cross_entropy(
+                logits_sub.reshape(-1, sub_bf16.cfg["vocab_size"]), gt0[:, 1:].reshape(-1),
+                reduction="none", ignore_index=-100,
+            ).reshape(n_real0, 15)
+            ce_sub_act = float(per_sub[act0].mean().item()) if int(act0.sum()) else float(per_sub.mean().item())
+            ce_sub_all = float(per_sub.mean().item())
+
+        print(f"  Logits Teacher shape: {list(logits_tch.shape)} (dtype: {logits_tch.dtype})", flush=True)
+        print(f"  Logits Sub     shape: {list(logits_sub.shape)} (dtype: {logits_sub.dtype})", flush=True)
+        print(f"  MAX  |Delta logits| : {max_logit_diff:.6f}", flush=True)
+        print(f"  MEAN |Delta logits| : {mean_logit_diff:.6f}", flush=True)
+        print(f"  Max diff coordinate : Frame {max_frame}/{n_real0}, Canale/Gruppo {max_channel}/15 (cb{max_channel+1}), Vocab Token {max_vocab}/2048", flush=True)
+        print(f"  CE Teacher (active) : {ce_tch_act:.4f} nats | (all): {ce_tch_all:.4f} nats", flush=True)
+        print(f"  CE Sub     (active) : {ce_sub_act:.4f} nats | (all): {ce_sub_all:.4f} nats", flush=True)
+        print(f"  Gap CE (Sub - Tch)  : {ce_sub_act - ce_tch_act:+.4f} nats", flush=True)
+
+        # 5. Verdetto e Gate Quantitativo
+        print("\n" + "=" * 78, flush=True)
+        print("=== 4. VERDETTO & DECISION GATE ===", flush=True)
+        print("=" * 78, flush=True)
+
+        gate_weights_identical = (max_w_diff_global < 1e-4 and len(weights_mismatch) == 0)
+        gate_forward_identical = (max_logit_diff < 0.05)
+
+        if gate_weights_identical and gate_forward_identical:
+            verdict_code = "SUB_EQUALS_TEACHER"
+            verdict_msg = (
+                "PROMOSSO AL 100%: SUB-TALKER == TEACHER CODE_PREDICTOR (Pesi e Forward identici in bf16).\n"
+                "-> Il gap di 7.03 nello smoke v9 era un artefatto di precisione (bf16 vs fp32) o test sfasato.\n"
+                "-> AZIONE: Procedere direttamente con FitNets Stage 2 con il sub-talker congelato (tetto CE ~5.66, NO Stage 1)."
+            )
+        elif not gate_weights_identical:
+            verdict_code = "WEIGHTS_MISMATCH"
+            verdict_msg = (
+                f"BOCCIATO (PESI DIVERSI): Il dataset qwen_subtalker NON contiene i pesi esatti del checkpoint Base (max diff={max_w_diff_global:.4e}).\n"
+                f"-> {len(weights_mismatch)} discrepanze rilevate.\n"
+                "-> AZIONE: Rigenerare il dataset qwen_subtalker eseguendo extract_qwen_subtalker.py con download pulito dal checkpoint Base."
+            )
+        else:
+            verdict_code = "FORWARD_WRAPPER_BUG"
+            verdict_msg = (
+                f"BOCCIATO (BUG NEL FORWARD WRAPPER): I pesi sono identici (max diff={max_w_diff_global:.2e}) ma i logits divergono (max delta_logits={max_logit_diff:.4f} > 0.05).\n"
+                "-> Causa principale: RoPE position_ids (S=1 collassa le posizioni a 0 in _forward_flat), causal mask o proiezioni.\n"
+                "-> AZIONE: Correggere qwen_subtalker.py e rieseguire il probe."
+            )
+
+        print(f"ESITO PROBE : [{verdict_code}]", flush=True)
+        print(verdict_msg, flush=True)
+        print("=" * 78, flush=True)
+
+        fidelity_report = {
+            "verdict_code": verdict_code,
+            "verdict_message": verdict_msg,
+            "gate_weights_identical": gate_weights_identical,
+            "gate_forward_identical": gate_forward_identical,
+            "max_weight_diff_global": max_w_diff_global,
+            "num_weight_mismatches": len(weights_mismatch),
+            "weight_mismatches_sample": weights_mismatch[:10],
+            "max_logit_diff": max_logit_diff,
+            "mean_logit_diff": mean_logit_diff,
+            "max_logit_diff_coord": {"frame": max_frame, "channel": max_channel, "vocab": max_vocab},
+            "ce_teacher_active": ce_tch_act,
+            "ce_teacher_all": ce_tch_all,
+            "ce_subtalker_active": ce_sub_act,
+            "ce_subtalker_all": ce_sub_all,
+            "ce_gap_active": ce_sub_act - ce_tch_act,
+            "config_report": config_report,
+            "config_mismatches": mismatches_cfg,
+        }
+        os.makedirs("/kaggle/output", exist_ok=True)
+        with open("/kaggle/output/fidelity_report.json", "w", encoding="utf-8") as f:
+            json.dump(fidelity_report, f, indent=2)
+        print("Report Fidelity salvato in: /kaggle/output/fidelity_report.json", flush=True)
+        print("\n=== FIDELITY PROBE COMPLETATO: skip estrazione e training ===", flush=True)
+        sys.stdout.flush()
+        sys.exit(0)
 
     # ---- estrazione ----
     OUT = "/kaggle/output/fitnets_targets"

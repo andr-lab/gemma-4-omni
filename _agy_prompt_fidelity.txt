@@ -1,0 +1,37 @@
+Sei il revisore tecnico senior del progetto speech-to-speech full-duplex (Gemma 4 E2B + adapter + sub-talker Qwen3-TTS su Kaggle T4). Ti chiedo: (1) validare la mia nuova lettura del fallimento, (2) scrivere e APPLICARE la patch del probe decisivo, (3) gate di decisione. Revisione critica: trova i punti deboli, non validare.
+
+## SCOPERTA CHIAVE (aggiorna il quadro precedente)
+Il file C:/Users/andre/Documents/gemma-4-omni/extract_qwen_subtalker.py mostra che il nostro sub-talker NON è un progetto ridotto arbitrario: estrae dal teacher Qwen3-TTS:
+- `talker.code_predictor.model.layers.{0..4}` -> layers.{i}.* (5 layer)
+- `talker.code_predictor.small_to_mtp_projection.{w,b}` (2048->1024)
+- `talker.code_predictor.model.norm.weight` -> norm.weight
+- `talker.code_predictor.model.codec_embedding.{0..14}` + cb0
+- `talker.code_predictor.lm_head.{0..14}.weight` (2048 x 1024)
+Cioè: il code_predictor del teacher È già un modello 5 layer / hidden 1024 / vocab 2048 / 16 gruppi, e il nostro QwenSubTalker (qwen_subtalker.py) ne è l'estrazione fedele per design (89 tensori, cfg manuale hidden 1024, 5 layer).
+
+## FATTI (smoke precedenti, tutti verificati sul kernel)
+- Test 4-vie (smoke v9): TEACHER ufficiale + h_t corretto ce_act=5.656; NOSTRO SUB + h_t corretto ce_act=7.031; |logits teacher - sub| max diff = 34.75. Il teacher e il sub sono stati valutati in PRECISIONI DIVERSE: teacher bf16, sub fp32 (cast ht a fp32 nel punto di chiamata; la patch SMOKE_B ha caricato il sub in float32 per T4).
+- Smoke B (v10): training del sub-talker su 128 finestre, 300 step AdamW lr 5e-4 batch 8, cosine, WD 1e-2, fp32: baseline CE 7.05 -> train loss 1.57 ma CE VAL 10.60 (DIVERGENZA: sopra il casuale 7.62). Gate BOCCIATO.
+- Se il sub-talker avesse davvero i pesi del code_predictor del teacher, il CE con h_t corretto dovrebbe essere ~5.656 (come il teacher), NON 7.03, e NON dovrebbe servire addestramento.
+
+## LA MIA NUOVA LETTURA (revisionala)
+1. Il problema NON è "capacità insufficiente del decoder ridotto": il sub-talker ha LA STESSA architettura e (per design) gli stessi pesi del code_predictor del teacher. Se replicasse il teacher, il CE sarebbe 5.656.
+2. Il gap 5.656 vs 7.03 e la fedeltà 34.75 indicano: (a) il dataset qwen_subtalker (su Kaggle /kaggle/input/datasets/andrlab/gemma-4-omni-module/qwen_subtalker) contiene pesi DIVERSI da quelli attuali del checkpoint (estrazione stantia/corrotta o checkpoint cambiato), oppure (b) il forward del wrapper QwenSubTalker NON replica il forward del teacher code_predictor (rotary/position_ids/attention mask/projection/dtype), oppure (c) artefatto di precisione bf16-vs-fp32 (ritenuto improbabile per un max diff di 34.75).
+3. Lo smoke B era il test SBAGLIATO: un modello che deve essere già identico al teacher non va addestrato, va VERIFICATO per replica. Il fallimento per divergenza (val 10.6) è compatibile con un modello i cui pesi non sono quelli del teacher (o un forward sbagliato) addestrato con lr alto e pochi dati: l'addestramento NON è la cura.
+
+## PROBE DECISIVO RICHIESTO (patch da scrivere e applicare)
+Sezione opzionale `FIDELITY_PROBE` nel cell2 (attivata da env FIDELITY=1; NON altera il flusso normale; niente training, niente estrazione h_t nuova — usa una finestra già estratta o la prima del dataset):
+1. Carica teacher (bf16) e sub-talker (bf16! stessa precisione del teacher per il confronto logits).
+2. Confronto PESI per modulo: mappa i nomi (sub `layers.i.*` <-> teacher `talker.code_predictor.model.layers.i.*`, norm, small_to_mtp_projection, lm_head.j, codec_embedding.j, cb0) e stampa per ogni modulo `max|w_sub - w_tch|` e la shape. Se tutti ≈0 (o <1e-6 in bf16) -> pesi identici.
+3. Confronto FORWARD in bf16 identico: stessi input (ht_corr, gt di una finestra reale), calcola `logits_tch = teacher.talker.forward_sub_talker_finetune(gt, ht)` e `logits_sub = sub.forward_sub_talker_finetune(ht, gt)` e stampa max|Δlogits|, media, e dove massima (per canale j e frame k). Se pesi identici e forward identici -> max|Δlogits| < 1e-2 (errore numerico bf16). Se >> -> bug nel forward del wrapper.
+4. Stampa la CONFIG del code_predictor del teacher dal checkpoint reale: config.code_predictor_config (o fallback defaults) con num_hidden_layers, hidden_size, num_attention_heads, num_key_value_heads, intermediate_size, num_code_groups, vocab_size — e le shape REALI di `talker.code_predictor.model.layers`, `codec_embedding`, `lm_head`. Confrontale con `sub.cfg` (qwen_subtalker.py: 5 layer, hidden 1024, 16 heads, vocab 2048, 15 lm_head, small_to_mtp 2048->1024) e segnala OGNI mismatch (es. heads diverse, ff diverso, codec_embedding shape diversa — l'estrazione avrebbe potuto perdere la GQA o usare heads sbagliate).
+5. Se il sub È identico (Δw≈0 e Δlogits<1e-2): stampa VERDETTO "SUB == TEACHER CODE_PREDICTOR: FitNets Stage 2 direttamente con il sub-talker (niente Stage 1, tetto CE 5.66)". Se Δw≠0: "rigenerare il dataset sub-talker (estrazione pulita)". Se Δw≈0 ma Δlogits>>: "bug nel forward wrapper, fix mirato".
+
+## GATE DI DECISIONE (per il prossimo passo dopo il probe)
+- Pesid identici + forward identici: il 4-vie era viziato (bf16 vs fp32 o altro) -> correggere la precisione e procedere con FitNets Stage 2 (adapter Gemma -> h_t -> sub-talker congelato). 
+- Pesid diversi: rigenerare l'estrazione del sub-talker in un run dedicato (~5 min), poi ri-test 4-vie in bf16.
+- Forward diverso: fix del wrapper (probabile candidate: attention mask causale, rotary position_ids, small_to_mtp_projection applicata due volte, oppure il teacher applica la projection PRIMA della concatenazione e il wrapper dopo, oppure ordine canali).
+
+## OUTPUT ATTESO
+(A) Validazione/smontaggio della mia lettura (in particolare: spiega se la divergenza dello smoke B è compatibile con "pesi non del teacher" e se il probe è il test giusto); (B) patch FIDELITY_PROBE applicata al file C:/Users/andre/Documents/gemma-4-omni/kernel_src/fitnets_extract_cell2.py con diff + esito py_compile; (C) gate quantitativi; (D) piano d'azione (kernel, ordine, tempi GPU) per ognuno dei 3 esiti.
+File da leggere: C:/Users/andre/Documents/gemma-4-omni/extract_qwen_subtalker.py, C:/Users/andre/Documents/gemma-4-omni/qwen_subtalker.py, C:/Users/andre/Documents/gemma-4-omni/kernel_src/fitnets_extract_cell2.py, C:/Users/andre/AppData/Local/Temp/modeling_qwen3_tts.py (righe 1015-1160 e 1605-1660).
