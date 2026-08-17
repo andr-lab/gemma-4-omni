@@ -56,6 +56,30 @@ try:
         QS.Qwen3TTSSubTalker._forward_flat = _fixed_forward_flat
         print("ROPE_FIX applicato: _forward_flat usa S=16 posizioni reali", flush=True)
 
+        # ---- THETA FIX (secondo bug di fedelta'): il config.json del dataset ha
+        # rope_theta=10000.0 (bug di extract_qwen_subtalker.py: SLIM_CONFIG
+        # hardcoded) mentre il teacher reale usa rope_theta=1000000.0 -> frequenze
+        # RoPE diverse -> logits divergenti (probe v13: teacher=1000000, sub=10000).
+        # Patch della funzione load: dopo il load, se theta != 1e6, ricrea la
+        # rotary_emb con theta 1e6 e aggiorna cfg. Copre tutti i load successivi
+        # (SMOKE_B, probe FIDELITY, training).
+        _orig_load_qs = QS.load_qwen_subtalker
+
+        def _load_with_theta(subtalker_dir, device=None, dtype=torch.bfloat16):
+            model, cfg = _orig_load_qs(subtalker_dir, device=device, dtype=dtype)
+            if abs(float(cfg.get("rope_theta", 10000.0)) - 1000000.0) > 1e-7:
+                cfg["rope_theta"] = 1000000.0
+                model.rotary_emb = QS.Qwen3TTSRotaryEmbedding(
+                    head_dim=cfg["head_dim"],
+                    max_position_embeddings=cfg["max_position_embeddings"],
+                    theta=1000000.0,
+                ).to(device=device, dtype=dtype)
+                print("THETA_FIX applicato: rope_theta 10000 -> 1000000 (rotary_emb ricreata)", flush=True)
+            return model, cfg
+
+        QS.load_qwen_subtalker = _load_with_theta
+        print("THETA_FIX installato: load_qwen_subtalker patcha rope_theta a 1e6", flush=True)
+
     # ---- dati (identico a checke) ----
     parquet_cache = f"data/train_tokens_{KP.DUPLEXCONV_MAX_HOURS}h_{KP.MDC_MAX_SAMPLES}s.parquet"
     KP.convert_parquet_to_memmap(parquet_cache)

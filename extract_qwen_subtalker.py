@@ -37,6 +37,7 @@ import os
 import sys
 import json
 import time
+from typing import Optional, Dict
 import numpy as np
 import torch
 from concurrent.futures import ThreadPoolExecutor
@@ -72,9 +73,28 @@ SLIM_CONFIG = {
     "vocab_size": 2048,
     "num_code_groups": 16,
     "max_position_embeddings": 65536,
-    "rope_theta": 10000.0,
+    "rope_theta": 1000000.0,
     "cb0_vocab_size": 3072,
 }
+
+
+def _repo_code_predictor_cfg() -> Optional[Dict]:
+    """Scarica config.json del repo Base e legge talker_config.code_predictor_config.
+    Usato per NON hardcodare rope_theta (il checkpoint reale usa 1e6, non 1e4).
+    Ritorna None se il download fallisce (fallback su SLIM_CONFIG)."""
+    import urllib.request
+    try:
+        url = f"https://huggingface.co/{REPO}/resolve/main/config.json"
+        with urllib.request.urlopen(url, timeout=60) as r:
+            c = json.loads(r.read().decode("utf-8"))
+        cp = (c.get("talker_config") or {}).get("code_predictor_config") or c.get("code_predictor_config")
+        if not cp:
+            print("[Extract] ATTENZIONE: code_predictor_config non trovato nel config.json del repo")
+            return None
+        return dict(cp)
+    except Exception as e:
+        print(f"[Extract] ATTENZIONE: fetch config.json fallito ({e}); uso SLIM_CONFIG hardcoded")
+        return None
 
 
 def _url(repo: str, fname: str) -> str:
@@ -211,8 +231,20 @@ def extract_subtalker(out_dir: str, big_disk_dir: str, repo: str = REPO,
     cfg_path = os.path.join(out_dir, "config.json")
     import safetensors.torch as st
     st.save_file(out_state, st_path)
+    repo_cfg = _repo_code_predictor_cfg()
+    slim = dict(SLIM_CONFIG)
+    if repo_cfg:
+        for k in ("rope_theta", "max_position_embeddings", "num_code_groups",
+                  "hidden_size", "num_hidden_layers", "num_attention_heads",
+                  "num_key_value_heads", "head_dim", "intermediate_size", "rms_norm_eps", "vocab_size"):
+            if k in repo_cfg:
+                slim[k] = repo_cfg[k]
+        print(f"[Extract] Config dal repo: rope_theta={slim.get('rope_theta')}, "
+              f"max_pos={slim.get('max_position_embeddings')}, n_codes={slim.get('num_code_groups')}", flush=True)
+    else:
+        print(f"[Extract] Config hardcoded (fallback): rope_theta={slim.get('rope_theta')}", flush=True)
     with open(cfg_path, "w", encoding="utf-8") as f:
-        json.dump(SLIM_CONFIG, f, indent=2)
+        json.dump(slim, f, indent=2)
     size_mb = os.path.getsize(st_path) / 1e6
     print(f"[Extract] Salvato: {st_path} ({size_mb:.1f} MB) + {cfg_path}")
     sys.stdout.flush()
@@ -266,8 +298,16 @@ def main() -> int:
         os.makedirs(args.out_dir, exist_ok=True)
         import safetensors.torch as st
         st.save_file(out_state, os.path.join(args.out_dir, "qwen_subtalker.safetensors"))
+        repo_cfg = _repo_code_predictor_cfg()
+        slim = dict(SLIM_CONFIG)
+        if repo_cfg:
+            for k in ("rope_theta", "max_position_embeddings", "num_code_groups",
+                      "hidden_size", "num_hidden_layers", "num_attention_heads",
+                      "num_key_value_heads", "head_dim", "intermediate_size", "rms_norm_eps", "vocab_size"):
+                if k in repo_cfg:
+                    slim[k] = repo_cfg[k]
         with open(os.path.join(args.out_dir, "config.json"), "w", encoding="utf-8") as f:
-            json.dump(SLIM_CONFIG, f, indent=2)
+            json.dump(slim, f, indent=2)
         print(f"[Extract] Salvato via fallback: {args.out_dir} ({len(out_state)} tensori)")
         sys.stdout.flush()
 
