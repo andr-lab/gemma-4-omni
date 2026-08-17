@@ -53,20 +53,80 @@ try:
         if r.returncode != 0:
             print("git clone FAIL:", r.stderr[-500:], flush=True)
             raise RuntimeError("git clone Qwen3-TTS fallito")
+
+    # --- bypassa gli __init__ dei package che importano sox/onnxruntime ---
+    # qwen_tts/__init__.py e qwen_tts/core/__init__.py importano i tokenizer
+    # 25Hz/12Hz (tokenizer_25hz/vq/speech_vq.py -> `import sox`) che NON ci
+    # servono: i codici GT arrivano dal dataset, il teacher serve solo per il
+    # forward del talker (h_t nativo). Stub dei package padre + stub del
+    # modulo tokenizer, poi carico modeling_qwen3_tts.py direttamente.
+    import types as _types
+
+    def _stub_pkg(_name, _path):
+        _p = _types.ModuleType(_name)
+        _p.__path__ = [_path]
+        _p.__package__ = _name
+        sys.modules[_name] = _p
+
+    _stub_pkg("qwen_tts", f"{_SRC}/qwen_tts")
+    _stub_pkg("qwen_tts.core", f"{_SRC}/qwen_tts/core")
+    _stub_pkg("qwen_tts.core.models", f"{_SRC}/qwen_tts/core/models")
+    _stub_pkg("qwen_tts.inference", f"{_SRC}/qwen_tts/inference")
+    _tok = _types.ModuleType("qwen_tts.inference.qwen3_tts_tokenizer")
+    class _StubTokenizer:
+        def __init__(self, *a, **k):
+            raise RuntimeError("stub Qwen3TTSTokenizer: non istanziare (percorso senza speech_tokenizer)")
+    _tok.Qwen3TTSTokenizer = _StubTokenizer
+    sys.modules["qwen_tts.inference.qwen3_tts_tokenizer"] = _tok
     sys.path.insert(0, _SRC)
-    from qwen_tts.core.models.modeling_qwen3_tts import Qwen3TTSForConditionalGeneration
+    import qwen_tts.core.models.modeling_qwen3_tts as _M
     from qwen_tts.core.models.processing_qwen3_tts import Qwen3TTSProcessor
     from transformers import AutoTokenizer
-    print("repo Qwen3-TTS clonato e importato", flush=True)
+    print("repo Qwen3-TTS clonato e importato (tokenizer sox bypassati)", flush=True)
 
-    # ---- carica teacher (bf16, eager; forward-only) ----
+    # ---- carica teacher (bf16; forward-only) ----
+    # transformers 5.5.0 in Kaggle: from_pretrained chiama
+    # mark_tied_weights_as_initialized -> property `all_tied_weights_keys`
+    # (introdotta in transformers 5.7+) che NON esiste sulla classe del repo
+    # -> AttributeError. Carichiamo i pesi A MANO via safetensors (stesso
+    # risultato, nessuna magia dei tied weights): istanzia con la config
+    # (init random), poi load_state_dict(strict=False) con i pesi veri.
+    # model.safetensors contiene solo talker.* + speaker_encoder.*.
     t0 = time.time()
-    teacher = Qwen3TTSForConditionalGeneration.from_pretrained(
-        "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
-        torch_dtype=torch.bfloat16,
-        attn_implementation="eager",
-    )
-    teacher = teacher.to("cuda")
+    import safetensors.torch as _st
+    from huggingface_hub import hf_hub_download
+    # transformers 5.5.0 ha RIMOSSO la chiave "default" da ROPE_INIT_FUNCTIONS
+    # (ripristinata nelle versioni >=5.6 su cui gira il repo ufficiale). Il
+    # config del talker usa rope_scaling={"rope_type": "default",
+    # mrope_section:[24,20,20], interleaved} -> ripristiniamo
+    # _default_rope_init (inv_freq classica theta^{-2i/d} + scaling 1.0).
+    # Il modeling importa ROPE_INIT_FUNCTIONS (stesso dict) -> mutation visibile.
+    import transformers.modeling_rope_utils as _ropeu
+    def _default_rope_init(config, device=None, seq_len=None, **kwargs):
+        base = config.rope_theta
+        partial_rotary_factor = getattr(config, "partial_rotary_factor", 1.0)
+        _head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+        _dim = int(_head_dim * partial_rotary_factor)
+        inv_freq = 1.0 / (base ** (torch.arange(0, _dim, 2, dtype=torch.int64).float().to(device) / _dim))
+        return inv_freq, 1.0
+    _ropeu.ROPE_INIT_FUNCTIONS["default"] = _default_rope_init
+    _cfg = _M.Qwen3TTSForConditionalGeneration.config_class.from_pretrained(
+        "Qwen/Qwen3-TTS-12Hz-1.7B-Base")
+    # pad_token_id manca nel config.json del talker (transformers >=5.7 lo
+    # defaulta a None; 5.5.0 no). Non e' mai usato negli embedding (solo in
+    # _init_weights con guardia `is not None`) -> None = comportamento ufficiale.
+    _cfg.talker_config.pad_token_id = None
+    teacher = _M.Qwen3TTSForConditionalGeneration(_cfg).to(torch.bfloat16)
+    _ckpt = hf_hub_download("Qwen/Qwen3-TTS-12Hz-1.7B-Base", "model.safetensors")
+    _sd = _st.load_file(_ckpt, device="cpu")
+    _missing, _unexpected = teacher.load_state_dict(_sd, strict=False)
+    del _sd
+    torch.cuda.empty_cache()
+    if _missing:
+        raise RuntimeError(f"pesi teacher mancanti ({len(_missing)}): {_missing[:8]}")
+    if _unexpected:
+        print(f"pesi inattesi ignorati ({len(_unexpected)}): {_unexpected[:6]}", flush=True)
+    teacher = teacher.to(device="cuda", dtype=torch.bfloat16)  # cast rigido post-load
     teacher.eval()
     talker = teacher.talker
     tok = AutoTokenizer.from_pretrained("Qwen/Qwen3-TTS-12Hz-1.7B-Base", use_fast=True)
@@ -88,7 +148,7 @@ try:
     if SANITY:
         PAD = KP.PAD_TARGET_ID
         SAMPLE_RATE = KP.SYNTH_SAMPLE_RATE
-        sub = QS.load_qwen_subtalker("/kaggle/input/datasets/andrlab/gemma-4-omni-module/qwen_subtalker",
+        sub, _sub_cfg = QS.load_qwen_subtalker("/kaggle/input/datasets/andrlab/gemma-4-omni-module/qwen_subtalker",
                                      device="cuda", dtype=torch.bfloat16)
         decoder = KP.Code2WavDecoder()
         sub.eval()
@@ -143,12 +203,17 @@ try:
         codec_mask = codec_mask.to("cuda")
         attn = attn.to("cuda")
         with torch.inference_mode():
-            input_text_emb = talker.model.text_embedding(input_ids[:, :, 0]) * text_mask.unsqueeze(-1)
+            # 1) canale testo: proiezione non-lineare UFFICIALE (ResizeMLP, SiLU) come
+            #    nel forward del talker con input_ids (fedelta h_t; text_hidden==hidden
+            #    ma la projection e' comunque non-identita, pesi addestrati)
+            raw_text_emb = talker.model.text_embedding(input_ids[:, :, 0])
+            input_text_emb = talker.text_projection(raw_text_emb) * text_mask.unsqueeze(-1)
             input_codec_emb = talker.model.codec_embedding(input_ids[:, :, 1]) * codec_emb_mask.unsqueeze(-1)
             input_embeddings = input_text_emb + input_codec_emb
             for i in range(1, 16):
                 ci = talker.code_predictor.get_input_embeddings()[i - 1](codec_ids[:, :, i])
                 input_embeddings = input_embeddings + ci * codec_mask.unsqueeze(-1)
+            input_embeddings = input_embeddings.to(dtype=talker.dtype)  # bf16 difensivo
             outputs = talker(
                 inputs_embeds=input_embeddings[:, :-1, :],
                 attention_mask=attn[:, :-1],
@@ -182,14 +247,17 @@ try:
     SAMPLE_RATE = KP.SYNTH_SAMPLE_RATE
     MPF_MEL = KP.MEL_PER_AGENT_FRAME
 
-    def _mel_active_mask(item, n_real):
-        """Mask attivo dai mel agent GT (proxy energia, senza decode wav)."""
-        mel = item["agent_mel"]  # (n_real*MPF_MEL, 128) o (64*MPF_MEL, 128)
+    def _mel_active_mask(ds, idx, n_real):
+        """Mask attivo dai mel agent GT (proxy energia, senza decode wav).
+        I mel agent NON sono per-item: sono nell'attributo globale
+        ds.agent_mel, allineato per finestra (stessi indici di __getitem__)."""
+        m0 = idx * ds.seq_len * MPF_MEL
         n_mel = n_real * MPF_MEL
-        mel = np.asarray(mel[:n_mel], dtype=np.float32)
-        nf = n_mel // MPF_MEL
-        if nf == 0:
+        m1 = min(m0 + n_mel, ds.agent_mel.shape[0])
+        mel = np.asarray(ds.agent_mel[m0:m1], dtype=np.float32)
+        if mel.shape[0] == 0:
             return np.zeros(n_real, dtype=bool)
+        nf = mel.shape[0] // MPF_MEL
         energy = np.array([float(np.mean(np.abs(mel[t * MPF_MEL:(t + 1) * MPF_MEL]))) for t in range(nf)])
         thr = max(0.01, 0.25 * (energy.max() if energy.max() > 0 else 1.0))
         mask = np.zeros(n_real, dtype=bool)
@@ -202,7 +270,7 @@ try:
         if n_real <= 0:
             return None
         if SANITY:
-            active = _mel_active_mask(item, n_real)
+            active = _mel_active_mask(ds, idx, n_real)
             if int(active.sum()) == 0:
                 return None
             return {"idx": idx, "n_real": n_real, "active": active}
@@ -248,6 +316,9 @@ try:
         item = ds_train[idx]
         text = text_by_window[idx] if text_by_window is not None else ""
         ht = torch.from_numpy(extract_ht(item, w["n_real"], text)).to("cuda")  # (T_audio, 2048)
+        # il sub-talker e' bf16: h_t da numpy e' fp32 -> cast al dtype del modulo
+        # (mat1/mat2 mismatch su small_to_mtp_projection altrimenti)
+        ht = ht.to(dtype=next(sub.parameters()).dtype)
         gt = item["audio_targets"][:w["n_real"]].to("cuda")  # (T_audio, 16)
         cb0 = gt[:, 0]
         # 1) CE del sub-talker con h_t NATIVO + cb0 GT (teacher forcing)
