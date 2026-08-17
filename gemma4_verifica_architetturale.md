@@ -127,3 +127,24 @@ Nessun tweak di ottimizzazione (lr, loss, LoRA sul decoder, piu' step) puo' riso
 - **Blocco esterno**: quota GPU settimanale Kaggle esaurita (30h, reset lun 17/08 00:00 UTC). Push v4 impossibile fino al reset.
 
 **Stato**: CHECK-E IN SOSPESO (fix pronto, ~45 min GPU al reset). Baseline già validata nei run v1/v2: TRAIN ce_act=7.263, VAL ce_act=6.808 (coerente con CHECK-D baseline 6.807).
+
+## Aggiornamento 17/08/2026 — ripresa dopo quota, CHECK-E smoke in corso
+
+- **Quota GPU resettata** (lun 17/08 00:00 UTC). Ripresa operativa.
+- **Pulizia repo**: storico archiviato in `_archive_20260817/` (fix_kernel_*, commit_ep2, kernel diag/eval, samples ep2, script one-off, report vecchi), log spazzatura v14 rimossi, `.gitignore` aggiornato. Commit `c67c143`.
+- **NEXT_STEP.md (protocollo R0–R4) ricevuto dall'utente**: ipotesi co-adattamento Gemma↔adapter↔sub-talker; R1 adapter-only con latent alignment; loss L = L_acoustic + λ·L_latent + μ·L_text + ν·L_turn; turn head ausiliaria; modifiche obbligatorie (clipping 2048 non cieco, DuplexConv/MDC, preflight REAL_ENCODING per contenuto).
+- **Validazione agy ×2 (DDD cross-model)**:
+  - claude-opus-4-6-thinking: CHECK-E va completato PRIMA come ceiling test (~45min GPU, v4 pronto); adapter 1-layer lineare 3072→2048 strutturalmente sottodimensionato → MLP 2-layer come fallback se rank/varianza bassi; hidden_states[-1] discute con la letteratura (PRIME-Speech usa layer ~2/3 profondità); R1: target h_t dal main talker Qwen offline (opzione i), loss cosine + variance reg, gate cos_sim VAL>0.5 / CE_act<6.5 / rank>100 / test audio C.
+  - gemini-3.7-flash-high: stesso verdetto (CHECK-E prima); progetta R1 in 5 step (estrazione offline h_t da Qwen/Qwen3-TTS-12Hz-1.7B-Base su ~10h DuplexConv → preflight dimensioni/range → training solo adapter con L_latent 500 step → gate loss+CE<5.2 → bivio R2/R3 vs CHECK-E se gap informativo); rischi: gap informativo (Gemma frozen senza testo risposta non può ricostruire pitch/fase dei codebook 11–15), illusione da alignment (cosine alta ma audio non intelligibile), off-by-one frame rate 12.5Hz + padding sinistro F.pad(2,0).
+- **CHECK-E v4 rivisto (fix banali)**: aggiunto `import shutil` (era usato in `shutil.rmtree` senza import — stesso tipo del NameError v3). `frame_weights` confermato nel dataset (kaggle_pipeline.py:2676). py_compile OK, 0 char>127, round-trip notebook OK.
+- **Smoke kernel `andrlab/gemma4-checke-smoke` v1 PUSHATO** (17/08 15:27 UTC): STEPS=6, EVAL_EVERY=2, N_TRAIN=3, N_VAL=2 (≈10-20 min GPU) per validare che il learning congiunto PARTE senza crash (lezione: mai run lunghe con errori banali). Monitor attivo. Al verdetto smoke → run completa CHECK-E (800 step) → verdetto ceiling test → decisione direzione.
+
+## Esito SMOKE CHECK-E (17/08 15:40 UTC) — run completa in corso
+
+- **Smoke `andrlab/gemma4-checke-smoke` v1 COMPLETE in 12m52s, ZERO errori.** Il fix v4 funziona: cache unsloth rimossa, causal_conv → Conv1d fresco fp32 (in=1536, out=1536, k=3), inference tensors 0, adapter fresco fp32 3.15M params, sub-talker fresco fp32, LoRA sub-talker 1.8M params, niente più "Inference tensors cannot be saved for backward".
+- Baseline coerente: TRAIN ce_act=7.247 | VAL ce_act=6.995 (atteso ~6.81-7.26, finestre diverse dal run v1/v2).
+- 6 step: loss 2.03→1.55, TRAIN ce_act 7.82→6.62, VAL stabile ~7.1 (nessun apprendimento VAL in 6 step — atteso).
+- Ablation h_t=0: TRAIN 12.33 / VAL 13.13 → gap VAL ≈ 6.0 vs con-h_t → **il decoder usa davvero h_t** (coupling reale, non fittizio).
+- Verdetto automatico "KO" NON significativo con 6 step (il criterio delta≥3 richiede apprendimento VAL); la run completa (800 step, ~45 min) darà il verdetto vero.
+- **Run completa `andrlab/gemma4-checke-full` PUSHATA e in esecuzione** (17/08 ~15:45 UTC): cell2 = checke_cell2.py (md5 bcc89f51, default 800 step / 24+12 finestre / eval ogni 50). Monitor `433a1a5c` attivo (timeout 90 min).
+- Nota log: `kaggle kernels logs` NON accetta `-f <file>` (è `--follow`); il log va scaricato con redirezione `> file` + `PYTHONIOENCODING=utf-8`.

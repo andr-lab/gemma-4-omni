@@ -22,7 +22,7 @@
 #   delta>=1.5 -> PARZIALE
 #   altro -> KO -> piano B FitNets
 # ============================================================================
-import os, sys, json, traceback, hashlib, math
+import os, sys, json, traceback, hashlib, math, shutil
 
 try:
     sys.path.insert(0, "/kaggle/working")
