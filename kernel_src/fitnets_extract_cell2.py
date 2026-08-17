@@ -20,6 +20,10 @@ try:
     EXTRACT_N = int(os.environ.get("FITEX_N", "1000"))
     SANITY = os.environ.get("FITEX_SANITY", "1") == "1"
     START_IDX = int(os.environ.get("FITEX_START", "0"))
+    SMOKE_B = os.environ.get("SMOKE_B", "0") == "1"
+    SMOKE_B_STEPS = int(os.environ.get("SMOKE_B_STEPS", "300"))
+    SMOKE_B_LR = float(os.environ.get("SMOKE_B_LR", "5e-4"))
+    SMOKE_B_BATCH = int(os.environ.get("SMOKE_B_BATCH", "8"))
 
     import kaggle_pipeline as KP
     import qwen_subtalker as QS
@@ -144,12 +148,12 @@ try:
     print(f"token: tts_pad={TTS_PAD} bos={TTS_BOS} eos={TTS_EOS} | codec nothink={CN} "
           f"think_bos={CTB} think_eos={CTE} pad={CPAD} bos={CBOS} eos={CEOS}", flush=True)
 
-    # ---- sub-talker locale (per sanity: h_t nativo -> cb1-15 -> wav) ----
-    if SANITY:
+    # ---- sub-talker locale (per sanity / smoke B: h_t nativo -> cb1-15 -> wav) ----
+    if SANITY or SMOKE_B:
         PAD = KP.PAD_TARGET_ID
         SAMPLE_RATE = KP.SYNTH_SAMPLE_RATE
         sub, _sub_cfg = QS.load_qwen_subtalker("/kaggle/input/datasets/andrlab/gemma-4-omni-module/qwen_subtalker",
-                                     device="cuda", dtype=torch.bfloat16)
+                                     device="cuda", dtype=torch.float32)
         decoder = KP.Code2WavDecoder()
         sub.eval()
 
@@ -357,7 +361,7 @@ try:
             ce_tch_shift_all = float(per_tch_shift.mean())
 
             # C) NOSTRO SUB-TALKER STANDALONE con h_t CORRETTO
-            logits_sub_corr = sub.forward_sub_talker_finetune(ht_corr.unsqueeze(0), gt.unsqueeze(0)).squeeze(0)
+            logits_sub_corr = sub.forward_sub_talker_finetune(ht_corr.float().unsqueeze(0), gt.unsqueeze(0)).squeeze(0)
             per_sub_corr = F.cross_entropy(
                 logits_sub_corr.reshape(-1, sub.cfg["vocab_size"]), gt[:, 1:].reshape(-1),
                 reduction="none", ignore_index=-100,
@@ -366,7 +370,7 @@ try:
             ce_sub_corr_all = float(per_sub_corr.mean())
 
             # D) NOSTRO SUB-TALKER STANDALONE con h_t SHIFTED (vecchio bug)
-            logits_sub_shift = sub.forward_sub_talker_finetune(ht_shift.unsqueeze(0), gt.unsqueeze(0)).squeeze(0)
+            logits_sub_shift = sub.forward_sub_talker_finetune(ht_shift.float().unsqueeze(0), gt.unsqueeze(0)).squeeze(0)
             per_sub_shift = F.cross_entropy(
                 logits_sub_shift.reshape(-1, sub.cfg["vocab_size"]), gt[:, 1:].reshape(-1),
                 reduction="none", ignore_index=-100,
@@ -375,7 +379,7 @@ try:
             ce_sub_shift_all = float(per_sub_shift.mean())
 
             # Discrepanza matematica esatta tra Teacher e Sub-Talker
-            max_logit_diff = float((logits_tch_corr - logits_sub_corr).abs().max())
+            max_logit_diff = float((logits_tch_corr.float() - logits_sub_corr.float()).abs().max())
 
         print(f"1. TEACHER UFFICIALE + h_t CORRETTO : ce_act={ce_tch_corr_act:.3f} | ce_all={ce_tch_corr_all:.3f}", flush=True)
         print(f"2. TEACHER UFFICIALE + h_t SHIFTED  : ce_act={ce_tch_shift_act:.3f} | ce_all={ce_tch_shift_all:.3f}", flush=True)
@@ -386,7 +390,7 @@ try:
 
         # Generazione audio greedy con h_t corretto
         with torch.inference_mode():
-            ac = sub.sample_acoustic_codes(ht_corr.unsqueeze(0), cb0.unsqueeze(0), temperature=0.0)
+            ac = sub.sample_acoustic_codes(ht_corr.float().unsqueeze(0), cb0.unsqueeze(0), temperature=0.0)
         full_codes = torch.cat([cb0.unsqueeze(-1), ac.squeeze(0)], dim=-1)  # (T_audio, 16) long
 
         # Decodifica Code2Wav passando LongTensor (nessun warning FloatTensor)
@@ -420,6 +424,198 @@ try:
         with open("/kaggle/output/sanity_report.json", "w", encoding="utf-8") as f:
             json.dump(report, f, indent=2)
         print("SANITY REPORT COMPLETO: /kaggle/output/sanity_report.json", flush=True)
+
+    # ---- SEZIONE OPZIONALE: SMOKE_B (Verifica Two-Stage: Training Sub-Talker su h_t nativi) ----
+    if SMOKE_B and train_wins:
+        print("\n" + "=" * 70, flush=True)
+        print("=== SMOKE B: TWO-STAGE VERIFICATION (TRAINING SUB-TALKER SU H_T NATIVI) ===", flush=True)
+        print("=" * 70, flush=True)
+
+        # 1. Preparazione Dataset In-Memory per Smoke B
+        smoke_items = []
+        for w in train_wins:
+            idx = w["idx"]
+            n_real = w["n_real"]
+            ht_path = os.path.join(OUT, f"ht_{idx:05d}.npy")
+            if not os.path.exists(ht_path):
+                continue
+            ht_arr = np.load(ht_path).astype(np.float32)  # (n_real, 2048)
+            item = ds_train[idx]
+            gt_arr = item["audio_targets"][:n_real].long().numpy()  # (n_real, 16)
+            active_arr = w.get("active", _mel_active_mask(ds_train, idx, n_real))
+            smoke_items.append({
+                "idx": idx,
+                "n_real": n_real,
+                "ht": torch.from_numpy(ht_arr),
+                "gt": torch.from_numpy(gt_arr),
+                "active": torch.from_numpy(active_arr).bool(),
+            })
+
+        n_tot = len(smoke_items)
+        if n_tot == 0:
+            print("  WARN SMOKE B: nessun file h_t trovato in cache, skip smoke B.", flush=True)
+        else:
+            n_val = max(2, min(16, int(n_tot * 0.2))) if n_tot > 4 else 1
+            n_train = max(1, n_tot - n_val)
+            smoke_train = smoke_items[:n_train]
+            smoke_val = smoke_items[n_train:] if n_tot > 1 else smoke_items[:1]
+            print(f"Smoke B dataset: {n_tot} finestre -> {len(smoke_train)} train, {len(smoke_val)} val", flush=True)
+            print(f"Iperparametri: steps={SMOKE_B_STEPS} | lr={SMOKE_B_LR} | batch_size={SMOKE_B_BATCH}", flush=True)
+
+            # 2. Inizializzazione Sub-Talker & Ottimizzatore
+            # Float32 per massima stabilita' numerica e velocita' nativa su T4
+            sub = sub.to(device="cuda", dtype=torch.float32)
+            sub.train()
+            sub.requires_grad_(True)
+
+            optimizer = torch.optim.AdamW(
+                sub.parameters(),
+                lr=SMOKE_B_LR,
+                weight_decay=1e-2,
+                betas=(0.9, 0.98),
+                eps=1e-8,
+            )
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=SMOKE_B_STEPS,
+                eta_min=1e-5,
+            )
+
+            def collate_smoke_batch(batch_list, device="cuda"):
+                B = len(batch_list)
+                T_max = max(item["n_real"] for item in batch_list)
+                batch_ht = torch.zeros((B, T_max, 2048), dtype=torch.float32, device=device)
+                batch_gt = torch.full((B, T_max, 16), PAD, dtype=torch.long, device=device)
+                batch_act = torch.zeros((B, T_max), dtype=torch.bool, device=device)
+                for b_idx, item in enumerate(batch_list):
+                    nr = item["n_real"]
+                    batch_ht[b_idx, :nr] = item["ht"].to(device)
+                    batch_gt[b_idx, :nr] = item["gt"].to(device)
+                    batch_act[b_idx, :nr] = item["active"].to(device)
+                return batch_ht, batch_gt, batch_act
+
+            val_ht, val_gt, val_act = collate_smoke_batch(smoke_val, device="cuda")
+
+            def evaluate_smoke_val():
+                sub.eval()
+                with torch.inference_mode():
+                    logits = sub.forward_sub_talker_finetune(val_ht, val_gt)  # (B, T, 15, V)
+                    per_frame = F.cross_entropy(
+                        logits.reshape(-1, sub.cfg["vocab_size"]),
+                        val_gt[:, :, 1:].reshape(-1),
+                        reduction="none",
+                        ignore_index=PAD,
+                    ).reshape(val_gt.shape[0], val_gt.shape[1], 15)
+
+                    per_frame_mean = per_frame.mean(dim=-1)  # (B, T)
+                    act_losses = per_frame_mean[val_act]
+                    ce_val_act = float(act_losses.mean().item()) if act_losses.numel() > 0 else float("nan")
+
+                    valid_mask = (val_gt[:, :, 0] != PAD)
+                    all_losses = per_frame_mean[valid_mask]
+                    ce_val_all = float(all_losses.mean().item()) if all_losses.numel() > 0 else float("nan")
+
+                    greedy_pred = logits.argmax(dim=-1)  # (B, T, 15)
+                    correct = (greedy_pred == val_gt[:, :, 1:])
+                    acc_act = float(correct[val_act].float().mean().item()) if val_act.any() else 0.0
+                sub.train()
+                return ce_val_act, ce_val_all, acc_act
+
+            # Baseline pre-training (Step 0)
+            ce_0_act, ce_0_all, acc_0 = evaluate_smoke_val()
+            print(f"[Step   0/{SMOKE_B_STEPS}] BASELINE PRE-TRAIN: ce_val_act={ce_0_act:.4f} | ce_val_all={ce_0_all:.4f} | acc_val_act={acc_0:.4f}", flush=True)
+
+            history = []
+            t_start_smoke = time.time()
+
+            # 3. Training Loop
+            for step in range(1, SMOKE_B_STEPS + 1):
+                cur_batch_size = min(SMOKE_B_BATCH, len(smoke_train))
+                indices = np.random.choice(len(smoke_train), size=cur_batch_size, replace=False)
+                batch_list = [smoke_train[i] for i in indices]
+                batch_ht, batch_gt, _ = collate_smoke_batch(batch_list, device="cuda")
+
+                optimizer.zero_grad(set_to_none=True)
+                logits = sub.forward_sub_talker_finetune(batch_ht, batch_gt)
+                loss = sub.coupling_loss(logits, batch_gt)
+
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(sub.parameters(), max_norm=1.0)
+                optimizer.step()
+                scheduler.step()
+
+                if step % 25 == 0 or step == SMOKE_B_STEPS:
+                    ce_v_act, ce_v_all, acc_v = evaluate_smoke_val()
+                    lr_curr = scheduler.get_last_lr()[0]
+                    print(f"[Step {step:3d}/{SMOKE_B_STEPS}] loss_train={loss.item():.4f} | ce_val_act={ce_v_act:.4f} | ce_val_all={ce_v_all:.4f} | acc_val_act={acc_v:.4f} | lr={lr_curr:.2e}", flush=True)
+                    history.append({
+                        "step": step,
+                        "loss_train": float(loss.item()),
+                        "ce_val_act": ce_v_act,
+                        "ce_val_all": ce_v_all,
+                        "acc_val_act": acc_v,
+                        "lr": lr_curr,
+                    })
+
+            t_smoke_elapsed = time.time() - t_start_smoke
+            print(f"\nSMOKE B TRAINING COMPLETATO in {t_smoke_elapsed:.1f}s ({t_smoke_elapsed/SMOKE_B_STEPS*1000:.1f} ms/step)", flush=True)
+
+            # 4. Verdetto & Gate Quantitativo
+            final_ce_act = history[-1]["ce_val_act"] if history else ce_0_act
+            final_acc = history[-1]["acc_val_act"] if history else acc_0
+            delta_ce = ce_0_act - final_ce_act
+            gate_passed = final_ce_act < 6.2
+
+            print("=" * 70, flush=True)
+            print(f"RISULTATO SMOKE B: CE 0 -> {ce_0_act:.4f} | CE FINALE -> {final_ce_act:.4f} (Delta: -{delta_ce:.4f} nats)", flush=True)
+            print(f"ACCURACY CB1-15 : {acc_0:.4f} -> {final_acc:.4f}", flush=True)
+            print(f"DECISION GATE   : {'[PROMOSSO] (CE < 6.2) -> Procedere con Stage 2 FitNets' if gate_passed else '[BOCCIATO] (CE >= 6.2) -> Passare ad Opzione A (Teacher Code Predictor) o D'}", flush=True)
+            print("=" * 70, flush=True)
+
+            # 5. Salvataggio Pesi e Configurazione
+            sub.eval()
+            sub.requires_grad_(False)
+            trained_weights_path = os.path.join(OUT, "qwen_subtalker_stage1.safetensors")
+            trained_cfg_path = os.path.join(OUT, "qwen_subtalker_stage1_config.json")
+            _st.save_file(sub.state_dict(), trained_weights_path)
+            with open(trained_cfg_path, "w", encoding="utf-8") as f:
+                json.dump(sub.cfg, f, indent=2)
+            print(f"Pesi Sub-Talker Stage 1 salvati in: {trained_weights_path}", flush=True)
+
+            # 6. Sintesi Audio Sample Post-Training (Window 0 di Val)
+            val_w0 = smoke_val[0]
+            ht_sample = val_w0["ht"].to("cuda", dtype=torch.float32).unsqueeze(0)
+            cb0_sample = val_w0["gt"][:, 0].to("cuda").unsqueeze(0)
+            with torch.inference_mode():
+                ac_sample = sub.sample_acoustic_codes(ht_sample, cb0_sample, temperature=0.0)
+            full_sample_codes = torch.cat([cb0_sample.unsqueeze(-1), ac_sample], dim=-1).squeeze(0)  # (T, 16)
+
+            wav_trained = decoder.decode(full_sample_codes.cpu().long())
+            wav_trained_path = "/kaggle/output/smoke_b_trained_sample.wav"
+            import scipy.io.wavfile as wavfile
+            wavfile.write(wav_trained_path, SAMPLE_RATE, (wav_trained.astype(np.float32) * 32767).astype(np.int16))
+            print(f"WAV Sintetizzato Post-Training: {wav_trained_path}", flush=True)
+
+            smoke_report = {
+                "n_train_windows": len(smoke_train),
+                "n_val_windows": len(smoke_val),
+                "steps": SMOKE_B_STEPS,
+                "lr": SMOKE_B_LR,
+                "batch_size": SMOKE_B_BATCH,
+                "time_seconds": t_smoke_elapsed,
+                "ce_initial_act": ce_0_act,
+                "ce_initial_all": ce_0_all,
+                "acc_initial": acc_0,
+                "ce_final_act": final_ce_act,
+                "ce_final_all": history[-1]["ce_val_all"] if history else ce_0_all,
+                "acc_final": final_acc,
+                "delta_ce": delta_ce,
+                "gate_passed": gate_passed,
+                "history": history,
+            }
+            with open("/kaggle/output/smoke_b_report.json", "w", encoding="utf-8") as f:
+                json.dump(smoke_report, f, indent=2)
+            print("Report Smoke B salvato in: /kaggle/output/smoke_b_report.json", flush=True)
 
     print("=== FITNETS EXTRACT COMPLETATO ===", flush=True)
     sys.stdout.flush()
