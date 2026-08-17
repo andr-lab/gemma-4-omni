@@ -148,3 +148,17 @@ Nessun tweak di ottimizzazione (lr, loss, LoRA sul decoder, piu' step) puo' riso
 - Verdetto automatico "KO" NON significativo con 6 step (il criterio delta≥3 richiede apprendimento VAL); la run completa (800 step, ~45 min) darà il verdetto vero.
 - **Run completa `andrlab/gemma4-checke-full` PUSHATA e in esecuzione** (17/08 ~15:45 UTC): cell2 = checke_cell2.py (md5 bcc89f51, default 800 step / 24+12 finestre / eval ogni 50). Monitor `433a1a5c` attivo (timeout 90 min).
 - Nota log: `kaggle kernels logs` NON accetta `-f <file>` (è `--follow`); il log va scaricato con redirezione `> file` + `PYTHONIOENCODING=utf-8`.
+
+## VERDETTO CHECK-E (run completa, 17/08 ~16:20 UTC) — KO → Piano B FitNets
+
+- Run `andrlab/gemma4-checke-full` COMPLETE in 36m35s. 800 step, 24+12 finestre, sub-talker LoRA + Gemma QLoRA + adapter tutti trainable, h_t differenziabile.
+- **Pattern IDENTICO a CHECK-D**: TRAIN collassa (ce_act 7.71→0.04, memorizzazione totale su 24 finestre), VAL PEGGIORA monotonamente (6.81→13.40, sopra casuale 7.62 e sopra baseline 6.81). ce_all VAL 3.71→7.07.
+- **Ablation h_t=0**: TRAIN 12.57 (vs 0.04 → h_t è l'unico veicolo dell'apprendimento in train), VAL 13.65 (vs 13.40 → ≈ identico: in VAL h_t NON porta informazione utile).
+- **Interpretazione (DDD, confronto con CHECK-B2/C/D)**:
+  - B2 (50h, sub congelato): train 7, val 7 → niente segnale.
+  - C (h_t fisso, sub congelato): overfit, val 10.8.
+  - D (h_t fisso, sub LoRA): overfit totale, val 13.6.
+  - E (learning congiunto, tutto trainable): overfit totale, val 13.4.
+  - → Nessuna combinazione di (origine h_t) × (adattabilità decoder) generalizza. Il denominatore comune: l'hidden di Gemma (parlato utente + testo risposta) NON contiene l'informazione acustica/prosodica/lessicale necessaria ai codebook residui Qwen in distribuzione generalizzabile. **CONFUTATA l'ipotesi "mancanza di co-adattamento"**: con h_t libero di riorganizzarsi il risultato non cambia. Il problema è il GAP INFORMATIVO strutturale (come previsto da agy: "Gemma frozen/semantica grezza non può ricostruire pitch/fase dei codebook 11-15").
+- **Prossimo: PIANO B FitNets (R1)**: estrazione offline h_t nativo dal teacher Qwen (main talker) su ~10h DuplexConv → training adapter-only con L_latent (cosine + variance regularizer, secondo le 2 revisioni agy) → gate cos_sim VAL>0.5 / CE_act<6.5 / rank adapter>100 → poi R2/R3 (sblocco progressivo LoRA) o bivio.
+- Lezione monitor: `kaggle kernels logs <kernel> > file` con PYTHONIOENCODING=utf-8 (il flag -f è --follow).
