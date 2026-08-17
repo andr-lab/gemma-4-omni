@@ -263,7 +263,7 @@ class Qwen3TTSSubTalker(nn.Module):
     def _forward_flat(self, h_t_flat: torch.Tensor, codec_ids_flat: torch.Tensor) -> torch.Tensor:
         """Code predictor su un batch piatto (B*T, 16, ...): replica esatta della
         forward del teacher con inputs_embeds concatenati (h_t, cb0, cb1..cb14)."""
-        B, S, _ = h_t_flat.shape  # S = 16 posizioni del sub-talker
+        B, _, _ = h_t_flat.shape  # batch piatto (B*T, 1, talker_hidden): S reale = lunghezza dopo la concatenazione
         inputs = [h_t_flat]  # posizione 0: h_t (senza embedding)
         # posizione 1: cb0 tramite codec_embedding del talker (spazio cb0_vocab)
         inputs.append(self.cb0_embedding(codec_ids_flat[:, :1].clamp(min=0)))
@@ -271,6 +271,7 @@ class Qwen3TTSSubTalker(nn.Module):
         for g in range(self.cfg["num_code_groups"] - 2):
             inputs.append(self.group_embeddings[g](codec_ids_flat[:, g + 1 : g + 2].clamp(min=0)))
         inputs_embeds = torch.cat(inputs, dim=1)  # (B, 16, talker_hidden)
+        S = inputs_embeds.shape[1]  # 16 posizioni (h_t, cb0, cb1..cb14): FIX RoPE (prima S=1 da h_t_flat)
         hidden_states = self.small_to_mtp_projection(inputs_embeds)  # (B, 16, cp_hidden)
 
         position_ids = torch.arange(0, S, device=h_t_flat.device).unsqueeze(0)

@@ -29,6 +29,33 @@ try:
     import kaggle_pipeline as KP
     import qwen_subtalker as QS
 
+    # ---- FIX RoPE runtime (bug storico: position_ids=[0] invece di 0..15) ----
+    # Il dataset montato contiene qwen_subtalker.py con il bug: _forward_flat
+    # calcola S=1 da h_t_flat (singolo frame) e applica il RoPE con fase 0 su
+    # tutte le 16 posizioni. Patch della classe: S = lunghezza reale della
+    # sequenza concatenata (h_t, cb0, cb1..cb14). Attivo con ROPE_FIX=1.
+    if os.environ.get("ROPE_FIX", "0") == "1" and hasattr(QS, "Qwen3TTSSubTalker"):
+        def _fixed_forward_flat(self, h_t_flat, codec_ids_flat):
+            inputs = [h_t_flat]  # posizione 0: h_t (senza embedding)
+            inputs.append(self.cb0_embedding(codec_ids_flat[:, :1].clamp(min=0)))
+            for g in range(self.cfg["num_code_groups"] - 2):
+                inputs.append(self.group_embeddings[g](codec_ids_flat[:, g + 1 : g + 2].clamp(min=0)))
+            inputs_embeds = torch.cat(inputs, dim=1)  # (B, 16, talker_hidden)
+            S = inputs_embeds.shape[1]  # FIX: 16 posizioni reali (prima S=1)
+            hidden_states = self.small_to_mtp_projection(inputs_embeds)
+            position_ids = torch.arange(0, S, device=h_t_flat.device).unsqueeze(0)
+            position_embeddings = self.rotary_emb(hidden_states, position_ids)
+            causal_mask = self._causal_mask.to(h_t_flat.device).to(h_t_flat.dtype)
+            for layer in self.layers:
+                hidden_states = layer(hidden_states, position_embeddings, causal_mask)
+            hidden_states = self.norm(hidden_states)
+            logits = torch.stack(
+                [self.lm_head[j](hidden_states[:, j + 1]) for j in range(self.cfg["num_code_groups"] - 1)], dim=1
+            )
+            return logits
+        QS.Qwen3TTSSubTalker._forward_flat = _fixed_forward_flat
+        print("ROPE_FIX applicato: _forward_flat usa S=16 posizioni reali", flush=True)
+
     # ---- dati (identico a checke) ----
     parquet_cache = f"data/train_tokens_{KP.DUPLEXCONV_MAX_HOURS}h_{KP.MDC_MAX_SAMPLES}s.parquet"
     KP.convert_parquet_to_memmap(parquet_cache)

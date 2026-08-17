@@ -1,0 +1,150 @@
+Ho caricato la memoria persistente globale e di workspace.
+
+---
+
+# 🏛️ Revisione Tecnica Senior: RoPE Fix, Monkey-Patch, Ri-Probe e Piano FitNets Stage 2
+
+---
+
+## (A) Revisione del Fix `_forward_flat`: Analisi Rigorosa e Punti Deboli
+
+### 1. Verdetto Architetturale: **APPROVATO AL 100% (Replica Matematica Esatta)**
+
+Il confronto riga per riga con il sorgente ufficiale [`modeling_qwen3_tts.py`](file:///C:/Users/andre/AppData/Local/Temp/modeling_qwen3_tts.py) (righe 1050–1260 e 1605–1635) conferma la totale fedeltà del fix:
+
+```python
+# FIX APPLICATO in qwen_subtalker.py:
+inputs = [h_t_flat]
+inputs.append(self.cb0_embedding(codec_ids_flat[:, :1].clamp(min=0)))
+for g in range(self.cfg["num_code_groups"] - 2):
+    inputs.append(self.group_embeddings[g](codec_ids_flat[:, g + 1 : g + 2].clamp(min=0)))
+inputs_embeds = torch.cat(inputs, dim=1)           # (B*T, 16, 2048)
+S = inputs_embeds.shape[1]                         # S = 16 (FIX: posizioni reali della sequenza)
+hidden_states = self.small_to_mtp_projection(inputs_embeds)  # (B*T, 16, 1024)
+position_ids = torch.arange(0, S, device=h_t_flat.device).unsqueeze(0)  # (1, 16)
+position_embeddings = self.rotary_emb(hidden_states, position_ids)
+causal_mask = self._causal_mask.to(h_t_flat.device).to(h_t_flat.dtype)
+for layer in self.layers: 
+    hidden_states = layer(hidden_states, position_embeddings, causal_mask)
+hidden_states = self.norm(hidden_states)
+logits = torch.stack([self.lm_head[j](hidden_states[:, j + 1]) for j in range(self.cfg["num_code_groups"] - 1)], dim=1)
+```
+
+### 2. Verifica Comparata sui Dettagli Interni
+1. **Comportamento di `position_ids` nel Teacher**:
+   In `modeling_qwen3_tts.py` (riga 1628), `forward_sub_talker_finetune` concatena gli embedding dei 16 token e chiama `code_predictor.forward_finetune(inputs_embeds=...)` senza passare `position_ids`. Il modello base (riga 1087–1092) esegue:
+   $$\text{cache\_position} = \text{arange}(0, \text{inputs\_embeds.shape}[1]) = [0, 1, \dots, 15]$$
+   $$\text{position\_ids} = \text{cache\_position.unsqueeze}(0) \in \mathbb{Z}^{1 \times 16}$$
+   Il fix riproduce esattamente questo tensore `[0, 1, ..., 15]`.
+2. **Classe `rotary_emb` e Calcolo Frequenze**:
+   La classe `Qwen3TTSRotaryEmbedding` in `qwen_subtalker.py` usa:
+   $$\theta = 10000.0, \quad \text{inv\_freq}_i = \frac{1}{\theta^{2i/d}} \quad (d = \text{head\_dim} = 128)$$
+   con calcolo in `float32` forzato via `autocast(enabled=False)` e concatenazione `(freqs, freqs)`. È bit-level identica all'implementazione HF ufficiale.
+3. **Allineamento Output `lm_head`**:
+   Per $j=0 \dots 14$, `lm_head[j]` proietta `hidden_states[:, j+1]` (token 1 = $cb_0 \to$ predice $cb_1$, fino al token 15 = $cb_{14} \to$ predice $cb_{15}$). Questo rispecchia riga 1237 del teacher (`lm_head[i-1](hidden_states[:, i])` per $i=1..15$).
+
+### 3. Analisi dei Potenziali Punti Deboli / Edge Cases
+* **`sample_acoustic_codes`**: In inferenza autoregressiva, la matrice `full` viene allocata a forma `(B, T, 16)` con $cb_0$ e i token progressivamente campionati in `1..g`, mentre le colonne future `g+1..15` contengono $0$. Poiché l'attenzione è causale (`_causal_mask.triu_(1)` a $-\infty$), le posizioni future non influenzano il token $g$. Poiché $S=16$, la posizione $g$ riceve la corretta coordinata di fase RoPE $g$. Il comportamento è **corretto ed esente da leakage**.
+* **Device e Dtype della maschera**: `self._causal_mask.to(h_t_flat.device).to(h_t_flat.dtype)` evita qualsiasi cast non necessario ed è safe in `bfloat16` (`-inf` preservato).
+
+---
+
+## (B) Revisione e Approvazione del Monkey-Patch Runtime
+
+### Verdetto: **APPROVATO (Comportamento Idempotente e Sicuro)**
+
+```python
+if os.environ.get("ROPE_FIX", "0") == "1" and hasattr(QS, "Qwen3TTSSubTalker"):
+    def _fixed_forward_flat(self, h_t_flat, codec_ids_flat):
+        # [stessa logica del fix con S=inputs_embeds.shape[1]]
+        ...
+    QS.Qwen3TTSSubTalker._forward_flat = _fixed_forward_flat
+```
+
+### Perché il Monkey-Patch è Sufficiente e Completo:
+1. **Punto Unico di Entrata (`_forward_flat`)**:
+   - `forward_sub_talker_finetune(...)` $\implies$ chiama `self._forward_flat(h_flat, c_flat)` (riga 329).
+   - `sample_acoustic_codes(...)` $\implies$ chiama `self._forward_flat(...)` (riga 398).
+   - `coupling_loss(...)` $\implies$ riceve i `logits` già calcolati da `forward_sub_talker_finetune`.
+   Non esistono altri percorsi interni che calcolano `position_ids` o invocano `rotary_emb`.
+2. **Ordine di Esecuzione**:
+   Il patch agisce direttamente sulla classe `QS.Qwen3TTSSubTalker` prima di qualsiasi chiamata a `QS.load_qwen_subtalker(...)` (sia nel setup di cella 2 sia nel blocco opzionale `FIDELITY_PROBE`). Tutte le istanze create riceveranno il nuovo metodo unbound.
+
+---
+
+## (C) Piano Operativo: Ri-Probe e FitNets Stage 2 (Bypass Stage 1)
+
+```mermaid
+flowchart TD
+    A["Ri-Probe (ROPE_FIX=1 + FIDELITY=1)"] -->|MAX Delta logits < 0.05, CE ~5.656| B["Gate Superato (SUB_EQUALS_TEACHER)"]
+    B --> C["Update Dataset Kaggle (qwen_subtalker.py pulito)"]
+    C --> D["FitNets Stage 2 (Training Adapter Gemma -> h_t)"]
+    D --> E["Valutazione & Gate Stage 2 (Cos Sim >= 0.85, CE_sub <= 6.00)"]
+```
+
+### 1. Ri-Probe di Fedeltà (Immediato)
+* **Comando / Environment**: `ROPE_FIX=1 FIDELITY=1` sul kernel `fitnets_extract`.
+* **Gate di Successo Quantitativo**:
+  - `MAX |Delta logits|` : $< 0.05$ (atteso $< 0.005$ in `bfloat16`).
+  - `CE Sub (active)` : $\approx 5.656$ nats (Gap vs Teacher $< 0.005$).
+  - `Esito Probe` : `[SUB_EQUALS_TEACHER]`.
+* **Costo Computazionale**: $\approx 20\text{–}30$ secondi GPU T4.
+
+---
+
+### 2. Perché lo Stage 1 è Ufficialmente Cancellato
+Lo Stage 1 era stato pianificato sotto l'assunzione che il sub-talker fosse un modello distillato degradato o non allineato da addestrare da zero. Il probe ha dimostrato che **è già il checkpoint oracolare esatto al 100% (89/89 tensori identici)**. Addestrare il sub-talker è dannoso (come visto in Smoke B con overfitting locale e collasso di validazione a $10.60$). 
+
+Il sub-talker rimane **CONGELATO al 100% (`eval()`, `requires_grad_(False)`)**.
+
+---
+
+### 3. Iperparametri e Configurazione di FitNets Stage 2 (Gemma Adapter)
+
+L'obiettivo di Stage 2 è addestrare l'adapter di Gemma ($d_{\text{gemma}} = 2048 \to d_{\text{talker}} = 2048$) per produrre rappresentazioni $h_t^{\text{pred}}$ che minimizzino la distanza geometrica da $h_t^{\text{nativo}}$ e massimizzino la predizione dei codebook acustici attraverso il sub-talker congelato.
+
+$$\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{latent}}(h_t^{\text{pred}}, h_t^{\text{nativo}}) + \lambda_{\text{coupling}} \cdot \mathcal{L}_{\text{coupling}}(\text{logits}_{\text{sub}}(h_t^{\text{pred}}, \text{GT}_{\text{codes}}), \text{GT}_{\text{codes}_{1..15}})$$
+
+dove:
+$$\mathcal{L}_{\text{latent}} = (1 - \text{CosineSimilarity}(h_t^{\text{pred}}, h_t^{\text{nativo}})) + 0.5 \cdot \text{MSE}(h_t^{\text{pred}}, h_t^{\text{nativo}})$$
+
+| Iperparametro | Valore Raccomandato | Razionale Tecnico |
+| :--- | :--- | :--- |
+| **Modulo Addestrabile** | Gemma 4 LoRA + Adapter $h_t$ | Sub-talker congelato (`requires_grad=False`) |
+| **Learning Rate Adapter** | $1.5 \times 10^{-4}$ (AdamW, $\beta_1=0.9, \beta_2=0.98$) | Stabilità geometrica per allineamento manifold |
+| **LR Scheduler** | Cosine Annealing con Warmup | 5% warmup step per evitare gradient shock iniziale |
+| **Weight Decay** | $1 \times 10^{-2}$ | Regolarizzazione L2 sull'adapter |
+| **Batch Size Reale** | $8$ finestre (seq_len=64) | Grad Accumulation = 2 (Effective Batch = 16) |
+| **$\lambda_{\text{coupling}}$** | **$0.15 \to 0.25$** (vedi Sez. D) | Gradiente pulito del sub-talker a regime |
+| **Gradient Clipping** | `max_norm = 1.0` | **Obbligatorio**: previene spike attraverso i 5 layer del sub |
+| **Step Totali** | $1.500 \text{–} 2.500$ step | $\approx 2.5 \text{–} 3.5$ ore su singola T4 Kaggle |
+| **Precisione** | `bfloat16` nativo | Coerenza forward/backward senza artefatti di casting |
+
+---
+
+### 4. Gate Quantitativi di Validazione per Stage 2
+Al termine del training, lo Stage 2 è promosso per la sintesi e il deployment solo se rispetta i seguenti criteri sul validation set:
+1. **Cosine Similarity Latente**: $\text{CosSim}(h_t^{\text{pred}}, h_t^{\text{nativo}}) \ge 0.88$ (baseline random $\approx 0.15$).
+2. **Cross-Entropy Sub-Talker**: $\text{CE}_{\text{val}} \le 5.95\text{ nats}$ (vicino al tetto oracolare $5.656$).
+3. **Rango Spettrale SVD**: $\text{Rank}(h_t^{\text{pred}}) \ge 256$ (assenza di collasso dimensionale dell'adapter).
+4. **Sintesi Audio Pesata**: Test audio `Code2Wav` privo di riverbero metallico o click acustici.
+
+---
+
+## (D) Analisi di Stabilità del Gradiente e Rischi Aggiuntivi
+
+### 1. Dinamica del Gradiente di Coupling post-RoPE Fix
+* **Prima del Fix (RoPE collassato a 0)**: I logit del sub-talker erano degradati ($\text{CE} \ge 7.03$). Il gradiente $\nabla_{h_t} \mathcal{L}_{\text{coupling}}$ retro-propagato attraverso i 5 layer conteneva vettori di fase incoerenti (rumore pseudo-casuale), costringendo $\lambda$ a rimanere basso per non corrompere $h_t$.
+* **Dopo il Fix (RoPE $0..15$ corretto)**: Con $\text{CE} \approx 5.656$, il sub-talker proietta su manifold semantici ben definiti. Il gradiente $\nabla_{h_t} \mathcal{L}_{\text{coupling}}$ è **estremamente informativo e compatto**, ma anche **significativamente più ripido**.
+* **Mitigazione**: Mantenere $\lambda_{\text{coupling}} \in [0.15, 0.25]$ e imporre `torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)` prima di `optimizer.step()`.
+
+### 2. Rischi Aggiuntivi Identificati:
+1. **Contaminazione Checkpoint Storici**: Qualsiasi adapter addestrato con il sub-talker buggato ha imparato a compensare artificialmente l'assenza di fase RoPE. **È tassativamente vietato effettuare il resume da vecchi pesi**: l'adapter di Stage 2 deve partire da un'inizializzazione pulita.
+2. **Disallineamento Dataset Congelato**: Una volta confermato il ri-probe, la priorità assoluta è il re-upload del dataset `gemma-4-omni-module` contenente il file [`qwen_subtalker.py`](file:///C:/Users/andre/Documents/gemma-4-omni/qwen_subtalker.py) con il fix permanente, rimuovendo il monkey-patch dal codice di produzione.
+
+---
+
+### Sintesi Operativa Immediata
+1. **Lanciare il Ri-Probe**: Eseguire il kernel con `ROPE_FIX=1` e `FIDELITY=1`.
+2. **Attendere il verdetto**: Conferma attesa `[SUB_EQUALS_TEACHER]`.
+3. **Procedere direttamente con il training di Stage 2**.
