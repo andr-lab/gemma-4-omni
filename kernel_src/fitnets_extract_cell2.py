@@ -156,14 +156,15 @@ try:
     # ---- replica ESATTA del collate_fn ufficiale (batch 1, niente padding) ----
     def build_inputs(text: str, audio_codes: torch.Tensor):
         """audio_codes: (T_audio, 16) long, valori del tokenizer 12Hz GT.
-        Ritorna input_ids (1,t,2), codec_ids (1,t,16), text_mask, codec_mask,
-        attn (1,t). t = 8 + T_text + T_audio."""
+        Ritorna input_ids (1,t,2), codec_ids (1,t,16), text_mask, codec_emb_mask, codec_mask,
+        attn (1,t), pos_cbos. t = 8 + Tt + Ta."""
         assistant = f"<|im_start|>assistant\n{text}<|im_end|>\n<|im_start|>assistant\n"
         text_ids = proc(text=assistant, return_tensors="pt")["input_ids"]  # (1, T_text_tot)
         text_ids = text_ids[:, :-5]  # come dataset ufficiale
         Tt = text_ids.shape[1]
         Ta = audio_codes.shape[0]
         t = 8 + Tt + Ta
+        pos_cbos = 8 + Tt - 2
         input_ids = torch.zeros((1, t, 2), dtype=torch.long)
         codec_ids = torch.zeros((1, t, 16), dtype=torch.long)
         text_mask = torch.zeros((1, t), dtype=torch.bool)
@@ -190,12 +191,12 @@ try:
         codec_mask[0, 8 + Tt - 1:8 + Tt - 1 + Ta] = True
         attn[0, :8 + Tt + Ta] = True
         codec_ids[0, 8 + Tt - 1:8 + Tt - 1 + Ta, :] = audio_codes
-        return input_ids, codec_ids, text_mask, codec_emb_mask, codec_mask, attn
+        return input_ids, codec_ids, text_mask, codec_emb_mask, codec_mask, attn, pos_cbos
 
     # ---- forward talker + h_t target (come sft_12hz.py) ----
-    def extract_ht(item, n_real, text):
+    def extract_ht(item, n_real, text, return_shifted: bool = False):
         audio_codes = item["audio_targets"][:n_real].long()  # (T_audio, 16)
-        input_ids, codec_ids, text_mask, codec_emb_mask, codec_mask, attn = build_inputs(text, audio_codes)
+        input_ids, codec_ids, text_mask, codec_emb_mask, codec_mask, attn, pos_cbos = build_inputs(text, audio_codes)
         input_ids = input_ids.to("cuda")
         codec_ids = codec_ids.to("cuda")
         text_mask = text_mask.to("cuda")
@@ -203,9 +204,7 @@ try:
         codec_mask = codec_mask.to("cuda")
         attn = attn.to("cuda")
         with torch.inference_mode():
-            # 1) canale testo: proiezione non-lineare UFFICIALE (ResizeMLP, SiLU) come
-            #    nel forward del talker con input_ids (fedelta h_t; text_hidden==hidden
-            #    ma la projection e' comunque non-identita, pesi addestrati)
+            # 1) canale testo: proiezione non-lineare UFFICIALE (ResizeMLP, SiLU)
             raw_text_emb = talker.model.text_embedding(input_ids[:, :, 0])
             input_text_emb = talker.text_projection(raw_text_emb) * text_mask.unsqueeze(-1)
             input_codec_emb = talker.model.codec_embedding(input_ids[:, :, 1]) * codec_emb_mask.unsqueeze(-1)
@@ -220,9 +219,19 @@ try:
                 output_hidden_states=True,
                 use_cache=False,
             )
+            # outputs.hidden_states[0][-1] e' gia' POST-RMSNorm finale (dim=2048)
             hidden_states = outputs.hidden_states[0][-1]  # (1, t-1, 2048)
-            cm = codec_mask[:, :-1]
-            ht_target = hidden_states[cm]  # (T_audio, 2048)
+            # ALLINEAMENTO TEMPORALE AUTOREGRESSIVO:
+            # Per predire audio_codes[k] (frame k), il talker usa lo stato generato alla posizione precedente:
+            # - Frame 0 (cb0..15): stato generato alla posizione CBOS (pos_cbos = 8 + Tt - 2)
+            # - Frame k: stato generato a pos_cbos + k
+            # Slicing corretto: [pos_cbos : pos_cbos + Ta] (lunghezza esatta Ta)
+            Ta = audio_codes.shape[0]
+            ht_target = hidden_states[0, pos_cbos : pos_cbos + Ta, :]  # (T_audio, 2048)
+            if return_shifted:
+                cm = codec_mask[:, :-1]
+                ht_shifted = hidden_states[cm]  # vecchio slicing errato (pos_cbos+1 : pos_cbos+1+Ta)
+                return ht_target.float().cpu().numpy(), ht_shifted.float().cpu().numpy()
         return ht_target.float().cpu().numpy()
 
     # ---- SCAN finestre attive (come checke, per una sanity comparabile) ----
@@ -309,58 +318,108 @@ try:
         json.dump(manifest, f)
     print(f"TARGET SALVATI: {len(manifest)} finestre in {OUT}", flush=True)
 
-    # ---- SANITY (solo se richiesta): h_t nativo -> sub-talker -> wav ----
+    # ---- SANITY & TEST DISCRIMINANTE 4-VIE: h_t corretto vs shifted x Teacher vs Sub-Talker ----
     if SANITY and train_wins:
         w = train_wins[0]
         idx = w["idx"]
         item = ds_train[idx]
         text = text_by_window[idx] if text_by_window is not None else ""
-        ht = torch.from_numpy(extract_ht(item, w["n_real"], text)).to("cuda")  # (T_audio, 2048)
-        # il sub-talker e' bf16: h_t da numpy e' fp32 -> cast al dtype del modulo
-        # (mat1/mat2 mismatch su small_to_mtp_projection altrimenti)
-        ht = ht.to(dtype=next(sub.parameters()).dtype)
-        gt = item["audio_targets"][:w["n_real"]].to("cuda")  # (T_audio, 16)
+        gt = item["audio_targets"][:w["n_real"]].to("cuda").long()  # (T_audio, 16)
         cb0 = gt[:, 0]
-        # 1) CE del sub-talker con h_t NATIVO + cb0 GT (teacher forcing)
+        active = torch.from_numpy(w["active"]).to("cuda")
+
+        # Estrai sia ht corretto che ht shifted (per comparazione diretta del bug)
+        ht_corr_np, ht_shift_np = extract_ht(item, w["n_real"], text, return_shifted=True)
+        ht_corr = torch.from_numpy(ht_corr_np).to("cuda", dtype=talker.dtype)
+        ht_shift = torch.from_numpy(ht_shift_np).to("cuda", dtype=talker.dtype)
+
+        print("\n" + "=" * 70, flush=True)
+        print("=== TEST DISCRIMINANTE 4-VIE (TEACHER vs SUB-TALKER, CORRETTO vs SHIFTED) ===", flush=True)
+        print("=" * 70, flush=True)
+
         with torch.inference_mode():
-            logits = sub.forward_sub_talker_finetune(ht.unsqueeze(0), gt.unsqueeze(0))
-            per = F.cross_entropy(
-                logits.reshape(-1, sub.cfg["vocab_size"]),
-                gt[:, 1:].reshape(-1),
+            # A) TEACHER UFFICIALE con h_t CORRETTO
+            logits_tch_corr, _ = talker.forward_sub_talker_finetune(gt, ht_corr)
+            per_tch_corr = F.cross_entropy(
+                logits_tch_corr.reshape(-1, 2048), gt[:, 1:].reshape(-1),
                 reduction="none", ignore_index=-100,
             ).reshape(w["n_real"], 15)
-            active = torch.from_numpy(w["active"]).to("cuda")
-            ce_act_native = float(per[active].mean()) if int(active.sum()) else float("nan")
-            ce_all_native = float(per.mean())
-        print(f"\nSANITY CE con h_t NATIVO: ce_act={ce_act_native:.3f} ce_all={ce_all_native:.3f} "
-              f"(baseline Gemma ce_act ~7.2 / casuale 7.62)", flush=True)
-        # 2) generazione cb1-15 greedy da h_t nativo + cb0 GT
+            ce_tch_corr_act = float(per_tch_corr[active].mean()) if int(active.sum()) else float("nan")
+            ce_tch_corr_all = float(per_tch_corr.mean())
+
+            # B) TEACHER UFFICIALE con h_t SHIFTED (vecchio bug)
+            logits_tch_shift, _ = talker.forward_sub_talker_finetune(gt, ht_shift)
+            per_tch_shift = F.cross_entropy(
+                logits_tch_shift.reshape(-1, 2048), gt[:, 1:].reshape(-1),
+                reduction="none", ignore_index=-100,
+            ).reshape(w["n_real"], 15)
+            ce_tch_shift_act = float(per_tch_shift[active].mean()) if int(active.sum()) else float("nan")
+            ce_tch_shift_all = float(per_tch_shift.mean())
+
+            # C) NOSTRO SUB-TALKER STANDALONE con h_t CORRETTO
+            logits_sub_corr = sub.forward_sub_talker_finetune(ht_corr.unsqueeze(0), gt.unsqueeze(0)).squeeze(0)
+            per_sub_corr = F.cross_entropy(
+                logits_sub_corr.reshape(-1, sub.cfg["vocab_size"]), gt[:, 1:].reshape(-1),
+                reduction="none", ignore_index=-100,
+            ).reshape(w["n_real"], 15)
+            ce_sub_corr_act = float(per_sub_corr[active].mean()) if int(active.sum()) else float("nan")
+            ce_sub_corr_all = float(per_sub_corr.mean())
+
+            # D) NOSTRO SUB-TALKER STANDALONE con h_t SHIFTED (vecchio bug)
+            logits_sub_shift = sub.forward_sub_talker_finetune(ht_shift.unsqueeze(0), gt.unsqueeze(0)).squeeze(0)
+            per_sub_shift = F.cross_entropy(
+                logits_sub_shift.reshape(-1, sub.cfg["vocab_size"]), gt[:, 1:].reshape(-1),
+                reduction="none", ignore_index=-100,
+            ).reshape(w["n_real"], 15)
+            ce_sub_shift_act = float(per_sub_shift[active].mean()) if int(active.sum()) else float("nan")
+            ce_sub_shift_all = float(per_sub_shift.mean())
+
+            # Discrepanza matematica esatta tra Teacher e Sub-Talker
+            max_logit_diff = float((logits_tch_corr - logits_sub_corr).abs().max())
+
+        print(f"1. TEACHER UFFICIALE + h_t CORRETTO : ce_act={ce_tch_corr_act:.3f} | ce_all={ce_tch_corr_all:.3f}", flush=True)
+        print(f"2. TEACHER UFFICIALE + h_t SHIFTED  : ce_act={ce_tch_shift_act:.3f} | ce_all={ce_tch_shift_all:.3f}", flush=True)
+        print(f"3. SUB-TALKER NOSTRO + h_t CORRETTO : ce_act={ce_sub_corr_act:.3f} | ce_all={ce_sub_corr_all:.3f}", flush=True)
+        print(f"4. SUB-TALKER NOSTRO + h_t SHIFTED  : ce_act={ce_sub_shift_act:.3f} | ce_all={ce_sub_shift_all:.3f}", flush=True)
+        print(f"5. FEDELTA' IMPLEMENTAZIONE (|Tch - Sub| max diff): {max_logit_diff:.6f}", flush=True)
+        print("=" * 70, flush=True)
+
+        # Generazione audio greedy con h_t corretto
         with torch.inference_mode():
-            ac = sub.sample_acoustic_codes(ht.unsqueeze(0), cb0.unsqueeze(0), temperature=0.0)
-        full_codes = torch.cat([cb0.unsqueeze(-1), ac.squeeze(0)], dim=-1)  # (T_audio, 16)
-        wav = decoder.decode(full_codes.cpu().float())
-        wav_path = "/kaggle/output/sanity_ht_native.wav"
+            ac = sub.sample_acoustic_codes(ht_corr.unsqueeze(0), cb0.unsqueeze(0), temperature=0.0)
+        full_codes = torch.cat([cb0.unsqueeze(-1), ac.squeeze(0)], dim=-1)  # (T_audio, 16) long
+
+        # Decodifica Code2Wav passando LongTensor (nessun warning FloatTensor)
+        wav = decoder.decode(full_codes.cpu().long())
+        wav_path = "/kaggle/output/sanity_ht_native_corr.wav"
         import scipy.io.wavfile as wavfile
         wavfile.write(wav_path, SAMPLE_RATE,
                       (wav.astype(np.float32) * 32767).astype(np.int16))
         wav_gt_path = "/kaggle/output/sanity_gt.wav"
-        wav_gt = decoder.decode(torch.from_numpy(KP._trim_trailing_silence(gt.cpu().numpy())))
+        wav_gt = decoder.decode(torch.from_numpy(KP._trim_trailing_silence(gt.cpu().numpy())).long())
         wavfile.write(wav_gt_path, SAMPLE_RATE,
                       (wav_gt.astype(np.float32) * 32767).astype(np.int16))
         print(f"SANITY WAV: {wav_path} e {wav_gt_path}", flush=True)
-        # 3) confronto: quanti frame del generated differiscono dall'oracle
+
+        # Accuratezza greedy vs oracle cb1-15
         oracle = gt[:, 1:].cpu().numpy()
         gen = full_codes[:, 1:].cpu().numpy()
         acc = float((gen == oracle).mean())
-        print(f"SANITY accuratezza cb1-15 (greedy vs oracle): {acc:.4f}", flush=True)
+        print(f"SANITY accuratezza cb1-15 con h_t CORRETTO (greedy vs oracle): {acc:.4f}", flush=True)
+
+        report = {
+            "idx": idx, "n_real": w["n_real"],
+            "ce_teacher_correct_act": ce_tch_corr_act, "ce_teacher_correct_all": ce_tch_corr_all,
+            "ce_teacher_shifted_act": ce_tch_shift_act, "ce_teacher_shifted_all": ce_tch_shift_all,
+            "ce_subtalker_correct_act": ce_sub_corr_act, "ce_subtalker_correct_all": ce_sub_corr_all,
+            "ce_subtalker_shifted_act": ce_sub_shift_act, "ce_subtalker_shifted_all": ce_sub_shift_all,
+            "max_logit_diff_tch_vs_sub": max_logit_diff,
+            "acc_cb115_greedy_correct": acc,
+            "ht_shape": list(ht_corr.shape),
+        }
         with open("/kaggle/output/sanity_report.json", "w", encoding="utf-8") as f:
-            json.dump({
-                "idx": idx, "n_real": w["n_real"],
-                "ce_act_native": ce_act_native, "ce_all_native": ce_all_native,
-                "acc_cb115_greedy": acc,
-                "ht_shape": list(ht.shape),
-            }, f, indent=2)
-        print("SANITY REPORT: /kaggle/output/sanity_report.json", flush=True)
+            json.dump(report, f, indent=2)
+        print("SANITY REPORT COMPLETO: /kaggle/output/sanity_report.json", flush=True)
 
     print("=== FITNETS EXTRACT COMPLETATO ===", flush=True)
     sys.stdout.flush()
