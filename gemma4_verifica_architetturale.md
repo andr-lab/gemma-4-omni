@@ -174,3 +174,14 @@ Nessun tweak di ottimizzazione (lr, loss, LoRA sul decoder, piu' step) puo' riso
 - g) Mitigazioni: adapter 2-layer (3072→4096→2048+LN) se rank effettivo <100; R2 LoRA r=8 lr=1e-5 sul sub-talker.
 - h) Alternative: distillazione CE pura = fallita (CHECK-C/D/E); ibridazione PRIME-Speech (h_t = W_h·h_Gemma + W_e·Emb(text) + W_s·e_spk) = fallback se R1 non passa il gate.
 - Operativo: Step 0 sanity → estrazione pilota 2h → training R1 → gate. Fattibilità alta su T4 (25 min totali GPU).
+
+## Estrazione target FitNets — implementazione (17/08 17:00 UTC)
+
+- **Studio SDD del teacher completato** (fonte: repo ufficiale QwenLM/Qwen3-TTS, finetuning/dataset.py + sft_12hz.py + modeling_qwen3_tts.py, scaricati e analizzati):
+  - h_t nativo = `hidden_states[codec_mask[:, :-1]]` = output layer 28 post-RMSNorm (talker_hidden 2048, 28 layer, vocab cb0 3072, residui 2048) ai frame audio 12.5Hz — ESATTAMENTE l'input del code_predictor (nostro sub-talker).
+  - Formato input dual-track (collate_fn ufficiale, batch 1): t = 8 + T_text + T_audio; canale testo (ChatML `<|im_start|>assistant\n...`, primi 3 token in testa, pad 3-6, tts_bos in 7, testo in 8.., tts_eos, pad) + canale codec (nothink/think_bos/think_eos/0/pad in 3-8, pad nel testo, codec_bos in 8+Tt-2, cb0 GT, codec_eos); codec_embedding_mask[6]=False (slot speaker, voce neutra); codec_ids (1,t,16) per i residui.
+  - Forward (sft_12hz.py): inputs_embeds = text_emb(text) * text_mask + codec_emb(cb0) * codec_emb_mask + Σ_{i=1..15} codec_emb_i(cb_i) * codec_mask (speaker embedding omesso → voce neutra, coerente col nostro sistema senza voce target); talker(inputs_embeds[:, :-1], attn[:, :-1], output_hidden_states=True, use_cache=False).
+  - Token speciali: tts_pad 151671, tts_bos 151672, tts_eos 151673; codec_nothink 2155, think_bos 2156, think_eos 2157, pad 2148, bos 2149, eos 2150. text_vocab 151936 (Qwen2Tokenizer).
+- **Script `kernel_src/fitnets_extract_cell2.py`**: clona il repo Qwen3-TTS (qwen_tts) in Kaggle (git clone --depth 1, internet), carica teacher bf16 eager forward-only (3.5GB VRAM su T4), replica collate+forward, estrae h_t fp16 per finestra (`ht_{idx:05d}.npy`) + manifest.json in `/kaggle/output/fitnets_targets/`. SANITY (1 finestra): CE sub-talker con h_t nativo + cb0 GT + sample_acoustic_codes greedy → wav + accuratezza cb1-15 vs oracle. Scan finestre attive via mel (proxy energia, niente decode per finestra).
+- **Asimmetria documentata**: h_t teacher[p] vede cb0[p] in input (futuro-informato), il nostro h_t[p] no; mitigazione = loss mista (L_latent + λ·L_CE) nel training R1.
+- **Kernel**: `andrlab/gemma4-fitnets-smoke` (FITEX_N=1, SANITY=1, ~5-10 min: validazione percorso completo) → poi `andrlab/gemma4-fitnets-extract` (FITEX_N=1000, ~20-25 min). Output scaricabili via `kaggle kernels output` → dataset `andrlab/gemma4-fitnets-targets` per R1.
