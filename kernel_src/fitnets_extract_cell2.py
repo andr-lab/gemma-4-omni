@@ -368,6 +368,23 @@ try:
         sub_bf16.eval()
         print(f"[Probe] Sub-talker caricato in bf16 da: {sub_path}", flush=True)
 
+        # 1b. Teacher EAGER per il confronto forward: il teacher di default gira
+        # con SDPA (transformers 5.x: _attn_implementation="sdpa" assegnato al
+        # load), il sub e' eager manuale -> eager-vs-SDPA introduce un residuo
+        # di precisione/interfaccia. Il confronto DECISIVO a parita' di
+        # implementazione (eager-vs-eager) isola i bug strutturali del wrapper.
+        _attn_teacher_orig = getattr(talker.code_predictor.config, "_attn_implementation", None)
+        print(f"[Probe] attn_implementation teacher (default): {_attn_teacher_orig} -> forzo 'eager' per il confronto", flush=True)
+        import copy as _copy
+        _cp_cfg = _copy.deepcopy(TCFG.code_predictor_config)
+        _cp_cfg._attn_implementation = "eager"
+        cp_eager = _M.Qwen3TTSTalkerCodePredictor(_cp_cfg, TCFG).to(device="cuda", dtype=torch.bfloat16)
+        _miss, _unexp = cp_eager.load_state_dict(talker.code_predictor.state_dict(), strict=False)
+        if _miss:
+            raise RuntimeError(f"code_predictor eager: pesi mancanti {_miss[:5]}")
+        cp_eager.eval()
+        print(f"[Probe] code_predictor EAGER istanziato (pesi da teacher: {len(_unexp) if _unexp else 0} inattesi)", flush=True)
+
         # 2. Confronto Configurazione
         tch_cp_cfg = getattr(TCFG, "code_predictor_config", None)
         if tch_cp_cfg is None:
@@ -496,8 +513,17 @@ try:
         ht_corr_bf16 = torch.from_numpy(ht_corr_np).to("cuda", dtype=torch.bfloat16)
 
         with torch.inference_mode():
-            # Teacher forward
-            logits_tch, _ = talker.forward_sub_talker_finetune(gt0, ht_corr_bf16)
+            # Teacher forward -- STESSO percorso di forward_sub_talker_finetune ma su
+            # code_predictor EAGER (parita' di implementazione col sub): costruzione
+            # inputs_embeds = [h_t] + [cb0 (codec_embedding talker)] + [cb1..cb14
+            # (codec_embedding code_predictor)], poi forward_finetune.
+            _emb_list = [ht_corr_bf16.unsqueeze(1)]
+            _emb_list.append(talker.model.codec_embedding(gt0[:, :1]))
+            for _i in range(1, 15):
+                _emb_list.append(cp_eager.get_input_embeddings()[_i - 1](gt0[:, _i:_i + 1]))
+            _inputs_tch = torch.cat(_emb_list, dim=1)  # (T, 16, 2048)
+            _out_tch = cp_eager.forward_finetune(inputs_embeds=_inputs_tch, labels=gt0[:, 1:])
+            logits_tch = _out_tch.logits
             # Sub-talker forward (bf16)
             logits_sub = sub_bf16.forward_sub_talker_finetune(ht_corr_bf16.unsqueeze(0), gt0.unsqueeze(0)).squeeze(0)
 
