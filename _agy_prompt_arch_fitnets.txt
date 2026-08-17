@@ -1,0 +1,41 @@
+Sei il revisore architetturale senior del progetto "Gemma 4 Full-Duplex Omni". Devi valutare CRITICAMENTE una scelta architetturale dopo un verdetto sperimentale fresco, e decidere se la strada proposta è giusta o va modificata/scartata. Non essere accomodante: trova ciò che è sbagliato.
+
+## Sistema attuale (funzionante, in Kaggle su T4)
+- Gemma 4 E2B (4-bit QLoRA r=16, hidden 3072) → adapter (Linear 3072→2048 + LayerNorm) → h_t (2048-dim, 12.5Hz, 1 per frame agente) → sub-talker Qwen3-TTS (decoder RVQ estratto, ADR-005) che genera cb0 semantico + 15 codebook residui → Code2Wav.
+- Il sub-talker estratto: input h_t (B,T,2048), cb0_embedding (vocab 3072 → 2048), codec_embedding residui (15 × Embedding(2048→2048)), small_to_mtp_projection 2048→1024, 5 layer MTP hidden 1024, 16 code groups, lm_head 15×Linear(1024→2048). Config identica al code_predictor del teacher (verificato su HF: hidden 1024, 5 layers, vocab 2048).
+- Dati: parquet 50h DuplexConv (24k finestre train 64-frame), checkpoint epoca 2 (Gemma QLoRA + adapter addestrati 50h con coupling loss, sub congelato).
+
+## Evidenze sperimentali (tutte COMPLETE, GPU reale, ~4 ore di test totali)
+Test audio A/B/C/D (v9): GT full → voce comprensibile. cb0 generated + cb1-15 GT → comprensibile. cb0 GT + cb1-15 generated → metallica/incomprensibile. full generated → metallica.
+Loss/training (ce_act = CE cross-entropy sui soli frame attivi, casuale = 7.62, baseline VAL ~6.8):
+- CHECK-B2 (50h reali, Gemma QLoRA + adapter trainable, sub CONGELATO): train 7, val 7 → nessun segnale.
+- CHECK-C (adapter-only, h_t FISSO preestratto, sub congelato, 400 step): overfit, VAL 10.8.
+- CHECK-D (adapter + LoRA sub r=16, h_t fisso, 800 step): TRAIN collassa 0.11, VAL 13.6. Ablation h_t=0: TRAIN 12.5 (h_t è l'unico veicolo) ma VAL quasi identica (13.6→13.9) → h_t non generalizza.
+- CHECK-E (LEARNING CONGIUNTO, 17/08/2026: Gemma QLoRA + adapter + LoRA sub, TUTTO trainable, h_t differenziabile, 800 step, 24 train/12 val): TRAIN ce_act 7.71→0.04 (collasso, memorizzazione totale), VAL 6.81→13.40 MONOTONA (sopra casuale 7.62). Ablation h_t=0: TRAIN 12.57 (vs 0.04) | VAL 13.65 (vs 13.40, quasi identico). ce_all VAL 3.71→7.07.
+- Baseline stabile: VAL ce_act ~6.8 in tutte le run.
+
+## Verdetto interpretativo (da validare)
+Nessuna combinazione di (origine h_t) × (adattabilità decoder) generalizza. Anche con learning congiunto (h_t LIBERO di riorganizzarsi) il pattern è identico a CHECK-D (h_t fisso): il decoder impara a usare h_t in train ma l'informazione in h_t non porta nulla in VAL. → CONFUTATA l'ipotesi "mancanza di co-adattamento". Il problema è il GAP INFORMATIVO: l'hidden di Gemma (da parlato utente + testo risposta) non contiene l'informazione acustica/prosodica/lessicale che il sub-talker Qwen si aspetta in h_t, in distribuzione generalizzabile.
+
+## Teacher disponibile (dati reali da HF, Qwen/Qwen3-TTS-12Hz-1.7B-Base)
+- Architettura Qwen3TTSForConditionalGeneration. talker_config: hidden_size=2048, 28 layers, 16 heads/8 kv, intermediate 6144, vocab 3072, code_predictor_config hidden 1024/5 layers/vocab 2048 (= il nostro sub-talker). speech_tokenizer/ (Qwen-TTS-Tokenizer-12Hz) separato.
+- h_t nativo = ultimo hidden state del backbone talker ai frame audio (2048-dim, 12.5Hz) → è L'INPUT che il decoder MTP ha visto in training. Il nostro percorso produce h_t con la STESSA dimensione (adapter 3072→2048).
+- Dual-track: input del backbone = token testo (Qwen tokenizer) + token acustici (mel via speech tokenizer) concatenati lungo l'asse canali; predice cb0 + produce h_t.
+
+## PROPOSTA DA VALUTARE: Piano B "FitNets" (R1 del protocollo R0-R4)
+1. Estrazione OFFLINE: scaricare il teacher (model.safetensors ~1.7B) in Kaggle, replicare il dual-track con testo risposta GT + mel agente GT, estrarre h_t nativo per ~10h di DuplexConv → file binari (target).
+2. Preflight: dimensioni temporali 12.5Hz coerenti, range numerico, non-collasso, sanity su 10 campioni (h_t estratto → sub-talker → audio: se l'audio con h_t nativo + cb0 GT è intelligibile, il decoder "capisce" h_t nativo → il problema è solo il nostro h_t sintetico).
+3. Training R1: adapter-ONLY (Gemma e sub congelati) con L_latent = cosine + variance regularizer verso il target h_t. ~500 step.
+4. Gate: cos_sim VAL > 0.5 + CE_act < 6.5 + rank adapter > 100.
+5. R2/R3: sblocco progressivo (LoRA Gemma con LR basso, come da protocollo).
+
+## DOMANDE PRECISE (rispondi a tutte, con struttura chiara e massimo ~1200 parole)
+a) VALIDAZIONE VERDETTO: il verdetto CHECK-E KO e l'interpretazione "gap informativo" sono corretti? C'è un'alternativa che spieghi meglio i dati (es. overfitting da poche finestre 24, LR troppo alta sul sub, memorizzazione come artefatto del test breve e non della struttura)?
+b) SCELTA FITNETS: dato che l'h_t nativo del teacher È l'input che il decoder MTP ha visto in training, la regressione dell'adapter verso h_t nativo è la mossa giusta? Quali sono i punti deboli (es. l'h_t nativo dipende dal testo GT della risposta — in inferenza il testo è GENERATO, e da un modello diverso; mismatch tra distribuzione del testo Qwen vs testo Gemma)?
+c) TARGET: estrarre l'ultimo hidden (layer 28) o un layer intermedio (~2/3, layer 19)? Nel codice HF il decoder MTP riceve proprio l'output finale del backbone o un hidden intermedio? (PRIME-Speech e altra letteratura usano layer intermedi per la distillazione prosodica — ma qui il decoder è stato addestrato su UN formato specifico: deve matcherare ESATTAMENTE quello, non la letteratura generica.)
+d) LOSS: cosine + variance reg è sufficiente o serve qualcosa in più (es. distil anche su cb0 logits, o MSE parziale)? Come evitare che l'adapter trovi una soluzione banale (es. proiezione costante che massimizza cosine media)?
+e) TEST DECISIVO PRE-TRAINING: il sanity check (h_t nativo + cb0 GT → audio intelligibile) è davvero il test che decide se FitNets ha senso? C'è un test ancora più economico da fare PRIMA di investire nell'estrazione?
+f) ORDINE OPERATIVO e quota: estrazione offline su ~10h richiede quanto GPU (forward 1.7B su ~30k frame)? Meglio 10h o meno? Il training R1 (500 step, adapter-only) è sufficiente o serve più?
+g) RISCHIO FINALE: anche con cosine alta, il rischio agy precedente ("i codebook residui sono sensibili a perturbazioni ortogonali non catturate da L_latent") resta — come si mitiga (es. fine-tuning successivo del sub-talker con h_t sintetico, o loss mista CE+L_latent)?
+h) ALTERNATIVE: c'è una strada migliore di FitNets dato TUTTO ciò che sappiamo (es. usare il teacher come GENERATORE dei target cb1-15 e distillare direttamente i codebook con L_CE sul sub-talker, mantenendo il nostro h_t; o sostituire l'adapter con una testa di proiezione addestrata con CE sul sub-talker invece della regressione)?
+Leggi i file che servono in workspace: qwen_subtalker.py, kaggle_pipeline.py (cerca _forward_ht, ht_adapter, coupling_loss, FullDuplexDataset), NEXT_STEP.md, gemma4_verifica_architetturale.md (appendici recenti con i verdetti).

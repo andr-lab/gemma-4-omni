@@ -162,3 +162,15 @@ Nessun tweak di ottimizzazione (lr, loss, LoRA sul decoder, piu' step) puo' riso
   - → Nessuna combinazione di (origine h_t) × (adattabilità decoder) generalizza. Il denominatore comune: l'hidden di Gemma (parlato utente + testo risposta) NON contiene l'informazione acustica/prosodica/lessicale necessaria ai codebook residui Qwen in distribuzione generalizzabile. **CONFUTATA l'ipotesi "mancanza di co-adattamento"**: con h_t libero di riorganizzarsi il risultato non cambia. Il problema è il GAP INFORMATIVO strutturale (come previsto da agy: "Gemma frozen/semantica grezza non può ricostruire pitch/fase dei codebook 11-15").
 - **Prossimo: PIANO B FitNets (R1)**: estrazione offline h_t nativo dal teacher Qwen (main talker) su ~10h DuplexConv → training adapter-only con L_latent (cosine + variance regularizer, secondo le 2 revisioni agy) → gate cos_sim VAL>0.5 / CE_act<6.5 / rank adapter>100 → poi R2/R3 (sblocco progressivo LoRA) o bivio.
 - Lezione monitor: `kaggle kernels logs <kernel> > file` con PYTHONIOENCODING=utf-8 (il flag -f è --follow).
+
+## Valutazione agy (gemini-3.7-flash-high) su scelta FitNets (17/08 16:20 UTC)
+
+- a) Verdetto gap informativo CONFERMATO (B2 vs D/E; decoder usa h_t come hash-key della memoria train; USM Gemma = semantica, no micro-struttura acustica).
+- b) FitNets = mossa giusta (rientrare nel manifold del code_predictor pre-addestrato) ma con punti deboli: mismatch conditioning (teacher: testo GT BPE Qwen; runtime: testo Gemma), regressione fuori manifold; adapter 1-layer lineare non basta da solo.
+- c) TARGET = **layer 28 (output finale del backbone post-RMSNorm)** — OBBLIGATORIO: il code_predictor (nostro sub-talker) è stato addestrato su QUEL formato. PRIME-Speech (layer ~2/3) non si applica (decoder addestrato da zero).
+- d) Loss: **non solo cosine** (rischio sotto-spazio fittizio: cosine 0.7-0.8 allineando 2-3 componenti principali). L = α·SmoothL1(h_ada, h_tea) + β·(1−CosSim) + λ·L_CE(cb1-15) — supervisione mista con ancoraggio sul task.
+- e) Step 0: SANITY 1-SAMPLE (costo ~0): h_t nativo + cb0 GT → sub-talker locale → Code2Wav → audio. Perfetto → problema era h_t. Metallico → bug interno sub-talker (rotary/mask/vocabolario), stop.
+- f) Dimensionamento: estrazione 1.5-2h (~1000 finestre) = 15-20 min GPU (non 10h); R1 500-800 step adapter-only < 5 min; gate CosSim_VAL>0.55 + CE_VAL<6.2 + test audio C.
+- g) Mitigazioni: adapter 2-layer (3072→4096→2048+LN) se rank effettivo <100; R2 LoRA r=8 lr=1e-5 sul sub-talker.
+- h) Alternative: distillazione CE pura = fallita (CHECK-C/D/E); ibridazione PRIME-Speech (h_t = W_h·h_Gemma + W_e·Emb(text) + W_s·e_spk) = fallback se R1 non passa il gate.
+- Operativo: Step 0 sanity → estrazione pilota 2h → training R1 → gate. Fattibilità alta su T4 (25 min totali GPU).
