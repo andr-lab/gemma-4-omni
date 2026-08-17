@@ -1,3 +1,36 @@
+## ✅ VERDETTO FEDELTA' (probe v16, 2025-08-17): SUB_EQUALS_TEACHER — wrapper replica ESATTA
+
+Il sub-talker (qwen_subtalker.py + dataset congelato) e' stato promosso al 100%:
+replica bit-identica del code_predictor del teacher Qwen3-TTS in eager/bf16.
+
+- MAX |Delta logits| : 0.000000 (confronto EAGER-vs-EAGER, stessi pesi 89/89, max diff 0.00e+00)
+- CE Teacher (active) : 5.6875 | CE Sub : 5.6875 | Gap : +0.0000
+- attn_implementation teacher di default: sdpa (transformers 5.x) -> il residuo v14
+  (1.25 / gap 0.031) era SOLO l'artefatto SDPA-vs-eager, non un bug del wrapper.
+
+Storia dei due bug di fedelta' (entrambi chiusi):
+1. RoPE position_ids collassato (S=1 -> 0..15): fix in _forward_flat
+   (S = inputs_embeds.shape[1]), monkey-patch runtime ROPE_FIX.
+2. rope_theta 1e4 vs 1e6: extract_qwen_subtalker.py scriveva rope_theta=10000.0
+   HARDCODED invece del code_predictor_config del checkpoint Base (1e6, verificato
+   sul config.json del repo). Fix runtime THETA_FIX (ricrea rotary_emb a 1e6 dopo il
+   load) + fix permanente nell'extract (_repo_code_predictor_cfg dal config.json).
+
+CONSEGUENZE:
+- Stage 1 definitivamente CANCELLATO (il sub E' l'oracolo del teacher; addestrarlo
+  e' dannoso). Tetto CE oracolare: 5.6875 (eager) / ~5.656 (sdpa).
+- Il monkey-patch ROPE_FIX+THETA_FIX (blocco nel cell2, env ROPE_FIX=1) e' lo
+  STANDARD per ogni kernel che carica il sub-talker (smoke, training Stage 2, eval).
+  Il dataset congelato resta sbagliato (position_ids + theta) finche' non si
+  rigenera il dataset (upload 5.45GB: rimandato; la patch runtime e' nel sorgente).
+- PROSSIMO PASSO: FitNets Stage 2 (adapter Gemma -> h_t, L_latent + lambda*CE,
+  sub congelato). Iperparametri agy: batch 8 (grad accum 2 -> eff 16), LR 1.5e-4
+  AdamW(0.9,0.98), wd 1e-2, lambda_coupling 0.15-0.25, grad clip 1.0, 1500-2500 step
+  (~2.5-3.5h T4). Gate: cos_sim>=0.88, CE_val<=5.95, rank SVD>=256. DIVIETO resume
+  dai vecchi pesi adapter (inquinati dal coupling col RoPE rotto). Smoke (2-4 batch)
+  OBBLIGATORIO prima del run completo; avviso email prima del run lungo.
+
+
 # **Gemma 4 Omni — Piano di validazione e modifiche prima della prossima run** 
 
 _Documento tecnico finale • 12 agosto 2026_ 
