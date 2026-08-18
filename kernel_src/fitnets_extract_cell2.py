@@ -1304,7 +1304,7 @@ try:
     os.makedirs(OUT, exist_ok=True)
     manifest = []
     t0 = time.time()
-    for k, w in enumerate(train_wins if (not STAGE2 and not EVAL_R1) else []):
+    for k, w in enumerate(train_wins if (not STAGE2 and not EVAL_R1 and not EVAL_R2) else []):
         idx = w["idx"]
         item = ds_train[idx]
         text = text_by_window[idx] if text_by_window is not None else ""
