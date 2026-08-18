@@ -807,26 +807,59 @@ try:
             # --- sintesi 3 wav (oracolo h_t GT vs h_t predetto, sub greedy + code2wav) ---
             SAMPLE_RATE = KP.SYNTH_SAMPLE_RATE
             import scipy.io.wavfile as wavfile
+            _outd = "/kaggle/output" if os.path.exists("/kaggle/output") else "."
+            _sub_dtype = next(sub_st2.parameters()).dtype
             _syn_idx = [val_idx[0], val_idx[len(val_idx) // 2], val_idx[-1]]
+            synth_results = []
             for _tag, _i in zip(["a", "b", "c"], _syn_idx):
-                _nr = nreal_map[_i]
-                _na = min(_nr, ST2_T)
-                cb0 = torch.from_numpy(np.asarray(ds_train[_i]["audio_targets"], dtype=np.int64))[:_na, 0]
-                _hp = torch.from_numpy(h_pred_map[_i][:_na]).float().unsqueeze(0).to(DEV2)
-                _ht = torch.from_numpy(h_tgt_map[_i][:_na]).float().unsqueeze(0).to(DEV2)
-                _cb0 = cb0.unsqueeze(0).to(DEV2)
-                with torch.inference_mode():
-                    ac_p = sub_st2.sample_acoustic_codes(_hp.to(sub_st2.dtype), _cb0, temperature=0.0)
-                    ac_t = sub_st2.sample_acoustic_codes(_ht.to(sub_st2.dtype), _cb0, temperature=0.0)
-                full_p = torch.cat([cb0.unsqueeze(-1), ac_p.squeeze(0).cpu().long()], dim=-1)
-                full_t = torch.cat([cb0.unsqueeze(-1), ac_t.squeeze(0).cpu().long()], dim=-1)
-                wav_p = decoder.decode(full_p)
-                wav_t = decoder.decode(full_t)
-                wavfile.write(f"/kaggle/output/eval_r1_pred_{_tag}.wav", SAMPLE_RATE,
-                              (np.asarray(wav_p, dtype=np.float32) * 32767).astype(np.int16))
-                wavfile.write(f"/kaggle/output/eval_r1_oracle_{_tag}.wav", SAMPLE_RATE,
-                              (np.asarray(wav_t, dtype=np.float32) * 32767).astype(np.int16))
-                print(f"[EVAL] synth {_tag}: idx={_i} n_active={_na} -> eval_r1_pred_{_tag}.wav / eval_r1_oracle_{_tag}.wav", flush=True)
+                try:
+                    _nr = nreal_map[_i]
+                    _na = min(_nr, ST2_T)
+                    _gt_full = np.asarray(ds_train[_i]["audio_targets"], dtype=np.int64)[:_na]
+                    _oracle = _gt_full[:, 1:]
+                    cb0 = torch.from_numpy(_gt_full[:, 0])
+                    _hp = torch.from_numpy(h_pred_map[_i][:_na]).to(DEV2, dtype=_sub_dtype).unsqueeze(0)
+                    _ht = torch.from_numpy(h_tgt_map[_i][:_na]).to(DEV2, dtype=_sub_dtype).unsqueeze(0)
+                    _cb0 = cb0.unsqueeze(0).to(DEV2)
+                    with torch.inference_mode():
+                        ac_p = sub_st2.sample_acoustic_codes(_hp, _cb0, temperature=0.0)
+                        ac_t = sub_st2.sample_acoustic_codes(_ht, _cb0, temperature=0.0)
+                    full_p = torch.cat([cb0.unsqueeze(-1), ac_p.squeeze(0).cpu().long()], dim=-1)
+                    full_t = torch.cat([cb0.unsqueeze(-1), ac_t.squeeze(0).cpu().long()], dim=-1)
+
+                    gen_p = full_p[:, 1:].cpu().numpy()
+                    gen_t = full_t[:, 1:].cpu().numpy()
+                    acc_p = float((gen_p == _oracle).mean()) if _na > 0 else 0.0
+                    acc_t = float((gen_t == _oracle).mean()) if _na > 0 else 0.0
+
+                    wav_p = decoder.decode(full_p)
+                    wav_t = decoder.decode(full_t)
+                    _f_pred = os.path.join(_outd, f"eval_r1_pred_{_tag}.wav")
+                    _f_orac = os.path.join(_outd, f"eval_r1_oracle_{_tag}.wav")
+                    wavfile.write(_f_pred, SAMPLE_RATE, (np.asarray(wav_p, dtype=np.float32) * 32767).astype(np.int16))
+                    wavfile.write(_f_orac, SAMPLE_RATE, (np.asarray(wav_t, dtype=np.float32) * 32767).astype(np.int16))
+                    print(f"[EVAL] synth {_tag}: idx={_i} n_active={_na} | acc_pred={acc_p:.4f} | acc_oracle={acc_t:.4f} -> eval_r1_pred_{_tag}.wav / eval_r1_oracle_{_tag}.wav", flush=True)
+                    synth_results.append({
+                        "tag": _tag,
+                        "idx": int(_i),
+                        "n_active": int(_na),
+                        "acc_pred": round(acc_p, 4),
+                        "acc_oracle": round(acc_t, 4),
+                        "status": "OK",
+                    })
+                except Exception as _e_win:
+                    print(f"[EVAL] ERRORE sintesi finestra {_tag} (idx={_i}): {_e_win}", flush=True)
+                    synth_results.append({
+                        "tag": _tag,
+                        "idx": int(_i),
+                        "status": "ERROR",
+                        "error": str(_e_win),
+                    })
+
+            _valid_p = [s["acc_pred"] for s in synth_results if "acc_pred" in s]
+            _valid_t = [s["acc_oracle"] for s in synth_results if "acc_oracle" in s]
+            avg_acc_p = round(float(np.mean(_valid_p)), 4) if _valid_p else None
+            avg_acc_t = round(float(np.mean(_valid_t)), 4) if _valid_t else None
 
             report = {
                 "status": "OK",
@@ -841,9 +874,15 @@ try:
                 "rank_svd_target": rk_t,
                 "cum_energy_pred": round(cum_p, 4),
                 "cum_energy_target": round(cum_t, 4),
-                "gates": {"cos_sim_ge_0.88": cos_v >= 0.88, "ce_val_le_5.95": ce_v <= 5.95, "rank_ge_256": rk_p >= 256},
+                "synth_samples": synth_results,
+                "mean_acc_pred": avg_acc_p,
+                "mean_acc_oracle": avg_acc_t,
+                "gates": {
+                    "cos_sim_ge_0.88": bool(cos_v >= 0.88),
+                    "ce_val_le_5.95": bool(ce_v <= 5.95),
+                    "rank_ge_256": bool(rk_p >= 256),
+                },
             }
-            _outd = "/kaggle/output" if os.path.exists("/kaggle/output") else "."
             with open(os.path.join(_outd, "eval_r1_report.json"), "w", encoding="utf-8") as f:
                 json.dump(report, f, indent=2)
             print(json.dumps(report, indent=2), flush=True)
@@ -851,6 +890,13 @@ try:
         except Exception:
             print("[EVAL] ERRORE durante la valutazione R1", flush=True)
             traceback.print_exc()
+            try:
+                _outd = "/kaggle/output" if os.path.exists("/kaggle/output") else "."
+                _err_rep = {"status": "ERROR", "phase": "EVAL_R1", "error": traceback.format_exc()}
+                with open(os.path.join(_outd, "eval_r1_report.json"), "w", encoding="utf-8") as f:
+                    json.dump(_err_rep, f, indent=2)
+            except Exception:
+                pass
 
     # ---- SEZIONE OPZIONALE: FIDELITY_PROBE (Confronto rigoroso Teacher CodePredictor vs QwenSubTalker) ----
     if FIDELITY and train_wins:
