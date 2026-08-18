@@ -519,7 +519,7 @@ try:
                     # forward Gemma (no_grad) + adapter (grafo)
                     input_ids, attn_mask = _build_ids(texts)
                     feats = torch.stack([_win_mel(w["idx"]) for w in wins], 0).to(DEV2)
-                    fmask = torch.ones((STAGE2_BATCH_SIZE, ST2_MEL_WIN), dtype=torch.float32, device=DEV2)
+                    fmask = torch.ones((STAGE2_BATCH_SIZE, ST2_MEL_WIN), dtype=torch.bool, device=DEV2)
                     with torch.no_grad():
                         go = gemma_base(
                             input_ids=input_ids,
