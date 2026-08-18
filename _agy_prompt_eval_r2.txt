@@ -1,0 +1,38 @@
+Sei l'ingegnere senior di un progetto di fitnets adapter: il modello Gemma 4 E2B (hidden 1536) deve predire gli hidden h_t del teacher Qwen3-TTS (2048 dim), per pilotare il sub-talker in full-duplex. L'adapter lineare R1 (nn.Sequential(Linear(1536,2048), LayerNorm(2048)), 3.15M params) ha saturato a cos ~0.62 (train=val 0.6200/0.6211). E' stato quindi implementato R2: ResidualAdapter MLP SiLU 14.17M (Linear 1536->3072, SiLU, Linear 3072->2048, skip Linear 1536->2048, somma, LayerNorm 2048) con LR 3e-4 cosine warmup 100 -> 1.5e-5 su 1500 step, loss invariata (cos 1.0 + 0.5 MSE su frame attivi + 0.2 coupling CE).
+
+## DATI REALI RUN R2 APPENA COMPLETATO (1500 step, train 1000 finestre idx 0-999)
+Serie cos_sim mediata a blocchi di 100 step (file locale: C:/Users/andre/Documents/gemma-4-omni/_r2_train_series.json con cos/loss/latent/coup/lr per 1499 step):
+step 1-100: 0.440 | 101-200: 0.588 | 201-300: 0.616 | 301-400: 0.620 | 401-500: 0.618 | 501-600: 0.637 | 601-700: 0.624 | 701-800: 0.639 | 801-900: 0.640 | 901-1000: 0.636 | 1001-1100: 0.653 | 1101-1200: 0.638 | 1201-1300: 0.653 | 1301-1400: 0.652 | 1401-1499: 0.645
+- cos min 0.003, max 0.869 (spike), media ultimi 100 step ~0.645
+- loss: media primi 100 = 3.845, media ultimi 100 = 3.031, ultimo = 3.237 (vs R1 finale 3.29)
+- grad_norm a fine run ~0.2-0.5 (basso); freeze base/sub verificato True su tutti gli step
+- Tempo: 4.37s/step, run completo 126 min T4
+- Checkpoint: /kaggle/output/checkpoints/ht_adapter_stage2r2_final.pt (+ periodici ogni 250, + ht_adapter_stage2r2_1500.pt)
+- Report: /kaggle/output/stage2r2_report.json
+
+Confronto R1 (v24): plateau cos 0.62 da step 250, loss finale 3.29, stessi freeze e setup.
+
+## COMPITO A — EVAL_R2 nel cell2 (estendere la sezione EVAL_R1 esistente)
+File: C:/Users/andre/Documents/gemma-4-omni/kernel_src/fitnets_extract_cell2.py
+La sezione EVAL_R1 parte alla riga ~733 (`if EVAL_R1 == 1 and train_wins:`) e termina prima della sezione FIDELITY/estrazione massiva (~riga 1280). Il blocco EVAL_R1 carica l'adapter R1 in questo modo (righe ~806-808):
+    ht_adapter = nn.Sequential(nn.Linear(_HID, 2048), nn.LayerNorm(2048)).to(DEV2, dtype=torch.float32)
+    ht_adapter.load_state_dict(torch.load(_ck, map_location="cpu"))
+con _ck_candidates = ["/kaggle/input/datasets/andrlab/gemma4-ht-adapter-r1/ht_adapter_stage2_final.pt", ...] (righe ~741-746).
+
+Requisiti (MINIMI, non toccare altro):
+1. Aggiungi env var EVAL_R2 (default 0) accanto a EVAL_R1 (riga ~43). La sezione EVAL va parametrizzata: `if (EVAL_R1 == 1 or EVAL_R2 == 1) and train_wins:`, con `_eval_is_r2 = EVAL_R2 == 1`.
+2. Se _eval_is_r2: usa `build_ht_adapter(_HID, variant=2)` (factory gia' presente a livello di blocco) e checkpoint candidati da `andrlab/gemma4-ht-adapter-r2/ht_adapter_stage2r2_final.pt` (stesso pattern con /datasets/ e senza). Altrimenti comportamento EVAL_R1 IDENTICO a oggi (nn.Sequential + ht_adapter_stage2_final.pt).
+3. Tag/report: quando _eval_is_r2 usa print tag [EVAL2], report `eval_r2_report.json` con campo "variant":"r2" e gates identici; wav con suffisso `_r2` (eval_r2_pred_a.wav ecc.). Per EVAL_R1 lasciare tutto invariato.
+4. La loss/metriche/gates/sintesi del blocco EVAL non cambiano: stessa estrazione target val, stesso load Gemma 4bit, stessi sub, stessa sintesi per-finestra con _sub_dtype.
+5. NON toccare: sezione STAGE2 training, factory ResidualAdapter, FIDELITY, estrazione massiva.
+
+Valida: py_compile del file, nessun char > 127, round-trip: `build_ht_adapter(1536, variant=2)` ricarica uno state_dict salvato da un'istanza identica.
+
+## COMPITO B — VERDETTO SCIENTIFICO sui dati R2 vs R1 (NON scrivere codice per B)
+Analizza i dati sopra (puoi leggere _r2_train_series.json e il file cell2) e rispondi:
+1. Il miglioramento train 0.645 vs 0.62 (+0.025) con 4.5x params e LR schedule diversa: e' statisticamente/qualitativamente significativo? E' compatibile con "la capacita' NON era il collo di bottiglia"?
+2. Quali sono le ipotesi alternative piu' probabili per il plateau ~0.62-0.65 (es. informazione mancante nel regressore: il Gemma E2B non vede lo speaker embedding / reference audio che il teacher Qwen3-TTS usa; degenerazione del prompt; numero di finestre; la loss coupling che frena il cos; il teacher congelato)?
+3. Design del prossimo passo (una sola direzione, con motivazione): piu' dati/prompt variati? aggiungere un canale di contesto? cambiare loss? teacher trainabile? oppure accettare cos 0.64 e passare allo streaming full-duplex con il sub-talker?
+4. Quanto deve essere il cos minimo per un audio accettabile in full-duplex (con acc greedy pred 0.032 vs oracolo 0.056 come riferimento)? E' realistico raggiungerlo con questo schema fitnets?
+
+Esci con un blocco VERDETTO chiaro: (a) cosa dicono i dati, (b) raccomandazione operativa per il prossimo run/iterazione, (c) rischio principale.

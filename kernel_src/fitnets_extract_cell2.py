@@ -41,6 +41,7 @@ try:
     STAGE2_GRAD_CLIP = float(os.environ.get("STAGE2_GRAD_CLIP", "1.0"))
     STAGE2_CKPT_EVERY = int(os.environ.get("STAGE2_CKPT_EVERY", "250"))
     EVAL_R1 = int(os.environ.get("EVAL_R1", "0"))
+    EVAL_R2 = int(os.environ.get("EVAL_R2", "0"))
     EVAL_N_VAL = int(os.environ.get("EVAL_N_VAL", "100"))
     EVAL_BATCH = int(os.environ.get("EVAL_BATCH", "4"))
 
@@ -730,13 +731,21 @@ try:
             print(f"[{_tag_err}] ERRORE durante {_phase_err}", flush=True)
             traceback.print_exc()
 
-    # ---- SEZIONE OPZIONALE: EVAL_R1 (valutazione adapter Stage 2 su val split) ----
+    # ---- SEZIONE OPZIONALE: EVAL_R1 / EVAL_R2 (valutazione adapter Stage 2 su val split) ----
     # Finestre val = idx 1000+ (mai viste nel train, che usa le prime EXTRACT_N=1000).
     # Metriche: cos_sim/MSE su frame attivi, coupling CE (sub congelato), rank SVD
     # effettivo delle h_t_pred; sintesi 3 wav (oracolo h_t GT vs h_t predetto).
-    if EVAL_R1 == 1 and train_wins:
+    if (EVAL_R1 == 1 or EVAL_R2 == 1) and train_wins:
+        _eval_is_r2 = (EVAL_R2 == 1)
+        _eval_tag = "EVAL2" if _eval_is_r2 else "EVAL"
+        _eval_name = "R2" if _eval_is_r2 else "R1"
+        _eval_rep_file = "eval_r2_report.json" if _eval_is_r2 else "eval_r1_report.json"
+        _eval_wav_pfx = "eval_r2" if _eval_is_r2 else "eval_r1"
         print("\n" + "=" * 80, flush=True)
-        print("=== EVAL R1: ADAPTER GEMMA -> h_t su VAL SPLIT (idx 1000+, mai viste) ===", flush=True)
+        if _eval_is_r2:
+            print("=== EVAL R2 (MLP RESIDUAL): ADAPTER GEMMA -> h_t su VAL SPLIT (idx 1000+, mai viste) ===", flush=True)
+        else:
+            print("=== EVAL R1: ADAPTER GEMMA -> h_t su VAL SPLIT (idx 1000+, mai viste) ===", flush=True)
         print("=" * 80, flush=True)
         try:
             ST2_T = 64
@@ -749,25 +758,32 @@ try:
             DEV2 = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
             # --- checkpoint adapter dal dataset input ---
-            _ck_candidates = [
-                "/kaggle/input/datasets/andrlab/gemma4-ht-adapter-r1/ht_adapter_stage2_final.pt",
-                "/kaggle/input/andrlab/gemma4-ht-adapter-r1/ht_adapter_stage2_final.pt",
-                "ht_adapter_stage2_final.pt",
-            ]
+            if _eval_is_r2:
+                _ck_candidates = [
+                    "/kaggle/input/datasets/andrlab/gemma4-ht-adapter-r2/ht_adapter_stage2r2_final.pt",
+                    "/kaggle/input/andrlab/gemma4-ht-adapter-r2/ht_adapter_stage2r2_final.pt",
+                    "ht_adapter_stage2r2_final.pt",
+                ]
+            else:
+                _ck_candidates = [
+                    "/kaggle/input/datasets/andrlab/gemma4-ht-adapter-r1/ht_adapter_stage2_final.pt",
+                    "/kaggle/input/andrlab/gemma4-ht-adapter-r1/ht_adapter_stage2_final.pt",
+                    "ht_adapter_stage2_final.pt",
+                ]
             _ck = next((p for p in _ck_candidates if os.path.exists(p)), None)
             if _ck is None:
-                raise RuntimeError("checkpoint adapter non trovato")
-            print(f"[EVAL] checkpoint adapter: {_ck}", flush=True)
+                raise RuntimeError(f"checkpoint adapter {_eval_name} non trovato")
+            print(f"[{_eval_tag}] checkpoint adapter: {_ck}", flush=True)
 
             # --- finestre val: 1000.. (mai viste nel train) ---
             n_avail = len(ds_train)
             val_idx = list(range(min(1000, n_avail), min(1000 + N_VAL, n_avail)))
             if len(val_idx) < 10:
                 raise RuntimeError(f"finestre val insufficienti: {len(val_idx)} (n_avail={n_avail})")
-            print(f"[EVAL] finestre val: {len(val_idx)} (idx {val_idx[0]}..{val_idx[-1]}, n_avail={n_avail})", flush=True)
+            print(f"[{_eval_tag}] finestre val: {len(val_idx)} (idx {val_idx[0]}..{val_idx[-1]}, n_avail={n_avail})", flush=True)
 
             # --- target h_t val PRIMA del load Gemma (teacher in GPU, una tantum) ---
-            print(f"[EVAL] estrazione target h_t val ({len(val_idx)} finestre, teacher no_grad)...", flush=True)
+            print(f"[{_eval_tag}] estrazione target h_t val ({len(val_idx)} finestre, teacher no_grad)...", flush=True)
             ht_map, act_map, nreal_map = {}, {}, {}
             _t0 = time.time()
             for _i in val_idx:
@@ -782,13 +798,13 @@ try:
                 _a = np.zeros(ST2_T, dtype=np.float32)
                 _a[: min(_nr, ST2_T)] = 1.0
                 act_map[_i] = _a
-            print(f"[EVAL] target val estratti in {time.time()-_t0:.1f}s; teacher su CPU (mai piu' in GPU)", flush=True)
+            print(f"[{_eval_tag}] target val estratti in {time.time()-_t0:.1f}s; teacher su CPU (mai piu' in GPU)", flush=True)
             teacher.to("cpu")
             gc.collect()
             torch.cuda.empty_cache()
 
             # --- load Gemma E2B 4bit (teacher GIA' su CPU) + adapter ---
-            print("[EVAL] load Gemma E2B (unsloth 4bit, frozen)...", flush=True)
+            print(f"[{_eval_tag}] load Gemma E2B (unsloth 4bit, frozen)...", flush=True)
             gemma_base = gemma_tok = None
             from unsloth import FastLanguageModel
             gemma_base, gemma_tok = FastLanguageModel.from_pretrained(
@@ -809,10 +825,13 @@ try:
                 raise RuntimeError("load Gemma E2B fallito")
 
             _HID = int(gemma_base.config.text_config.hidden_size) if hasattr(gemma_base.config, "text_config") else 1536
-            ht_adapter = nn.Sequential(nn.Linear(_HID, 2048), nn.LayerNorm(2048)).to(DEV2, dtype=torch.float32)
+            if _eval_is_r2:
+                ht_adapter = build_ht_adapter(_HID, variant=2).to(DEV2, dtype=torch.float32)
+            else:
+                ht_adapter = nn.Sequential(nn.Linear(_HID, 2048), nn.LayerNorm(2048)).to(DEV2, dtype=torch.float32)
             ht_adapter.load_state_dict(torch.load(_ck, map_location="cpu"))
             ht_adapter.eval()
-            print(f"[EVAL] adapter caricato ({_HID}->2048) + Gemma congelata", flush=True)
+            print(f"[{_eval_tag}] adapter caricato ({_HID}->2048) + Gemma congelata", flush=True)
 
             # --- tokenizer testo + sub bf16 ---
             from transformers import AutoTokenizer
@@ -830,7 +849,7 @@ try:
                 _sp = next((p for p in _sub_paths if os.path.isdir(p)), _sub_paths[0])
                 sub_st2, _ = QS.load_qwen_subtalker(_sp, device="cuda", dtype=torch.bfloat16)
             sub_st2.eval()
-            print("[EVAL] sub-talker bf16 pronto", flush=True)
+            print(f"[{_eval_tag}] sub-talker bf16 pronto", flush=True)
 
             def _build_ids(texts):
                 rows, mrows = [], []
@@ -896,7 +915,7 @@ try:
             cos_v = float(np.mean(cos_all))
             mse_v = float(np.mean(mse_all))
             ce_v = float(np.mean(ce_all))
-            print(f"[EVAL] val: cos_sim={cos_v:.4f} | mse={mse_v:.4f} | coupling_ce={ce_v:.4f}", flush=True)
+            print(f"[{_eval_tag}] val: cos_sim={cos_v:.4f} | mse={mse_v:.4f} | coupling_ce={ce_v:.4f}", flush=True)
 
             # --- rank SVD effettivo (h_t_pred vs h_t_target) ---
             _P = np.concatenate([h_pred_map[i] for i in val_idx], 0).astype(np.float32)
@@ -907,7 +926,7 @@ try:
                 return int((_sv > _thr).sum()), float(_sv[0]), float(_sv[_sv > _thr].sum() / _sv.sum())
             rk_p, s0_p, cum_p = _rank_eff(_P)
             rk_t, s0_t, cum_t = _rank_eff(_T)
-            print(f"[EVAL] rank SVD effettivo: h_t_pred={rk_p} (cum {cum_p:.3f}) | h_t_target={rk_t} (cum {cum_t:.3f})", flush=True)
+            print(f"[{_eval_tag}] rank SVD effettivo: h_t_pred={rk_p} (cum {cum_p:.3f}) | h_t_target={rk_t} (cum {cum_t:.3f})", flush=True)
 
             # --- sintesi 3 wav (oracolo h_t GT vs h_t predetto, sub greedy + code2wav) ---
             SAMPLE_RATE = KP.SYNTH_SAMPLE_RATE
@@ -939,11 +958,13 @@ try:
 
                     wav_p = decoder.decode(full_p)
                     wav_t = decoder.decode(full_t)
-                    _f_pred = os.path.join(_outd, f"eval_r1_pred_{_tag}.wav")
-                    _f_orac = os.path.join(_outd, f"eval_r1_oracle_{_tag}.wav")
+                    _f_pred_name = f"{_eval_wav_pfx}_pred_{_tag}.wav"
+                    _f_orac_name = f"{_eval_wav_pfx}_oracle_{_tag}.wav"
+                    _f_pred = os.path.join(_outd, _f_pred_name)
+                    _f_orac = os.path.join(_outd, _f_orac_name)
                     wavfile.write(_f_pred, SAMPLE_RATE, (np.asarray(wav_p, dtype=np.float32) * 32767).astype(np.int16))
                     wavfile.write(_f_orac, SAMPLE_RATE, (np.asarray(wav_t, dtype=np.float32) * 32767).astype(np.int16))
-                    print(f"[EVAL] synth {_tag}: idx={_i} n_active={_na} | acc_pred={acc_p:.4f} | acc_oracle={acc_t:.4f} -> eval_r1_pred_{_tag}.wav / eval_r1_oracle_{_tag}.wav", flush=True)
+                    print(f"[{_eval_tag}] synth {_tag}: idx={_i} n_active={_na} | acc_pred={acc_p:.4f} | acc_oracle={acc_t:.4f} -> {_f_pred_name} / {_f_orac_name}", flush=True)
                     synth_results.append({
                         "tag": _tag,
                         "idx": int(_i),
@@ -953,7 +974,7 @@ try:
                         "status": "OK",
                     })
                 except Exception as _e_win:
-                    print(f"[EVAL] ERRORE sintesi finestra {_tag} (idx={_i}): {_e_win}", flush=True)
+                    print(f"[{_eval_tag}] ERRORE sintesi finestra {_tag} (idx={_i}): {_e_win}", flush=True)
                     synth_results.append({
                         "tag": _tag,
                         "idx": int(_i),
@@ -968,7 +989,7 @@ try:
 
             report = {
                 "status": "OK",
-                "phase": "EVAL_R1",
+                "phase": f"EVAL_{_eval_name}",
                 "ckpt": _ck,
                 "n_val": len(val_idx),
                 "val_idx_range": [val_idx[0], val_idx[-1]],
@@ -988,17 +1009,21 @@ try:
                     "rank_ge_256": bool(rk_p >= 256),
                 },
             }
-            with open(os.path.join(_outd, "eval_r1_report.json"), "w", encoding="utf-8") as f:
+            if _eval_is_r2:
+                report["variant"] = "r2"
+            with open(os.path.join(_outd, _eval_rep_file), "w", encoding="utf-8") as f:
                 json.dump(report, f, indent=2)
             print(json.dumps(report, indent=2), flush=True)
-            print(">>> EVAL R1 COMPLETATO <<<", flush=True)
+            print(f">>> EVAL {_eval_name} COMPLETATO <<<", flush=True)
         except Exception:
-            print("[EVAL] ERRORE durante la valutazione R1", flush=True)
+            print(f"[{_eval_tag}] ERRORE durante la valutazione {_eval_name}", flush=True)
             traceback.print_exc()
             try:
                 _outd = "/kaggle/output" if os.path.exists("/kaggle/output") else "."
-                _err_rep = {"status": "ERROR", "phase": "EVAL_R1", "error": traceback.format_exc()}
-                with open(os.path.join(_outd, "eval_r1_report.json"), "w", encoding="utf-8") as f:
+                _err_rep = {"status": "ERROR", "phase": f"EVAL_{_eval_name}", "error": traceback.format_exc()}
+                if _eval_is_r2:
+                    _err_rep["variant"] = "r2"
+                with open(os.path.join(_outd, _eval_rep_file), "w", encoding="utf-8") as f:
                     json.dump(_err_rep, f, indent=2)
             except Exception:
                 pass
