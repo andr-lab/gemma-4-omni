@@ -434,10 +434,14 @@ try:
             print("[ST2] Gemma E2B caricata e congelata; teacher rispostato su GPU", flush=True)
 
             # --- adapter (UNICO trainable) ---
+            # Le hidden del LLM Gemma 4 E2B hanno dim 1536 (text_config.hidden_size,
+            # verificato su config unsloth e google; l'hardcode 3072 era errato).
+            _HID = int(gemma_base.config.text_config.hidden_size) if hasattr(gemma_base.config, "text_config") else 1536
             ht_adapter = nn.Sequential(
-                nn.Linear(3072, 2048),
+                nn.Linear(_HID, 2048),
                 nn.LayerNorm(2048),
             ).to(DEV2, dtype=torch.float32)
+            print(f"[ST2] hidden_size LLM rilevato: {_HID}", flush=True)
             trainable_params = [p for p in ht_adapter.parameters()]
             n_tr = sum(p.numel() for p in trainable_params)
             print(f"[ST2] parametri trainable adapter: {n_tr:,}", flush=True)
