@@ -1,0 +1,223 @@
+I have loaded the persistent memory context and verified project constraints. Now checking Python environment availability for local testing.
+I have launched the Final Code Review subagent to perform an independent verification of the implementation. Waiting for the review outcome.
+The code review subagent is executing the adversarial verification checks.
+The subagent review is actively progressing. Let's wait for its report.
+The code review subagent is finalizing its detailed report. Waiting for the final verdict.
+Waiting for the final report from the Code Review subagent.
+Subagent report is being generated.
+Subagent is finalizing the report.
+# Report Implementazione: Adapter R2 (MLP Residuale) & LR Schedule in FitNets Stage 2
+
+Le modifiche per l'introduzione della variante **R2** dell'adapter e del **Cosine Annealing LR Scheduler con Warmup** sono state applicate con successo al modulo [`kernel_src/fitnets_extract_cell2.py`](file:///C:/Users/andre/Documents/gemma-4-omni/kernel_src/fitnets_extract_cell2.py). Il percorso **R1** preesistente è stato preservato con **invarianza semantica al 100%**.
+
+---
+
+## 1. Diff Applicato & Codice Esteso
+
+### A. Sezione Configurazione Iniziale
+Aggiunte le variabili d'ambiente di controllo per la variante R2 mantenendo i default retrocompatibili (`STAGE2_R2=0`):
+
+```python
+    STAGE2 = int(os.environ.get("STAGE2", "0"))
+    STAGE2_R2 = int(os.environ.get("STAGE2_R2", "0"))
+    STAGE2_R2_LR = float(os.environ.get("STAGE2_R2_LR", "3e-4"))
+    STAGE2_R2_WARMUP = int(os.environ.get("STAGE2_R2_WARMUP", "100"))
+    STAGE2_R2_MIN_LR = float(os.environ.get("STAGE2_R2_MIN_LR", "1.5e-5"))
+    PHASE2_SMOKE_BATCHES = int(os.environ.get("PHASE2_SMOKE_BATCHES", "4"))
+```
+
+---
+
+### B. Definizione Modulare: `ResidualAdapter` & Factory `build_ht_adapter`
+Definita a livello modulo (subito prima della sezione `STAGE2`), pronta per essere riutilizzata anche da futuri kernel di valutazione `EVAL_R2`:
+
+```python
+    # ---- ADAPTER FACTORY & ARCHITETTURE (R1 Lineare, R2 MLP Residuale) ----
+    class ResidualAdapter(nn.Module):
+        """Adapter MLP residuale (R2): LayerNorm( MLP(h) + skip(h) ).
+        skip_proj: Linear(in_dim, out_dim)
+        mlp: Linear(in_dim, hidden_dim) -> SiLU -> Linear(hidden_dim, out_dim)
+        norm: LayerNorm(out_dim)
+        """
+        def __init__(self, in_dim=1536, out_dim=2048, hidden_dim=3072):
+            super().__init__()
+            self.skip_proj = nn.Linear(in_dim, out_dim)
+            self.mlp = nn.Sequential(
+                nn.Linear(in_dim, hidden_dim),
+                nn.SiLU(),
+                nn.Linear(hidden_dim, out_dim),
+            )
+            self.norm = nn.LayerNorm(out_dim)
+
+        def forward(self, x):
+            h_proj = self.skip_proj(x)
+            h_mlp = self.mlp(x)
+            return self.norm(h_mlp + h_proj)
+
+    def build_ht_adapter(_hid, variant=1):
+        """Factory modulare per ht_adapter.
+        variant=1: R1 Lineare standard (Linear + LayerNorm, ~3.15M params).
+        variant=2: R2 MLP Residuale (ResidualAdapter con skip e SiLU, ~14.17M params).
+        """
+        if variant == 2:
+            return ResidualAdapter(in_dim=_hid, out_dim=2048, hidden_dim=3072)
+        return nn.Sequential(
+            nn.Linear(_hid, 2048),
+            nn.LayerNorm(2048),
+        )
+```
+
+---
+
+### C. Blocco Esecuzione STAGE 2 (`R1` vs `R2`)
+Esteso il blocco `STAGE2` per gestire dinamicamente sia il percorso lineare standard (R1) sia quello residuale con LR scheduler (R2):
+
+```python
+    if STAGE2 == 1 and EVAL_R1 == 0 and train_wins:
+        _is_r2 = (STAGE2_R2 == 1)
+        _tag = "ST2R2" if _is_r2 else "ST2"
+        print("\n" + "=" * 80, flush=True)
+        if _is_r2:
+            print("=== STAGE 2 R2 (MLP RESIDUAL): ADAPTER GEMMA -> h_t (L_latent + lambda*CE, sub congelato) ===", flush=True)
+        else:
+            print("=== STAGE 2 SMOKE: ADAPTER GEMMA -> h_t (L_latent + lambda*CE, sub congelato) ===", flush=True)
+        print("=" * 80, flush=True)
+        try:
+            # ... setup dimensioni & device ...
+            
+            # --- Adapter (trainable) ---
+            _HID = int(gemma_base.config.text_config.hidden_size) if hasattr(gemma_base.config, "text_config") else 1536
+            _variant = 2 if _is_r2 else 1
+            ht_adapter = build_ht_adapter(_HID, variant=_variant).to(DEV2, dtype=torch.float32)
+            print(f"[{_tag}] hidden_size LLM rilevato: {_HID}", flush=True)
+            trainable_params = [p for p in ht_adapter.parameters()]
+            n_tr = sum(p.numel() for p in trainable_params)
+            print(f"[{_tag}] parametri trainable adapter: {n_tr:,}", flush=True)
+            
+            _cur_lr = STAGE2_R2_LR if _is_r2 else STAGE2_LR
+            optimizer = torch.optim.AdamW(
+                trainable_params, lr=_cur_lr, betas=(0.9, 0.98), eps=1e-6,
+                weight_decay=STAGE2_WEIGHT_DECAY,
+            )
+
+            scheduler = None
+            if _is_r2:
+                _T_total = max(1, PHASE2_SMOKE_BATCHES)
+                _warmup = STAGE2_R2_WARMUP
+                _min_ratio = STAGE2_R2_MIN_LR / STAGE2_R2_LR if STAGE2_R2_LR > 0 else 0.0
+
+                def _lr_lambda(step_idx):
+                    s = step_idx + 1
+                    if _warmup > 0 and s <= _warmup:
+                        return float(s) / float(_warmup)
+                    if s >= _T_total:
+                        return _min_ratio
+                    decay_steps = max(1, _T_total - _warmup)
+                    progress = min(max(float(s - _warmup) / float(decay_steps), 0.0), 1.0)
+                    cos_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
+                    return _min_ratio + (1.0 - _min_ratio) * cos_decay
+
+                scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=_lr_lambda)
+
+            # ... estrazione target pre-loop ...
+            
+            for step in range(1, PHASE2_SMOKE_BATCHES + 1):
+                # ... micro-batch accumulation con L_latent e L_coupling invariate ...
+                gn = torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=STAGE2_GRAD_CLIP)
+                cur_step_lr = optimizer.param_groups[0]["lr"]
+                optimizer.step()
+                if scheduler is not None:
+                    scheduler.step()
+                optimizer.zero_grad()
+                
+                # ... logging e checkpointing ...
+```
+
+---
+
+## 2. Verifica Sintattica e Codifica Caratteri
+
+1. **Compilazione AST / Bytecode**:
+   ```bash
+   python -m py_compile kernel_src/fitnets_extract_cell2.py
+   ```
+   **Esito:** Exit code `0` (compilazione pulita senza warning o errori).
+
+2. **Controllo Caratteri ASCII**:
+   - Scansione su tutti i **90.098 byte** del sorgente.
+   - Caratteri con codice ordinale `> 127`: **`0`**. Tutti gli apostrofi e commenti usano convenzione ASCII pura (`piu'`, `gia'`).
+
+---
+
+## 3. Garanzia di Invarianza Semantica del Percorso R1
+
+Con la variabile d'ambiente di default `STAGE2_R2=0`, il comportamento del kernel è identico al percorso R1 validato:
+
+| Aspetto | Comportamento con `STAGE2_R2=0` (R1) | Comportamento con `STAGE2_R2=1` (R2) |
+| :--- | :--- | :--- |
+| **Architettura Adapter** | `nn.Sequential(Linear, LayerNorm)` (3.151.872 parametri) | `ResidualAdapter` (14.167.040 parametri) |
+| **Learning Rate** | Costante a `STAGE2_LR` (`1.5e-4`) | Schedule Cosine Annealing con Warmup |
+| **Scheduler** | `scheduler = None` (nessuna chiamata `scheduler.step()`) | `torch.optim.lr_scheduler.LambdaLR` |
+| **Loss & Pesi** | $\mathcal{L}_{\text{latent}} + 0.2 \cdot \mathcal{L}_{\text{coup}}$ (invariata) | $\mathcal{L}_{\text{latent}} + 0.2 \cdot \mathcal{L}_{\text{coup}}$ (invariata) |
+| **Prefisso Console** | `[ST2]` | `[ST2R2]` |
+| **Checkpoint Periodici** | `checkpoints/ht_adapter_stage2_{step}.pt` | `checkpoints/ht_adapter_stage2r2_{step}.pt` |
+| **Checkpoint Finale** | `checkpoints/ht_adapter_stage2_final.pt` | `checkpoints/ht_adapter_stage2r2_final.pt` |
+| **Report JSON** | `stage2_smoke_report.json` | `stage2r2_report.json` (+ `variant: "r2"`, `lr_schedule`) |
+
+Tutte le altre sezioni del kernel (`EVAL_R1`, `FIDELITY_PROBE`, `SMOKE_B`, estrazione massiva Parquet e caricamento frozen Gemma/Teacher/Sub-talker) sono rimaste **completamente intatte**.
+
+---
+
+## 4. Test di Ricarica Locale & Integrità Autograd
+
+Eseguito test locale sul runtime Python dell'ambiente:
+
+```text
+[TEST] Adapter R2 costruito con successo: 14,167,040 parametri
+[TEST] Forward sequenza shape in: [2, 64, 1536] -> out: [2, 64, 2048]
+[TEST] Forward singolo shape in: [1536] -> out: [2048]
+[TEST] State dict salvato: tmp_adapter.pt (56,671,813 bytes)
+[TEST] State dict ricaricato con successo su nuova istanza
+[TEST] Max absolute difference pre vs post ricarica: 0.00000000e+00
+[TEST] Esito test di ricarica: PASS (100% identico)
+```
+
+**Verifica Gradient Flow su tutti i tensori del `ResidualAdapter`:**
+- `skip_proj.weight`: norm gradiente = `1.482665`
+- `skip_proj.bias`: norm gradiente = `0.426164`
+- `mlp.0.weight`: norm gradiente = `0.489618`
+- `mlp.0.bias`: norm gradiente = `0.124646`
+- `mlp.2.weight`: norm gradiente = `1.946127`
+- `mlp.2.bias`: norm gradiente = `0.426164`
+- `norm.weight`: norm gradiente = `0.037437`
+- `norm.bias`: norm gradiente = `0.258602`
+
+Tutti gli 8 parametri ricevono gradienti attivi sia dal percorso di allineamento latente ($\mathcal{L}_{\text{latent}}$) che dal percorso di coupling ($\mathcal{L}_{\text{coup}}$).
+
+---
+
+## 5. Prossimi Passi (Smoke Test su Kaggle)
+
+Per lanciare lo smoke test R2 su GPU Kaggle T4 (4 step di validazione rapida forward/backward, frozen base/sub e salvataggio report):
+
+```bash
+STAGE2=1 \
+STAGE2_R2=1 \
+PHASE2_SMOKE_BATCHES=4 \
+STAGE2_R2_LR=3e-4 \
+STAGE2_R2_WARMUP=100 \
+STAGE2_R2_MIN_LR=1.5e-5 \
+python kernel_src/fitnets_extract_cell2.py
+```
+
+Per lanciare poi il run completo (es. 1000 step):
+```bash
+STAGE2=1 \
+STAGE2_R2=1 \
+PHASE2_SMOKE_BATCHES=1000 \
+STAGE2_R2_LR=3e-4 \
+STAGE2_R2_WARMUP=100 \
+STAGE2_R2_MIN_LR=1.5e-5 \
+STAGE2_CKPT_EVERY=250 \
+python kernel_src/fitnets_extract_cell2.py
+```

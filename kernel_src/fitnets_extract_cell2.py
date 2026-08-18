@@ -9,7 +9,7 @@
 # Verdetto CHECK-E (17/08): KO (gap informativo) -> il piano B FitNets richiede
 # questo target. Valutazione agy: layer 28 obbligatorio, sanity 1-sample prima.
 # ============================================================================
-import os, sys, json, traceback, hashlib, shutil, subprocess, time
+import os, sys, json, traceback, hashlib, shutil, subprocess, time, math
 
 try:
     sys.path.insert(0, "/kaggle/working")
@@ -28,6 +28,10 @@ try:
     SMOKE_B_LR = float(os.environ.get("SMOKE_B_LR", "5e-4"))
     SMOKE_B_BATCH = int(os.environ.get("SMOKE_B_BATCH", "8"))
     STAGE2 = int(os.environ.get("STAGE2", "0"))
+    STAGE2_R2 = int(os.environ.get("STAGE2_R2", "0"))
+    STAGE2_R2_LR = float(os.environ.get("STAGE2_R2_LR", "3e-4"))
+    STAGE2_R2_WARMUP = int(os.environ.get("STAGE2_R2_WARMUP", "100"))
+    STAGE2_R2_MIN_LR = float(os.environ.get("STAGE2_R2_MIN_LR", "1.5e-5"))
     PHASE2_SMOKE_BATCHES = int(os.environ.get("PHASE2_SMOKE_BATCHES", "4"))
     STAGE2_BATCH_SIZE = int(os.environ.get("STAGE2_BATCH_SIZE", "8"))
     STAGE2_GRAD_ACCUM = int(os.environ.get("STAGE2_GRAD_ACCUM", "2"))
@@ -365,14 +369,53 @@ try:
             break
     print(f"raccolte {len(train_wins)} finestre train (EXTRACT_N={EXTRACT_N}, FIDELITY={FIDELITY})", flush=True)
 
+    # ---- ADAPTER FACTORY & ARCHITETTURE (R1 Lineare, R2 MLP Residuale) ----
+    class ResidualAdapter(nn.Module):
+        """Adapter MLP residuale (R2): LayerNorm( MLP(h) + skip(h) ).
+        skip_proj: Linear(in_dim, out_dim)
+        mlp: Linear(in_dim, hidden_dim) -> SiLU -> Linear(hidden_dim, out_dim)
+        norm: LayerNorm(out_dim)
+        """
+        def __init__(self, in_dim=1536, out_dim=2048, hidden_dim=3072):
+            super().__init__()
+            self.skip_proj = nn.Linear(in_dim, out_dim)
+            self.mlp = nn.Sequential(
+                nn.Linear(in_dim, hidden_dim),
+                nn.SiLU(),
+                nn.Linear(hidden_dim, out_dim),
+            )
+            self.norm = nn.LayerNorm(out_dim)
+
+        def forward(self, x):
+            h_proj = self.skip_proj(x)
+            h_mlp = self.mlp(x)
+            return self.norm(h_mlp + h_proj)
+
+    def build_ht_adapter(_hid, variant=1):
+        """Factory modulare per ht_adapter.
+        variant=1: R1 Lineare standard (Linear + LayerNorm, ~3.15M params).
+        variant=2: R2 MLP Residuale (ResidualAdapter con skip e SiLU, ~14.17M params).
+        """
+        if variant == 2:
+            return ResidualAdapter(in_dim=_hid, out_dim=2048, hidden_dim=3072)
+        return nn.Sequential(
+            nn.Linear(_hid, 2048),
+            nn.LayerNorm(2048),
+        )
+
     # ---- SEZIONE OPZIONALE: STAGE2_SMOKE (FitNets adapter Gemma -> h_t) ----
     # Obiettivo: validare forward/backward dell'adapter (Gemma E2B congelata 4bit +
-    # ht_adapter trainable 3072->2048 + sub-talker Qwen congelato bf16) con loss
+    # ht_adapter trainable (R1 lineare o R2 residuale) + sub-talker Qwen congelato bf16) con loss
     # L_latent = (1-cos_sim) + 0.5*MSE su frame attivi + lambda*CE coupling.
     # Gate run completo: cos_sim>=0.88, CE_val<=5.95, rank SVD>=256 (revisione agy).
     if STAGE2 == 1 and EVAL_R1 == 0 and train_wins:
+        _is_r2 = (STAGE2_R2 == 1)
+        _tag = "ST2R2" if _is_r2 else "ST2"
         print("\n" + "=" * 80, flush=True)
-        print("=== STAGE 2 SMOKE: ADAPTER GEMMA -> h_t (L_latent + lambda*CE, sub congelato) ===", flush=True)
+        if _is_r2:
+            print("=== STAGE 2 R2 (MLP RESIDUAL): ADAPTER GEMMA -> h_t (L_latent + lambda*CE, sub congelato) ===", flush=True)
+        else:
+            print("=== STAGE 2 SMOKE: ADAPTER GEMMA -> h_t (L_latent + lambda*CE, sub congelato) ===", flush=True)
         print("=" * 80, flush=True)
         try:
             ST2_T = 64  # frame agente per finestra
@@ -382,8 +425,13 @@ try:
             ST2_MEL_WIN = ST2_T * 8  # 512 frame mel 100fps per finestra
             BOS_ID, BOA_ID, AUDIO_TOKEN_ID, EOA_ID = 2, 256000, 258881, 258883
             DEV2 = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-            print(f"[ST2] cfg: batches={PHASE2_SMOKE_BATCHES} bs={STAGE2_BATCH_SIZE} "
-                  f"accum={STAGE2_GRAD_ACCUM} lr={STAGE2_LR} lambda_c={STAGE2_LAMBDA_COUPLING}", flush=True)
+            if _is_r2:
+                print(f"[{_tag}] cfg: batches={PHASE2_SMOKE_BATCHES} bs={STAGE2_BATCH_SIZE} "
+                      f"accum={STAGE2_GRAD_ACCUM} lr={STAGE2_R2_LR} warmup={STAGE2_R2_WARMUP} min_lr={STAGE2_R2_MIN_LR} "
+                      f"lambda_c={STAGE2_LAMBDA_COUPLING}", flush=True)
+            else:
+                print(f"[ST2] cfg: batches={PHASE2_SMOKE_BATCHES} bs={STAGE2_BATCH_SIZE} "
+                      f"accum={STAGE2_GRAD_ACCUM} lr={STAGE2_LR} lambda_c={STAGE2_LAMBDA_COUPLING}", flush=True)
 
             # --- sub-talker bf16 (se sub_bf16 gia' caricato, altrimenti load deterministico) ---
             # NOTA: la variabile globale "sub" del cell0 e' una STRINGA (residuo di un
@@ -399,7 +447,7 @@ try:
                 ]
                 _sp = next((p for p in _sub_paths if os.path.isdir(p)), _sub_paths[0])
                 sub_st2, _ = QS.load_qwen_subtalker(_sp, device="cuda", dtype=torch.bfloat16)
-                print(f"[ST2] sub-talker caricato bf16 da {_sp}", flush=True)
+                print(f"[{_tag}] sub-talker caricato bf16 da {_sp}", flush=True)
             sub_st2.eval()
             for _p in sub_st2.parameters():
                 _p.requires_grad = False
@@ -409,7 +457,7 @@ try:
             # prima della quantizzazione 4bit -> picco OOM col teacher in GPU (v18).
             # Spostiamo il teacher (3.4GB bf16) su CPU durante il load e lo
             # riportiamo su GPU nel finally. Il sub bf16 (1.3GB) resta.
-            print("[ST2] load Gemma E2B (unsloth 4bit, frozen; teacher su CPU durante il load)...", flush=True)
+            print(f"[{_tag}] load Gemma E2B (unsloth 4bit, frozen; teacher su CPU durante il load)...", flush=True)
             _tdev = next(talker.parameters()).device
             teacher.to("cpu")
             gc.collect()
@@ -435,29 +483,47 @@ try:
                 torch.cuda.empty_cache()
             if gemma_base is None:
                 raise RuntimeError("load Gemma E2B fallito")
-            print("[ST2] Gemma E2B caricata e congelata; teacher rispostato su GPU", flush=True)
+            print(f"[{_tag}] Gemma E2B caricata e congelata; teacher rispostato su GPU", flush=True)
 
             # --- adapter (UNICO trainable) ---
             # Le hidden del LLM Gemma 4 E2B hanno dim 1536 (text_config.hidden_size,
             # verificato su config unsloth e google; l'hardcode 3072 era errato).
             _HID = int(gemma_base.config.text_config.hidden_size) if hasattr(gemma_base.config, "text_config") else 1536
-            ht_adapter = nn.Sequential(
-                nn.Linear(_HID, 2048),
-                nn.LayerNorm(2048),
-            ).to(DEV2, dtype=torch.float32)
-            print(f"[ST2] hidden_size LLM rilevato: {_HID}", flush=True)
+            _variant = 2 if _is_r2 else 1
+            ht_adapter = build_ht_adapter(_HID, variant=_variant).to(DEV2, dtype=torch.float32)
+            print(f"[{_tag}] hidden_size LLM rilevato: {_HID}", flush=True)
             trainable_params = [p for p in ht_adapter.parameters()]
             n_tr = sum(p.numel() for p in trainable_params)
-            print(f"[ST2] parametri trainable adapter: {n_tr:,}", flush=True)
+            print(f"[{_tag}] parametri trainable adapter: {n_tr:,}", flush=True)
+            _cur_lr = STAGE2_R2_LR if _is_r2 else STAGE2_LR
             optimizer = torch.optim.AdamW(
-                trainable_params, lr=STAGE2_LR, betas=(0.9, 0.98), eps=1e-6,
+                trainable_params, lr=_cur_lr, betas=(0.9, 0.98), eps=1e-6,
                 weight_decay=STAGE2_WEIGHT_DECAY,
             )
+
+            scheduler = None
+            if _is_r2:
+                _T_total = max(1, PHASE2_SMOKE_BATCHES)
+                _warmup = STAGE2_R2_WARMUP
+                _min_ratio = STAGE2_R2_MIN_LR / STAGE2_R2_LR if STAGE2_R2_LR > 0 else 0.0
+
+                def _lr_lambda(step_idx):
+                    s = step_idx + 1
+                    if _warmup > 0 and s <= _warmup:
+                        return float(s) / float(_warmup)
+                    if s >= _T_total:
+                        return _min_ratio
+                    decay_steps = max(1, _T_total - _warmup)
+                    progress = min(max(float(s - _warmup) / float(decay_steps), 0.0), 1.0)
+                    cos_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
+                    return _min_ratio + (1.0 - _min_ratio) * cos_decay
+
+                scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=_lr_lambda)
 
             # --- costruzione input ---
             # gemma_tok di unsloth e' un Gemma4Processor (niente .encode): si usa
             # AutoTokenizer del repo google/gemma-4-E2B-it (pattern progetto riga 3616).
-            print("[ST2] load tokenizer testo Gemma E2B (AutoTokenizer)...", flush=True)
+            print(f"[{_tag}] load tokenizer testo Gemma E2B (AutoTokenizer)...", flush=True)
             from transformers import AutoTokenizer
             gemma_txt = AutoTokenizer.from_pretrained("google/gemma-4-E2B-it")
             E2B_PAD = 0  # pad_token_id tokenizer testo Gemma 4
@@ -489,7 +555,7 @@ try:
             # I target non dipendono dall'adapter: si estraggono prima del training e il
             # teacher (3.4GB bf16) esce dalla GPU -> evita OOM nel loop (v22: OOM 48MiB
             # nel forward del sub con teacher+Gemma+sub tutti in GPU).
-            print(f"[ST2] estrazione target h_t per {len(train_wins)} finestre (teacher, no_grad)...", flush=True)
+            print(f"[{_tag}] estrazione target h_t per {len(train_wins)} finestre (teacher, no_grad)...", flush=True)
             ht_map = {}
             _t0 = time.time()
             for _w in train_wins:
@@ -499,7 +565,7 @@ try:
                 _h64 = np.zeros((ST2_T, 2048), dtype=np.float32)
                 _h64[: min(_w["n_real"], ST2_T)] = _h[: min(_w["n_real"], ST2_T)]
                 ht_map[_w["idx"]] = _h64
-            print(f"[ST2] target estratti: {len(ht_map)} in {time.time()-_t0:.1f}s; teacher su CPU", flush=True)
+            print(f"[{_tag}] target estratti: {len(ht_map)} in {time.time()-_t0:.1f}s; teacher su CPU", flush=True)
             teacher.to("cpu")
             gc.collect()
             torch.cuda.empty_cache()
@@ -576,12 +642,16 @@ try:
                     acc_cos += mean_cos.item()
 
                 gn = torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=STAGE2_GRAD_CLIP)
+                cur_step_lr = optimizer.param_groups[0]["lr"]
                 optimizer.step()
+                if scheduler is not None:
+                    scheduler.step()
                 optimizer.zero_grad()
                 base_g = any(p.grad is not None and bool((p.grad != 0).any()) for p in gemma_base.parameters())
                 sub_g = any(p.grad is not None and bool((p.grad != 0).any()) for p in sub_st2.parameters())
                 info = {
                     "step": step,
+                    "lr": round(cur_step_lr, 8),
                     "loss": round(acc_loss / STAGE2_GRAD_ACCUM, 4),
                     "latent": round(acc_lat / STAGE2_GRAD_ACCUM, 4),
                     "coupling": round(acc_coup / STAGE2_GRAD_ACCUM, 4),
@@ -592,37 +662,72 @@ try:
                     "time_s": round(time.time() - t0s, 2),
                 }
                 step_logs.append(info)
-                print(f"[ST2] step {step}/{PHASE2_SMOKE_BATCHES} | loss {info['loss']:.4f} "
-                      f"(latent {info['latent']:.4f} coup {info['coupling']:.4f}) | cos {info['cos_sim']:.4f} "
-                      f"| grad {info['grad_norm']:.4f} | base0 {info['base_grad_zero']} sub0 {info['sub_grad_zero']} "
-                      f"| {info['time_s']}s", flush=True)
+                if _is_r2:
+                    print(f"[{_tag}] step {step}/{PHASE2_SMOKE_BATCHES} | lr {info['lr']:.2e} | loss {info['loss']:.4f} "
+                          f"(latent {info['latent']:.4f} coup {info['coupling']:.4f}) | cos {info['cos_sim']:.4f} "
+                          f"| grad {info['grad_norm']:.4f} | base0 {info['base_grad_zero']} sub0 {info['sub_grad_zero']} "
+                          f"| {info['time_s']}s", flush=True)
+                else:
+                    print(f"[ST2] step {step}/{PHASE2_SMOKE_BATCHES} | loss {info['loss']:.4f} "
+                          f"(latent {info['latent']:.4f} coup {info['coupling']:.4f}) | cos {info['cos_sim']:.4f} "
+                          f"| grad {info['grad_norm']:.4f} | base0 {info['base_grad_zero']} sub0 {info['sub_grad_zero']} "
+                          f"| {info['time_s']}s", flush=True)
                 if step % STAGE2_CKPT_EVERY == 0:
                     os.makedirs("checkpoints", exist_ok=True)
-                    torch.save(ht_adapter.state_dict(), f"checkpoints/ht_adapter_stage2_{step}.pt")
-                    print(f"[ST2] checkpoint periodico: checkpoints/ht_adapter_stage2_{step}.pt", flush=True)
+                    _ckpt_name = f"checkpoints/ht_adapter_stage2r2_{step}.pt" if _is_r2 else f"checkpoints/ht_adapter_stage2_{step}.pt"
+                    torch.save(ht_adapter.state_dict(), _ckpt_name)
+                    print(f"[{_tag}] checkpoint periodico: {_ckpt_name}", flush=True)
 
             os.makedirs("checkpoints", exist_ok=True)
             _ck_smoke = PHASE2_SMOKE_BATCHES <= 8  # smoke vs run completo
-            ck = "checkpoints/ht_adapter_stage2_smoke.pt" if _ck_smoke else "checkpoints/ht_adapter_stage2_final.pt"
+            if _is_r2:
+                ck = "checkpoints/ht_adapter_stage2r2_smoke.pt" if _ck_smoke else "checkpoints/ht_adapter_stage2r2_final.pt"
+                report_file = "stage2r2_report.json"
+                report = {
+                    "status": "PASS",
+                    "phase": "STAGE2_FITNETS_R2",
+                    "variant": "r2",
+                    "batches": PHASE2_SMOKE_BATCHES,
+                    "trainable_params": n_tr,
+                    "lr_schedule": {
+                        "type": "cosine_with_warmup",
+                        "base_lr": STAGE2_R2_LR,
+                        "min_lr": STAGE2_R2_MIN_LR,
+                        "warmup_steps": STAGE2_R2_WARMUP,
+                        "total_steps": PHASE2_SMOKE_BATCHES,
+                    },
+                    "base_frozen_verified": all(s["base_grad_zero"] for s in step_logs),
+                    "sub_frozen_verified": all(s["sub_grad_zero"] for s in step_logs),
+                    "final": step_logs[-1] if step_logs else {},
+                    "all_steps": step_logs,
+                }
+            else:
+                ck = "checkpoints/ht_adapter_stage2_smoke.pt" if _ck_smoke else "checkpoints/ht_adapter_stage2_final.pt"
+                report_file = "stage2_smoke_report.json"
+                report = {
+                    "status": "PASS",
+                    "phase": "STAGE2_FITNETS_SMOKE",
+                    "batches": PHASE2_SMOKE_BATCHES,
+                    "trainable_params": n_tr,
+                    "base_frozen_verified": all(s["base_grad_zero"] for s in step_logs),
+                    "sub_frozen_verified": all(s["sub_grad_zero"] for s in step_logs),
+                    "final": step_logs[-1] if step_logs else {},
+                    "all_steps": step_logs,
+                }
             torch.save(ht_adapter.state_dict(), ck)
-            report = {
-                "status": "PASS",
-                "phase": "STAGE2_FITNETS_SMOKE",
-                "batches": PHASE2_SMOKE_BATCHES,
-                "trainable_params": n_tr,
-                "base_frozen_verified": all(s["base_grad_zero"] for s in step_logs),
-                "sub_frozen_verified": all(s["sub_grad_zero"] for s in step_logs),
-                "final": step_logs[-1] if step_logs else {},
-                "all_steps": step_logs,
-            }
             _outd = "/kaggle/output" if os.path.exists("/kaggle/output") else "."
-            with open(os.path.join(_outd, "stage2_smoke_report.json"), "w", encoding="utf-8") as f:
+            with open(os.path.join(_outd, report_file), "w", encoding="utf-8") as f:
                 json.dump(report, f, indent=2)
-            print(f"[ST2] checkpoint salvato: {ck}", flush=True)
-            print(f"[ST2] report: {os.path.join(_outd, 'stage2_smoke_report.json')}", flush=True)
-            print(">>> STAGE 2 SMOKE COMPLETATO CON SUCCESSO <<<", flush=True)
+            print(f"[{_tag}] checkpoint salvato: {ck}", flush=True)
+            print(f"[{_tag}] report: {os.path.join(_outd, report_file)}", flush=True)
+            if _is_r2:
+                print(">>> STAGE 2 R2 COMPLETATO CON SUCCESSO <<<", flush=True)
+            else:
+                print(">>> STAGE 2 SMOKE COMPLETATO CON SUCCESSO <<<", flush=True)
         except Exception:
-            print("[ST2] ERRORE durante lo smoke Stage 2", flush=True)
+            _tag_err = "ST2R2" if STAGE2_R2 == 1 else "ST2"
+            _phase_err = "lo Stage 2 R2" if STAGE2_R2 == 1 else "lo smoke Stage 2"
+            print(f"[{_tag_err}] ERRORE durante {_phase_err}", flush=True)
             traceback.print_exc()
 
     # ---- SEZIONE OPZIONALE: EVAL_R1 (valutazione adapter Stage 2 su val split) ----

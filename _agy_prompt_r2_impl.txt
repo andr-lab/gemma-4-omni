@@ -1,0 +1,82 @@
+# TASK: Implementare l'adapter R2 (MLP residuale) + LR schedule nel training STAGE2 (FitNets)
+
+## 1. OBIETTIVO E RUOLO
+Sei il progettista/implementatore senior del kernel di training FitNets Stage 2. Devi ESTENDERE il file sorgente del kernel per introdurre la variante R2 dell'adapter (design gia' approvato in una tua revisione precedente) mantenendo PERFETTAMENTE invariato il percorso R1 esistente. APPLICA direttamente le modifiche al file indicato e riporta diff + verifica sintattica.
+
+## 2. CONTESTO & FILE COINVOLTO
+- File: `C:/Users/andre/Documents/gemma-4-omni/kernel_src/fitnets_extract_cell2.py` (unico modulo cella Kaggle, ~68K char).
+- Sezione da estendere: `# ---- SEZIONE OPZIONALE: STAGE2_SMOKE` (righe ~368-627). LEGGILA per intero prima di modificare.
+- Ambiente: Python 3.12, transformers==5.5.0, unsloth, GPU T4 14.56 GiB.
+- Vincoli progetto: NESSUN carattere >127 nel sorgente (apostrofi ASCII: "piu'", "gia'"); NON introdurre dipendenze nuove.
+
+## 3. STATO ATTUALE (percorso R1, NON toccare la semantica)
+Nel blocco `if STAGE2 == 1 and EVAL_R1 == 0 and train_wins:`:
+- config gia' presenti: `STAGE2_LR` (1.5e-4), `STAGE2_LAMBDA_COUPLING` (0.2), `STAGE2_BATCH_SIZE` (8), `STAGE2_GRAD_ACCUM` (2), `STAGE2_CKPT_EVERY` (250), `STAGE2_WEIGHT_DECAY` (1e-2), `STAGE2_GRAD_CLIP` (1.0), `PHASE2_SMOKE_BATCHES` (numero step).
+- adapter attuale (riga ~446):
+```python
+_HID = int(gemma_base.config.text_config.hidden_size) if hasattr(gemma_base.config, "text_config") else 1536
+ht_adapter = nn.Sequential(
+    nn.Linear(_HID, 2048),
+    nn.LayerNorm(2048),
+).to(DEV2, dtype=torch.float32)
+```
+- loss attuale (gia' nella forma target): `L_latent = cos_loss + 0.5 * MSE(attivi)` e `micro_loss = (L_latent + STAGE2_LAMBDA_COUPLING * L_coup) / STAGE2_GRAD_ACCUM`, con `cos_loss = 1.0 - (cos_m * active_mask).sum() / ms` e `ms = active_mask.sum().clamp(min=1e-8)`.
+- ottimizzatore: `AdamW(trainable_params, lr=STAGE2_LR, betas=(0.9,0.98), eps=1e-6, weight_decay=STAGE2_WEIGHT_DECAY)`, senza scheduler.
+- checkpoint: `checkpoints/ht_adapter_stage2_{step}.pt` ogni 250 + `ht_adapter_stage2_final.pt` (run) / `ht_adapter_stage2_smoke.pt` (smoke); report `stage2_smoke_report.json`.
+- Il blocco STAGE2 e' racchiuso in `try/except` con print `[ST2]`.
+
+## 4. DESIGN R2 DA IMPLEMENTARE (approvato in revisione precedente)
+
+### 4.1 Adapter MLP residuale (variant=2)
+Definisci a livello di MODULO (fuori dal blocco `if STAGE2...`, ad es. subito prima della sezione STAGE2) una factory riutilizzabile:
+
+```python
+def build_ht_adapter(_hid, variant=1):
+    if variant == 2:
+        # MLP residuale: LayerNorm( MLP(h) + skip(h) ), ~11M params
+        return nn.Sequential(
+            nn.Linear(_hid, 3072),
+            nn.SiLU(),
+            nn.Linear(3072, 2048),
+            nn.LayerNorm(2048),
+        ).to(...)  # fp32
+    return nn.Sequential(nn.Linear(_hid, 2048), nn.LayerNorm(2048)).to(...)  # R1, invariato
+```
+
+ATTENZIONE alla forma esatta: la skip-connection DEVE sommare l'ingresso proiettato. Il design approvato e':
+```
+h_proj = Linear_1536x2048(h)                      # proiezione dello skip
+h_mlp  = Linear_3072x2048(SiLU(Linear_1536x3072(h)))
+h_out  = LayerNorm_2048(h_mlp + h_proj)           # somma prima della LayerNorm
+```
+Realizzalo come un modulo nn.Module dedicato (classe `ResidualAdapter`) con i sotto-moduli nominati, NON come un nn.Sequential che perderebbe la somma residuale. Deve essere serializzabile con state_dict (torch.save) e ricaricabile.
+
+### 4.2 Config nuove variabili (nel blocco config in cima alla cella, righe ~28-40)
+- `STAGE2_R2 = int(os.environ.get("STAGE2_R2", "0"))` (default 0 -> percorso R1 invariato)
+- `STAGE2_R2_LR = float(os.environ.get("STAGE2_R2_LR", "3e-4"))`
+- `STAGE2_R2_WARMUP = int(os.environ.get("STAGE2_R2_WARMUP", "100"))`
+- `STAGE2_R2_MIN_LR = float(os.environ.get("STAGE2_R2_MIN_LR", "1.5e-5"))`
+
+### 4.3 Comportamento nel blocco STAGE2
+Se `STAGE2_R2 == 1`:
+- `ht_adapter = build_ht_adapter(_HID, variant=2)` (fp32), print `[ST2R2] parametri trainable adapter: N`.
+- `optimizer = AdamW(..., lr=STAGE2_R2_LR, ...)` (stessi betas/eps/wd).
+- Scheduler **cosine annealing con warmup** implementato con `torch.optim.lr_scheduler.LambdaLR` (nessuna dipendenza nuova):
+  - step < WARMUP: lr lineare da ~0 a LR base (`lr = STAGE2_R2_LR * step / WARMUP`)
+  - step in [WARMUP, T]: decay coseno da STAGE2_R2_LR a STAGE2_R2_MIN_LR su T = PHASE2_SMOKE_BATCHES step totali
+  - applica `scheduler.step()` alla fine di ogni step (dopo optimizer.step) e logga `info["lr"]`.
+- Loss: INVARIATA (gia' cos 1.0 + 0.5 MSE + 0.2 CE su frame attivi) — non toccarla.
+- Checkpoint R2 separati: `checkpoints/ht_adapter_stage2r2_{step}.pt` ogni 250 e `ht_adapter_stage2r2_final.pt` (run) / `ht_adapter_stage2r2_smoke.pt` (smoke); report `stage2r2_report.json` con gli stessi campi + `"variant": "r2"` + `"lr_schedule": {...}`. Print con prefisso `[ST2R2]`.
+- Se `STAGE2_R2 == 0`: comportamento IDENTICO all'attuale (nessuna modifica di logica, nomi, report, checkpoint).
+
+### 4.4 Restrizioni
+- NON modificare: la sezione `EVAL_R1`, la sezione `FIDELITY_PROBE`, l'estrazione massiva, la prep dati, il load teacher/sub/Gemma.
+- NON introdurre caratteri >127.
+- La factory `build_ht_adapter` DEVE essere definita a livello di modulo prima della sezione STAGE2 (cosi' un futuro kernel EVAL_R2 potra' importarla ricostruendo la stessa architettura).
+
+## 5. OUTPUT RICHIESTO
+1. **DIFF APPLICATO**: elenco esatto delle modifiche (config, factory/classe, blocco STAGE2) con il codice nuovo completo.
+2. **VERIFICA SINTATTICA**: esito `python -m py_compile kernel_src/fitnets_extract_cell2.py`.
+3. **VERIFICA INVARIANZA R1**: come hai garantito che con `STAGE2_R2=0` il comportamento resti identico (cita i punti del codice che non tocchi)?
+4. **TEST DI RICARICA**: riporta il risultato di un test locale (se eseguibile senza GPU) che: costruisce `build_ht_adapter(1536, variant=2)`, salva state_dict, ricostruisce e carica, verifica shape di output su input random (1536,)->(2048,). In alternativa spiega perche' non eseguibile in locale.
+5. **PROSSIMI PASSI** (smoke test da lanciare su Kaggle, flag esatti).
