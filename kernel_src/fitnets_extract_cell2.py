@@ -36,6 +36,8 @@ try:
     STAGE2_WEIGHT_DECAY = float(os.environ.get("STAGE2_WEIGHT_DECAY", "1e-2"))
     STAGE2_GRAD_CLIP = float(os.environ.get("STAGE2_GRAD_CLIP", "1.0"))
     STAGE2_CKPT_EVERY = int(os.environ.get("STAGE2_CKPT_EVERY", "250"))
+    EVAL_R1 = int(os.environ.get("EVAL_R1", "0"))
+    EVAL_N_VAL = int(os.environ.get("EVAL_N_VAL", "100"))
 
     import kaggle_pipeline as KP
     import qwen_subtalker as QS
@@ -620,6 +622,240 @@ try:
             print(">>> STAGE 2 SMOKE COMPLETATO CON SUCCESSO <<<", flush=True)
         except Exception:
             print("[ST2] ERRORE durante lo smoke Stage 2", flush=True)
+            traceback.print_exc()
+
+    # ---- SEZIONE OPZIONALE: EVAL_R1 (valutazione adapter Stage 2 su val split) ----
+    # Finestre val = idx 1000+ (mai viste nel train, che usa le prime EXTRACT_N=1000).
+    # Metriche: cos_sim/MSE su frame attivi, coupling CE (sub congelato), rank SVD
+    # effettivo delle h_t_pred; sintesi 3 wav (oracolo h_t GT vs h_t predetto).
+    if EVAL_R1 == 1 and train_wins:
+        print("\n" + "=" * 80, flush=True)
+        print("=== EVAL R1: ADAPTER GEMMA -> h_t su VAL SPLIT (idx 1000+, mai viste) ===", flush=True)
+        print("=" * 80, flush=True)
+        try:
+            ST2_T = 64
+            ST2_FPF = 2
+            ST2_TXT = 48
+            ST2_AFS = 2 + ST2_TXT
+            ST2_MEL_WIN = ST2_T * 8
+            BOS_ID, BOA_ID, AUDIO_TOKEN_ID, EOA_ID = 2, 256000, 258881, 258883
+            N_VAL = EVAL_N_VAL
+            DEV2 = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+            # --- checkpoint adapter dal dataset input ---
+            _ck_candidates = [
+                "/kaggle/input/datasets/andrlab/gemma4-ht-adapter-r1/ht_adapter_stage2_final.pt",
+                "/kaggle/input/andrlab/gemma4-ht-adapter-r1/ht_adapter_stage2_final.pt",
+                "ht_adapter_stage2_final.pt",
+            ]
+            _ck = next((p for p in _ck_candidates if os.path.exists(p)), None)
+            if _ck is None:
+                raise RuntimeError("checkpoint adapter non trovato")
+            print(f"[EVAL] checkpoint adapter: {_ck}", flush=True)
+
+            # --- load Gemma E2B 4bit (teacher su CPU durante il load) + adapter ---
+            print("[EVAL] load Gemma E2B (unsloth 4bit, frozen)...", flush=True)
+            _tdev = next(talker.parameters()).device
+            teacher.to("cpu")
+            gc.collect()
+            torch.cuda.empty_cache()
+            gemma_base = gemma_tok = None
+            try:
+                from unsloth import FastLanguageModel
+                gemma_base, gemma_tok = FastLanguageModel.from_pretrained(
+                    model_name="unsloth/gemma-4-E2B-it",
+                    max_seq_length=2048,
+                    load_in_4bit=True,
+                    device_map="cuda:0",
+                )
+                for _nm2, _mod in gemma_base.named_modules():
+                    if "norm" in _nm2.lower():
+                        _mod.to(torch.float32)
+                gemma_base.eval()
+                for _p in gemma_base.parameters():
+                    _p.requires_grad = False
+            finally:
+                teacher.to(_tdev)
+                gc.collect()
+                torch.cuda.empty_cache()
+            if gemma_base is None:
+                raise RuntimeError("load Gemma E2B fallito")
+
+            _HID = int(gemma_base.config.text_config.hidden_size) if hasattr(gemma_base.config, "text_config") else 1536
+            ht_adapter = nn.Sequential(nn.Linear(_HID, 2048), nn.LayerNorm(2048)).to(DEV2, dtype=torch.float32)
+            ht_adapter.load_state_dict(torch.load(_ck, map_location="cpu"))
+            ht_adapter.eval()
+            print(f"[EVAL] adapter caricato ({_HID}->2048) + Gemma congelata", flush=True)
+
+            # --- tokenizer testo + sub bf16 ---
+            from transformers import AutoTokenizer
+            gemma_txt = AutoTokenizer.from_pretrained("google/gemma-4-E2B-it")
+            E2B_PAD = 0
+            _v0 = globals().get("sub_bf16")
+            if _v0 is not None and not isinstance(_v0, (str, bytes)):
+                sub_st2 = _v0
+            else:
+                _sub_paths = [
+                    "/kaggle/input/datasets/andrlab/gemma-4-omni-module/qwen_subtalker",
+                    "/kaggle/input/andrlab/gemma-4-omni-module/qwen_subtalker",
+                    "qwen_subtalker",
+                ]
+                _sp = next((p for p in _sub_paths if os.path.isdir(p)), _sub_paths[0])
+                sub_st2, _ = QS.load_qwen_subtalker(_sp, device="cuda", dtype=torch.bfloat16)
+            sub_st2.eval()
+            print("[EVAL] sub-talker bf16 pronto", flush=True)
+
+            # --- finestre val: 1000.. (mai viste nel train) ---
+            n_avail = len(ds_train)
+            val_idx = list(range(min(1000, n_avail), min(1000 + N_VAL, n_avail)))
+            if len(val_idx) < 10:
+                raise RuntimeError(f"finestre val insufficienti: {len(val_idx)} (n_avail={n_avail})")
+            print(f"[EVAL] finestre val: {len(val_idx)} (idx {val_idx[0]}..{val_idx[-1]}, n_avail={n_avail})", flush=True)
+
+            def _build_ids(texts):
+                rows, mrows = [], []
+                for t in texts:
+                    toks = gemma_txt.encode(str(t) if t else "", add_special_tokens=False)
+                    if len(toks) > ST2_TXT:
+                        toks = toks[-ST2_TXT:]
+                    n_pad = ST2_TXT - len(toks)
+                    row = ([BOS_ID] + [E2B_PAD] * n_pad + toks + [BOA_ID]
+                           + [AUDIO_TOKEN_ID] * (ST2_T * ST2_FPF) + [EOA_ID])
+                    mrow = ([1] + [0] * n_pad + [1] * (len(toks) + 1)
+                            + [1] * (ST2_T * ST2_FPF) + [1])
+                    rows.append(row)
+                    mrows.append(mrow)
+                return (torch.tensor(rows, dtype=torch.long, device=DEV2),
+                        torch.tensor(mrows, dtype=torch.long, device=DEV2))
+
+            def _win_mel(idx):
+                s = idx * ST2_MEL_WIN
+                m = user_mel[s:s + ST2_MEL_WIN]
+                if m.shape[0] < ST2_MEL_WIN:
+                    m = np.pad(m, ((0, ST2_MEL_WIN - m.shape[0]), (0, 0)))
+                return torch.from_numpy(np.asarray(m, dtype=np.float32))
+
+            # --- target h_t val (teacher in GPU, una tantum) + active masks ---
+            print(f"[EVAL] estrazione target h_t val ({len(val_idx)} finestre, teacher no_grad)...", flush=True)
+            ht_map, act_map, nreal_map = {}, {}, {}
+            _t0 = time.time()
+            for _i in val_idx:
+                _it = ds_train[_i]
+                _nr = int((_it["audio_targets"][:, 0] != KP.PAD_TARGET_ID).sum().item())
+                _tx = text_by_window[_i] if text_by_window is not None else ""
+                _h = extract_ht(_it, _nr, _tx, return_shifted=False)  # (n_real, 2048)
+                _h64 = np.zeros((ST2_T, 2048), dtype=np.float32)
+                _h64[: min(_nr, ST2_T)] = _h[: min(_nr, ST2_T)]
+                ht_map[_i] = _h64
+                nreal_map[_i] = _nr
+                _a = np.zeros(ST2_T, dtype=np.float32)
+                _a[: min(_nr, ST2_T)] = 1.0
+                act_map[_i] = _a
+            print(f"[EVAL] target val estratti in {time.time()-_t0:.1f}s; teacher su CPU", flush=True)
+            teacher.to("cpu")
+            gc.collect()
+            torch.cuda.empty_cache()
+
+            # --- loop valutazione (batch 8, no_grad) ---
+            decoder = KP.Code2WavDecoder()
+            cos_all, mse_all, ce_all = [], [], []
+            h_pred_map, h_tgt_map = {}, {}
+            PAD_T = KP.PAD_TARGET_ID
+            for _b in range(0, len(val_idx), 8):
+                _idxs = val_idx[_b:_b + 8]
+                texts = [text_by_window[i] if text_by_window is not None else "" for i in _idxs]
+                input_ids, attn_mask = _build_ids(texts)
+                feats = torch.stack([_win_mel(i) for i in _idxs], 0).to(DEV2)
+                fmask = torch.ones((len(_idxs), ST2_MEL_WIN), dtype=torch.bool, device=DEV2)
+                with torch.no_grad():
+                    go = gemma_base(
+                        input_ids=input_ids,
+                        attention_mask=attn_mask,
+                        input_features=feats,
+                        input_features_mask=fmask,
+                        output_hidden_states=True,
+                    )
+                    lh = go.hidden_states[-1]
+                    _s, _e = ST2_AFS + ST2_FPF - 1, ST2_AFS + ST2_FPF * ST2_T
+                    agent_hidden = lh[:, _s:_e:ST2_FPF, :].to(torch.float32)
+                h_pred = ht_adapter(agent_hidden)  # (B,64,2048)
+                ht_tgt = torch.stack([torch.from_numpy(ht_map[i]) for i in _idxs], 0).to(DEV2)
+                am = torch.stack([torch.from_numpy(act_map[i]) for i in _idxs], 0).to(DEV2)
+                ms = am.sum().clamp(min=1e-8)
+                cos_m = F.cosine_similarity(h_pred, ht_tgt, dim=-1)
+                cos_all.append(((cos_m * am).sum() / ms).item())
+                mse_m = F.mse_loss(h_pred, ht_tgt, reduction="none").mean(dim=-1)
+                mse_all.append(((mse_m * am).sum() / ms).item())
+                audio_targets = torch.stack(
+                    [torch.from_numpy(np.asarray(ds_train[i]["audio_targets"], dtype=np.int64)) for i in _idxs], 0
+                ).to(DEV2)
+                sub_logits = sub_st2.forward_sub_talker_finetune(h_pred.to(torch.bfloat16), audio_targets)
+                ce_all.append(sub_st2.coupling_loss(sub_logits, audio_targets, frame_weights=am).item())
+                for _k, _i in enumerate(_idxs):
+                    h_pred_map[_i] = h_pred[_k].detach().float().cpu().numpy()
+                    h_tgt_map[_i] = ht_tgt[_k].float().cpu().numpy()
+            cos_v = float(np.mean(cos_all))
+            mse_v = float(np.mean(mse_all))
+            ce_v = float(np.mean(ce_all))
+            print(f"[EVAL] val: cos_sim={cos_v:.4f} | mse={mse_v:.4f} | coupling_ce={ce_v:.4f}", flush=True)
+
+            # --- rank SVD effettivo (h_t_pred vs h_t_target) ---
+            _P = np.concatenate([h_pred_map[i] for i in val_idx], 0).astype(np.float32)
+            _T = np.concatenate([h_tgt_map[i] for i in val_idx], 0).astype(np.float32)
+            def _rank_eff(M):
+                _sv = np.linalg.svd(M, compute_uv=False)
+                _thr = 1e-3 * float(_sv[0])
+                return int((_sv > _thr).sum()), float(_sv[0]), float(_sv[_sv > _thr].sum() / _sv.sum())
+            rk_p, s0_p, cum_p = _rank_eff(_P)
+            rk_t, s0_t, cum_t = _rank_eff(_T)
+            print(f"[EVAL] rank SVD effettivo: h_t_pred={rk_p} (cum {cum_p:.3f}) | h_t_target={rk_t} (cum {cum_t:.3f})", flush=True)
+
+            # --- sintesi 3 wav (oracolo h_t GT vs h_t predetto, sub greedy + code2wav) ---
+            SAMPLE_RATE = KP.SYNTH_SAMPLE_RATE
+            import scipy.io.wavfile as wavfile
+            _syn_idx = [val_idx[0], val_idx[len(val_idx) // 2], val_idx[-1]]
+            for _tag, _i in zip(["a", "b", "c"], _syn_idx):
+                _nr = nreal_map[_i]
+                _na = min(_nr, ST2_T)
+                cb0 = torch.from_numpy(np.asarray(ds_train[_i]["audio_targets"], dtype=np.int64))[:_na, 0]
+                _hp = torch.from_numpy(h_pred_map[_i][:_na]).float().unsqueeze(0).to(DEV2)
+                _ht = torch.from_numpy(h_tgt_map[_i][:_na]).float().unsqueeze(0).to(DEV2)
+                _cb0 = cb0.unsqueeze(0).to(DEV2)
+                with torch.inference_mode():
+                    ac_p = sub_st2.sample_acoustic_codes(_hp.to(sub_st2.dtype), _cb0, temperature=0.0)
+                    ac_t = sub_st2.sample_acoustic_codes(_ht.to(sub_st2.dtype), _cb0, temperature=0.0)
+                full_p = torch.cat([cb0.unsqueeze(-1), ac_p.squeeze(0).cpu().long()], dim=-1)
+                full_t = torch.cat([cb0.unsqueeze(-1), ac_t.squeeze(0).cpu().long()], dim=-1)
+                wav_p = decoder.decode(full_p)
+                wav_t = decoder.decode(full_t)
+                wavfile.write(f"/kaggle/output/eval_r1_pred_{_tag}.wav", SAMPLE_RATE,
+                              (np.asarray(wav_p, dtype=np.float32) * 32767).astype(np.int16))
+                wavfile.write(f"/kaggle/output/eval_r1_oracle_{_tag}.wav", SAMPLE_RATE,
+                              (np.asarray(wav_t, dtype=np.float32) * 32767).astype(np.int16))
+                print(f"[EVAL] synth {_tag}: idx={_i} n_active={_na} -> eval_r1_pred_{_tag}.wav / eval_r1_oracle_{_tag}.wav", flush=True)
+
+            report = {
+                "status": "OK",
+                "phase": "EVAL_R1",
+                "ckpt": _ck,
+                "n_val": len(val_idx),
+                "val_idx_range": [val_idx[0], val_idx[-1]],
+                "cos_sim": round(cos_v, 4),
+                "mse": round(mse_v, 4),
+                "coupling_ce": round(ce_v, 4),
+                "rank_svd_pred": rk_p,
+                "rank_svd_target": rk_t,
+                "cum_energy_pred": round(cum_p, 4),
+                "cum_energy_target": round(cum_t, 4),
+                "gates": {"cos_sim_ge_0.88": cos_v >= 0.88, "ce_val_le_5.95": ce_v <= 5.95, "rank_ge_256": rk_p >= 256},
+            }
+            _outd = "/kaggle/output" if os.path.exists("/kaggle/output") else "."
+            with open(os.path.join(_outd, "eval_r1_report.json"), "w", encoding="utf-8") as f:
+                json.dump(report, f, indent=2)
+            print(json.dumps(report, indent=2), flush=True)
+            print(">>> EVAL R1 COMPLETATO <<<", flush=True)
+        except Exception:
+            print("[EVAL] ERRORE durante la valutazione R1", flush=True)
             traceback.print_exc()
 
     # ---- SEZIONE OPZIONALE: FIDELITY_PROBE (Confronto rigoroso Teacher CodePredictor vs QwenSubTalker) ----
