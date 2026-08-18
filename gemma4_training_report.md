@@ -100,3 +100,28 @@
 - LR schedule: **cosine warmup** (LambdaLR): 3e-4, warmup 100 step lineare, decay coseno → 1.5e-5 a step 1500
 - Checkpoint separati `ht_adapter_stage2r2_*.pt`, report `stage2r2_report.json`
 - **Smoke R2 PASS** (4 step, 20m13s): freeze OK (base0/sub0 True), warmup LR attivo (3e-6→1.2e-5), ~4.3s/step → run completo 1500 step ~2h T4
+
+## 5. Run completo R2 (1500 step, T4, 126m36s) — train
+- cos (blocchi 100): 0.440 → **0.645** finale (media ultimi 100); min 0.003, max 0.869 (spike)
+- loss media ultimi 100 = 3.031 (ultimo 3.237 vs R1 3.29); grad_norm fine run 0.2-0.5; ~4.37s/step
+- R1 train: plateau 0.62 → R2 train **+0.025 (+4%)** nonostante 4.5× params → capacità NON il collo di bottiglia
+- Checkpoint: `ht_adapter_stage2r2_final.pt` (54MB fp32) → dataset `andrlab/gemma4-ht-adapter-r2`
+
+## 6. EVAL R2 (val idx 1000-1099, 100 finestre, batch 4, teacher su CPU; report `eval_r2_report.json`)
+| Metrica | R1 | R2 | Gate | Esito |
+| :--- | :--- | :--- | :--- | :--- |
+| cos_sim | 0.6211 | **0.6275** | ≥ 0.88 | ❌ |
+| mse | 3.4303 | **3.3908** | — | — |
+| coupling CE | 5.4226 | **5.4121** | ≤ 5.95 | ✅ |
+| rank SVD pred | 1136 | **1145** (cum 0.926) | ≥ 256 | ✅ |
+| acc_pred (cb1-15 greedy) | 0.0319 | **0.0351** | — | — |
+| acc_oracle | 0.0555 | **0.0555** | — | — |
+- **R2 ≈ R1 su val**: +0.006 cos, +0.003 acc. Il MLP residuale 14.17M NON sposta il tetto informativo
+- Wav sintesi 3 campioni (pred vs oracle): `eval_r2_pred_{a,b,c}.wav` — analisi oggettiva: energia concentrata in banda vocale (0.3-3kHz: b 94.6%, c 72.7%), **nessuna energia anomala >6kHz (0-0.3%)** → nessun segnale di "metallico"; giudizio finale all'ascolto
+
+## 7. Verdetto finale R1+R2 (revisione agy)
+- **cos 0.63 su val è il tetto informativo del canale Gemma(hidden+mel) → h_t(teacher)**, non un limite di capacità:
+  +4.5× params → +0.006 cos. Iterare sull'adapter è il modo sbagliato di spendere GPU
+- Cause candidate del tetto: il Gemma E2B non vede lo speaker embedding / reference audio che il teacher Qwen3-TTS usa; prompt degenerati; poche finestre (1000 train)
+- **Raccomandazione agy**: giudicare sul downstream reale — l'ascolto. Se intelligibile e senza metallico → **congelare R2 e passare all'integrazione dello streaming full-duplex** (Gemma E2B + adapter + sub-talker + code2wav)
+- Baseline per lo streaming: adapter R2 (cos 0.6275 val, CE 5.41, rank 1145) — migliore di R1, da congelare
