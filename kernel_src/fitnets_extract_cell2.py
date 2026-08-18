@@ -400,21 +400,37 @@ try:
                 _p.requires_grad = False
 
             # --- Gemma E2B 4bit congelata (forward no_grad) ---
-            print("[ST2] load Gemma E2B (unsloth 4bit, frozen)...", flush=True)
-            from unsloth import FastLanguageModel
-            gemma_base, gemma_tok = FastLanguageModel.from_pretrained(
-                model_name="unsloth/gemma-4-E2B-it",
-                max_seq_length=2048,
-                load_in_4bit=True,
-                device_map="cuda:0",
-            )
-            for _nm2, _mod in gemma_base.named_modules():
-                if "norm" in _nm2.lower():
-                    _mod.to(torch.float32)
-            gemma_base.eval()
-            for _p in gemma_base.parameters():
-                _p.requires_grad = False
-            print("[ST2] Gemma E2B caricata e congelata", flush=True)
+            # VRAM T4: il load unsloth materializza i pesi bf16 transitori (~5.2GB)
+            # prima della quantizzazione 4bit -> picco OOM col teacher in GPU (v18).
+            # Spostiamo il teacher (3.4GB bf16) su CPU durante il load e lo
+            # riportiamo su GPU nel finally. Il sub bf16 (1.3GB) resta.
+            print("[ST2] load Gemma E2B (unsloth 4bit, frozen; teacher su CPU durante il load)...", flush=True)
+            _tdev = next(talker.parameters()).device
+            teacher.to("cpu")
+            gc.collect()
+            torch.cuda.empty_cache()
+            gemma_base = gemma_tok = None
+            try:
+                from unsloth import FastLanguageModel
+                gemma_base, gemma_tok = FastLanguageModel.from_pretrained(
+                    model_name="unsloth/gemma-4-E2B-it",
+                    max_seq_length=2048,
+                    load_in_4bit=True,
+                    device_map="cuda:0",
+                )
+                for _nm2, _mod in gemma_base.named_modules():
+                    if "norm" in _nm2.lower():
+                        _mod.to(torch.float32)
+                gemma_base.eval()
+                for _p in gemma_base.parameters():
+                    _p.requires_grad = False
+            finally:
+                teacher.to(_tdev)
+                gc.collect()
+                torch.cuda.empty_cache()
+            if gemma_base is None:
+                raise RuntimeError("load Gemma E2B fallito")
+            print("[ST2] Gemma E2B caricata e congelata; teacher rispostato su GPU", flush=True)
 
             # --- adapter (UNICO trainable) ---
             ht_adapter = nn.Sequential(
