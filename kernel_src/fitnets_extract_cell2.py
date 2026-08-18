@@ -447,18 +447,28 @@ try:
             )
 
             # --- costruzione input ---
-            _pad_tok = gemma_tok.pad_token_id if gemma_tok.pad_token_id is not None else 0
+            # gemma_tok di unsloth e' un Gemma4Processor (niente .encode): si usa
+            # AutoTokenizer del repo google/gemma-4-E2B-it (pattern progetto riga 3616).
+            print("[ST2] load tokenizer testo Gemma E2B (AutoTokenizer)...", flush=True)
+            from transformers import AutoTokenizer
+            gemma_txt = AutoTokenizer.from_pretrained("google/gemma-4-E2B-it")
+            E2B_PAD = 0  # pad_token_id tokenizer testo Gemma 4
 
             def _build_ids(texts):
-                rows = []
+                rows, mrows = [], []
                 for t in texts:
-                    toks = gemma_tok.encode(str(t) if t else "", add_special_tokens=False)
+                    toks = gemma_txt.encode(str(t) if t else "", add_special_tokens=False)
                     if len(toks) > ST2_TXT:
                         toks = toks[-ST2_TXT:]
-                    elif len(toks) < ST2_TXT:
-                        toks = [_pad_tok] * (ST2_TXT - len(toks)) + toks
-                    rows.append([BOS_ID] + toks + [BOA_ID] + [AUDIO_TOKEN_ID] * (ST2_T * ST2_FPF) + [EOA_ID])
-                return torch.tensor(rows, dtype=torch.long, device=DEV2)
+                    n_pad = ST2_TXT - len(toks)
+                    row = ([BOS_ID] + [E2B_PAD] * n_pad + toks + [BOA_ID]
+                           + [AUDIO_TOKEN_ID] * (ST2_T * ST2_FPF) + [EOA_ID])
+                    mrow = ([1] + [0] * n_pad + [1] * (len(toks) + 1)
+                            + [1] * (ST2_T * ST2_FPF) + [1])
+                    rows.append(row)
+                    mrows.append(mrow)
+                return (torch.tensor(rows, dtype=torch.long, device=DEV2),
+                        torch.tensor(mrows, dtype=torch.long, device=DEV2))
 
             def _win_mel(idx):
                 s = idx * ST2_MEL_WIN
@@ -507,12 +517,13 @@ try:
                     active_mask = torch.from_numpy(np.stack(am, 0)).to(DEV2)  # (B, 64)
 
                     # forward Gemma (no_grad) + adapter (grafo)
-                    input_ids = _build_ids(texts)
+                    input_ids, attn_mask = _build_ids(texts)
                     feats = torch.stack([_win_mel(w["idx"]) for w in wins], 0).to(DEV2)
                     fmask = torch.ones((STAGE2_BATCH_SIZE, ST2_MEL_WIN), dtype=torch.float32, device=DEV2)
                     with torch.no_grad():
                         go = gemma_base(
                             input_ids=input_ids,
+                            attention_mask=attn_mask,
                             input_features=feats,
                             input_features_mask=fmask,
                             output_hidden_states=True,
