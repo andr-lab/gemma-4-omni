@@ -369,7 +369,7 @@ try:
     # ht_adapter trainable 3072->2048 + sub-talker Qwen congelato bf16) con loss
     # L_latent = (1-cos_sim) + 0.5*MSE su frame attivi + lambda*CE coupling.
     # Gate run completo: cos_sim>=0.88, CE_val<=5.95, rank SVD>=256 (revisione agy).
-    if STAGE2 == 1 and train_wins:
+    if STAGE2 == 1 and EVAL_R1 == 0 and train_wins:
         print("\n" + "=" * 80, flush=True)
         print("=== STAGE 2 SMOKE: ADAPTER GEMMA -> h_t (L_latent + lambda*CE, sub congelato) ===", flush=True)
         print("=" * 80, flush=True)
@@ -1129,12 +1129,12 @@ try:
 
     # ---- estrazione (saltata nello smoke STAGE2: i target sono calcolati in batch) ----
     if STAGE2:
-        print("estrazione h_t massiva saltata (STAGE2 smoke attivo)", flush=True)
+        print("estrazione h_t massiva saltata (STAGE2/EVAL attivo)", flush=True)
     OUT = "/kaggle/output/fitnets_targets"
     os.makedirs(OUT, exist_ok=True)
     manifest = []
     t0 = time.time()
-    for k, w in enumerate(train_wins if not STAGE2 else []):
+    for k, w in enumerate(train_wins if (not STAGE2 and not EVAL_R1) else []):
         idx = w["idx"]
         item = ds_train[idx]
         text = text_by_window[idx] if text_by_window is not None else ""
