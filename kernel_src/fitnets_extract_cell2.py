@@ -14,6 +14,7 @@ import os, sys, json, traceback, hashlib, shutil, subprocess, time
 try:
     sys.path.insert(0, "/kaggle/working")
     import torch
+    import torch.nn as nn
     import torch.nn.functional as F
     import numpy as np
 
@@ -25,6 +26,14 @@ try:
     SMOKE_B_STEPS = int(os.environ.get("SMOKE_B_STEPS", "300"))
     SMOKE_B_LR = float(os.environ.get("SMOKE_B_LR", "5e-4"))
     SMOKE_B_BATCH = int(os.environ.get("SMOKE_B_BATCH", "8"))
+    STAGE2 = int(os.environ.get("STAGE2", "0"))
+    PHASE2_SMOKE_BATCHES = int(os.environ.get("PHASE2_SMOKE_BATCHES", "4"))
+    STAGE2_BATCH_SIZE = int(os.environ.get("STAGE2_BATCH_SIZE", "8"))
+    STAGE2_GRAD_ACCUM = int(os.environ.get("STAGE2_GRAD_ACCUM", "2"))
+    STAGE2_LR = float(os.environ.get("STAGE2_LR", "1.5e-4"))
+    STAGE2_LAMBDA_COUPLING = float(os.environ.get("STAGE2_LAMBDA_COUPLING", "0.2"))
+    STAGE2_WEIGHT_DECAY = float(os.environ.get("STAGE2_WEIGHT_DECAY", "1e-2"))
+    STAGE2_GRAD_CLIP = float(os.environ.get("STAGE2_GRAD_CLIP", "1.0"))
 
     import kaggle_pipeline as KP
     import qwen_subtalker as QS
@@ -351,6 +360,215 @@ try:
             break
     print(f"raccolte {len(train_wins)} finestre train (EXTRACT_N={EXTRACT_N}, FIDELITY={FIDELITY})", flush=True)
 
+    # ---- SEZIONE OPZIONALE: STAGE2_SMOKE (FitNets adapter Gemma -> h_t) ----
+    # Obiettivo: validare forward/backward dell'adapter (Gemma E2B congelata 4bit +
+    # ht_adapter trainable 3072->2048 + sub-talker Qwen congelato bf16) con loss
+    # L_latent = (1-cos_sim) + 0.5*MSE su frame attivi + lambda*CE coupling.
+    # Gate run completo: cos_sim>=0.88, CE_val<=5.95, rank SVD>=256 (revisione agy).
+    if STAGE2 == 1 and train_wins:
+        print("\n" + "=" * 80, flush=True)
+        print("=== STAGE 2 SMOKE: ADAPTER GEMMA -> h_t (L_latent + lambda*CE, sub congelato) ===", flush=True)
+        print("=" * 80, flush=True)
+        try:
+            ST2_T = 64  # frame agente per finestra
+            ST2_FPF = 2  # feature audio 25fps per frame agente 12.5fps
+            ST2_TXT = 48  # TEXT_BLOCK_LEN
+            ST2_AFS = 2 + ST2_TXT  # audio_feat_start
+            ST2_MEL_WIN = ST2_T * 8  # 512 frame mel 100fps per finestra
+            BOS_ID, BOA_ID, AUDIO_TOKEN_ID, EOA_ID = 2, 256000, 258881, 258883
+            DEV2 = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+            print(f"[ST2] cfg: batches={PHASE2_SMOKE_BATCHES} bs={STAGE2_BATCH_SIZE} "
+                  f"accum={STAGE2_GRAD_ACCUM} lr={STAGE2_LR} lambda_c={STAGE2_LAMBDA_COUPLING}", flush=True)
+
+            # --- sub-talker bf16 (se non gia' caricato) ---
+            sub_st2 = None
+            for _nm in ("sub_bf16", "sub"):
+                if _nm in globals() and globals()[_nm] is not None:
+                    sub_st2 = globals()[_nm]
+                    break
+            if sub_st2 is None:
+                _sub_paths = [
+                    "/kaggle/input/datasets/andrlab/gemma-4-omni-module/qwen_subtalker",
+                    "/kaggle/input/andrlab/gemma-4-omni-module/qwen_subtalker",
+                    "qwen_subtalker",
+                ]
+                _sp = next((p for p in _sub_paths if os.path.isdir(p)), _sub_paths[0])
+                sub_st2, _ = QS.load_qwen_subtalker(_sp, device="cuda", dtype=torch.bfloat16)
+                print(f"[ST2] sub-talker caricato bf16 da {_sp}", flush=True)
+            sub_st2.eval()
+            for _p in sub_st2.parameters():
+                _p.requires_grad = False
+
+            # --- Gemma E2B 4bit congelata (forward no_grad) ---
+            print("[ST2] load Gemma E2B (unsloth 4bit, frozen)...", flush=True)
+            from unsloth import FastLanguageModel
+            gemma_base, gemma_tok = FastLanguageModel.from_pretrained(
+                model_name="unsloth/gemma-4-E2B-it",
+                max_seq_length=2048,
+                load_in_4bit=True,
+                device_map="cuda:0",
+            )
+            for _nm2, _mod in gemma_base.named_modules():
+                if "norm" in _nm2.lower():
+                    _mod.to(torch.float32)
+            gemma_base.eval()
+            for _p in gemma_base.parameters():
+                _p.requires_grad = False
+            print("[ST2] Gemma E2B caricata e congelata", flush=True)
+
+            # --- adapter (UNICO trainable) ---
+            ht_adapter = nn.Sequential(
+                nn.Linear(3072, 2048),
+                nn.LayerNorm(2048),
+            ).to(DEV2, dtype=torch.float32)
+            trainable_params = [p for p in ht_adapter.parameters()]
+            n_tr = sum(p.numel() for p in trainable_params)
+            print(f"[ST2] parametri trainable adapter: {n_tr:,}", flush=True)
+            optimizer = torch.optim.AdamW(
+                trainable_params, lr=STAGE2_LR, betas=(0.9, 0.98), eps=1e-6,
+                weight_decay=STAGE2_WEIGHT_DECAY,
+            )
+
+            # --- costruzione input ---
+            _pad_tok = gemma_tok.pad_token_id if gemma_tok.pad_token_id is not None else 0
+
+            def _build_ids(texts):
+                rows = []
+                for t in texts:
+                    toks = gemma_tok.encode(str(t) if t else "", add_special_tokens=False)
+                    if len(toks) > ST2_TXT:
+                        toks = toks[-ST2_TXT:]
+                    elif len(toks) < ST2_TXT:
+                        toks = [_pad_tok] * (ST2_TXT - len(toks)) + toks
+                    rows.append([BOS_ID] + toks + [BOA_ID] + [AUDIO_TOKEN_ID] * (ST2_T * ST2_FPF) + [EOA_ID])
+                return torch.tensor(rows, dtype=torch.long, device=DEV2)
+
+            def _win_mel(idx):
+                s = idx * ST2_MEL_WIN
+                m = user_mel[s:s + ST2_MEL_WIN]
+                if m.shape[0] < ST2_MEL_WIN:
+                    m = np.pad(m, ((0, ST2_MEL_WIN - m.shape[0]), (0, 0)))
+                return torch.from_numpy(np.asarray(m, dtype=np.float32))
+
+            step_logs = []
+            win_cursor = 0
+            avail = len(train_wins)
+            optimizer.zero_grad()
+            for step in range(1, PHASE2_SMOKE_BATCHES + 1):
+                t0s = time.time()
+                acc_loss = acc_lat = acc_coup = acc_cos = 0.0
+                for _mi in range(STAGE2_GRAD_ACCUM):
+                    wins = [train_wins[(win_cursor + i) % avail] for i in range(STAGE2_BATCH_SIZE)]
+                    win_cursor = (win_cursor + STAGE2_BATCH_SIZE) % avail
+                    items = [ds_train[w["idx"]] for w in wins]
+                    texts = [text_by_window[w["idx"]] if text_by_window is not None else "" for w in wins]
+                    nrs = [w["n_real"] for w in wins]
+
+                    # target h_t dal teacher (padding a 64)
+                    ht_list = []
+                    for it, nr, tx in zip(items, nrs, texts):
+                        h = extract_ht(it, nr, tx, return_shifted=False)  # (nr, 2048)
+                        h64 = np.zeros((ST2_T, 2048), dtype=np.float32)
+                        h64[: min(nr, ST2_T)] = h[: min(nr, ST2_T)]
+                        ht_list.append(h64)
+                    ht_target = torch.from_numpy(np.stack(ht_list, 0)).to(DEV2, dtype=torch.float32)
+
+                    # codes + mask attiva
+                    audio_targets = torch.stack(
+                        [torch.from_numpy(np.asarray(it["audio_targets"], dtype=np.int64)) for it in items], 0
+                    ).to(DEV2)
+                    am = []
+                    for w in wins:
+                        if "active" in w and w["active"] is not None:
+                            a = np.asarray(w["active"], dtype=np.float32)
+                            if a.shape[0] < ST2_T:
+                                a = np.pad(a, (0, ST2_T - a.shape[0]))
+                        else:
+                            a = np.zeros(ST2_T, dtype=np.float32)
+                            a[: min(w["n_real"], ST2_T)] = 1.0
+                        am.append(a)
+                    active_mask = torch.from_numpy(np.stack(am, 0)).to(DEV2)  # (B, 64)
+
+                    # forward Gemma (no_grad) + adapter (grafo)
+                    input_ids = _build_ids(texts)
+                    feats = torch.stack([_win_mel(w["idx"]) for w in wins], 0).to(DEV2)
+                    fmask = torch.ones((STAGE2_BATCH_SIZE, ST2_MEL_WIN), dtype=torch.float32, device=DEV2)
+                    with torch.no_grad():
+                        go = gemma_base(
+                            input_ids=input_ids,
+                            input_features=feats,
+                            input_features_mask=fmask,
+                            output_hidden_states=True,
+                        )
+                        lh = go.hidden_states[-1]
+                        _s, _e = ST2_AFS + ST2_FPF - 1, ST2_AFS + ST2_FPF * ST2_T
+                        agent_hidden = lh[:, _s:_e:ST2_FPF, :].to(torch.float32).detach()  # (B,64,3072)
+
+                    h_t_pred = ht_adapter(agent_hidden)  # (B,64,2048) fp32
+                    ms = active_mask.sum().clamp(min=1e-8)
+                    cos_m = F.cosine_similarity(h_t_pred, ht_target, dim=-1)
+                    cos_loss = 1.0 - (cos_m * active_mask).sum() / ms
+                    mean_cos = (cos_m * active_mask).sum() / ms
+                    mse_m = F.mse_loss(h_t_pred, ht_target, reduction="none").mean(dim=-1)
+                    L_latent = cos_loss + 0.5 * ((mse_m * active_mask).sum() / ms)
+
+                    # coupling CE (sub congelato, h_t castato bf16)
+                    h_t_sub = h_t_pred.to(torch.bfloat16)
+                    sub_logits = sub_st2.forward_sub_talker_finetune(h_t_sub, audio_targets)
+                    L_coup = sub_st2.coupling_loss(sub_logits, audio_targets, frame_weights=active_mask)
+
+                    micro_loss = (L_latent + STAGE2_LAMBDA_COUPLING * L_coup) / STAGE2_GRAD_ACCUM
+                    micro_loss.backward()
+                    acc_loss += micro_loss.item() * STAGE2_GRAD_ACCUM
+                    acc_lat += L_latent.item()
+                    acc_coup += L_coup.item()
+                    acc_cos += mean_cos.item()
+
+                gn = torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=STAGE2_GRAD_CLIP)
+                optimizer.step()
+                optimizer.zero_grad()
+                base_g = any(p.grad is not None and bool((p.grad != 0).any()) for p in gemma_base.parameters())
+                sub_g = any(p.grad is not None and bool((p.grad != 0).any()) for p in sub_st2.parameters())
+                info = {
+                    "step": step,
+                    "loss": round(acc_loss / STAGE2_GRAD_ACCUM, 4),
+                    "latent": round(acc_lat / STAGE2_GRAD_ACCUM, 4),
+                    "coupling": round(acc_coup / STAGE2_GRAD_ACCUM, 4),
+                    "cos_sim": round(acc_cos / STAGE2_GRAD_ACCUM, 4),
+                    "grad_norm": round(float(gn.item()), 4) if hasattr(gn, "item") else float(gn),
+                    "base_grad_zero": not base_g,
+                    "sub_grad_zero": not sub_g,
+                    "time_s": round(time.time() - t0s, 2),
+                }
+                step_logs.append(info)
+                print(f"[ST2] step {step}/{PHASE2_SMOKE_BATCHES} | loss {info['loss']:.4f} "
+                      f"(latent {info['latent']:.4f} coup {info['coupling']:.4f}) | cos {info['cos_sim']:.4f} "
+                      f"| grad {info['grad_norm']:.4f} | base0 {info['base_grad_zero']} sub0 {info['sub_grad_zero']} "
+                      f"| {info['time_s']}s", flush=True)
+
+            os.makedirs("checkpoints", exist_ok=True)
+            ck = "checkpoints/ht_adapter_stage2_smoke.pt"
+            torch.save(ht_adapter.state_dict(), ck)
+            report = {
+                "status": "PASS",
+                "phase": "STAGE2_FITNETS_SMOKE",
+                "batches": PHASE2_SMOKE_BATCHES,
+                "trainable_params": n_tr,
+                "base_frozen_verified": all(s["base_grad_zero"] for s in step_logs),
+                "sub_frozen_verified": all(s["sub_grad_zero"] for s in step_logs),
+                "final": step_logs[-1] if step_logs else {},
+                "all_steps": step_logs,
+            }
+            _outd = "/kaggle/output" if os.path.exists("/kaggle/output") else "."
+            with open(os.path.join(_outd, "stage2_smoke_report.json"), "w", encoding="utf-8") as f:
+                json.dump(report, f, indent=2)
+            print(f"[ST2] checkpoint salvato: {ck}", flush=True)
+            print(f"[ST2] report: {os.path.join(_outd, 'stage2_smoke_report.json')}", flush=True)
+            print(">>> STAGE 2 SMOKE COMPLETATO CON SUCCESSO <<<", flush=True)
+        except Exception:
+            print("[ST2] ERRORE durante lo smoke Stage 2", flush=True)
+            traceback.print_exc()
+
     # ---- SEZIONE OPZIONALE: FIDELITY_PROBE (Confronto rigoroso Teacher CodePredictor vs QwenSubTalker) ----
     if FIDELITY and train_wins:
         print("\n" + "=" * 78, flush=True)
@@ -620,12 +838,14 @@ try:
         sys.stdout.flush()
         sys.exit(0)
 
-    # ---- estrazione ----
+    # ---- estrazione (saltata nello smoke STAGE2: i target sono calcolati in batch) ----
+    if STAGE2:
+        print("estrazione h_t massiva saltata (STAGE2 smoke attivo)", flush=True)
     OUT = "/kaggle/output/fitnets_targets"
     os.makedirs(OUT, exist_ok=True)
     manifest = []
     t0 = time.time()
-    for k, w in enumerate(train_wins):
+    for k, w in enumerate(train_wins if not STAGE2 else []):
         idx = w["idx"]
         item = ds_train[idx]
         text = text_by_window[idx] if text_by_window is not None else ""

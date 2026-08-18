@@ -1,0 +1,47 @@
+RUOLO: sei il revisore/architetto di fiducia del progetto "Gemma 4 Full-Duplex Omni Pipeline" (Kaggle, T4 16GB). Devi PROGETTARE e SCRIVERE il codice della sezione di SMOKE TEST dello Stage 2 FitNets (adapter Gemma -> h_t) da integrare nel kernel Kaggle `andrlab/gemma4-fitnets-smoke`. Output: 1) design in 10-15 righe; 2) il codice Python completo della sezione (pronto da incollare come sezione di una cella Kaggle); 3) elenco delle modifiche da fare agli env var nel header della cella.
+
+== CONTESTO VERIFICATO (fatti, non ipotesi) ==
+
+1) VERDETTO FEDELTA' CHIUSO (probe v16, 17/08): il sub-talker `qwen_subtalker.py` (Qwen3TTSSubTalker, classe al riga 209) e' una replica BIT-IDENTICA del code_predictor del teacher Qwen3-TTS-12Hz-1.7B-Base in eager/bf16 (MAX|delta logits|=0.0, gap CE +0.0, pesi 89/89 identici). Dopo 2 bug fixati: (a) RoPE position_ids S=1->S=16; (b) rope_theta 10000->1000000 (il config reale del checkpoint usa 1e6). Il kernel applica il monkey-patch runtime con env ROPE_FIX=1 (patch di classe _forward_flat + patch della funzione load_qwen_subtalker che ricrea la rotary_emb con theta=1e6). QUESTO PATCH E' OBBLIGATORIO e gia' presente nel cell2 esistente.
+
+2) TARGET FitNets: h_t = hidden finale del talker Qwen3-TTS (layer 28, post-RMSNorm, talker_hidden=2048) ai frame audio 12.5Hz. Nel cell2 esistente si estrae con `extract_ht(item, n_real, text, return_shifted=False)` -> array numpy (T, 2048) fp16, T=numero frame agente della finestra (finestre di 64 frame agente). Il teacher e' caricato bf16 (3.5GB) e gira forward-only.
+
+3) DATASET (gia' caricato nel cell2): parquet Fase 1 -> KP.convert_parquet_to_memmap + KP.load_tokens_from_parquet -> user_mel, agent_mel (mel log-spettrale 100fps, 128 bin, 16kHz), agent_codes (T_total, 16) RVQ codec, text_by_window. KP.FullDuplexDataset(user_mel[...], agent_mel[...], agent_codes[...], seq_len=64) -> ds_train (finestre di 64 frame agente = 512 frame mel). train_wins = lista di dict {"idx", "n_real", "active"} (active = mask bool sui frame reali della finestra, gli altri padding). item = ds_train[idx]; item0["audio_targets"] -> (T=64, 16) codes int64; text0 = text_by_window[idx0].
+
+4) MODELLO GIA' ESISTENTE nel progetto (kaggle_pipeline.py, riga 2682): `class Gemma4FullDuplexModel(nn.Module)` con:
+   - self.base_model (Gemma 4 E2B, unsloth, load_in_4bit, device_map="cuda:0", poi CONGELATO per lo Stage 2)
+   - self.causal_conv = nn.Conv1d(hidden_size=3072, 3072, kernel_size=3, padding=0) + left-pad (2,0) via _apply_causal_conv
+   - self.ht_adapter = nn.Sequential(nn.Linear(3072, 2048), nn.LayerNorm(2048))  <- UNICO MODULO TRAINABLE dello Stage 2
+   - self.subtalker (Qwen3TTSSubTalker caricato con load_qwen_subtalker, CONGELATO)
+   - self.semantic_head (Linear 3072->4096, cb0) <- NON usato nello Stage 2 (congelato/ignorato)
+   - forward esistente: hidden_states = base_model(output_hidden_states=True).hidden_states[-1]; agent_hidden = hidden_states[:, audio_feat_start+fpf-1 : audio_feat_start+fpf*n_agent : fpf, :] con audio_feat_start = 2 + TEXT_BLOCK_LEN (TEXT_BLOCK_LEN=48, fpf=2, AUDIO_FEATURE_RATE=25fps -> 2 feature per frame agente 12.5fps); adapted_hidden = _apply_causal_conv(agent_hidden); h_t = ht_adapter(adapted_hidden); sub_logits = subtalker.forward_sub_talker_finetune(h_t, audio_targets) con audio_targets (B, n_agent, 16) [n_agent=64]; coupling_loss = subtalker.coupling_loss(sub_logits, audio_targets, frame_weights).
+
+5) SEQUENZA INPUT GEMMA (convenzione progetto): [bos(2), testo BPE x<=48 (left-pad), boa(256000), feature audio x (2*64=128? NO: il mel a 100fps -> input_features al modello, i placeholder audio_token_id=258881 sostituiti via masked_scatter), eoa(258883)]. Il forward Gemma riceve input_ids + input_features (mel 100fps del canale utente, shape (B, 512, 128)) + input_features_mask. Verifica nel codice esistente del progetto come costruire questi input (cerca nel kaggle_pipeline.py Fase 2 la funzione che costruisce input_ids con placeholder audio e input_features).
+
+6) SUB-TALKER API (qwen_subtalker.py): forward_sub_talker_finetune(h_t, audio_codes) con h_t (B, T, 2048) e audio_codes (B, T, 16) [nel wrapper: h_t.reshape(B*T,1,2048), codes.reshape(B*T,16)]; coupling_loss(logits, targets, frame_weights) per il CE. Il sub DEVE restare in bf16 (com'è nel cell2) e congelato: h_t va castato a bf16 prima del sub (ad_dtype pattern esistente).
+
+7) IPERPARAMETRI STAGE 2 (approvati da revisione agy precedente): batch 8 con grad accum 2 (batch effettivo 16), LR 1.5e-4 AdamW(betas=(0.9,0.98), eps=1e-6?), weight_decay 1e-2, lambda_coupling 0.15-0.25 (scegli 0.2), grad clip 1.0, 1500-2500 step nel run completo. L_latent = (1 - cos_sim) + 0.5 * MSE tra h_t_pred e h_t_target (solo frame attivi). GATE run completo: cos_sim>=0.88, CE_val<=5.95 (tetto oracolo teacher ~5.66-5.69), rank SVD>=256.
+
+8) SMOKE TEST (questo task): PHASE2_SMOKE_BATCHES=4 batch (2-4) per validare: forward/backward senza crash, loss finite (no NaN), gradienti presenti SOLO sui parametri di ht_adapter (base Gemma e sub-talker a gradiente zero), cos_sim iniziale stampato, checkpoint adapter salvato in checkpoints/. Niente training lungo.
+
+9) VINCOLI T4 16GB: teacher Qwen3-TTS 1.7B bf16 (~3.5GB) + Gemma E2B 4bit (~3-4GB) + sub-talker bf16 (~1.3GB) + ht_adapter fp32 + ottimizzatore (solo adapter, piccolo). Il cell2 esistente usa già bf16 per teacher/sub. Il modello Gemma via unsloth richiede il fix dtype T4: dopo il load, portare a fp32 tutti i moduli il cui nome contiene 'norm' (LayerNorm non quantizzati, evita RuntimeError mixed dtype in inference); il layer_norm patched di unsloth in inference non casta l'input (patch a eager o gestione dtype). Nel forward Gemma usa torch.inference_mode() o no_grad (Gemma FROZEN per lo Stage 2: nessuna LoRA, nessun gradiente attraverso il base).
+
+10) RESTRIZIONI DI CODICE: niente caratteri >127 (ASCII puro: niente emoji, niente accenti), print con flush=True, tutto in un try/except che stampa traceback, il kernel gira come cella Kaggle (transformers 5.5.0, torch 2.x, unsloth disponibile SOLO se installato nel cell0 — il kernel fitnets-smoke attuale NON ha unsloth nel cell0: specifica i pip install necessari da aggiungere al cell0: unsloth, unsloth_zoo, bitsandbytes, accelerate, peft, trl, xformers? — mantieni il set del progetto Fase 2: !pip install -q --upgrade unsloth unsloth_zoo transformers accelerate bitsandbytes peft trl tqdm).
+
+== COMPITO ==
+
+Scrivi il codice della sezione `STAGE2_SMOKE` da aggiungere al cell2 di kernel_src/fitnets_extract_cell2.py, attivata da env STAGE2=1 (default 0). La sezione va inserita DOPO il blocco di estrazione finestre (train_wins) e PRIMA della sezione FIDELITY, e deve:
+- caricare Gemma E2B (MODEL_NAME="unsloth/gemma-4-E2B-it", max_seq_length=2048, load_in_4bit=True, device_map="cuda:0") + fix dtype norm fp32 + base congelato (requires_grad_/eval); NON usare get_peft_model (niente LoRA nello Stage 2)
+- istanziare Gemma4FullDuplexModel-like ma SENZA semantic_head loss: puoi istanziare la classe esistente (import da kaggle_pipeline se presente nel kernel) oppure definire una versione slim locale (consigliato: definire una classe Stage2Model locale nel cell2 per non dipendere dai path del progetto: base_model + causal_conv + ht_adapter + subtalker)
+- costruire per ogni finestra di train_wins: mel user 100fps (512 frame), audio codes (64,16), text (BPE Gemma, pad a 48), h_t_target (64,2048) via extract_ht, active mask
+- forward: hidden_states[-1] -> agent_hidden slicing (audio_feat_start=2+48=50, fpf=2, n=64) -> causal_conv -> ht_adapter -> h_t_pred (64,2048) fp32; L_latent su frame attivi; h_t_bf16 -> sub congelato -> coupling_loss * 0.2; loss totale = L_latent + coupling
+- ottimizzatore AdamW solo ht_adapter (e parametri trainable espliciti), grad accum 2, grad clip 1.0, 4 step
+- stampa per step: loss, L_latent, coupling, cos_sim, grad norm adapter; verifica grad=0 su base e sub; salva checkpoint ht_adapter in checkpoints/ht_adapter_stage2_smoke.pt; report in /kaggle/output/stage2_smoke_report.json
+- TUTTO con torch.inference_mode() SOLO per il forward Gemma (per risparmiare VRAM), ma attenzione: il backward richiede il grafo attraverso ht_adapter -> il forward Gemma deve girare in no_grad ma il grafo deve agganciarsi da agent_hidden in poi: usa torch.no_grad() per il call del base_model e ricalcola il resto fuori dal no_grad (agent_hidden è un tensore detached -> il grafo parte da causal_conv/ht_adapter). Alternativa se la VRAM lo permette: tutto in grafo con requires_grad=False sul base (forward non no_grad). Scegli la soluzione robusta e spiega perche'.
+
+== OUTPUT ATTESO ==
+1. Design (10-15 righe)
+2. Codice completo della sezione (solo la sezione, con print ASCII)
+3. Modifiche header (env var da aggiungere)
+4. Lista pip install da aggiungere al cell0
+5. Rischi/note (VRAM, dtype, shape mismatch) in 5-8 righe
