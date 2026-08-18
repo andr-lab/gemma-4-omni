@@ -481,6 +481,25 @@ try:
                     m = np.pad(m, ((0, ST2_MEL_WIN - m.shape[0]), (0, 0)))
                 return torch.from_numpy(np.asarray(m, dtype=np.float32))
 
+            # --- estrazione target h_t UNA TANTUM (teacher in GPU, poi su CPU) ---
+            # I target non dipendono dall'adapter: si estraggono prima del training e il
+            # teacher (3.4GB bf16) esce dalla GPU -> evita OOM nel loop (v22: OOM 48MiB
+            # nel forward del sub con teacher+Gemma+sub tutti in GPU).
+            print(f"[ST2] estrazione target h_t per {len(train_wins)} finestre (teacher, no_grad)...", flush=True)
+            ht_map = {}
+            _t0 = time.time()
+            for _w in train_wins:
+                _it = ds_train[_w["idx"]]
+                _tx = text_by_window[_w["idx"]] if text_by_window is not None else ""
+                _h = extract_ht(_it, _w["n_real"], _tx, return_shifted=False)  # (n_real,2048)
+                _h64 = np.zeros((ST2_T, 2048), dtype=np.float32)
+                _h64[: min(_w["n_real"], ST2_T)] = _h[: min(_w["n_real"], ST2_T)]
+                ht_map[_w["idx"]] = _h64
+            print(f"[ST2] target estratti: {len(ht_map)} in {time.time()-_t0:.1f}s; teacher su CPU", flush=True)
+            teacher.to("cpu")
+            gc.collect()
+            torch.cuda.empty_cache()
+
             step_logs = []
             win_cursor = 0
             avail = len(train_wins)
@@ -495,14 +514,10 @@ try:
                     texts = [text_by_window[w["idx"]] if text_by_window is not None else "" for w in wins]
                     nrs = [w["n_real"] for w in wins]
 
-                    # target h_t dal teacher (padding a 64)
-                    ht_list = []
-                    for it, nr, tx in zip(items, nrs, texts):
-                        h = extract_ht(it, nr, tx, return_shifted=False)  # (nr, 2048)
-                        h64 = np.zeros((ST2_T, 2048), dtype=np.float32)
-                        h64[: min(nr, ST2_T)] = h[: min(nr, ST2_T)]
-                        ht_list.append(h64)
-                    ht_target = torch.from_numpy(np.stack(ht_list, 0)).to(DEV2, dtype=torch.float32)
+                    # target h_t gia' estratti pre-loop (teacher su CPU)
+                    ht_target = torch.stack(
+                        [torch.from_numpy(ht_map[w["idx"]]) for w in wins], 0
+                    ).to(DEV2, dtype=torch.float32)
 
                     # codes + mask attiva
                     audio_targets = torch.stack(
