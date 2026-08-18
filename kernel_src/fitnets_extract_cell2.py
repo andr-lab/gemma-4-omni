@@ -35,6 +35,7 @@ try:
     STAGE2_LAMBDA_COUPLING = float(os.environ.get("STAGE2_LAMBDA_COUPLING", "0.2"))
     STAGE2_WEIGHT_DECAY = float(os.environ.get("STAGE2_WEIGHT_DECAY", "1e-2"))
     STAGE2_GRAD_CLIP = float(os.environ.get("STAGE2_GRAD_CLIP", "1.0"))
+    STAGE2_CKPT_EVERY = int(os.environ.get("STAGE2_CKPT_EVERY", "250"))
 
     import kaggle_pipeline as KP
     import qwen_subtalker as QS
@@ -592,9 +593,14 @@ try:
                       f"(latent {info['latent']:.4f} coup {info['coupling']:.4f}) | cos {info['cos_sim']:.4f} "
                       f"| grad {info['grad_norm']:.4f} | base0 {info['base_grad_zero']} sub0 {info['sub_grad_zero']} "
                       f"| {info['time_s']}s", flush=True)
+                if step % STAGE2_CKPT_EVERY == 0:
+                    os.makedirs("checkpoints", exist_ok=True)
+                    torch.save(ht_adapter.state_dict(), f"checkpoints/ht_adapter_stage2_{step}.pt")
+                    print(f"[ST2] checkpoint periodico: checkpoints/ht_adapter_stage2_{step}.pt", flush=True)
 
             os.makedirs("checkpoints", exist_ok=True)
-            ck = "checkpoints/ht_adapter_stage2_smoke.pt"
+            _ck_smoke = PHASE2_SMOKE_BATCHES <= 8  # smoke vs run completo
+            ck = "checkpoints/ht_adapter_stage2_smoke.pt" if _ck_smoke else "checkpoints/ht_adapter_stage2_final.pt"
             torch.save(ht_adapter.state_dict(), ck)
             report = {
                 "status": "PASS",
