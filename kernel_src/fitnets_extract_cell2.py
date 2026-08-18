@@ -17,6 +17,7 @@ try:
     import torch.nn as nn
     import torch.nn.functional as F
     import numpy as np
+    import gc
 
     EXTRACT_N = int(os.environ.get("FITEX_N", "1000"))
     SANITY = os.environ.get("FITEX_SANITY", "1") == "1"
