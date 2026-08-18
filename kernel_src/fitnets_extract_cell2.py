@@ -38,6 +38,7 @@ try:
     STAGE2_CKPT_EVERY = int(os.environ.get("STAGE2_CKPT_EVERY", "250"))
     EVAL_R1 = int(os.environ.get("EVAL_R1", "0"))
     EVAL_N_VAL = int(os.environ.get("EVAL_N_VAL", "100"))
+    EVAL_BATCH = int(os.environ.get("EVAL_BATCH", "4"))
 
     import kaggle_pipeline as KP
     import qwen_subtalker as QS
@@ -653,31 +654,52 @@ try:
                 raise RuntimeError("checkpoint adapter non trovato")
             print(f"[EVAL] checkpoint adapter: {_ck}", flush=True)
 
-            # --- load Gemma E2B 4bit (teacher su CPU durante il load) + adapter ---
-            print("[EVAL] load Gemma E2B (unsloth 4bit, frozen)...", flush=True)
-            _tdev = next(talker.parameters()).device
+            # --- finestre val: 1000.. (mai viste nel train) ---
+            n_avail = len(ds_train)
+            val_idx = list(range(min(1000, n_avail), min(1000 + N_VAL, n_avail)))
+            if len(val_idx) < 10:
+                raise RuntimeError(f"finestre val insufficienti: {len(val_idx)} (n_avail={n_avail})")
+            print(f"[EVAL] finestre val: {len(val_idx)} (idx {val_idx[0]}..{val_idx[-1]}, n_avail={n_avail})", flush=True)
+
+            # --- target h_t val PRIMA del load Gemma (teacher in GPU, una tantum) ---
+            print(f"[EVAL] estrazione target h_t val ({len(val_idx)} finestre, teacher no_grad)...", flush=True)
+            ht_map, act_map, nreal_map = {}, {}, {}
+            _t0 = time.time()
+            for _i in val_idx:
+                _it = ds_train[_i]
+                _nr = int((_it["audio_targets"][:, 0] != KP.PAD_TARGET_ID).sum().item())
+                _tx = text_by_window[_i] if text_by_window is not None else ""
+                _h = extract_ht(_it, _nr, _tx, return_shifted=False)  # (n_real, 2048)
+                _h64 = np.zeros((ST2_T, 2048), dtype=np.float32)
+                _h64[: min(_nr, ST2_T)] = _h[: min(_nr, ST2_T)]
+                ht_map[_i] = _h64
+                nreal_map[_i] = _nr
+                _a = np.zeros(ST2_T, dtype=np.float32)
+                _a[: min(_nr, ST2_T)] = 1.0
+                act_map[_i] = _a
+            print(f"[EVAL] target val estratti in {time.time()-_t0:.1f}s; teacher su CPU (mai piu' in GPU)", flush=True)
             teacher.to("cpu")
             gc.collect()
             torch.cuda.empty_cache()
+
+            # --- load Gemma E2B 4bit (teacher GIA' su CPU) + adapter ---
+            print("[EVAL] load Gemma E2B (unsloth 4bit, frozen)...", flush=True)
             gemma_base = gemma_tok = None
-            try:
-                from unsloth import FastLanguageModel
-                gemma_base, gemma_tok = FastLanguageModel.from_pretrained(
-                    model_name="unsloth/gemma-4-E2B-it",
-                    max_seq_length=2048,
-                    load_in_4bit=True,
-                    device_map="cuda:0",
-                )
-                for _nm2, _mod in gemma_base.named_modules():
-                    if "norm" in _nm2.lower():
-                        _mod.to(torch.float32)
-                gemma_base.eval()
-                for _p in gemma_base.parameters():
-                    _p.requires_grad = False
-            finally:
-                teacher.to(_tdev)
-                gc.collect()
-                torch.cuda.empty_cache()
+            from unsloth import FastLanguageModel
+            gemma_base, gemma_tok = FastLanguageModel.from_pretrained(
+                model_name="unsloth/gemma-4-E2B-it",
+                max_seq_length=2048,
+                load_in_4bit=True,
+                device_map="cuda:0",
+            )
+            for _nm2, _mod in gemma_base.named_modules():
+                if "norm" in _nm2.lower():
+                    _mod.to(torch.float32)
+            gemma_base.eval()
+            for _p in gemma_base.parameters():
+                _p.requires_grad = False
+            gc.collect()
+            torch.cuda.empty_cache()
             if gemma_base is None:
                 raise RuntimeError("load Gemma E2B fallito")
 
@@ -705,13 +727,6 @@ try:
             sub_st2.eval()
             print("[EVAL] sub-talker bf16 pronto", flush=True)
 
-            # --- finestre val: 1000.. (mai viste nel train) ---
-            n_avail = len(ds_train)
-            val_idx = list(range(min(1000, n_avail), min(1000 + N_VAL, n_avail)))
-            if len(val_idx) < 10:
-                raise RuntimeError(f"finestre val insufficienti: {len(val_idx)} (n_avail={n_avail})")
-            print(f"[EVAL] finestre val: {len(val_idx)} (idx {val_idx[0]}..{val_idx[-1]}, n_avail={n_avail})", flush=True)
-
             def _build_ids(texts):
                 rows, mrows = [], []
                 for t in texts:
@@ -735,34 +750,13 @@ try:
                     m = np.pad(m, ((0, ST2_MEL_WIN - m.shape[0]), (0, 0)))
                 return torch.from_numpy(np.asarray(m, dtype=np.float32))
 
-            # --- target h_t val (teacher in GPU, una tantum) + active masks ---
-            print(f"[EVAL] estrazione target h_t val ({len(val_idx)} finestre, teacher no_grad)...", flush=True)
-            ht_map, act_map, nreal_map = {}, {}, {}
-            _t0 = time.time()
-            for _i in val_idx:
-                _it = ds_train[_i]
-                _nr = int((_it["audio_targets"][:, 0] != KP.PAD_TARGET_ID).sum().item())
-                _tx = text_by_window[_i] if text_by_window is not None else ""
-                _h = extract_ht(_it, _nr, _tx, return_shifted=False)  # (n_real, 2048)
-                _h64 = np.zeros((ST2_T, 2048), dtype=np.float32)
-                _h64[: min(_nr, ST2_T)] = _h[: min(_nr, ST2_T)]
-                ht_map[_i] = _h64
-                nreal_map[_i] = _nr
-                _a = np.zeros(ST2_T, dtype=np.float32)
-                _a[: min(_nr, ST2_T)] = 1.0
-                act_map[_i] = _a
-            print(f"[EVAL] target val estratti in {time.time()-_t0:.1f}s; teacher su CPU", flush=True)
-            teacher.to("cpu")
-            gc.collect()
-            torch.cuda.empty_cache()
-
-            # --- loop valutazione (batch 8, no_grad) ---
+            # --- loop valutazione (batch EVAL_BATCH, no_grad) ---
             decoder = KP.Code2WavDecoder()
             cos_all, mse_all, ce_all = [], [], []
             h_pred_map, h_tgt_map = {}, {}
             PAD_T = KP.PAD_TARGET_ID
-            for _b in range(0, len(val_idx), 8):
-                _idxs = val_idx[_b:_b + 8]
+            for _b in range(0, len(val_idx), EVAL_BATCH):
+                _idxs = val_idx[_b:_b + EVAL_BATCH]
                 texts = [text_by_window[i] if text_by_window is not None else "" for i in _idxs]
                 input_ids, attn_mask = _build_ids(texts)
                 feats = torch.stack([_win_mel(i) for i in _idxs], 0).to(DEV2)
