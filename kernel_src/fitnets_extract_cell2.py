@@ -380,13 +380,13 @@ try:
             print(f"[ST2] cfg: batches={PHASE2_SMOKE_BATCHES} bs={STAGE2_BATCH_SIZE} "
                   f"accum={STAGE2_GRAD_ACCUM} lr={STAGE2_LR} lambda_c={STAGE2_LAMBDA_COUPLING}", flush=True)
 
-            # --- sub-talker bf16 (se non gia' caricato) ---
-            sub_st2 = None
-            for _nm in ("sub_bf16", "sub"):
-                if _nm in globals() and globals()[_nm] is not None:
-                    sub_st2 = globals()[_nm]
-                    break
-            if sub_st2 is None:
+            # --- sub-talker bf16 (se sub_bf16 gia' caricato, altrimenti load deterministico) ---
+            # NOTA: la variabile globale "sub" del cell0 e' una STRINGA (residuo di un
+            # for loop) -> mai usarla; si carica sempre il modello bf16 dedicato.
+            _v0 = globals().get("sub_bf16")
+            if _v0 is not None and not isinstance(_v0, (str, bytes)):
+                sub_st2 = _v0
+            else:
                 _sub_paths = [
                     "/kaggle/input/datasets/andrlab/gemma-4-omni-module/qwen_subtalker",
                     "/kaggle/input/andrlab/gemma-4-omni-module/qwen_subtalker",
