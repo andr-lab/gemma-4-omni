@@ -1,0 +1,47 @@
+CONTESTO (sintetico, per l'analisi — non serve ri-leggere tutto il progetto):
+
+Stiamo validando il fix del "suono metallico" del sub-talker Qwen3-TTS-12Hz in una
+pipeline speech-to-speech full-duplex (Gemma 4 E2B + adapter 1536->2048 + sub-talker
+congelato). Root cause gia' chiuso con test GT-100%: dataset+decoder sani (le wav
+"gt_ref" sono parlato cinese intelligibile). Il colpevole era il sampling GREEDY
+(argmax, temperature=0) dei 15 codebook residui nel wrapper custom. Fix implementato:
+sampling stocastico col protocollo ufficiale Qwen3-TTS (temperature=0.9, top_k=50,
+top_p=1.0, seed=1234), retrocompatibile (temperature<=0 -> argmax).
+
+Il run su Kaggle (kernel gemma4-fitnets-syntest v2) ha generato 9 wav su 3 finestre
+di VALIDAZIONE (idx 1002/1011/1013, mai viste in training, scelte per energia GT
+rms 0.089/0.054/0.047, 64 frame = 5.12s ciascuna, parlato cinese):
+
+Per ogni finestra {a,b,c} ci sono 3 wav:
+  eval_r2_gt_ref_{a,b,c}.wav   = DECODER PURISSIMO: codici 100% ground-truth (max qualita')
+  eval_r2_oracle_{a,b,c}.wav   = predizione sub-talker con h_t oracle (target teacher, non
+                                  la predizione dell'adapter) + sampling ufficiale T=0.9
+  eval_r2_pred_{a,b,c}.wav     = pipeline COMPLETA: h_t dall'adapter (cos_sim 0.63 vs
+                                  target) + sampling ufficiale T=0.9
+
+Cosa voglio da te (ASCOLTO AUDITIVO):
+1. Per ogni finestra, confronta le 3 varianti. Verdetto su:
+   a. gt_ref e' chiaramente intelligibile e naturale? (referenza massima)
+   b. oracle: l'audio e' ancora metallico/robotico o e' parlato naturale?
+   c. pred: intelligibile? quanto si allontana da gt_ref/oracle?
+2. Il FIX ha funzionato: il "metallico" dei residui e' sparito rispetto al sampling
+   greedy precedente (riferimento: le wav greedy erano giudicate metalliche)?
+3. Eventuali artefatti residui (riverbero, rumore, ringhio, robotizzazione).
+4. Giudizio finale: la pipeline e' pronta per la fase streaming full-duplex, o serve
+   altro lavoro sul sub-talker/adapter?
+
+File (path assoluti):
+C:\Users\andre\Documents\gemma-4-omni\eval_syntest_v2_out\eval_r2_gt_ref_a.wav
+C:\Users\andre\Documents\gemma-4-omni\eval_syntest_v2_out\eval_r2_oracle_a.wav
+C:\Users\andre\Documents\gemma-4-omni\eval_syntest_v2_out\eval_r2_pred_a.wav
+C:\Users\andre\Documents\gemma-4-omni\eval_syntest_v2_out\eval_r2_gt_ref_b.wav
+C:\Users\andre\Documents\gemma-4-omni\eval_syntest_v2_out\eval_r2_oracle_b.wav
+C:\Users\andre\Documents\gemma-4-omni\eval_syntest_v2_out\eval_r2_pred_b.wav
+C:\Users\andre\Documents\gemma-4-omni\eval_syntest_v2_out\eval_r2_gt_ref_c.wav
+C:\Users\andre\Documents\gemma-4-omni\eval_syntest_v2_out\eval_r2_oracle_c.wav
+C:\Users\andre\Documents\gemma-4-omni\eval_syntest_v2_out\eval_r2_pred_c.wav
+
+Puoi anche guardare gli spettrogrammi nella sottocartella spec_met/ se utile.
+
+Rispondi con: 1) verdetto per finestra (a/b/c), 2) giudizio sul fix, 3) artefatti,
+4) raccomandazione finale. Sii specifico e onesto: se qualcosa suona ancora male, dillo.
