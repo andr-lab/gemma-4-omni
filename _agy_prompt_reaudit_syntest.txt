@@ -1,0 +1,82 @@
+CONTESTO CRITICO: hai gia' ascoltato queste 9 wav e avevi emesso un verdetto
+("oracle naturale all'85-94%, fix al 100%"). L'utente umano (ascolto diretto)
+CONTRADDICE il tuo verdetto: sente oracle e pred come "gorgoglio inintelligibile
+e caotico, artefatti alieni/liquidi, perdita totale delle formanti linguistiche",
+mentre gt_ref e' "perfetto". Inoltre, le metriche che TU STESSO avevi riportato
+nel tuo report precedente sembrano supportare l'utente, non il tuo verdetto:
+  - LSD oracle vs GT: 12.46-14.19 dB (per parlato simile ci si aspetta <3 dB)
+  - LSD pred vs GT: 15.10-17.22 dB
+  - flatness pred: 0.848-0.932 (rumore piatto)
+  - RMS pred ~30-40% del GT
+
+TASK: ANALISI ADVERSARIALE. NON validare passivamente ne' il tuo verdetto
+precedente ne' quello dell'utente: ascolta di nuovo le wav e trova la VERITA'
+con evidenze oggettive. Se il tuo verdetto precedente era sbagliato, ammettilo
+esplicitamente e spiega perche' (es. bias verso "sembra parlato" su segmenti
+brevi di mandarino, formanti parziali presenti ma fase distrutta).
+
+1. Riascolta ATTENTAMENTE (puoi rileggere anche gli spettrogrammi in
+   C:\Users\andre\Documents\gemma-4-omni\eval_syntest_v2_out\spec_met\):
+   per ogni finestra a/b/c confronta gt_ref vs oracle vs pred.
+   Verdetto per ognuna: intelligibile / parzialmente intelligibile / distrutto.
+   In particolare: oracle ha DAVVERO le formanti e la prosodia del parlato, o
+   e' rumore modulato che "somiglia" a parlato?
+
+2. Calcola tu stesso metriche oggettive di corruzione (in python, puoi usare
+   numpy/scipy sui file wav):
+   - LSD vs gt_ref (log-spectral distance media, bande 20-8000 Hz)
+   - phase coherence / micro-varianza frame-to-frame dei residui (gli artefatti
+     "liquidi" da campionamento caotico dei residui RVQ si vedono come rumore
+     bianco ad alta varianza nei frame di voce)
+   - entropia spettrale nelle bande 0-1k, 1-4k, 4-8k vs gt_ref
+   - distribuzione degli zero-crossing / salienza armonica
+   Riporta i numeri e la tua interpretazione onesta.
+
+3. VALIDA le supposizioni tecniche dell'utente (di' per ciascuna se e' vera,
+   falsa o da verificare empiricamente, con motivazione):
+   a. "Campionare TUTTI i 15 codebook residui con T=0.9 e' distruttivo: i
+      livelli 1..15 contengono solo micro-correzioni di fase/timbro e vanno
+      campionati greedy o con T decrescente (0.1-0.2)". CONFRONTO coi sorgenti
+      ufficiali che trovi in C:\Users\andre\Documents\gemma-4-omni\docs\sources\
+      qwen3_tts_official_src\modeling_qwen3_tts.py (righe 1640-1690: il code
+      predictor genera i livelli in sequenza, un level per generation_step, con
+      subtalker do_sample=True top_k=50 top_p=1.0 T=0.9) e qwen3_tts_model.py
+      (righe 320-352). Nota anche: l'ufficiale usa un code predictor
+      AUTOREGRESSIVO che si alimenta coi codici appena campionati, mentre il
+      nostro wrapper usa h_t fisso (hidden del talker/adapter) e genera i livelli
+      dal MTP in un colpo solo: questa differenza strutturale puo' rendere le
+      distribuzioni residue piu' piatte e quindi T=0.9 distruttivo NEL NOSTRO
+      caso anche se non lo e' nell'ufficiale. Valuta.
+   b. "Possibile disallineamento shape/offset tra i codebook (transposizione
+      num_quantizers/time, off-by-one, code offset)". Guarda il nostro wrapper
+      in C:\Users\andre\Documents\gemma-4-omni\qwen_subtalker.py
+      (sample_acoustic_codes, righe 361-455): il loop per livello g usa
+      logits[:, g-1, :] per predire cb_g e riempie le colonne future con i
+      codici gia' campionati (full[:, :, 1:g] = seq[:, :, 1:]). Verifica la
+      causalita' e l'allineamento vs la struttura ufficiale (modeling_qwen3_tts.py
+      righe 1620-1690). Ci sono bug di shift/interleaving?
+   c. "Codebook 0 contiene la semantica, i residui solo micro-correzioni" —
+      e' vero per RVQ standard? E nel nostro modello congelato?
+   d. Le sue azioni correttive: isolamento RVQ (GT livelli 0..N + modello per i
+      restanti, N=0..15) per localizzare la corruzione; sampling differenziato
+      (cb0: T=0.8-0.9 top_k=50; residui: greedy o T<=0.2); verifica interleaving
+      temporale. Sono sensate? Quale consiglieresti in che ordine?
+
+4. RACCOMANDAZIONE FINALE: dato che (se confermi) oracle e' distrutto, qual e'
+   il prossimo esperimento piu' informativo? (es. isolamento RVQ su Kaggle;
+   greedy sui residui; T decrescente; confronto col protocollo ufficiale
+   autoregressivo). Priorizza per costo GPU e informativita'.
+
+FILE (path assoluti, 9 wav da riascoltare):
+C:\Users\andre\Documents\gemma-4-omni\eval_syntest_v2_out\eval_r2_gt_ref_a.wav
+C:\Users\andre\Documents\gemma-4-omni\eval_syntest_v2_out\eval_r2_oracle_a.wav
+C:\Users\andre\Documents\gemma-4-omni\eval_syntest_v2_out\eval_r2_pred_a.wav
+C:\Users\andre\Documents\gemma-4-omni\eval_syntest_v2_out\eval_r2_gt_ref_b.wav
+C:\Users\andre\Documents\gemma-4-omni\eval_syntest_v2_out\eval_r2_oracle_b.wav
+C:\Users\andre\Documents\gemma-4-omni\eval_syntest_v2_out\eval_r2_pred_b.wav
+C:\Users\andre\Documents\gemma-4-omni\eval_syntest_v2_out\eval_r2_gt_ref_c.wav
+C:\Users\andre\Documents\gemma-4-omni\eval_syntest_v2_out\eval_r2_oracle_c.wav
+C:\Users\andre\Documents\gemma-4-omni\eval_syntest_v2_out\eval_r2_pred_c.wav
+
+Sii spietato: se oracle e' rumore, dillo con i numeri. Se e' davvero parlato
+naturale, difendilo con i numeri. Non fare diplomazia.
