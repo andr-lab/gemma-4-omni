@@ -19,14 +19,23 @@ try:
     import numpy as np
     import gc
 
+    # =========================================================================
+    # CONFIGURAZIONE RUNTIME & IPERPARAMETRI (Environment Variables Centralizzate)
+    # =========================================================================
+    # --- Modalita' di esecuzione & Routing ---
     EXTRACT_N = int(os.environ.get("FITEX_N", "1000"))
     SANITY = os.environ.get("FITEX_SANITY", "1") == "1"
     FIDELITY = os.environ.get("FIDELITY", "0") == "1" or os.environ.get("FIDELITY_PROBE", "0") == "1"
     START_IDX = int(os.environ.get("FITEX_START", "0"))
+    ROPE_FIX = os.environ.get("ROPE_FIX", "0") == "1"
+
+    # --- Smoke B (Verifica Sub-Talker isolato su h_t nativi) ---
     SMOKE_B = os.environ.get("SMOKE_B", "0") == "1"
     SMOKE_B_STEPS = int(os.environ.get("SMOKE_B_STEPS", "300"))
     SMOKE_B_LR = float(os.environ.get("SMOKE_B_LR", "5e-4"))
     SMOKE_B_BATCH = int(os.environ.get("SMOKE_B_BATCH", "8"))
+
+    # --- Stage 2 FitNets Distillation (Gemma E2B -> h_t) ---
     STAGE2 = int(os.environ.get("STAGE2", "0"))
     STAGE2_R2 = int(os.environ.get("STAGE2_R2", "0"))
     STAGE2_R2_LR = float(os.environ.get("STAGE2_R2_LR", "3e-4"))
@@ -40,10 +49,40 @@ try:
     STAGE2_WEIGHT_DECAY = float(os.environ.get("STAGE2_WEIGHT_DECAY", "1e-2"))
     STAGE2_GRAD_CLIP = float(os.environ.get("STAGE2_GRAD_CLIP", "1.0"))
     STAGE2_CKPT_EVERY = int(os.environ.get("STAGE2_CKPT_EVERY", "250"))
+
+    # --- Valutazione Offline & Sintesi Audio (EVAL R1 / EVAL R2) ---
     EVAL_R1 = int(os.environ.get("EVAL_R1", "0"))
     EVAL_R2 = int(os.environ.get("EVAL_R2", "1"))  # SYNTEST v3: attivo l'EVAL R2 per il blocco synth varianti+RVQ
     EVAL_N_VAL = int(os.environ.get("EVAL_N_VAL", "100"))
     EVAL_BATCH = int(os.environ.get("EVAL_BATCH", "4"))
+
+    # --- Dataset & Checkpoint Path Fallback Candidates ---
+    OUTPUT_DIR = "/kaggle/output" if os.path.exists("/kaggle/output") else "."
+    TARGETS_DIR = os.path.join(OUTPUT_DIR, "fitnets_targets")
+    QWEN3_TTS_SRC_DIR = "/kaggle/working/qwen3tts_src"
+
+    QWEN_SUBTALKER_CANDIDATE_PATHS = (
+        "/kaggle/input/datasets/andrlab/gemma-4-omni-module/qwen_subtalker",
+        "/kaggle/input/andrlab/gemma-4-omni-module/qwen_subtalker",
+        "qwen_subtalker",
+        "/kaggle/working/qwen_subtalker",
+    )
+
+    ADAPTER_STAGE2_R2_CANDIDATE_PATHS = (
+        "checkpoints/ht_adapter_stage2r2_final.pt",
+        "/kaggle/working/checkpoints/ht_adapter_stage2r2_final.pt",
+        "/kaggle/input/datasets/andrlab/gemma4-ht-adapter-r2/ht_adapter_stage2r2_final.pt",
+        "/kaggle/input/andrlab/gemma4-ht-adapter-r2/ht_adapter_stage2r2_final.pt",
+        "ht_adapter_stage2r2_final.pt",
+    )
+
+    ADAPTER_STAGE2_R1_CANDIDATE_PATHS = (
+        "checkpoints/ht_adapter_stage2_final.pt",
+        "/kaggle/working/checkpoints/ht_adapter_stage2_final.pt",
+        "/kaggle/input/datasets/andrlab/gemma4-ht-adapter-r1/ht_adapter_stage2_final.pt",
+        "/kaggle/input/andrlab/gemma4-ht-adapter-r1/ht_adapter_stage2_final.pt",
+        "ht_adapter_stage2_final.pt",
+    )
 
     import kaggle_pipeline as KP
     import qwen_subtalker as QS
@@ -151,7 +190,7 @@ try:
     # calcola S=1 da h_t_flat (singolo frame) e applica il RoPE con fase 0 su
     # tutte le 16 posizioni. Patch della classe: S = lunghezza reale della
     # sequenza concatenata (h_t, cb0, cb1..cb14). Attivo con ROPE_FIX=1.
-    if os.environ.get("ROPE_FIX", "0") == "1" and hasattr(QS, "Qwen3TTSSubTalker"):
+    if ROPE_FIX and hasattr(QS, "Qwen3TTSSubTalker"):
         def _fixed_forward_flat(self, h_t_flat, codec_ids_flat):
             inputs = [h_t_flat]  # posizione 0: h_t (senza embedding)
             inputs.append(self.cb0_embedding(codec_ids_flat[:, :1].clamp(min=0)))
@@ -217,7 +256,7 @@ try:
     print(f"split train=[0,{val_start}) | ds_train: {len(ds_train)} finestre", flush=True)
 
     # ---- clone repo ufficiale Qwen3-TTS (modeling + processor) ----
-    _SRC = "/kaggle/working/qwen3tts_src"
+    _SRC = QWEN3_TTS_SRC_DIR
     if not os.path.isdir(_SRC):
         r = subprocess.run(
             ["git", "clone", "--depth", "1", "https://github.com/QwenLM/Qwen3-TTS.git", _SRC],
@@ -321,8 +360,8 @@ try:
     if SANITY or SMOKE_B:
         PAD = KP.PAD_TARGET_ID
         SAMPLE_RATE = KP.SYNTH_SAMPLE_RATE
-        sub, _sub_cfg = QS.load_qwen_subtalker("/kaggle/input/datasets/andrlab/gemma-4-omni-module/qwen_subtalker",
-                                     device="cuda", dtype=torch.float32)
+        _sub_sp = next((p for p in QWEN_SUBTALKER_CANDIDATE_PATHS if os.path.isdir(p)), QWEN_SUBTALKER_CANDIDATE_PATHS[0])
+        sub, _sub_cfg = QS.load_qwen_subtalker(_sub_sp, device="cuda", dtype=torch.float32)
         decoder = KP.Code2WavDecoder()
         sub.eval()
 
@@ -413,23 +452,6 @@ try:
         return ht_target.float().cpu().numpy()
 
     # ---- SCAN finestre attive (come checke, per una sanity comparabile) ----
-    def _rms(x):
-        x = np.asarray(x, dtype=np.float32)
-        return float(np.sqrt(np.mean(np.square(x)))) if x.size else 0.0
-
-    def _frame_active_mask(wav, n_real):
-        FRAME_SAMPLES = int(round(KP.SYNTH_SAMPLE_RATE / KP.FRAME_RATE_HZ))
-        n = min(len(wav), n_real * FRAME_SAMPLES)
-        w = np.asarray(wav[:n], dtype=np.float32)
-        nf = n // FRAME_SAMPLES
-        if nf == 0:
-            return np.zeros(n_real, dtype=bool), np.zeros(n_real, dtype=np.float32)
-        rms_per = np.array([_rms(w[t * FRAME_SAMPLES:(t + 1) * FRAME_SAMPLES]) for t in range(nf)])
-        thr = max(0.02, 0.25 * (rms_per.max() if rms_per.max() > 0 else 1.0))
-        mask = np.zeros(n_real, dtype=bool)
-        mask[:nf] = rms_per > thr
-        return mask, rms_per
-
     PAD = KP.PAD_TARGET_ID
     SAMPLE_RATE = KP.SYNTH_SAMPLE_RATE
     MPF_MEL = KP.MEL_PER_AGENT_FRAME
@@ -579,12 +601,7 @@ try:
             if _v0 is not None and not isinstance(_v0, (str, bytes)):
                 sub_st2 = _v0
             else:
-                _sub_paths = [
-                    "/kaggle/input/datasets/andrlab/gemma-4-omni-module/qwen_subtalker",
-                    "/kaggle/input/andrlab/gemma-4-omni-module/qwen_subtalker",
-                    "qwen_subtalker",
-                ]
-                _sp = next((p for p in _sub_paths if os.path.isdir(p)), _sub_paths[0])
+                _sp = next((p for p in QWEN_SUBTALKER_CANDIDATE_PATHS if os.path.isdir(p)), QWEN_SUBTALKER_CANDIDATE_PATHS[0])
                 sub_st2, _ = QS.load_qwen_subtalker(_sp, device="cuda", dtype=torch.bfloat16)
                 print(f"[{_tag}] sub-talker caricato bf16 da {_sp}", flush=True)
             sub_st2.eval()
@@ -635,11 +652,7 @@ try:
             # -> la forward parte esattamente dal punto di lavoro R2 noto (cos 0.627),
             # e la conv apprende i filtri temporali Delta/DeltaDelta senza regressione.
             if _is_r2:
-                _ck_warm = next((p for p in [
-                    "/kaggle/input/datasets/andrlab/gemma4-ht-adapter-r2/ht_adapter_stage2r2_final.pt",
-                    "/kaggle/input/andrlab/gemma4-ht-adapter-r2/ht_adapter_stage2r2_final.pt",
-                    "ht_adapter_stage2r2_final.pt",
-                ] if os.path.exists(p)), None)
+                _ck_warm = next((p for p in ADAPTER_STAGE2_R2_CANDIDATE_PATHS if os.path.exists(p)), None)
                 if _ck_warm:
                     _missing_c = ht_adapter.load_state_dict(torch.load(_ck_warm, map_location="cpu"), strict=False)
                     print(f"[{_tag}] warm-start R2: {_ck_warm} (missing={list(_missing_c.missing_keys)[:4]}...)", flush=True)
@@ -868,7 +881,7 @@ try:
                     "all_steps": step_logs,
                 }
             torch.save(ht_adapter.state_dict(), ck)
-            _outd = "/kaggle/output" if os.path.exists("/kaggle/output") else "."
+            _outd = OUTPUT_DIR
             with open(os.path.join(_outd, report_file), "w", encoding="utf-8") as f:
                 json.dump(report, f, indent=2)
             print(f"[{_tag}] checkpoint salvato: {ck}", flush=True)
@@ -916,22 +929,7 @@ try:
             DEV2 = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
             # --- checkpoint adapter: priorita' al FRESCO (stesso run), poi dataset input ---
-            if _eval_is_r2:
-                _ck_candidates = [
-                    "checkpoints/ht_adapter_stage2r2_final.pt",
-                    "/kaggle/working/checkpoints/ht_adapter_stage2r2_final.pt",
-                    "/kaggle/input/datasets/andrlab/gemma4-ht-adapter-r2/ht_adapter_stage2r2_final.pt",
-                    "/kaggle/input/andrlab/gemma4-ht-adapter-r2/ht_adapter_stage2r2_final.pt",
-                    "ht_adapter_stage2r2_final.pt",
-                ]
-            else:
-                _ck_candidates = [
-                    "checkpoints/ht_adapter_stage2_final.pt",
-                    "/kaggle/working/checkpoints/ht_adapter_stage2_final.pt",
-                    "/kaggle/input/datasets/andrlab/gemma4-ht-adapter-r1/ht_adapter_stage2_final.pt",
-                    "/kaggle/input/andrlab/gemma4-ht-adapter-r1/ht_adapter_stage2_final.pt",
-                    "ht_adapter_stage2_final.pt",
-                ]
+            _ck_candidates = ADAPTER_STAGE2_R2_CANDIDATE_PATHS if _eval_is_r2 else ADAPTER_STAGE2_R1_CANDIDATE_PATHS
             _ck = next((p for p in _ck_candidates if os.path.exists(p)), None)
             if _ck is None:
                 raise RuntimeError(f"checkpoint adapter {_eval_name} non trovato")
@@ -1012,12 +1010,7 @@ try:
             if _v0 is not None and not isinstance(_v0, (str, bytes)):
                 sub_st2 = _v0
             else:
-                _sub_paths = [
-                    "/kaggle/input/datasets/andrlab/gemma-4-omni-module/qwen_subtalker",
-                    "/kaggle/input/andrlab/gemma-4-omni-module/qwen_subtalker",
-                    "qwen_subtalker",
-                ]
-                _sp = next((p for p in _sub_paths if os.path.isdir(p)), _sub_paths[0])
+                _sp = next((p for p in QWEN_SUBTALKER_CANDIDATE_PATHS if os.path.isdir(p)), QWEN_SUBTALKER_CANDIDATE_PATHS[0])
                 sub_st2, _ = QS.load_qwen_subtalker(_sp, device="cuda", dtype=torch.bfloat16)
             sub_st2.eval()
             print(f"[{_eval_tag}] sub-talker bf16 pronto", flush=True)
@@ -1100,9 +1093,8 @@ try:
             print(f"[{_eval_tag}] rank SVD effettivo: h_t_pred={rk_p} (cum {cum_p:.3f}) | h_t_target={rk_t} (cum {cum_t:.3f})", flush=True)
 
             # --- sintesi wav v3: varianti sampling residui + isolamento RVQ (diagnosi corruzione) ---
-            SAMPLE_RATE = KP.SYNTH_SAMPLE_RATE
             import scipy.io.wavfile as wavfile
-            _outd = "/kaggle/output" if os.path.exists("/kaggle/output") else "."
+            _outd = OUTPUT_DIR
             _sub_dtype = next(sub_st2.parameters()).dtype
 
             EVAL_SAMPLING_TEMP = 0.9
@@ -1275,53 +1267,11 @@ try:
                 json.dump(report, f, indent=2)
             print(json.dumps(report, indent=2), flush=True)
             print(f">>> EVAL {_eval_name} COMPLETATO <<<", flush=True)
-            _valid_p = [s["acc_pred"] for s in synth_results if "acc_pred" in s]
-            _valid_t = [s["acc_oracle"] for s in synth_results if "acc_oracle" in s]
-            _valid_rms = [s["rms_gt"] for s in synth_results if "rms_gt" in s]
-            avg_acc_p = round(float(np.mean(_valid_p)), 4) if _valid_p else None
-            avg_acc_t = round(float(np.mean(_valid_t)), 4) if _valid_t else None
-            avg_rms_gt = round(float(np.mean(_valid_rms)), 6) if _valid_rms else None
-
-            report = {
-                "status": "OK",
-                "phase": f"EVAL_{_eval_name}",
-                "ckpt": _ck,
-                "n_val": len(val_idx),
-                "val_idx_range": [val_idx[0], val_idx[-1]],
-                "cos_sim": round(cos_v, 4),
-                "mse": round(mse_v, 4),
-                "coupling_ce": round(ce_v, 4),
-                "rank_svd_pred": rk_p,
-                "rank_svd_target": rk_t,
-                "cum_energy_pred": round(cum_p, 4),
-                "cum_energy_target": round(cum_t, 4),
-                "sampling_protocol": {
-                    "temperature": EVAL_SAMPLING_TEMP,
-                    "top_k": EVAL_SAMPLING_TOP_K,
-                    "top_p": EVAL_SAMPLING_TOP_P,
-                    "seed": EVAL_SAMPLING_SEED,
-                },
-                "synth_samples": synth_results,
-                "mean_rms_gt": avg_rms_gt,
-                "mean_acc_pred": avg_acc_p,
-                "mean_acc_oracle": avg_acc_t,
-                "gates": {
-                    "cos_sim_ge_0.88": bool(cos_v >= 0.88),
-                    "ce_val_le_5.95": bool(ce_v <= 5.95),
-                    "rank_ge_256": bool(rk_p >= 256),
-                },
-            }
-            if _eval_is_r2:
-                report["variant"] = "r2"
-            with open(os.path.join(_outd, _eval_rep_file), "w", encoding="utf-8") as f:
-                json.dump(report, f, indent=2)
-            print(json.dumps(report, indent=2), flush=True)
-            print(f">>> EVAL {_eval_name} COMPLETATO <<<", flush=True)
         except Exception:
             print(f"[{_eval_tag}] ERRORE durante la valutazione {_eval_name}", flush=True)
             traceback.print_exc()
             try:
-                _outd = "/kaggle/output" if os.path.exists("/kaggle/output") else "."
+                _outd = OUTPUT_DIR
                 _err_rep = {"status": "ERROR", "phase": f"EVAL_{_eval_name}", "error": traceback.format_exc()}
                 if _eval_is_r2:
                     _err_rep["variant"] = "r2"
@@ -1336,13 +1286,7 @@ try:
         print("=== FIDELITY PROBE DECISIVO: CONFRONTO TEACHER CODE_PREDICTOR vs SUB-TALKER ===", flush=True)
         print("=" * 78, flush=True)
 
-        sub_candidates = [
-            "/kaggle/input/datasets/andrlab/gemma-4-omni-module/qwen_subtalker",
-            "/kaggle/input/andrlab/gemma-4-omni-module/qwen_subtalker",
-            "qwen_subtalker",
-            "/kaggle/working/qwen_subtalker",
-        ]
-        sub_path = next((p for p in sub_candidates if os.path.isdir(p)), sub_candidates[0])
+        sub_path = next((p for p in QWEN_SUBTALKER_CANDIDATE_PATHS if os.path.isdir(p)), QWEN_SUBTALKER_CANDIDATE_PATHS[0])
         sub_bf16, sub_cfg = QS.load_qwen_subtalker(sub_path, device="cuda", dtype=torch.bfloat16)
         sub_bf16.eval()
         print(f"[Probe] Sub-talker caricato in bf16 da: {sub_path}", flush=True)
@@ -1591,10 +1535,10 @@ try:
             "config_report": config_report,
             "config_mismatches": mismatches_cfg,
         }
-        os.makedirs("/kaggle/output", exist_ok=True)
-        with open("/kaggle/output/fidelity_report.json", "w", encoding="utf-8") as f:
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        with open(os.path.join(OUTPUT_DIR, "fidelity_report.json"), "w", encoding="utf-8") as f:
             json.dump(fidelity_report, f, indent=2)
-        print("Report Fidelity salvato in: /kaggle/output/fidelity_report.json", flush=True)
+        print(f"Report Fidelity salvato in: {os.path.join(OUTPUT_DIR, 'fidelity_report.json')}", flush=True)
         print("\n=== FIDELITY PROBE COMPLETATO: skip estrazione e training ===", flush=True)
         sys.stdout.flush()
         sys.exit(0)
@@ -1602,7 +1546,7 @@ try:
     # ---- estrazione (saltata nello smoke STAGE2: i target sono calcolati in batch) ----
     if STAGE2:
         print("estrazione h_t massiva saltata (STAGE2/EVAL attivo)", flush=True)
-    OUT = "/kaggle/output/fitnets_targets"
+    OUT = TARGETS_DIR
     os.makedirs(OUT, exist_ok=True)
     manifest = []
     t0 = time.time()
@@ -1697,11 +1641,11 @@ try:
 
         # Decodifica Code2Wav passando LongTensor (nessun warning FloatTensor)
         wav = decoder.decode(full_codes.cpu().long())
-        wav_path = "/kaggle/output/sanity_ht_native_corr.wav"
+        wav_path = os.path.join(OUTPUT_DIR, "sanity_ht_native_corr.wav")
         import scipy.io.wavfile as wavfile
         wavfile.write(wav_path, SAMPLE_RATE,
                       (wav.astype(np.float32) * 32767).astype(np.int16))
-        wav_gt_path = "/kaggle/output/sanity_gt.wav"
+        wav_gt_path = os.path.join(OUTPUT_DIR, "sanity_gt.wav")
         wav_gt = decoder.decode(torch.from_numpy(KP._trim_trailing_silence(gt.cpu().numpy())).long())
         wavfile.write(wav_gt_path, SAMPLE_RATE,
                       (wav_gt.astype(np.float32) * 32767).astype(np.int16))
@@ -1723,9 +1667,9 @@ try:
             "acc_cb115_greedy_correct": acc,
             "ht_shape": list(ht_corr.shape),
         }
-        with open("/kaggle/output/sanity_report.json", "w", encoding="utf-8") as f:
+        with open(os.path.join(OUTPUT_DIR, "sanity_report.json"), "w", encoding="utf-8") as f:
             json.dump(report, f, indent=2)
-        print("SANITY REPORT COMPLETO: /kaggle/output/sanity_report.json", flush=True)
+        print(f"SANITY REPORT COMPLETO: {os.path.join(OUTPUT_DIR, 'sanity_report.json')}", flush=True)
 
     # ---- SEZIONE OPZIONALE: SMOKE_B (Verifica Two-Stage: Training Sub-Talker su h_t nativi) ----
     if SMOKE_B and train_wins:
@@ -1893,7 +1837,7 @@ try:
             full_sample_codes = torch.cat([cb0_sample.unsqueeze(-1), ac_sample], dim=-1).squeeze(0)  # (T, 16)
 
             wav_trained = decoder.decode(full_sample_codes.cpu().long())
-            wav_trained_path = "/kaggle/output/smoke_b_trained_sample.wav"
+            wav_trained_path = os.path.join(OUTPUT_DIR, "smoke_b_trained_sample.wav")
             import scipy.io.wavfile as wavfile
             wavfile.write(wav_trained_path, SAMPLE_RATE, (wav_trained.astype(np.float32) * 32767).astype(np.int16))
             print(f"WAV Sintetizzato Post-Training: {wav_trained_path}", flush=True)
@@ -1915,9 +1859,9 @@ try:
                 "gate_passed": gate_passed,
                 "history": history,
             }
-            with open("/kaggle/output/smoke_b_report.json", "w", encoding="utf-8") as f:
+            with open(os.path.join(OUTPUT_DIR, "smoke_b_report.json"), "w", encoding="utf-8") as f:
                 json.dump(smoke_report, f, indent=2)
-            print("Report Smoke B salvato in: /kaggle/output/smoke_b_report.json", flush=True)
+            print(f"Report Smoke B salvato in: {os.path.join(OUTPUT_DIR, 'smoke_b_report.json')}", flush=True)
 
     print("=== FITNETS EXTRACT COMPLETATO ===", flush=True)
     sys.stdout.flush()
