@@ -213,3 +213,62 @@ Sì, ma tetto asintotico: **0.66-0.70** (+0.04/0.07). Mai ≥0.88 da solo perch�
 - Oracle v2 che hai sentito = intelligibile (stessa qualità v3); se ti è parso incomprensibile, probabilmente ascoltavi le pred oppure il mandarino ti risultava incomprensibile — la sintesi non era rotta.
 - Le tue 2 proposte tecniche: la loss ibrida è già attiva; l'MLP espressivo è già falsificato dai dati (R2≈R1); **il Conv1D causale k=3 è la proposta nuova e validissima** — prossimo smoke test (cos stimato 0.66-0.70).
 - Prossimi passi consigliati: smoke Conv1D k=3 (30 min) → run R3 con Conv1D + tdecay → valutare LoRA co-adaptation (2-3h) per rompere l'asintoto.
+
+---
+
+## 10. R3: Causal Conv1D k=3 — il fix del mismatch training/inferenza (2026-08-19)
+
+### Contesto: la domanda dell'utente e il bug trovato
+L'utente ha sollevato due questioni nella verifica bug (email 5ecb1e73):
+1. **Perché gli oracle attuali sono "robotici e incomprensibili"** mentre nei run passati (EP2) erano perfetti?
+2. **Letteratura Conv1D** in /docs — esaminarla e farla esaminare da agy.
+
+### Mistero oracle RISOLTO — la definizione è cambiata tra i run
+- **Run EP2** (kaggle_pipeline.py L3638/L3694): `oracle_{i}.wav` = **decodifica dei codici GT completi** (cb0..cb15 dal dataset) → audio perfetto per definizione (MCD 0). Il sub-talker NON era coinvolto.
+- **Run syntest v2/v3**: "oracle" = cb0 GT + h_t GT + residui cb1..cb15 **GENERATI dal sub-talker** → MCD 6-9 dB.
+- L'utente confrontava due quantità diverse con lo stesso nome. Gli oracle EP2 non testavano mai il sub-talker.
+
+### Verifica bug sub-talker: NESSUN bug di causalità
+Test `_test_wrapper_vs_reference.py` con pesi reali (181.4M): confronto tra il loop
+`sample_acoustic_codes` (forward con junk 0 nelle posizioni future) e la forward causale
+del teacher con solo le posizioni reali → **max delta 6.48e-05 su tutti i 15 livelli**.
+Il wrapper è EQUIVALENTE al teacher. Il degrado oracle (6-9 dB) è il comportamento reale
+del code_predictor (RVQ stocastico, acc ~5.5% = 110× il caso casuale).
+
+### ⚠️ BUG DI INTEGRAZIONE REALE TROVATO — causal_conv mismatch
+- `kaggle_pipeline.py` L2692: `self.causal_conv = nn.Conv1d(hidden_size, hidden_size, kernel_size=3, padding=0)` (ADR-002).
+- L2844: `adapted_hidden = self._apply_causal_conv(agent_hidden)` **PRIMA** di `ht_adapter` (produzione).
+- `syntest_v3_cell2.py` L625: `h_t_pred = ht_adapter(agent_hidden)` **SENZA conv** (training) → **0 occorrenze** di causal_conv nel file.
+- **Effetto**: l'adapter è addestrato su hidden frame-wise ma in produzione riceve hidden convogliati (contesto 240ms) → covariate shift catastrofico all'ingresso di ht_adapter. Causa probabile del plateau cos 0.627.
+
+### Verdetto agy (task 7cf7316d, 2m38s)
+1. **Proposta utente VALIDATA dalla letteratura**: Qwen3-TTS Tech Report Sez 2.2 ("fully causal feature encoders and decoders" per tokenizer 12.5Hz, L162-179) + Sez 3.4 (80ms/frame); Full-Duplex Survey Sez 4 (L1 hidden-state predictor, left-padding causale (K-1,0), niente padding simmetrico); Mini-Omni; ADR-002 (accettato 2026-08-05: Conv1d k=3 + left-pad (2,0) + circular buffer streaming).
+2. **Giustificazione teorica**: h_t del teacher = traiettoria di 28 strati di causal self-attention (modeling_qwen3_tts.py L1457-1560, L1713-1745) → codifica Δ e ΔΔ (derivate formantiche). L'adapter frame-wise 1×1 è matematicamente impossibilitato a calcolare le derivate. Conv k=3 = campo recettivo 240ms minimo indispensabile.
+3. **Fix**: conv DENTRO ResidualAdapter con identity-init (peso centrale=I, laterali=0) → a passo 0 forward(x)==x → warm-start da checkpoint R2 con strict=False senza regressione.
+4. **Classifica ROI**: [1] Unificazione CausalConv1D+R2 identity → [2] training congiunto (10 min) → [3] LoRA → [4] MLP più profondo (rifiutare).
+
+### Implementazione (TDD, 6 test GREEN)
+`kernel_src/syntest_v3_cell2.py`:
+- `CausalConv1d`: Conv1d(channels, channels, k=3, padding=0, bias=False) + left-pad (2,0); identity-init con peso centrale j=k-1=2 (corretto: con left-pad (k-1,0), out[i]=Σ_j w[j]·x[i+j-(k-1)] → j=k-1).
+- `ResidualAdapter(use_causal_conv=True)`: primo stadio CausalConv1d(1536).
+- Training: warm-start da checkpoint R2 (strict=False, missing solo causal_conv.conv.weight).
+- Eval/synth: load strict=False + stampa "causal_conv presente: identità fino a training R3".
+
+Test (`_test_causalconv_adapter.py`, classi estratte dal sorgente reale):
+1. Identity no-op: delta 0.0 ✓
+2. Warm-start R2 preserva output: delta 1.91e-06 ✓
+3. Conv addestrabile: 1.999→1.346 ✓
+4. Zero look-ahead: delta 0.0 ✓
+5. Kernel center j=2, laterali 0 ✓
+6. Shape (B,T,1536)→(B,T,2048) ✓
++ Retrocompatibilità synth block R2: max delta 3.81e-06 (output identici col checkpoint senza conv) ✓
+
+### Notebook smoke R3 pronto
+`kernel_fitnets_syntest_r3/gemma4-fitnets-syntest-r3.ipynb`:
+STAGE2=1, STAGE2_R2=1, PHASE2_SMOKE_BATCHES=4, EVAL_R1=0, EVAL_R2=0, FITEX_N=16,
+dataset: andrlab/gemma-4-omni-module + andrlab/gemma4-ht-adapter-r2 (warm-start).
+Obiettivo smoke: cos parte da ~0.627 (warm-start) e NON regredisce; loss latente scende;
+grad della conv attivo (base0=True, sub0=True); atteso cos 0.66-0.70 dopo run completo R3.
+
+### Commit
+`2940e71` — R3 causal conv: fix mismatch training/inferenza (letteratura agy, TDD 6 test, warm-start, notebook smoke R3).
