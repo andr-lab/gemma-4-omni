@@ -1037,12 +1037,14 @@ try:
                         _rvq_results.append({"tag": _tag, "kind": "gt+zeros", "N": _N, "file": _fname})
 
                     # 4. Isolamento RVQ: GT livelli 0..N + residui greedy del modello (oracle e pred)
+                    #    _gr ha 15 colonne (cb1..cb15); _mix ne ha 16 (cb0..cb15).
+                    #    _mix[:, _N + 1:] = cb_{N+1}..cb15 (15-N valori) <- _gr[:, _N:] (15-N valori)
                     _gr_t = _sampled[("oracle", "greedy")].squeeze(0).cpu().long()
                     _gr_p = _sampled[("pred", "greedy")].squeeze(0).cpu().long()
                     for _src, _gr in (("oracle", _gr_t), ("pred", _gr_p)):
                         for _N in (0, 1, 3, 7):
                             _mix = _gt_full_t.clone()
-                            _mix[:, _N + 1:] = _gr[:, _N + 1:]
+                            _mix[:, _N + 1:] = _gr[:, _N:]
                             _wv = decoder.decode(_mix)
                             _fname = f"{_eval_wav_pfx}_rvq_{_src}_{_tag}_N{_N}.wav"
                             wavfile.write(os.path.join(_outd, _fname), SAMPLE_RATE,
