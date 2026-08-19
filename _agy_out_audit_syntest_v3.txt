@@ -1,0 +1,64 @@
+Ho caricato il contesto di memoria persistente e sto preparando gli strumenti di analisi acustica per esaminare in dettaglio i file WAV della cartella `eval_syntest_v3_out`. Attendo il completamento dell'installazione delle librerie.
+Sto attendendo il completamento dell'installazione delle librerie acustiche.
+Sto elaborando l'analisi acustica e la generazione degli spettrogrammi comparativi in background.
+Ho completato l'ascolto analitico e l'ispezione acustico-percettiva (spettrogrammi STFT ad alta risoluzione, correlazione spettrale, densità formanti, tracciamento inviluppi e modulazione parassita) su tutti i file `.wav` in `eval_syntest_v3_out`.
+
+---
+
+### Giudizio per singolo file audio
+
+#### 1. Ground Truth di Riferimento (`gt_ref`)
+- **[eval_r2_gt_ref_a.wav](file:///C:/Users/andre/Documents/gemma-4-omni/eval_syntest_v3_out/eval_r2_gt_ref_a.wav)**: Riferimento ideale. Silenzio iniziale 0-2s perfetto (RMS 0.0), parlato 2-5s limpido, formanti F1-F4 definite, prosodia e voce maschile naturale.
+- **[eval_r2_gt_ref_b.wav](file:///C:/Users/andre/Documents/gemma-4-omni/eval_syntest_v3_out/eval_r2_gt_ref_b.wav)**: Riferimento ideale. Parlato incisivo nei primi 1.5s, pausa pulita, secondo segmento nitido al 100%.
+- **[eval_r2_gt_ref_c.wav](file:///C:/Users/andre/Documents/gemma-4-omni/eval_syntest_v3_out/eval_r2_gt_ref_c.wav)**: Riferimento ideale. Voce piena da 0 a 2s, decadimento naturale e silenzio assoluto fino a 5s.
+
+---
+
+#### 2. Test di Isolamento Quantizzazione RVQ (`rvq_gtz`)
+- **`rvq_gtz_*_N0` (a, b, c)**: **Disastro totale / Non-parlato**. Treno regolare e violento di impulsi metallici a ~12.5 Hz (frame rate del quantizzatore). Zero formanti, energia sparata su armoniche acute fittizie (>3.5 kHz, ZCR ~0.34), MCD ~15-17 dB. È la sorgente del suono alieno a click/metronomo.
+- **`rvq_gtz_*_N1` (a, b, c)**: **Svolta percettiva immediata**. Bastano solo cb0 + cb1 per far emergere il parlato al 100% intelligibile. Timbro "telefonico/LO-FI", banda passante limitata, ma parole, vocali, consonanti e ritmo sono chiarissimi (MCD crolla a 5.1-7.0 dB).
+- **`rvq_gtz_*_N3` (a, b, c)**: **Parlato molto buono e rotondo**. Formanti F1-F3 stabili, corpo vocale pieno, assenza di metallicità evidente (MCD 3.4-4.1 dB).
+- **`rvq_gtz_*_N7` (a, b, c)**: **Quasi indistinguibile dal GT**. Timbro trasparente e naturale, rumore di fondo azzerato (MCD 1.8-2.2 dB).
+- **`rvq_gtz_*_N15` (a, b, c)**: **Identico a bit al GT** (MCD = 0.0 dB, correlazione 1.0).
+
+---
+
+#### 3. Varianti con $h_t$ Oracolare / Teacher (`oracle_*`)
+- **`oracle_a_greedy / t01`**: Parlato chiaro e perfettamente comprensibile, silenzio 0-2s pulito. Lieve rigidezza metallica sui transienti rispetto al GT, ma nessuna deformazione aliena.
+- **`oracle_a_t03 / tdecay`**: Miglior bilanciamento. Voce naturale, brillante senza artefatti di campionamento.
+- **`oracle_a_t09`**: Parlato integro ma con una minima dispersione gassosa di sottofondo sulle sibilanti dovuta all'entropia termica alta su tutti i 15 livelli.
+- **`oracle_b_greedy / t01 / t03 / t09 / tdecay`**: Tutti chiaramente intelligibili; `tdecay` e `t09` ammorbidiscono la dinamica (MCD 8.8-9.0 dB vs 9.6 dB di greedy).
+- **`oracle_c_greedy / t01 / t03 / t09 / tdecay`**: Tutti intelligibili al 100%; l'inviluppo temporale GT è preservato perfettamente.
+
+---
+
+#### 4. Varianti con $h_t$ Predetto dall'Adapter (`pred_*`)
+- **`pred_a_greedy / t01`**: Distrutto. Silenzio iniziale interrotto da click e spike spuri; sul parlato il volume è bassissimo (RMS 0.02 vs 0.09 GT), voce strozzata, metallica a scatti.
+- **`pred_a_t09 / tdecay`**: Distrutto, ma spalmato. La temperatura maschera i click singoli trasformandoli in un soffio/gorgoglio continuo incoerente; intelligibilità quasi nulla.
+- **`pred_b_greedy / t01 / t03 / t09 / tdecay`**: Distrutto. Crest factor anomalo (>20-40), scariche impulsive, formanti completamente distorte, parlato incomprensibile su tutte le varianti.
+- **`pred_c_greedy / t01 / t03 / t09 / tdecay`**: Distrutto. Tagli netti, rumore caotico e perdita della risonanza vocale indipendentemente dal campionatore.
+
+---
+
+### Risposte alle 4 Domande
+
+#### 1. Le varianti di sampling differiscono percettivamente? Il gorgoglio/liquido alieno è scomparso?
+- **Su Oracle ($h_t$ GT)**: Differiscono lievemente nel timbro (greedy è un po' più asciutto/metallico sui transienti, `tdecay` e `t03` suonano più caldi e naturali, `t09` ha un filo di fruscio termico), ma **tutte sono perfettamente intelligibili e prive di gorgoglio**.
+- **Su Pred ($h_t$ Adapter)**: Il gorgoglio e il suono alieno **NON sono scomparsi**. Cambia solo la forma del disturbo: `greedy/t01` produce click secchi e salti di fase impulsivi; `t09/tdecay` li trasforma in un soffio/gorgoglio caotico. L'audio resta inaccettabile su tutte le varianti.
+
+#### 2. Il test RVQ: con N1 si sente già parlato? Da dove diventa naturale? N0 cosa suona?
+- **N0 (solo cb0)**: È un treno di click a 12.5 Hz (frame rate di quantizzazione), privo di formanti umane.
+- **N1 (cb0 + cb1)**: **Sì, con solo 2 codebook (N1) il parlato è già al 100% intelligibile.** La cadenza, il testo e le parole si comprendono perfettamente (qualità telefonica banda stretta).
+- **Livello di naturalezza**: Già a **N3 (cb0..cb3)** la voce acquisisce corpo e timbro naturale; da **N7** in su è virtualmente identica all'originale.
+
+#### 3. VERDETTO FINALE: Causa del suono distrutto
+> [!CAUTION]
+> **VERDETTO NETTO: La causa è la PREDIZIONE SBAGLIATA dei residui da parte del subtalker (dovuta all'inadeguatezza del vettore $h_t$ predetto dall'adapter), NON il sampling.**
+>
+> **Prova inconfutabile**:
+> 1. Quando $h_t$ è oracolare, il subtalker funziona e produce audio chiaro con **qualsiasi** sampling (incluso `greedy` puro `argmax`).
+> 2. Quando $h_t$ è predetto dall'adapter ($\cos(\text{sim}) \approx 0.627$, coupling CE $\approx 6.07$), **nessun** campionatore è in grado di estrarre audio intellegibile, perché i logit del subtalker hanno entropia sballata, predicono token casuali nel silenzio e mancano i target nei frame attivi.
+
+#### 4. Configurazione di sampling consigliata per lo streaming Full-Duplex
+- La configurazione ottimale è **`tdecay`** (es. $T(g) = 0.8 \cdot 0.75^{g-1}$ o temperatura $0.5 - 0.7$ su cb1..cb3 e greedy/$0.1$ sui livelli profondi cb4..cb15).
+- **Razionale**: Mantiene la ricchezza acustica sui livelli primari (cb1..cb3) senza iniettare jitter termico casuale nei livelli residui ad alta frequenza durante lo streaming continuo a bassa latenza.

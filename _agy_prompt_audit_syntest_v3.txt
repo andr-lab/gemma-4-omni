@@ -1,0 +1,32 @@
+Sei un revisore avversariale AUDIO (multimodale). Devi ASCOLTARE le wav nella cartella
+"C:\Users\andre\Documents\gemma-4-omni\eval_syntest_v3_out" e dare un verdetto PERCETTIVO.
+
+CONTESTO (progetto Gemma 4 Omni, pipeline speech-to-speech):
+- gt_ref_{a,b,c}.wav = audio di riferimento massimo (decoder Code2Wav sui codici GT veri). intelligibile al 100%.
+- Le varianti oracle_* = codici residui cb1..cb15 GENERATI dal sub-talker a partire da h_t ORACLE (h_t del teacher, il target perfetto), con cb0 GT. Solo il sampling differisce:
+  * greedy = argmax puro su tutti i 15 livelli
+  * t01 = sampling temperatura 0.1 su tutti i livelli
+  * t09 = sampling temperatura 0.9 su tutti i livelli (protocollo ufficiale Qwen3-TTS)
+  * tdecay = temperatura esponenziale 0.8*0.75^(g-1) (0.8, 0.6, 0.45, ...) per livello crescente
+- pred_* = stesse varianti ma a partire da h_t PREDETTO dall'adapter Gemma (peggiore del teacher).
+- rvq_gtz_*_N{k} = TEST DI ISOLAMENTO RVQ: codici GT completi ma con i livelli residui > N azzerati
+  (N0 = solo cb0; N1 = cb0+cb1; N3 = cb0..cb3; N7 = cb0..cb7; N15 = tutto = identico a gt_ref).
+
+NUMERI OGGETTIVI GIÀ CALCOLATI (MCD gold-standard, frame voiced, calibrato: gt vs gt=0,
+parlato diverso=16.6, rumore=16.9 dB):
+- oracle: greedy 6.2/9.6/7.2, t01 6.4/9.4/7.0, t09 7.1/9.1/7.7, tdecay 6.8/8.9/7.8 (per a/b/c)
+- pred:   greedy 12.4/13.9/11.6, t01 12.5/14.4/11.7, t09 10.1/13.6/12.3, tdecay 10.3/14.1/12.6
+- rvq_gtz: N0 15.0/16.7/13.5, N1 5.3/7.0/5.1, N3 3.4/4.1/3.9, N7 1.9/2.2/2.1, N15 0.0
+
+DOMANDE (rispondi a tutte, per ciascuna finestra a/b/c dove rilevante):
+1. Le varianti di sampling (greedy vs t01 vs t09 vs tdecay) differiscono PERCETTIVAMENTE?
+   Quale suona meglio per oracle? E per pred? Il gorgoglio/liquido alieno è scomparso o no?
+2. Il test RVQ: con N1 (solo cb1) si sente già parlato intelligibile? Da quale livello (N) il
+   parlato diventa naturale? N0 (solo cb0) che cosa suona?
+3. VERDETTO FINALE: la causa del suono distrutto è il SAMPLING dei residui (come ipotizzato
+   dall'utente) o la PREDIZIONE dei residui da parte del sub-talker (i logit sono sbagliati
+   a prescindere dal sampling)? Rispondi in modo netto.
+4. Quale configurazione di sampling consiglieresti per lo streaming full-duplex (se una)?
+
+Sii concreto e breve: per ogni wav una riga di giudizio, poi il verdetto sintetico. NON
+confermare ciò che pensi ci si aspetti: ascolta davvero e riporta cosa senti.
