@@ -272,3 +272,36 @@ grad della conv attivo (base0=True, sub0=True); atteso cos 0.66-0.70 dopo run co
 
 ### Commit
 `2940e71` — R3 causal conv: fix mismatch training/inferenza (letteratura agy, TDD 6 test, warm-start, notebook smoke R3).
+
+### 10.5 Esito SMOKE R3 (kernel andrlab/gemma4-fitnets-syntest-r3, v2) — 2026-08-19
+
+**Caveat run v1 (fallito silenziosamente)**: il primo push (v1) aveva la cella 2 con `source` senza `\n` finali
+(`split('\n')` invece di `splitlines(keepends=True)`). Kaggle serializza gli elementi della lista senza separatore →
+la cella diventava una riga-unica dove il commento iniziale ingoiava TUTTO il codice → cella eseguita come no-op →
+run COMPLETE in 173s senza training né checkpoint (nessun errore, quindi nessun alert). Fix: ricostruito il notebook
+con `splitlines(keepends=True)` (uguale al base eval_r2), commit `dba37a5`, push v2.
+
+**Run v2 (14m 37s, T4, 16 finestre, 4 batch) — TUTTI I GATE PASS**:
+
+| Gate | Atteso | Ottenuto | Esito |
+|---|---|---|---|
+| Warm-start R2 | missing solo `causal_conv.conv.weight` | `missing=['causal_conv.conv.weight']` | ✅ |
+| Parametri trainable | 14.17M + 7.08M conv = 21.25M | 21,244,928 | ✅ |
+| cos iniziale | parte da ~0.627, NO regressione | **0.6835** (finestre train) | ✅ |
+| cos trend | sale | **0.6835 → 0.6953** (4 step) | ✅ |
+| Loss latent | scende | **1.8553 → 1.8108** | ✅ |
+| Grad conv attivo | base0=True sub0=True | base_grad_zero=true, sub_grad_zero=true, grad_norm 2.34→1.54 | ✅ |
+| Checkpoint | `ht_adapter_stage2r2_smoke.pt` | salvato (84.9MB) | ✅ |
+| Report | JSON | `stage2r2_report.json` status=PASS | ✅ |
+| Exit | 0 | `STAGE 2 R2 COMPLETATO CON SUCCESSO` | ✅ |
+
+**Verifica locale pesi conv** (dal checkpoint scaricato): `causal_conv.conv.weight` shape (1536,1536,3),
+|w[:,:,2]| medio 0.000678 ≈ 1/1536 (diag identity residua dopo 4 step a lr warmup 3e-6→1.2e-5), laterali 0.000027
+→ la conv ha INIZIATO ad apprendere (coerente con lr bassa di warmup). Gradiente attivo confermato.
+
+**Verdetto**: il fix R3 (CausalConv1d dentro ResidualAdapter, identity-init, warm-start strict=False) è
+metodologicamente corretto e la pipeline regge. La conv parte come no-op esatto e la loss scende subito.
+Next: run R3 completo (PHASE2_SMOKE_BATCHES grande, ~10 min training stage2) → atteso cos 0.66-0.70.
+
+### Commit
+`dba37a5` — FIX CRITICO notebook r3: source celle con splitlines(keepends=True) (run v1 era no-op).
