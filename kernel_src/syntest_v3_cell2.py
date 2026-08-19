@@ -370,15 +370,48 @@ try:
             break
     print(f"raccolte {len(train_wins)} finestre train (EXTRACT_N={EXTRACT_N}, FIDELITY={FIDELITY})", flush=True)
 
-    # ---- ADAPTER FACTORY & ARCHITETTURE (R1 Lineare, R2 MLP Residuale) ----
+    # ---- ADAPTER FACTORY & ARCHITETTURE (R1 Lineare, R2 MLP Residuale + CausalConv) ----
+    class CausalConv1d(nn.Module):
+        """Conv1D causale k=3 con left-pad (2,0): contesto [t-2,t-1,t]=240ms, 0 look-ahead.
+        Identity-init: peso centrale=I, laterali=0 -> forward(x)==x a passo 0 (no regressione
+        sul checkpoint R2 esistente). ADR-002 + Qwen3-TTS causal encoders (12.5Hz).
+        """
+        def __init__(self, channels, kernel_size=3):
+            super().__init__()
+            self.conv = nn.Conv1d(channels, channels, kernel_size=kernel_size, padding=0, bias=False)
+            self._reset_identity_parameters()
+
+        def _reset_identity_parameters(self):
+            nn.init.zeros_(self.conv.weight)
+            with torch.no_grad():
+                # con left-pad (k-1,0): out[i] = sum_j w[j] * x[i + j - (k-1)]
+                # -> frame corrente x[i] mappato dal peso j = k-1 (es. k=3 -> j=2)
+                _c = self.conv.kernel_size[0] - 1
+                for i in range(self.conv.weight.shape[0]):
+                    self.conv.weight[i, i, _c] = 1.0
+
+        def forward(self, x):
+            # x: (B, T, C) -> (B, C, T) -> left-pad (2,0) -> conv -> (B, T, C)
+            x_t = x.transpose(1, 2)
+            x_pad = F.pad(x_t, (2, 0))
+            out = self.conv(x_pad)
+            return out.transpose(1, 2)
+
     class ResidualAdapter(nn.Module):
-        """Adapter MLP residuale (R2): LayerNorm( MLP(h) + skip(h) ).
+        """Adapter MLP residuale (R2): CausalConv1D -> LayerNorm( MLP(h) + skip(h) ).
         skip_proj: Linear(in_dim, out_dim)
         mlp: Linear(in_dim, hidden_dim) -> SiLU -> Linear(hidden_dim, out_dim)
         norm: LayerNorm(out_dim)
+        use_causal_conv=True: primo stadio CausalConv1d identity-init (k=3, left-pad (2,0));
+        caricando il checkpoint R2 con strict=False la conv parte come identita' (nessuna
+        regressione) e viene addestrata per apprendere filtri temporali Delta/DeltaDelta
+        (mismatch training/inferenza risolto: kaggle_pipeline applica gia' la conv a monte).
         """
-        def __init__(self, in_dim=1536, out_dim=2048, hidden_dim=3072):
+        def __init__(self, in_dim=1536, out_dim=2048, hidden_dim=3072, use_causal_conv=True):
             super().__init__()
+            self.use_causal_conv = use_causal_conv
+            if use_causal_conv:
+                self.causal_conv = CausalConv1d(in_dim)
             self.skip_proj = nn.Linear(in_dim, out_dim)
             self.mlp = nn.Sequential(
                 nn.Linear(in_dim, hidden_dim),
@@ -388,6 +421,8 @@ try:
             self.norm = nn.LayerNorm(out_dim)
 
         def forward(self, x):
+            if self.use_causal_conv:
+                x = self.causal_conv(x)
             h_proj = self.skip_proj(x)
             h_mlp = self.mlp(x)
             return self.norm(h_mlp + h_proj)
@@ -493,9 +528,22 @@ try:
             _variant = 2 if _is_r2 else 1
             ht_adapter = build_ht_adapter(_HID, variant=_variant).to(DEV2, dtype=torch.float32)
             print(f"[{_tag}] hidden_size LLM rilevato: {_HID}", flush=True)
+            # R3: warm-start dal checkpoint R2 (strict=False) con causal_conv identity-init
+            # -> la forward parte esattamente dal punto di lavoro R2 noto (cos 0.627),
+            # e la conv apprende i filtri temporali Delta/DeltaDelta senza regressione.
+            if _is_r2:
+                _ck_warm = next((p for p in [
+                    "/kaggle/input/datasets/andrlab/gemma4-ht-adapter-r2/ht_adapter_stage2r2_final.pt",
+                    "ht_adapter_stage2r2_final.pt",
+                ] if os.path.exists(p)), None)
+                if _ck_warm:
+                    _missing_c = ht_adapter.load_state_dict(torch.load(_ck_warm, map_location="cpu"), strict=False)
+                    print(f"[{_tag}] warm-start R2: {_ck_warm} (missing={list(_missing_c.missing_keys)[:4]}...)", flush=True)
+                else:
+                    print(f"[{_tag}] warm-start R2: checkpoint non trovato, training da zero", flush=True)
             trainable_params = [p for p in ht_adapter.parameters()]
             n_tr = sum(p.numel() for p in trainable_params)
-            print(f"[{_tag}] parametri trainable adapter: {n_tr:,}", flush=True)
+            print(f"[{_tag}] parametri trainable adapter: {n_tr:,} (incl. causal_conv {sum(p.numel() for p in ht_adapter.causal_conv.parameters()) if getattr(ht_adapter,'use_causal_conv',False) else 0:,})", flush=True)
             _cur_lr = STAGE2_R2_LR if _is_r2 else STAGE2_LR
             optimizer = torch.optim.AdamW(
                 trainable_params, lr=_cur_lr, betas=(0.9, 0.98), eps=1e-6,
@@ -829,7 +877,10 @@ try:
                 ht_adapter = build_ht_adapter(_HID, variant=2).to(DEV2, dtype=torch.float32)
             else:
                 ht_adapter = nn.Sequential(nn.Linear(_HID, 2048), nn.LayerNorm(2048)).to(DEV2, dtype=torch.float32)
-            ht_adapter.load_state_dict(torch.load(_ck, map_location="cpu"))
+            ht_adapter.load_state_dict(torch.load(_ck, map_location="cpu"), strict=False)
+            if getattr(ht_adapter, "use_causal_conv", False):
+                # la causal_conv resta identity-init (no-op) se assente nel checkpoint R2
+                print(f"[{_eval_tag}] causal_conv presente: identita' fino a training R3 (delta 0)", flush=True)
             ht_adapter.eval()
             print(f"[{_eval_tag}] adapter caricato ({_HID}->2048) + Gemma congelata", flush=True)
 
