@@ -534,6 +534,7 @@ try:
             if _is_r2:
                 _ck_warm = next((p for p in [
                     "/kaggle/input/datasets/andrlab/gemma4-ht-adapter-r2/ht_adapter_stage2r2_final.pt",
+                    "/kaggle/input/andrlab/gemma4-ht-adapter-r2/ht_adapter_stage2r2_final.pt",
                     "ht_adapter_stage2r2_final.pt",
                 ] if os.path.exists(p)), None)
                 if _ck_warm:
