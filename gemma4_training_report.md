@@ -305,3 +305,45 @@ Next: run R3 completo (PHASE2_SMOKE_BATCHES grande, ~10 min training stage2) →
 
 ### Commit
 `dba37a5` — FIX CRITICO notebook r3: source celle con splitlines(keepends=True) (run v1 era no-op).
+
+### 10.6 Run completo R3 v7 (kernel andrlab/gemma4-fitnets-syntest-r3, v7) — 2026-08-19
+
+**Catena di fix che ha portato a questo run** (v3→v7):
+- **v3** (primo run completo): training STAGE2 OK (cos 0.7257) ma EVAL R2 crash per device mismatch in `extract_ht`.
+- **v4** (fix device-aware `_tdev = next(talker.parameters()).device`): target val estratti su CPU (teacher su CPU), ma **CUDA OOM al load della seconda Gemma** (13.29 GiB in uso).
+- **v5** (fix `del`+empty_cache): **OOM persistito** — unsloth tiene la Gemma in un registry interno (9.96 GiB allocated anche dopo `del`). Lezione empirica: il del non libera la VRAM.
+- **v6** (fix riuso Gemma EVAL2 + checkpoint fresco): OOM risolto, EVAL2 finalmente completo — ma synth wav fallita: `sample_acoustic_codes() got an unexpected keyword argument 'top_k'` (il dataset input monta `qwen_subtalker.py` VECCHIO senza top_k).
+- **v7** (commit `f211d5c`): **monkey-patch condizionale su firma via `inspect`** — se `top_k` manca, sostituisce `sample_acoustic_codes` con la versione del repo (top_k/top_p/seed/temperatures_per_level). TDD 2 test GREEN. **Run completo: 56m30s, TUTTI i passi OK.**
+
+**Risultati numerici (run v7, 200 step, adapter fresco `ht_adapter_stage2r2_final.pt`)**:
+
+| Metrica | Valore | Note |
+|---|---|---|
+| Training cos finale (STAGE2) | **0.7257** | da partenza 0.6835, loss latent 1.7456 |
+| **cos val (100 finestre mai viste)** | **0.6063** | vs R2 baseline 0.6275 — lieve calo, asintoto informativo regge |
+| mse val | 3.4927 | |
+| coupling_ce val | **5.4817** | gate ≤5.95 ✅ (il coupling è sano) |
+| rank SVD pred / target | **937 / 2044** | gate ≥256 ✅ (pred non degenerata, ma rank ridotto: la pred vive in un sottospazio più piccolo del target) |
+| Synth wav | 72 file, status OK | 3 finestre × (gt_ref, oracle 5 varianti, pred 5 varianti, rvq) |
+| Base/sub congelati | verificate | `base_grad_zero=true, sub_grad_zero=true` per tutti i 200 step |
+
+**Pesi causal_conv appresi** (dal checkpoint fresco scaricato): `causal_conv.conv.weight` shape (1536,1536,3),
+deviazione da identity al centro **0.0184**, pesi off-center (laterali temporali) max **0.0203** → la conv ha
+appreso ben oltre il no-op iniziale (smoke: 0.0007), ma l'effetto sul cos val è marginale.
+
+**Verdetto run completo R3**: il CausalConv1D NON rompe l'asintoto informativo (cos val 0.6063 vs 0.6275 R2:
+sostanzialmente stabile, non è una regressione metodologica ma nemmeno un guadagno). La causa non è il mismatch
+training/inferenza (risolto): è il **tetto informativo dell'adapter sul tensore della finestra** con Gemma E2B
+congelata. La pred ha rank SVD 937 vs target 2044: l'adapter proietta in un sottospazio a metà dimensionalità.
+
+**Next (leve a regime)**:
+1. **LoRA co-adaptation su Gemma E2B** (r=16, α=32, LR 1.5e-5, 2-3h) — la leva principale per rompere il tetto:
+   permette alla Gemma di riorganizzare le features invece di usare solo il residuo dell'adapter.
+2. Se LoRA non basta: aumentare l'hop di contesto (la finestra di 16 frame può non contenere l'informazione di
+   prosodia lunga necessaria).
+3. Streaming full-duplex: sampling `tdecay` + post-gain +4dB su pred.
+
+### Commit
+`f211d5c` — fix synth wav EVAL_R2: monkey-patch `sample_acoustic_codes` con la versione del repo (top_k/top_p/seed/
+temperatures_per_level) — il dataset input monta `qwen_subtalker.py` VECCHIO. TDD 2 test GREEN. Run v7 completo:
+cos val 0.6063, CE 5.4817, rank 937, synth 72 wav OK.
