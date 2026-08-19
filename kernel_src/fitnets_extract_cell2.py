@@ -928,26 +928,86 @@ try:
             rk_t, s0_t, cum_t = _rank_eff(_T)
             print(f"[{_eval_tag}] rank SVD effettivo: h_t_pred={rk_p} (cum {cum_p:.3f}) | h_t_target={rk_t} (cum {cum_t:.3f})", flush=True)
 
-            # --- sintesi 3 wav (oracolo h_t GT vs h_t predetto, sub greedy + code2wav) ---
+            # --- sintesi 3 wav (protocollo ufficiale Qwen3-TTS: top_k=50, top_p=1.0, temp=0.9, seed=1234) ---
             SAMPLE_RATE = KP.SYNTH_SAMPLE_RATE
             import scipy.io.wavfile as wavfile
             _outd = "/kaggle/output" if os.path.exists("/kaggle/output") else "."
             _sub_dtype = next(sub_st2.parameters()).dtype
-            _syn_idx = [val_idx[0], val_idx[len(val_idx) // 2], val_idx[-1]]
-            synth_results = []
-            for _tag, _i in zip(["a", "b", "c"], _syn_idx):
+
+            # Selezione finestre con energia: scansiona candidati da val_idx e seleziona le 3 con energia GT maggiore
+            EVAL_SAMPLING_TEMP = 0.9
+            EVAL_SAMPLING_TOP_K = 50
+            EVAL_SAMPLING_TOP_P = 1.0
+            EVAL_SAMPLING_SEED = 1234
+
+            _cand_idxs = val_idx[:min(len(val_idx), 15)]
+            _scored_cands = []
+            for _ci in _cand_idxs:
                 try:
-                    _nr = nreal_map[_i]
+                    _nr = nreal_map.get(_ci, 0)
                     _na = min(_nr, ST2_T)
+                    if _na <= 0:
+                        continue
+                    _gt_c = np.asarray(ds_train[_ci]["audio_targets"], dtype=np.int64)[:_na]
+                    _w_c = decoder.decode(torch.from_numpy(_gt_c).long())
+                    _w_arr = np.asarray(_w_c, dtype=np.float32)
+                    _rms = float(np.sqrt(np.mean(np.square(_w_arr)))) if _w_arr.size > 0 else 0.0
+                    _scored_cands.append((_ci, _rms, _nr, _na))
+                except Exception:
+                    pass
+
+            # Filtro soglia energia > 0.01, ordinamento decrescente
+            _energetic = [c for c in _scored_cands if c[1] > 0.01]
+            _energetic.sort(key=lambda x: x[1], reverse=True)
+            if len(_energetic) >= 3:
+                _chosen_cands = _energetic[:3]
+            else:
+                # Fallback: migliori disponibili per rms
+                _scored_cands.sort(key=lambda x: x[1], reverse=True)
+                _chosen_cands = _scored_cands[:min(3, len(_scored_cands))]
+                if not _chosen_cands and val_idx:
+                    _chosen_cands = [(val_idx[0], 0.0, nreal_map.get(val_idx[0], 0), min(nreal_map.get(val_idx[0], 0), ST2_T))]
+
+            print(f"[{_eval_tag}] Finestre selezionate per sintesi (ordinate per energia GT):", flush=True)
+            for _tag_c, _cand_info in zip(["a", "b", "c"], _chosen_cands):
+                print(f"  [{_tag_c}] idx={_cand_info[0]} | n_real={_cand_info[2]} | n_active={_cand_info[3]} | rms_gt={_cand_info[1]:.6f}", flush=True)
+
+            synth_results = []
+            for _tag, _cand_info in zip(["a", "b", "c"], _chosen_cands):
+                _i, _rms_cand, _nr, _na = _cand_info
+                try:
                     _gt_full = np.asarray(ds_train[_i]["audio_targets"], dtype=np.int64)[:_na]
                     _oracle = _gt_full[:, 1:]
                     cb0 = torch.from_numpy(_gt_full[:, 0])
                     _hp = torch.from_numpy(h_pred_map[_i][:_na]).to(DEV2, dtype=_sub_dtype).unsqueeze(0)
                     _ht = torch.from_numpy(h_tgt_map[_i][:_na]).to(DEV2, dtype=_sub_dtype).unsqueeze(0)
                     _cb0 = cb0.unsqueeze(0).to(DEV2)
+
+                    # 1. Riferimento massimo GT (100% GT audio codes)
+                    wav_gt = decoder.decode(torch.from_numpy(_gt_full).long())
+                    wav_gt_arr = np.asarray(wav_gt, dtype=np.float32)
+                    rms_gt = float(np.sqrt(np.mean(np.square(wav_gt_arr)))) if wav_gt_arr.size > 0 else 0.0
+
+                    # 2. Campionamento residui con protocollo ufficiale Qwen3-TTS (stocastico top_k=50, top_p=1.0, temp=0.9)
                     with torch.inference_mode():
-                        ac_p = sub_st2.sample_acoustic_codes(_hp, _cb0, temperature=0.0)
-                        ac_t = sub_st2.sample_acoustic_codes(_ht, _cb0, temperature=0.0)
+                        ac_p = sub_st2.sample_acoustic_codes(
+                            _hp, _cb0,
+                            temperature=EVAL_SAMPLING_TEMP,
+                            top_k=EVAL_SAMPLING_TOP_K,
+                            top_p=EVAL_SAMPLING_TOP_P,
+                            seed=EVAL_SAMPLING_SEED,
+                        )
+                        ac_t = sub_st2.sample_acoustic_codes(
+                            _ht, _cb0,
+                            temperature=EVAL_SAMPLING_TEMP,
+                            top_k=EVAL_SAMPLING_TOP_K,
+                            top_p=EVAL_SAMPLING_TOP_P,
+                            seed=EVAL_SAMPLING_SEED,
+                        )
+                        # Confronto diagnostico greedy (temperature=0.0)
+                        ac_p_gr = sub_st2.sample_acoustic_codes(_hp, _cb0, temperature=0.0)
+                        ac_t_gr = sub_st2.sample_acoustic_codes(_ht, _cb0, temperature=0.0)
+
                     full_p = torch.cat([cb0.unsqueeze(-1), ac_p.squeeze(0).cpu().long()], dim=-1)
                     full_t = torch.cat([cb0.unsqueeze(-1), ac_t.squeeze(0).cpu().long()], dim=-1)
 
@@ -956,21 +1016,51 @@ try:
                     acc_p = float((gen_p == _oracle).mean()) if _na > 0 else 0.0
                     acc_t = float((gen_t == _oracle).mean()) if _na > 0 else 0.0
 
+                    acc_p_gr = float((ac_p_gr.squeeze(0).cpu().numpy() == _oracle).mean()) if _na > 0 else 0.0
+                    acc_t_gr = float((ac_t_gr.squeeze(0).cpu().numpy() == _oracle).mean()) if _na > 0 else 0.0
+
                     wav_p = decoder.decode(full_p)
                     wav_t = decoder.decode(full_t)
+
+                    _f_gt_name = f"{_eval_wav_pfx}_gt_ref_{_tag}.wav"
                     _f_pred_name = f"{_eval_wav_pfx}_pred_{_tag}.wav"
                     _f_orac_name = f"{_eval_wav_pfx}_oracle_{_tag}.wav"
+                    _f_gt = os.path.join(_outd, _f_gt_name)
                     _f_pred = os.path.join(_outd, _f_pred_name)
                     _f_orac = os.path.join(_outd, _f_orac_name)
+
+                    wavfile.write(_f_gt, SAMPLE_RATE, (np.asarray(wav_gt, dtype=np.float32) * 32767).astype(np.int16))
                     wavfile.write(_f_pred, SAMPLE_RATE, (np.asarray(wav_p, dtype=np.float32) * 32767).astype(np.int16))
                     wavfile.write(_f_orac, SAMPLE_RATE, (np.asarray(wav_t, dtype=np.float32) * 32767).astype(np.int16))
-                    print(f"[{_eval_tag}] synth {_tag}: idx={_i} n_active={_na} | acc_pred={acc_p:.4f} | acc_oracle={acc_t:.4f} -> {_f_pred_name} / {_f_orac_name}", flush=True)
+
+                    print(
+                        f"[{_eval_tag}] synth {_tag}: idx={_i} n_real={_nr} n_active={_na} rms_gt={rms_gt:.4f} | "
+                        f"acc_pred={acc_p:.4f} (greedy={acc_p_gr:.4f}) | acc_oracle={acc_t:.4f} (greedy={acc_t_gr:.4f}) | "
+                        f"sampling(T={EVAL_SAMPLING_TEMP},top_k={EVAL_SAMPLING_TOP_K},top_p={EVAL_SAMPLING_TOP_P},seed={EVAL_SAMPLING_SEED}) -> "
+                        f"{_f_gt_name} / {_f_pred_name} / {_f_orac_name}",
+                        flush=True,
+                    )
                     synth_results.append({
                         "tag": _tag,
                         "idx": int(_i),
+                        "n_real": int(_nr),
                         "n_active": int(_na),
+                        "rms_gt": round(rms_gt, 6),
                         "acc_pred": round(acc_p, 4),
                         "acc_oracle": round(acc_t, 4),
+                        "acc_pred_greedy": round(acc_p_gr, 4),
+                        "acc_oracle_greedy": round(acc_t_gr, 4),
+                        "sampling": {
+                            "temperature": EVAL_SAMPLING_TEMP,
+                            "top_k": EVAL_SAMPLING_TOP_K,
+                            "top_p": EVAL_SAMPLING_TOP_P,
+                            "seed": EVAL_SAMPLING_SEED,
+                        },
+                        "files": {
+                            "gt_ref": _f_gt_name,
+                            "pred": _f_pred_name,
+                            "oracle": _f_orac_name,
+                        },
                         "status": "OK",
                     })
                 except Exception as _e_win:
@@ -984,8 +1074,10 @@ try:
 
             _valid_p = [s["acc_pred"] for s in synth_results if "acc_pred" in s]
             _valid_t = [s["acc_oracle"] for s in synth_results if "acc_oracle" in s]
+            _valid_rms = [s["rms_gt"] for s in synth_results if "rms_gt" in s]
             avg_acc_p = round(float(np.mean(_valid_p)), 4) if _valid_p else None
             avg_acc_t = round(float(np.mean(_valid_t)), 4) if _valid_t else None
+            avg_rms_gt = round(float(np.mean(_valid_rms)), 6) if _valid_rms else None
 
             report = {
                 "status": "OK",
@@ -1000,7 +1092,14 @@ try:
                 "rank_svd_target": rk_t,
                 "cum_energy_pred": round(cum_p, 4),
                 "cum_energy_target": round(cum_t, 4),
+                "sampling_protocol": {
+                    "temperature": EVAL_SAMPLING_TEMP,
+                    "top_k": EVAL_SAMPLING_TOP_K,
+                    "top_p": EVAL_SAMPLING_TOP_P,
+                    "seed": EVAL_SAMPLING_SEED,
+                },
                 "synth_samples": synth_results,
+                "mean_rms_gt": avg_rms_gt,
                 "mean_acc_pred": avg_acc_p,
                 "mean_acc_oracle": avg_acc_t,
                 "gates": {

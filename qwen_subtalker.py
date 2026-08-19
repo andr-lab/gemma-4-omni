@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-qwen_subtalker.py — SUB-TALKER acustico Qwen3-TTS-12Hz in torch puro (ZERO transformers).
+qwen_subtalker.py -- SUB-TALKER acustico Qwen3-TTS-12Hz in torch puro (ZERO transformers).
 
 Replica 1:1 la struttura e la matematica del code predictor del teacher
 Qwen/Qwen3-TTS-12Hz-1.7B-Base, come implementato nel pacchetto ufficiale
@@ -19,16 +19,16 @@ qwen-tts 0.1.1 (sorgente di riferimento: modeling_qwen3_tts.py):
   * forward_sub_talker_finetune (input = [h_t] + codec_embedding(cb0) +
     code_predictor.get_input_embeddings()[i-1](cb_i) per i=1..14) -> righe 1612-1640
 
-SCELTA VARIANTE (verificato): il teacher è la variante **Base** (tts_model_type
+SCELTA VARIANTE (verificato): il teacher e' la variante **Base** (tts_model_type
 "base"). A livello di modello COMPLETO il Base richiede un sample audio per la
 clonazione (ref_audio Required in generate_voice_clone; speaker_encoder presente
 nel checkpoint: 480 tensori). CustomVoice (9 preset, nessuno italiano nativo) e
 VoiceDesign (prompt testuale) NON hanno speaker_encoder (405 tensori). QUI
 extraiamo SOLO il sub-talker (code_predictor + codec_embedding di cb0), niente
-speaker_encoder e niente main talker: l'input è [h_t, codici] e la voce arriva da
-h_t di Gemma (adapter trainabile) — NESSUN sample vocale necessario a inferenza.
+speaker_encoder e niente main talker: l'input e' [h_t, codici] e la voce arriva da
+h_t di Gemma (adapter trainabile) -- NESSUN sample vocale necessario a inferenza.
 Nota: i pesi del sub-talker differiscono tra varianti (verificato via hash),
-quindi la scelta Base è vincolante per l'estrazione.
+quindi la scelta Base e' vincolante per l'estrazione.
 
 Config reali verificati (huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base/raw/main/
 config.json -> talker_config.code_predictor_config): hidden_size=1024,
@@ -48,11 +48,11 @@ ALLINEAMENTO DELLA LOSS (decisione verificata, fonte tripla):
   * Il generate del code predictor (lm_head[generation_steps] sulla posizione
     di input cb_{generation_steps-1}) e il report Qwen3-TTS sez. 3.2 (l'MTP
     "generates all residual codebooks" in catena RVQ) usano l'allineamento
-    DIRETTO. L'unica interpretazione auto-coerente dei pesi rilasciati è la
+    DIRETTO. L'unica interpretazione auto-coerente dei pesi rilasciati e' la
     catena RVQ: QUI usiamo l'allineamento diretto (nessuno shift), coerente
     train <-> inference.
 
-Uso: il modulo è CONGELATO (requires_grad_(False)) e usato dal training di
+Uso: il modulo e' CONGELATO (requires_grad_(False)) e usato dal training di
 Gemma: input h_t (B,T,2048) dall'adapter + codec_ids GT (B,T,16); la loss di
 coupling fa fluire i gradienti a Gemma attraverso i pesi congelati
 (attivazioni, non pesi). Guard fail-fast: cb0 dei frame validi deve essere
@@ -319,9 +319,9 @@ class Qwen3TTSSubTalker(nn.Module):
                 self._num_warned_ge2048 += 1
                 if self._num_warned_ge2048 <= 3:
                     print(
-                        f"[QwenSubTalker] ⚠️ cb0 max = {mx} (>= vocab {self.cfg['vocab_size']}): "
+                        f"[QwenSubTalker] [WARN] cb0 max = {mx} (>= vocab {self.cfg['vocab_size']}): "
                         "valore fuori dal range semantico del tokenizer 12Hz (codebook_size 2048). "
-                        "Embedding 3072 lo copre, ma è un'anomalia dati da investigare."
+                        "Embedding 3072 lo copre, ma e' un'anomalia dati da investigare."
                     )
 
         h_flat = h_t.reshape(B * T, 1, self.cfg["talker_hidden_size"])
@@ -363,16 +363,41 @@ class Qwen3TTSSubTalker(nn.Module):
         h_t: torch.Tensor,
         cb0: torch.Tensor,
         temperature: float = 0.0,
+        top_k: int = 50,
+        top_p: float = 1.0,
+        seed: Optional[int] = None,
         device: Optional[torch.device] = None,
         warn_cb0_clamp: bool = True,
     ) -> torch.Tensor:
-        """Inferenza: dato h_t (B, T, talker_hidden) e cb0 campionati (B, T) dal
-        semantic_head di Gemma, genera cb1..cb15 in catena RVQ (15 passi del
-        sub-talker congelato, attenzione causale -> ogni passo legge solo la
-        posizione del codice appena aggiunto).
+        """Inferenza: dato h_t (B, T, talker_hidden) e cb0 (B, T) dal semantic_head,
+        genera i 15 codebook residui cb1..cb15 tramite il sub-talker causale congelato.
 
-        Ritorna (B, T, 15) codici acustici campionati.
+        Protocollo ufficiale Qwen3-TTS (SDD):
+          - modeling_qwen3_tts.py (righe 1652-1677): code_predictor.generate(...) con
+            do_sample, top_p, top_k, temperature.
+          - qwen3_tts_model.py (righe 320-352): hard_defaults ufficiali del sub-talker:
+            subtalker_dosample=True, subtalker_top_k=50, subtalker_top_p=1.0,
+            subtalker_temperature=0.9.
+
+        Args:
+            h_t: (B, T, talker_hidden_size) stati nascosti (da adapter o teacher nativo).
+            cb0: (B, T) codici semantici del primo codebook (range [0, vocab_size)).
+            temperature: temperatura di scaling dei logit. Se <= 0.0, esegue argmax puro
+                (greedy). Se > 0.0, esegue sampling stocastico con top_k e top_p.
+            top_k: numero massimo di candidati ad alta probabilita' da considerare (default 50).
+                Se top_k <= 0 o top_k >= vocab_size, il filtro non viene applicato.
+                Se top_k == 1, coincide deterministicamente con argmax.
+            top_p: soglia di probabilita' cumulativa per il nucleus sampling (default 1.0 = disattivo).
+            seed: seed casuale opzionale per riproducibilita' deterministica del sampling.
+            device: torch.device di destinazione (se None, usa cb0.device).
+            warn_cb0_clamp: se True, stampa un avviso qualora cb0 superi vocab_size - 1.
+
+        Returns:
+            torch.Tensor: (B, T, 15) codici acustici campionati (cb1..cb15).
         """
+        if seed is not None:
+            torch.manual_seed(seed)
+
         B, T = cb0.shape
         dev = device if device is not None else cb0.device
         cb0 = cb0.to(dev).long()
@@ -381,7 +406,7 @@ class Qwen3TTSSubTalker(nn.Module):
         if cb0.numel() > 0 and cb0.max() >= self.cfg["vocab_size"]:
             if warn_cb0_clamp:
                 print(
-                    f"[QwenSubTalker] ⚠️ clamp cb0 campionato: max={int(cb0.max().item())} -> "
+                    f"[QwenSubTalker] [WARN] clamp cb0 campionato: max={int(cb0.max().item())} -> "
                     f"{self.cfg['vocab_size'] - 1} (semantic_head 4096 vs range GT 2048)."
                 )
             cb0 = cb0.clamp(max=self.cfg["vocab_size"] - 1)
@@ -390,18 +415,51 @@ class Qwen3TTSSubTalker(nn.Module):
         full = torch.zeros(B, T, self.cfg["num_code_groups"], dtype=torch.long, device=dev)
         full[:, :, 0] = cb0
         seq = cb0.unsqueeze(-1)  # (B, T, 1)
+        V = self.cfg["vocab_size"]
         for g in range(1, self.cfg["num_code_groups"]):
-            # full: col0=cb0, col1..g-1 = codici già campionati, resto 0 (junk:
-            # la causalità rende innocue le posizioni future per la posizione g)
+            # full: col0=cb0, col1..g-1 = codici gia' campionati, resto 0 (junk:
+            # la causalita' rende innocue le posizioni future per la posizione g)
             if g > 1:
                 full[:, :, 1:g] = seq[:, :, 1:]
             logits = self._forward_flat(h_flat, full.reshape(B * T, self.cfg["num_code_groups"]))  # (B*T, 15, V)
-            lg = logits[:, g - 1, :].reshape(B, T, self.cfg["vocab_size"])  # predice cb_g
+            lg = logits[:, g - 1, :].reshape(B, T, V)  # predice cb_g
+
             if temperature <= 0.0:
                 sampled = lg.argmax(dim=-1)
             else:
-                probs = F.softmax(lg / temperature, dim=-1)
-                sampled = torch.multinomial(probs.reshape(-1, self.cfg["vocab_size"]), 1).reshape(B, T)
+                logits_step = lg / float(temperature)
+
+                # 1. Filtro Top-K (HF style)
+                if top_k is not None and 0 < top_k < V:
+                    topk_vals, _ = torch.topk(logits_step, min(int(top_k), V), dim=-1)
+                    kth_val = topk_vals[..., -1, None]
+                    logits_step = torch.where(
+                        logits_step < kth_val,
+                        torch.tensor(float("-inf"), device=logits_step.device, dtype=logits_step.dtype),
+                        logits_step,
+                    )
+
+                # 2. Filtro Top-P / Nucleus (HF style)
+                if top_p is not None and 0.0 < top_p < 1.0:
+                    sorted_logits, sorted_indices = torch.sort(logits_step, descending=True, dim=-1)
+                    sorted_probs = F.softmax(sorted_logits, dim=-1)
+                    cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+
+                    # Maschera token sopra la soglia cumulativa top_p
+                    sorted_indices_to_remove = cumulative_probs > top_p
+                    # Shift a destra di 1 per mantenere almeno il primo token che sfora
+                    sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                    sorted_indices_to_remove[..., 0] = False
+
+                    indices_to_remove = sorted_indices_to_remove.scatter(
+                        dim=-1, index=sorted_indices, src=sorted_indices_to_remove
+                    )
+                    logits_step = logits_step.masked_fill(indices_to_remove, float("-inf"))
+
+                probs = F.softmax(logits_step, dim=-1)
+                flat_probs = probs.reshape(-1, V)
+                sampled = torch.multinomial(flat_probs, num_samples=1).reshape(B, T)
+
             seq = torch.cat([seq, sampled.unsqueeze(-1)], dim=-1)
         return seq[:, :, 1:]  # (B, T, 15)
 
@@ -433,7 +491,7 @@ def load_qwen_subtalker(subtalker_dir: str, device: Optional[torch.device] = Non
     """Carica il modulo dal dir (qwen_subtalker.safetensors + config.json).
 
     Ritorna (module, cfg_dict). Il modulo viene restituito congelato (eval +
-    requires_grad_(False)): solo l'adapter h_t di Gemma è addestrabile.
+    requires_grad_(False)): solo l'adapter h_t di Gemma e' addestrabile.
     """
     import safetensors.torch as st
 
@@ -460,7 +518,7 @@ def load_qwen_subtalker(subtalker_dir: str, device: Optional[torch.device] = Non
 
 
 # ---------------------------------------------------------------------------
-# Self-test comportamentali (TDD): shape, causalità, gradienti, mask, guard
+# Self-test comportamentali (TDD): shape, causalita', gradienti, mask, guard
 # ---------------------------------------------------------------------------
 def _selftest() -> int:
     torch.manual_seed(0)
@@ -498,12 +556,12 @@ def _selftest() -> int:
     logits2 = model.forward_sub_talker_finetune(h_t, codes)
     check("determinismo", torch.equal(logits, logits2))
 
-    # 4) Proprietà causale: logits[:, :, j] non dipende da codici col k > j
-    #    (posizione k+1 oltre la finestra causale di posizione j+1; cb15 non è mai input)
+    # 4) Proprieta' causale: logits[:, :, j] non dipende da codici col k > j
+    #    (posizione k+1 oltre la finestra causale di posizione j+1; cb15 non e' mai input)
     codes_pert = codes.clone()
     codes_pert[:, :, 15] = (codes_pert[:, :, 15] + 1) % cfg["vocab_size"]
     logits_pert = model.forward_sub_talker_finetune(h_t, codes_pert)
-    check("logits j=0 invariante a cb15 (causalità)", torch.equal(logits[:, :, 0], logits_pert[:, :, 0]))
+    check("logits j=0 invariante a cb15 (causalita')", torch.equal(logits[:, :, 0], logits_pert[:, :, 0]))
     check("logits j=14 invariante a cb15", torch.equal(logits[:, :, 14], logits_pert[:, :, 14]))
 
     # 5) Gradienti: la loss di coupling fluisce fino a h_t (input) e all'adapter
