@@ -272,12 +272,17 @@ try:
     def extract_ht(item, n_real, text, return_shifted: bool = False):
         audio_codes = item["audio_targets"][:n_real].long()  # (T_audio, 16)
         input_ids, codec_ids, text_mask, codec_emb_mask, codec_mask, attn, pos_cbos = build_inputs(text, audio_codes)
-        input_ids = input_ids.to("cuda")
-        codec_ids = codec_ids.to("cuda")
-        text_mask = text_mask.to("cuda")
-        codec_emb_mask = codec_emb_mask.to("cuda")
-        codec_mask = codec_mask.to("cuda")
-        attn = attn.to("cuda")
+        # FIX device-aware: gli input seguono il device del teacher, non un cuda
+        # hardcodato. Il flusso STAGE2->EVAL lascia il teacher su CPU (per fare
+        # spazio alla Gemma 4bit); con "cuda" fisso si aveva mismatch
+        # (index su cuda:0, pesi su cpu) -> RuntimeError in EVAL R2.
+        _tdev = next(talker.parameters()).device
+        input_ids = input_ids.to(_tdev)
+        codec_ids = codec_ids.to(_tdev)
+        text_mask = text_mask.to(_tdev)
+        codec_emb_mask = codec_emb_mask.to(_tdev)
+        codec_mask = codec_mask.to(_tdev)
+        attn = attn.to(_tdev)
         with torch.inference_mode():
             # 1) canale testo: proiezione non-lineare UFFICIALE (ResizeMLP, SiLU)
             raw_text_emb = talker.model.text_embedding(input_ids[:, :, 0])
