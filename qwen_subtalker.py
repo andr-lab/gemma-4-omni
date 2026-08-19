@@ -63,7 +63,7 @@ NOTA MEMORIA: ~109 tensori, ~400MB bf16 per la variante 1.7B (pesi congelati).
 
 import json
 import os
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Sequence, Tuple
 
 import torch
 import torch.nn as nn
@@ -368,6 +368,7 @@ class Qwen3TTSSubTalker(nn.Module):
         seed: Optional[int] = None,
         device: Optional[torch.device] = None,
         warn_cb0_clamp: bool = True,
+        temperatures_per_level: Optional[Sequence[float]] = None,
     ) -> torch.Tensor:
         """Inferenza: dato h_t (B, T, talker_hidden) e cb0 (B, T) dal semantic_head,
         genera i 15 codebook residui cb1..cb15 tramite il sub-talker causale congelato.
@@ -382,8 +383,9 @@ class Qwen3TTSSubTalker(nn.Module):
         Args:
             h_t: (B, T, talker_hidden_size) stati nascosti (da adapter o teacher nativo).
             cb0: (B, T) codici semantici del primo codebook (range [0, vocab_size)).
-            temperature: temperatura di scaling dei logit. Se <= 0.0, esegue argmax puro
+            temperature: temperatura scalare di scaling dei logit. Se <= 0.0, esegue argmax puro
                 (greedy). Se > 0.0, esegue sampling stocastico con top_k e top_p.
+                Usata su tutti i livelli se temperatures_per_level e' None.
             top_k: numero massimo di candidati ad alta probabilita' da considerare (default 50).
                 Se top_k <= 0 o top_k >= vocab_size, il filtro non viene applicato.
                 Se top_k == 1, coincide deterministicamente con argmax.
@@ -391,10 +393,21 @@ class Qwen3TTSSubTalker(nn.Module):
             seed: seed casuale opzionale per riproducibilita' deterministica del sampling.
             device: torch.device di destinazione (se None, usa cb0.device).
             warn_cb0_clamp: se True, stampa un avviso qualora cb0 superi vocab_size - 1.
+            temperatures_per_level: sequenza opzionale di float (lunghezza num_code_groups - 1 = 15)
+                con la temperatura specifica per ciascun livello residuo g (1..15). Se fornita,
+                a ciascun livello viene usata temperatures_per_level[g-1] al posto di temperature.
 
         Returns:
             torch.Tensor: (B, T, 15) codici acustici campionati (cb1..cb15).
         """
+        if temperatures_per_level is not None:
+            expected_len = self.cfg["num_code_groups"] - 1
+            if len(temperatures_per_level) != expected_len:
+                raise ValueError(
+                    f"temperatures_per_level ha lunghezza {len(temperatures_per_level)}, "
+                    f"attesa {expected_len} (num_code_groups - 1)."
+                )
+
         if seed is not None:
             torch.manual_seed(seed)
 
@@ -424,10 +437,16 @@ class Qwen3TTSSubTalker(nn.Module):
             logits = self._forward_flat(h_flat, full.reshape(B * T, self.cfg["num_code_groups"]))  # (B*T, 15, V)
             lg = logits[:, g - 1, :].reshape(B, T, V)  # predice cb_g
 
-            if temperature <= 0.0:
+            lvl_temp = (
+                float(temperatures_per_level[g - 1])
+                if temperatures_per_level is not None
+                else float(temperature)
+            )
+
+            if lvl_temp <= 0.0:
                 sampled = lg.argmax(dim=-1)
             else:
-                logits_step = lg / float(temperature)
+                logits_step = lg / lvl_temp
 
                 # 1. Filtro Top-K (HF style)
                 if top_k is not None and 0 < top_k < V:
