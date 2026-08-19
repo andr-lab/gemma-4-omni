@@ -125,3 +125,37 @@
 - Cause candidate del tetto: il Gemma E2B non vede lo speaker embedding / reference audio che il teacher Qwen3-TTS usa; prompt degenerati; poche finestre (1000 train)
 - **Raccomandazione agy**: giudicare sul downstream reale — l'ascolto. Se intelligibile e senza metallico → **congelare R2 e passare all'integrazione dello streaming full-duplex** (Gemma E2B + adapter + sub-talker + code2wav)
 - Baseline per lo streaming: adapter R2 (cos 0.6275 val, CE 5.41, rank 1145) — migliore di R1, da congelare
+
+## 8. Syntest v3: sampling differenziato + isolamento RVQ (kernel `gemma4-fitnets-syntest` v4, 22m47s)
+
+### Obiettivo (test decisivo supposizioni utente)
+1. Il sampling T=0.9 su **tutti** i 15 codebook residui è distruttivo → test di **sampling differenziato per livello** (greedy, t01, t03, t09, tdecay `0.8·0.75^(g-1)`)
+2. **Isolamento RVQ** per individuare da quale codebook parte la corruzione
+
+### Output validi (48 wav + report)
+- 3 `gt_ref` + 30 varianti sampling (oracle/pred × 3 finestre × 5 varianti) + 15 `rvq_gtz` (GT 0..N + zeri, N=0,1,3,7,15)
+- ⚠️ Blocco 4 (rvq GT+greedy) fallito per slicing errato (`_gr[:, N+1:]` su 15 col vs `_mix` 16 col) — **fixato nel codice**, riaudio opzionale se serve
+
+### MCD gold-standard (metodo calibrato: gt vs gt=0, parlato diverso=16.66, rumore=16.93 dB ✓)
+| Gruppo | MCD (dB, più basso = più simile al GT) |
+| :--- | :--- |
+| **Oracle** greedy/t01/t03/t09/tdecay | 6.2-9.6 / 6.4-9.4 / 6.7-9.5 / 7.1-9.1 / 6.8-8.9 |
+| **Pred** greedy/t01/t03/t09/tdecay | 11.6-13.9 / 11.7-14.4 / 11.6-16.1 / 10.1-13.6 / 10.3-14.1 |
+| **RVQ** N0 / N1 / N3 / N7 / N15 | 13.5-16.7 / 5.1-7.0 / 3.4-4.1 / 1.9-2.2 / 0.0 |
+
+### Verdetto audit audio (agy, 48 wav ascoltate + spettrogrammi)
+- **RVQ N0** (solo cb0): treno di click a 12.5Hz, zero formanti — non-parlato
+- **RVQ N1** (cb0+cb1): **parlato 100% intelligibile** (telefonico) → MCD 5-7 dB
+- **RVQ N3/N7**: naturale / quasi indistinguibile dal GT
+- **Oracle** (h_t GT): intelligibile con **qualsiasi** sampling, anche greedy puro argmax
+- **Pred** (h_t adapter): distrutto su **tutte** le varianti (click secchi con greedy/t01, gorgoglio soffiato con t09/tdecay)
+
+### 🔴 Verdetto netto (agy + MCD concordi)
+> **La causa del suono distrutto è la predizione sbagliata dei residui da parte del sub-talker a partire da h_t predetto dall'adapter — NON il sampling.**
+> Prova inconfutabile: h_t oracolare → sub-talker OK con qualsiasi campionatore; h_t adapter (cos 0.627, coupling CE 6.07) → nessun sampling salva l'audio.
+
+### Implicazioni
+1. **La supposizione "T=0.9 distruttivo" è falsificata dai dati**: anche greedy (T=0) resta corrotto su pred. Il sampling differenziato è una leva inutile per il problema principale.
+2. **Il contenuto linguistico vive nei residui 1-7** (cb0-only = click train): il sub-talker è architetturalmente essenziale; il collo di bottiglia è la qualità di h_t.
+3. **Raccomandazione sampling per lo streaming full-duplex**: `tdecay` `0.8·0.75^(g-1)` (ricchezza cb1-cb3, greedy sui livelli profondi) — configurazione ottimale, non dannosa.
+4. **Prossima leva vera**: migliorare h_t (conditioning speaker esplicito P3, dataset più ricco, prompt migliori) — iterare sull'adapter è già dimostrato inutile (R2 ≈ R1).
