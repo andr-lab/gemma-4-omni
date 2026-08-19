@@ -785,18 +785,11 @@ try:
             print(f"[{_tag_err}] ERRORE durante {_phase_err}", flush=True)
             traceback.print_exc()
 
-    # ---- Libera la Gemma E2B 4bit dello STAGE2 dalla VRAM (fix CUDA OOM EVAL) ----
-    # L'EVAL_R1/R2 carica una SECONDA copia di unsloth/gemma-4-E2B-it: senza del
-    # esplicito la prima (piu' l'adapter + sub bf16) occupa 13+ GiB e il load
-    # della nuova fallisce con torch.OutOfMemoryError (v4 run: OOM a 2648s).
-    if "gemma_base" in globals() or "gemma_base" in locals():
-        try:
-            del gemma_base, gemma_tok
-        except Exception:
-            pass
-        gc.collect()
-        torch.cuda.empty_cache()
-        print("[VRAM] Gemma E2B dello STAGE2 liberata prima dell'EVAL", flush=True)
+    # ---- Riuso Gemma E2B dello STAGE2 nell'EVAL (fix CUDA OOM) ----
+    # NOTA: `del gemma_base` + empty_cache NON libera la VRAM (unsloth tiene il
+    # modello in un registry interno; v5: 13.98 GiB in uso anche dopo il del).
+    # Quindi nell'EVAL2 la Gemma viene RIUSATA se gia' in memoria (stesso run),
+    # evitando un secondo load da 4.38 GiB che fa OOM sulla T4 da 14.56 GiB.
 
     # ---- SEZIONE OPZIONALE: EVAL_R1 / EVAL_R2 (valutazione adapter Stage 2 su val split) ----
     # Finestre val = idx 1000+ (mai viste nel train, che usa le prime EXTRACT_N=1000).
@@ -824,15 +817,19 @@ try:
             N_VAL = EVAL_N_VAL
             DEV2 = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-            # --- checkpoint adapter dal dataset input ---
+            # --- checkpoint adapter: priorita' al FRESCO (stesso run), poi dataset input ---
             if _eval_is_r2:
                 _ck_candidates = [
+                    "checkpoints/ht_adapter_stage2r2_final.pt",
+                    "/kaggle/working/checkpoints/ht_adapter_stage2r2_final.pt",
                     "/kaggle/input/datasets/andrlab/gemma4-ht-adapter-r2/ht_adapter_stage2r2_final.pt",
                     "/kaggle/input/andrlab/gemma4-ht-adapter-r2/ht_adapter_stage2r2_final.pt",
                     "ht_adapter_stage2r2_final.pt",
                 ]
             else:
                 _ck_candidates = [
+                    "checkpoints/ht_adapter_stage2_final.pt",
+                    "/kaggle/working/checkpoints/ht_adapter_stage2_final.pt",
                     "/kaggle/input/datasets/andrlab/gemma4-ht-adapter-r1/ht_adapter_stage2_final.pt",
                     "/kaggle/input/andrlab/gemma4-ht-adapter-r1/ht_adapter_stage2_final.pt",
                     "ht_adapter_stage2_final.pt",
@@ -870,16 +867,22 @@ try:
             gc.collect()
             torch.cuda.empty_cache()
 
-            # --- load Gemma E2B 4bit (teacher GIA' su CPU) + adapter ---
-            print(f"[{_eval_tag}] load Gemma E2B (unsloth 4bit, frozen)...", flush=True)
-            gemma_base = gemma_tok = None
-            from unsloth import FastLanguageModel
-            gemma_base, gemma_tok = FastLanguageModel.from_pretrained(
-                model_name="unsloth/gemma-4-E2B-it",
-                max_seq_length=2048,
-                load_in_4bit=True,
-                device_map="cuda:0",
-            )
+            # --- riuso Gemma E2B dello STAGE2 (stesso run) oppure load 4bit ---
+            _g = globals().get("gemma_base")
+            if _g is not None and not isinstance(_g, (str, bytes)):
+                print(f"[{_eval_tag}] riuso Gemma E2B dello STAGE2 (gia' in VRAM, frozen 4bit)", flush=True)
+                gemma_base = _g
+                gemma_tok = globals().get("gemma_tok")
+            else:
+                print(f"[{_eval_tag}] load Gemma E2B (unsloth 4bit, frozen)...", flush=True)
+                gemma_base = gemma_tok = None
+                from unsloth import FastLanguageModel
+                gemma_base, gemma_tok = FastLanguageModel.from_pretrained(
+                    model_name="unsloth/gemma-4-E2B-it",
+                    max_seq_length=2048,
+                    load_in_4bit=True,
+                    device_map="cuda:0",
+                )
             for _nm2, _mod in gemma_base.named_modules():
                 if "norm" in _nm2.lower():
                     _mod.to(torch.float32)
