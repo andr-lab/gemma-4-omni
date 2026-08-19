@@ -18,6 +18,29 @@ try:
     import gc
 
     # =========================================================================
+    # FIX GLOBALE DTYPE-SAFE LAYER NORM (Anti-Mismatch Float/Half in Unsloth JIT)
+    # =========================================================================
+    _orig_torch_layer_norm = torch.layer_norm
+
+    def _dtype_safe_torch_layer_norm(input, normalized_shape, weight=None, bias=None, eps=1e-5, cudnn_enable=True):
+        orig_dtype = input.dtype
+        if weight is not None and input.dtype != weight.dtype:
+            input = input.to(weight.dtype)
+        if bias is not None and weight is not None and bias.dtype != weight.dtype:
+            bias = bias.to(weight.dtype)
+        out = _orig_torch_layer_norm(input, normalized_shape, weight, bias, eps, cudnn_enable)
+        return out.to(orig_dtype) if out.dtype != orig_dtype else out
+
+    torch.layer_norm = _dtype_safe_torch_layer_norm
+    F.layer_norm = _dtype_safe_torch_layer_norm
+    try:
+        import unsloth_zoo.patch_torch_functions as _uz_patch
+        _uz_patch.layer_norm = _dtype_safe_torch_layer_norm
+    except Exception:
+        pass
+    print("[INIT] Patch globale _dtype_safe_torch_layer_norm applicata a torch e F.layer_norm", flush=True)
+
+    # =========================================================================
     # CONFIGURAZIONE RUNTIME & IPERPARAMETRI (Environment Variables Centralizzate)
     # =========================================================================
     STAGE2_QLORA = int(os.environ.get("STAGE2_QLORA", "1"))
@@ -484,11 +507,6 @@ try:
                 device_map="cuda:0",
             )
             print(f"[QLoRA] Gemma 4 E2B caricata in 4-bit su {DEV2}", flush=True)
-
-            # Converte tutti i LayerNorm a fp32 per stabilita' Turing T4
-            for _nm2, _mod in gemma_base.named_modules():
-                if "norm" in _nm2.lower() and hasattr(_mod, "weight") and _mod.weight is not None:
-                    _mod.to(torch.float32)
 
             # Applica LoRA con FastLanguageModel.get_peft_model
             target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
