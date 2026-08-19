@@ -41,7 +41,7 @@ try:
     STAGE2_GRAD_CLIP = float(os.environ.get("STAGE2_GRAD_CLIP", "1.0"))
     STAGE2_CKPT_EVERY = int(os.environ.get("STAGE2_CKPT_EVERY", "250"))
     EVAL_R1 = int(os.environ.get("EVAL_R1", "0"))
-    EVAL_R2 = int(os.environ.get("EVAL_R2", "0"))
+    EVAL_R2 = int(os.environ.get("EVAL_R2", "1"))  # SYNTEST v3: attivo l'EVAL R2 per il blocco synth varianti+RVQ
     EVAL_N_VAL = int(os.environ.get("EVAL_N_VAL", "100"))
     EVAL_BATCH = int(os.environ.get("EVAL_BATCH", "4"))
 
