@@ -1,306 +1,70 @@
-## ✅ VERDETTO FEDELTA' (probe v16, 2025-08-17): SUB_EQUALS_TEACHER — wrapper replica ESATTA
+# Gemma 4 Full-Duplex Omni Pipeline - Stato Attuale e Prossimi Passi
 
-Il sub-talker (qwen_subtalker.py + dataset congelato) e' stato promosso al 100%:
-replica bit-identica del code_predictor del teacher Qwen3-TTS in eager/bf16.
+Documento di stato del progetto • Aggiornato al 19 Agosto 2026
 
-- MAX |Delta logits| : 0.000000 (confronto EAGER-vs-EAGER, stessi pesi 89/89, max diff 0.00e+00)
-- CE Teacher (active) : 5.6875 | CE Sub : 5.6875 | Gap : +0.0000
-- attn_implementation teacher di default: sdpa (transformers 5.x) -> il residuo v14
-  (1.25 / gap 0.031) era SOLO l'artefatto SDPA-vs-eager, non un bug del wrapper.
+---
 
-Storia dei due bug di fedelta' (entrambi chiusi):
-1. RoPE position_ids collassato (S=1 -> 0..15): fix in _forward_flat
-   (S = inputs_embeds.shape[1]), monkey-patch runtime ROPE_FIX.
-2. rope_theta 1e4 vs 1e6: extract_qwen_subtalker.py scriveva rope_theta=10000.0
-   HARDCODED invece del code_predictor_config del checkpoint Base (1e6, verificato
-   sul config.json del repo). Fix runtime THETA_FIX (ricrea rotary_emb a 1e6 dopo il
-   load) + fix permanente nell'extract (_repo_code_predictor_cfg dal config.json).
+## 1. Stato Attuale del Progetto (Executive Summary)
 
-CONSEGUENZE:
-- Stage 1 definitivamente CANCELLATO (il sub E' l'oracolo del teacher; addestrarlo
-  e' dannoso). Tetto CE oracolare: 5.6875 (eager) / ~5.656 (sdpa).
-- Il monkey-patch ROPE_FIX+THETA_FIX (blocco nel cell2, env ROPE_FIX=1) e' lo
-  STANDARD per ogni kernel che carica il sub-talker (smoke, training Stage 2, eval).
-  Il dataset congelato resta sbagliato (position_ids + theta) finche' non si
-  rigenera il dataset (upload 5.45GB: rimandato; la patch runtime e' nel sorgente).
-- PROSSIMO PASSO: FitNets Stage 2 (adapter Gemma -> h_t, L_latent + lambda*CE,
-  sub congelato). Iperparametri agy: batch 8 (grad accum 2 -> eff 16), LR 1.5e-4
-  AdamW(0.9,0.98), wd 1e-2, lambda_coupling 0.15-0.25, grad clip 1.0, 1500-2500 step
-  (~2.5-3.5h T4). Gate: cos_sim>=0.88, CE_val<=5.95, rank SVD>=256. DIVIETO resume
-  dai vecchi pesi adapter (inquinati dal coupling col RoPE rotto). Smoke (2-4 batch)
-  OBBLIGATORIO prima del run completo; avviso email prima del run lungo.
+Il progetto sviluppa una pipeline conversazionale Speech-to-Speech Full-Duplex real-time accoppiando **Gemma 4 E2B** (305M USM-Conformer audio input) con il **sub-talker congelato di Qwen3-TTS-12Hz-1.7B-Base** (~363MB) e il decoder **Code2Wav** (24kHz PCM).
 
+La fase di allineamento e distillazione latente (FitNets Stage 2: Gemma hidden -> adapter -> h_t teacher) e' stata validata empiricamente attraverso tre generazioni di adapter (R1, R2, R3) e molteplici run Kaggle su GPU T4 (16GB).
 
-# **Gemma 4 Omni — Piano di validazione e modifiche prima della prossima run** 
+---
 
-_Documento tecnico finale • 12 agosto 2026_ 
+## 2. Cosa e' stato fatto (R1, R2, R3 e Run Completo v7)
 
-## **Executive summary** 
+### A. Fedelta' e Validazione Sub-Talker (Oracle)
+- **Verifica Wrapper vs Reference Teacher**: Replica bit-identica del `code_predictor` eager/bf16 (max diff logits = 0.00e+00, CE oracolare = 5.6875).
+- **Risoluzione Bug RoPE e Theta**: Corretto position_ids collassato ($S = \text{inputs\_embeds.shape}[1]$) e sincronizzato $\text{rope\_theta} = 10^6$.
+- **Mistero Oracle Risolto**: Distinzione formale tra codici GT completi (MCD = 0 dB) e residui generati dal sub-talker da $h_t$ GT (MCD = 6-9 dB, 100% intelligibile, varianza fisiologica RVQ stocastica).
+- **Protocollo di Sampling per Livello**: Falsificata l'ipotesi che il sampling distrugga la voce; validato `tdecay` ($0.8 \cdot 0.75^{g-1}$) per sintesi streaming ricca e stabile.
 
-La prossima run non dovrebbe partire da ulteriori modifiche radicali all’architettura. Le diagnostiche disponibili indicano che il ramo semantic/cb0 è promettente, mentre il problema principale è nella generazione cb1–cb15 e nel collegamento tra lo spazio latente di Gemma e quello atteso dal sub-talker Qwen. Il test più informativo è quello in cui GT full e cb0 generated + acoustic GT producono voce comprensibile, mentre GT cb0 + acoustic generated e full generated producono voce metallica/incomprensibile. 
+### B. Risultati Sperimentali FitNets Stage 2
 
-Nota correttiva: il warning REAL_ENCODING visto in una delle ultime run è stato interpretato erroneamente come prova di fallback FFT/sintetico. In quella run il warning era un falso allarme; non va usato per invalidare il training. Le conclusioni qui sotto non si basano su quella interpretazione errata. 
+| Run ID | Architettura Adapter | Params | Step | Cos Val (Gate >=0.88) | Coupling CE Val (Gate <=5.95) | SVD Rank Pred / Target (Gate >=256) | Note Principali |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **R1** | Linear(1536->2048) + LN | 3.15M | 1500 | **0.6211** (FAIL) | **5.4226** (PASS) | **1136 / 2043** (PASS) | Baseline lineare; plateau a ~0.62 da step 250. |
+| **R2** | Residual MLP (Skip + 1536->3072->SiLU->2048) + LN | 14.17M | 1500 | **0.6275** (FAIL) | **5.4121** (PASS) | **1145 / 2043** (PASS) | +4.5x params produce solo +0.006 cos; capacita' non e' il collo di bottiglia. |
+| **R3 Smoke** | CausalConv1d(k=3, pad 2,0, identity-init) + Residual MLP | 21.25M | 4 | **0.6835 -> 0.6953** (train) | — | — | Warm-start R2 senza regressione; gradiente conv attivo. |
+| **R3 v7** | CausalConv1d(k=3, pad 2,0) + Residual MLP | 21.25M | 200 + EVAL | **0.6063** (FAIL) | **5.4817** (PASS) | **937 / 2044** (PASS) | Run completo 56m30s; CausalConv1d appresa; 72 wav generati OK. |
 
-## **1. Cosa hanno dimostrato le ultime diagnostiche** 
+### C. Stabilizzazione Pipeline ed Esecuzione Kaggle
+- **EVAL su CPU (ADR-006)**: Teacher mantenuto su host CPU durante l'eval per azzerare i rischi di CUDA OOM con Gemma in VRAM.
+- **Riuso Istanza Gemma (ADR-007)**: Risolto il problema del memory retention di Unsloth evitando il reload della seconda copia del modello.
+- **Precedenza Checkpoint Fresco (ADR-008)**: Risolto l'errore di valutazione su pesi statici del dataset di input; priorita' assoluta a `checkpoints/ht_adapter_stage2r2_final.pt`.
+- **Monkey-Patch Condizionale (ADR-009)**: Iniezione a runtime di `sample_acoustic_codes` con supporto `top_k`, `top_p`, `seed` e `temperatures_per_level`.
 
-- GT full → voce comprensibile: la catena Qwen/sub-talker + decoder è in grado di produrre speech valido. 
+---
 
-- cb0 generated + cb1–15 GT → voce comprensibile: la predizione semantic/cb0 di Gemma è sufficientemente buona; un errore in cb0 non spiega da solo la degradazione acustica. 
+## 3. Cosa NON Funziona (Asintoto Informativo)
 
-- cb0 GT + cb1–15 generated → voce metallica/incomprensibile: il failure è localizzato principalmente nel ramo che genera cb1–15 o nel suo condizionamento. 
+1. **Tetto Informativo della Rappresentazione Congelata**:
+   - Con il base LLM Gemma 4 E2B congelato (4-bit), la similarita' coseno di validazione resta bloccata a $\text{cos\_sim} \approx 0.60 - 0.63$, indipendentemente dalla capacita' dell'adapter (Linear 3M -> Residual MLP 14M -> CausalConv 21M).
+2. **Collasso Dimensionale del Sottospazio Predetto**:
+   - L'analisi spettrale SVD mostra che la predizione dell'adapter vive in un sottospazio a rango dimezzato (SVD rank effettivo **937** vs target teacher **2044**).
+3. **Mancanza di Informazione Speaker/Prosodica Globale**:
+   - Il teacher Qwen3-TTS estrae $h_t$ attraverso 28 layer di causal self-attention globale con condizionamento speaker; la Gemma congelata su singola finestra non dispone di sufficiente contesto per proiettare l'intero spazio dinamico.
 
-- cb0 generated + cb1–15 generated → voce metallica/incomprensibile: il problema del ramo acustico rimane anche quando cb0 è corretto. 
+---
 
-- Le statistiche dei codebook non mostrano un collasso banale verso un singolo codice: il ramo generativo non sembra semplicemente emettere sempre silenzio. 
+## 4. Prossimi Passi Operativi (Roadmap)
 
-## **2. Ipotesi principale: co-adattamento Gemma ↔ adapter ↔ sub-talker** 
+### Priorita' 1: QLoRA Co-Adaptation su Gemma 4 E2B (Rompere l'Asintoto)
+- **Obiettivo**: Sbloccare l'adattamento congiunto dello spazio di rappresentazione di Gemma 4 E2B verso il manifold $h_t$ di Qwen3-TTS.
+- **Configurazione**:
+  - QLoRA $r=16, \alpha=32$, dropout=0.05 su moduli target (`q_proj, k_proj, v_proj, o_proj`, `gate_proj, up_proj, down_proj`).
+  - Learning rate differenziato: $\text{LR}_{\text{Gemma}} = 1.5 \times 10^{-5}$, $\text{LR}_{\text{Adapter}} = 1.5 \times 10^{-4}$.
+  - Sub-talker Qwen3-TTS: rigorosamente congelato.
+  - Target: $\text{cos\_sim} \ge 0.80$, SVD rank $\ge 1500$.
+  - Durata stimata: ~2-3 ore su Kaggle T4.
 
-L’ipotesi è tecnicamente plausibile. Se il sub-talker Qwen è congelato, il suo manifold di ingresso rimane fisso, mentre i pesi LoRA di Gemma modificano continuamente la distribuzione degli hidden state. L’adapter deve quindi apprendere una trasformazione verso un target che, dal suo punto di vista, cambia continuamente perché cambia la sorgente Gemma. Il problema è meno 'il sub-talker si muove' e più 'il sistema di coordinate della sorgente si muove mentre l’adapter sta imparando la mappa'. 
+### Priorita' 2: Sintesi Streaming Full-Duplex
+- **Configurazione Downstream**:
+  - Sampling stocastico `tdecay` ($0.8 \cdot 0.75^{g-1}$) sui 15 codebook residui.
+  - Post-gain $+4\text{ dB}$ sul waveform generato da Code2Wav per compensare la leggera perdita di energia sui residui predetti.
+  - Circular buffer 2-frame per zero look-ahead streaming inference.
 
-Non è ancora una prova causale. Va verificata con un ablation controllato: Gemma frozen + Qwen frozen + solo adapter trainable, seguito da un secondo stage in cui si sbloccano le LoRA di Gemma con learning rate più basso dell’adapter. 
-
-## **3. Modifiche obbligatorie prima del training** 
-
-**A. Inserire un protocollo di latent alignment —** Aggiungere una latent alignment loss tra adapter(Gemma hidden) e una rappresentazione target estratta dal sub-talker Qwen sullo stesso audio. Usarla come regolarizzatore, non come unico obiettivo. 
-
-**B. Separare le fasi di ottimizzazione —** Stage 0: Gemma frozen, Qwen frozen, adapter trainable. Stage 1: aggiungere acoustic CE. Stage 2: sbloccare LoRA Gemma, mantenendo Qwen frozen e adapter a LR inferiore. 
-
-**C. Aggiungere la turn head, ma mantenerla leggerissima —** Head Linear/LayerNorm → pochi logits sopra gli hidden già calcolati da Gemma. Nessun nuovo encoder, LSTM/GRU/Transformer o forward Gemma separato. Stati consigliati: WAIT, BACKCHANNEL, START/ SPEAK, CONTINUE, YIELD, INTERRUPT. 
-
-**D. Rendere il controllo turn-taking un segnale ausiliario —** La turn head deve inizialmente essere addestrata come task ausiliario. Solo dopo aver verificato che impari segnali temporali utili va usata nel runtime per controllare la generazione. 
-
-**E. Rafforzare il data pipeline DuplexConv —** Campionamento per durata cumulativa e stratificazione dei domini; verificare esplicitamente il mapping dei track a partecipanti/ruoli. Conservare timestamp/VAD/overlap invece di ridurli a semplice frame weighting. 
-
-**F. Correggere il pipeline MDC —** Separare train/dev/test; non trasformare tutto il dataset read-speech in pseudoconversazione. Randomizzare gap e punto di barge-in; evitare una pausa fissa e un cutoff fisso del 50%. 
-
-**G. Non cambiare ancora il sub-talker —** Il test GT full dimostra che il decoder può produrre voce comprensibile. Prima va risolto il mapping Gemma→Qwen; cambiare contemporaneamente il decoder renderebbe l’esperimento non diagnostico. 
-
-## **4. Protocollo sperimentale consigliato** 
-
-|Run|Gemma|Adapter|Qwen|Scopo|
-|---|---|---|---|---|
-|R0 — baseline<br>diagnostica|frozen|frozen|frozen|Misurare A/B/C/D<br>sullo stesso<br>checkpoint e<br>dataset.<br>|
-|R1 — alignment|frozen|train|frozen|Verifcare se esiste<br>una mappa stabile<br>verso il manifold<br>Qwen.|
-|R2 — acoustic|frozen|train|frozen|Aggiungere acoustic<br>CE e verifcare cb1–<br>15.|
-|R3 — Gemma<br>adaptation|LoRA train|train, LR basso|frozen|Testare l’ipotesi del<br>moving<br>representation<br>space.|
-|R4 — turn auxiliary|LoRA train|train|frozen|Aggiungere turn loss<br>senza cambiare il<br>runtime.|
-
-
-
-## **5. Loss consigliata** 
-
-Durante R3, usare concettualmente: 
-
-#### **L_total = L_acoustic + λ · L_latent + μ · L_text + ν · L_turn** 
-
-λ deve essere più alto nella fase di warm-up e poi ridotto. L’obiettivo non è rendere gli hidden di Gemma identici a quelli Qwen, ma renderli funzionalmente compatibili con il sub-talker. 
-
-## **6. Test diagnostici da automatizzare** 
-
-- A/B/C/D waveform test: GT full, cb0GEN/restGT, cb0GT/restGEN, fullGEN. 
-
-- cb0 top-1 e top-5 accuracy, perplexity ed entropy. 
-
-- Per-codebook CE/accuracy per cb1…cb15. 
-
-- Latent cosine similarity prima e dopo adapter. 
-
-- Norma e covariance spectrum di Gemma hidden, adapter output e Qwen hidden. 
-
-- Temporal smoothness: ||z_t-z_{t-1}|| confrontato con il target Qwen. 
-
-- Nearest-neighbor retrieval nello spazio Qwen: verificare se l’embedding mappato recupera il frame corretto. 
-
-- Audio quality: non usare RMS waveform error come unica metrica; aggiungere ASR/WER o CER e ascolto umano su un set fisso. 
-
-- Silence/code collapse: distribuzione per codebook, entropy, percentuale dei codici dominanti. 
-
-- Turn head: macro-F1, confusion matrix e detection latency su START/INTERRUPT/BACKCHANNEL/YIELD. 
-
-## **7. Criteri di go/no-go** 
-
-|Segnale|GO|NO-GO|
-|---|---|---|
-|R1 latent alignment|alignment loss converge + cosine<br>aumenta|nessun miglioramento nonostante<br>adapter train|
-|cb1–15|CE e/o accuracy migliorano e audio<br>diventa intelligibile|audio resta metallico con GT cb0|
-|Gemma LoRA|migliora acoustic metrics senza<br>destabilizzare alignment|alignment degrada rapidamente|
-|Turn head|impara oltre baseline e non richiede<br>forward extra|richiede modello/forward aggiuntivo<br>opeggiora training|
-|Full A/B|fullGEN si avvicina progressivamente<br>a cb0GEN/restGT|fullGEN resta incomprensibile<br>mentre oracle acoustic resta buono|
-
-
-
-## **8. Turn head e latenza** 
-
-La turn head non dovrebbe costituire un problema di latenza se è una piccola projection head applicata agli hidden state già calcolati da Gemma. Va evitato qualsiasi forward separato o modulo temporale pesante. In runtime il ramo turn e il ramo Qwen possono essere eseguiti in parallelo. La turn head va quindi considerata un rischio di latenza trascurabile rispetto a Gemma + autoregressione Qwen, a condizione di mantenere questa struttura. 
-
-## **9. Priorità operative** 
-
-1. Automatizzare A/B/C/D e salvarne audio + metriche su un set fisso. 
-
-2. Implementare adapter-only alignment con Gemma e Qwen congelati. 
-
-3. Aggiungere latent alignment loss al training acustico. 
-
-4. Ripetere una run con Gemma frozen per verificare il ramo cb1–15. 
-
-5. Sbloccare LoRA Gemma con LR più basso dell’adapter e confrontare direttamente con la run frozen. 
-
-6. Aggiungere la turn head come loss ausiliaria, senza inserirla inizialmente nel percorso critico di inferenza. 
-
-7. Solo dopo i test sopra, rifinire sampling/augmentation DuplexConv e MDC. 
-
-## **10. Conclusione** 
-
-La prossima run deve essere soprattutto un esperimento diagnostico controllato. I risultati A/B già ottenuti localizzano il problema nel ramo acoustic-code generation/latent conditioning, non nel decoder e non principalmente nel cb0. L’ipotesi di co-adattamento Gemma/adapter è sufficientemente forte da meritare un’ablation dedicata. La modifica architetturale più promettente è quindi un adapter stabilizzato da latent alignment, seguito da un graduale sblocco delle LoRA di Gemma. La turn head è compatibile con il requisito di bassa latenza se implementata come head leggera sugli hidden già disponibili. 
-
-## **Appendice operativa — clipping, dataset e uso delle informazioni** 
-
-## **DuplexConv/MDC** 
-
-Questa appendice rende espliciti i punti che devono essere gate obbligatori prima della prossima run: clipping a 2048, preservazione delle informazioni temporali e conversazionali di DuplexConv, separazione dei ruoli tra DuplexConv e MDC Italian Speech Dataset 2026, e controlli della pipeline. 
-
-### **A. Clipping a 2048: non deve essere un semplice truncation** 
-
-Il limite di contesto a 2048 non deve comportare la perdita arbitraria della parte audio o delle annotazioni che determinano il comportamento conversazionale. Il problema è la perdita di causalità tra contesto, turn-taking e target speech. 
-
-- Misurare prima della run la distribuzione delle sequenze: percentuale >2048, mediana/p95 e quota realmente clippata. 
-
-- Preferire chunking su boundary semantici/temporali quando possibile, non taglio cieco nel mezzo di un evento. 
-
-- Conservare overlap sufficiente tra finestre consecutive per non perdere il contesto prima di START, BACKCHANNEL, YIELD o INTERRUPT. 
-
-- Non troncare separatamente input, cb0 e cb1–15: tutti i target devono restare temporalmente allineati. 
-
-- Registrare original_length, clipped_length, clip_fraction, timestamp iniziale/finale e turn boundary attraversati. 
-
-- Misurare quante finestre clippate attraversano un evento di turn-taking. 
-
-### **B. DuplexConv: usare l'informazione conversazionale** 
-
-DuplexConv non va trattato come semplice speech italiano. Il suo valore è nella struttura dialogica e temporale: partecipanti, turni, overlap, pause, silenzi e interruzioni devono diventare supervisione. 
-
-- Conservare speaker/participant identity e role information quando disponibile. 
-
-- Preservare timestamp e ricostruire WAIT → START → CONTINUE → YIELD → INTERRUPT/BACKCHANNEL. 
-
-- Derivare target temporali per la turn head dagli eventi reali, non solo dal frame weighting. 
-
-- Marcare esplicitamente overlap/co-talk. 
-
-- Separare silence conversazionale, pausa prosodica e attesa quando i dati lo permettono. 
-
-- Usare speaker-disjoint split per evitare leakage. 
-
-- Bilanciare anche per evento: START/INTERRUPT/BACKCHANNEL/YIELD sono rari rispetto a SPEAK/SILENCE. 
-
-### **C. MDC Italian Speech Dataset 2026: usarlo per speech, non per inventare conversazione** 
-
-MDC è principalmente utile per copertura linguistica/acustica italiana e varietà del parlato. Non dovrebbe essere trasformato in conversazione artificiale tramite una singola pausa o un cutoff deterministico. 
-
-- Usare MDC per fonetica, lessico, speaker/accent variation e robustezza acustica. 
-
-- Mantenere testo/trascrizione rigorosamente allineati all'audio e ai codebook Qwen. 
-
-- Se si sintetizzano interazioni, randomizzare gap, durata pause, posizione del barge-in e combinazioni speaker. 
-
-- Non usare una pausa fissa o un cutoff fisso: diventerebbe un artefatto apprendibile. 
-
-- Marcare chiaramente esempi reali e sintetici. 
-
-- Usare MDC per aumentare il volume speech, senza permettergli di dominare la distribuzione degli eventi conversazionali. 
-
-### **D. Ruolo corretto dei due dataset** 
-
-|Funzione|DuplexConv|MDC 2026|Regola|
-|---|---|---|---|
-|Speech / codebook|Sì|Sì|Entrambi, con mix|
-|learning|||controllato.|
-|Italian linguistic coverage|Medio|Alto|MDC può fornire maggiore<br>copertura.|
-
-
-
-|Turn-taking|Alto|Basso / solo se annotato|Non inventarlo da read<br>speech.|
-|---|---|---|---|
-|Overlap / interruption|Alto|Solo se realmente<br>presente|Preservare temporalità.|
-|Text alignment|Sì|Sì|Obbligatorio.|
-|Speaker split|Obbligatorio|Obbligatorio|Niente leakage.|
-|Synthetic augmentation|Limitata|Possibile, marcata|Non confondere<br>reale/sintetico.|
-
-
-
-### **E. Sampling e weighting** 
-
-- Loggare per run la quota di batch proveniente da DuplexConv e MDC. 
-
-- Loggare la quota di esempi con turn event, overlap, backchannel, interruption e silence. 
-
-- Usare sampling/probability per task oltre al frame weighting. 
-
-- Separare nei report loss speech, text, turn e latent per dataset. 
-
-- Avere validation DuplexConv e validation MDC separate: una media unica può nascondere un failure domainspecifico. 
-
-### **F. Caching e REAL_ENCODING: controllo robusto** 
-
-Dato il falso allarme osservato sul controllo REAL_ENCODING, il preflight deve verificare il contenuto effettivo della cache, non solo un flag. 
-
-- Salvare encoder/version/hash e modalità di encoding nei metadata di ogni shard. 
-
-- Verificare un piccolo campione audio → embedding/codebook durante il preflight. 
-
-- Confrontare statistiche cache vs fresh encode su un campione. 
-
-- Fallire il training solo quando il contenuto verificato è incompatibile. 
-
-### **G. Checklist preflight obbligatoria** 
-
-- ☐ Nessun sample supera 2048 senza policy di chunking/overlap. 
-
-- ☐ Input, cb0 e cb1–15 hanno identica segmentazione temporale. 
-
-- ☐ Sono registrati original_length e clipped_length. 
-
-- ☐ Le finestre che attraversano turn boundary sono identificate. 
-
-- ☐ Speaker/participant split verificato. 
-
-- ☐ DuplexConv conserva turn/overlap/timestamp. 
-
-- ☐ MDC non introduce pause/cutoff deterministici. 
-
-- ☐ Train/val/test separati per speaker quando possibile. 
-
-- ☐ Mix DuplexConv/MDC misurato per batch e ore. 
-
-- ☐ REAL_ENCODING verificato sul contenuto cache. 
-
-- ☐ A/B/C/D eseguito su un set fisso. 
-
-- ☐ Salvate metriche cb0, cb1–15, latent alignment e ASR/CER/WER. 
-
-### **H. Ordine definitivo delle modifiche** 
-
-1. Audit token budget e clipping 2048. 
-
-2. Audit builder DuplexConv: ruoli, timestamp, overlap e turn events. 
-
-3. Audit builder MDC: split, allineamento, augmentation e assenza di pattern conversazionali artificiali. 
-
-4. Rendere il preflight REAL_ENCODING basato sul contenuto. 
-
-5. Congelare Gemma/Qwen e implementare adapter-only latent alignment. 
-
-6. Automatizzare A/B/C/D + metriche audio/ASR. 
-
-7. Run acoustic con Gemma frozen. 
-
-8. Sbloccare LoRA Gemma gradualmente con LR più basso dell'adapter. 
-
-9. Aggiungere turn head come task ausiliario leggero. 
-
-10. Solo dopo ottimizzare sampling, weighting e policy runtime. 
-
-## **Decisione per la prossima run** 
-
-La prossima run deve essere un esperimento controllato, non semplicemente una ripetizione con più step. Clipping 2048, mix DuplexConv/MDC, preservazione degli eventi conversazionali e allineamento Gemma→Qwen devono essere osservabili e misurabili. Il criterio principale è che full generated inizi a convergere verso la qualità di cb0 generated + acoustic GT, accompagnato da miglioramento di latent alignment e cb1–15. 
-
+### Priorita' 3: Contesto Temporale e Turn-Taking
+- Se la co-adaptation non raggiunge il target, espandere l'hop di contesto temporale per consentire la cattura della prosodia a lungo termine.
+- Integrare la turn head ausiliaria leggera (stati: WAIT, SPEAK, YIELD, INTERRUPT) per il controllo nativo del barge-in.

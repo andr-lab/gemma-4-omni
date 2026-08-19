@@ -347,3 +347,15 @@ congelata. La pred ha rank SVD 937 vs target 2044: l'adapter proietta in un sott
 `f211d5c` — fix synth wav EVAL_R2: monkey-patch `sample_acoustic_codes` con la versione del repo (top_k/top_p/seed/
 temperatures_per_level) — il dataset input monta `qwen_subtalker.py` VECCHIO. TDD 2 test GREEN. Run v7 completo:
 cos val 0.6063, CE 5.4817, rank 937, synth 72 wav OK.
+
+---
+
+## 11. Tabella Riassuntiva dei Run (R1, R2, R3 Smoke, R3 Completo v7)
+
+| Run ID / Setup | Architettura Adapter | Params Trainable | Step & Dataset | Tempo & Hardware | Cos Val (Gate >=0.88) | Coupling CE Val (Gate <=5.95) | SVD Rank Pred / Target (Gate >=256) | Kernel Kaggle | Verdetto / Note |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **R1 (Linear)** | Linear(1536->2048) + LN | 3.15M | 1500 step (1000 finestre train) | ~100m, T4 (16GB) | **0.6211** (FAIL) | **5.4226** (PASS) | **1136 / 2043** (PASS) | `gemma4-fitnets-eval` (v24) | Baseline funzionale; plateau cos a 0.62; limite capacita adapter lineare. |
+| **R2 (Residual MLP)** | Skip + MLP(1536->3072->SiLU->2048) + LN | 14.17M (+4.5x params) | 1500 step (1000 finestre train) | 126m 36s, T4 | **0.6275** (FAIL, +0.006) | **5.4121** (PASS) | **1145 / 2043** (PASS) | `gemma4-fitnets-eval-r2` | +4.5x params produce solo +0.006 cos; capacita non e il collo di bottiglia; audio senza metallico. |
+| **R3 Smoke** | CausalConv1d(k=3, pad 2,0) + Residual MLP | 21.25M (identity-init) | 4 step (16 finestre train) | 14m 37s, T4 | **0.6835 -> 0.6953** (train) | — (smoke) | — | `gemma4-fitnets-syntest-r3` (v2) | Warm-start R2 senza regressione; CausalConv1d apprende (gradiente attivo); pipeline stabilizzata. |
+| **R3 Completo v7** | CausalConv1d(k=3, pad 2,0) + Residual MLP | 21.25M | 200 step (warm-start R2) + EVAL2 (100 val) | 56m 30s, T4 | **0.6063** (FAIL, asintoto) | **5.4817** (PASS) | **937 / 2044** (PASS) | `gemma4-fitnets-syntest-r3` (v7) | CausalConv1d appresa; asintoto informativo a ~0.60-0.63 confermato; rank 937; synth 72 wav OK; next: QLoRA co-adaptation. |
+

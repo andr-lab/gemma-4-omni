@@ -1,0 +1,26 @@
+RUOLO: sei il revisore scientifico del progetto "Gemma 4 Full-Duplex Omni Pipeline" (C:\Users\andre\Documents\gemma-4-omni). COMPITO: REVISIONE DEL PROGETTO CONTRO LA LETTERATURA — sia quella gia' scaricata in locale sia quella online (hai accesso a strumenti di ricerca arXiv). Obiettivo: stabilire se i LIMITI empirici trovati sono coerenti con la letteratura o se stiamo sbagliando qualcosa di architetturale.
+
+DATI EMPIRICI DA VALUTARE (run completo R3 v7, 2026-08-19, kernel andrlab/gemma4-fitnets-syntest-r3):
+- Task: adapter FitNets (ResidualAdapter: CausalConv1d k=3 identity-init + MLP 1536->2048) su hidden states di Gemma 4 E2B (4bit, FROZEN) per predire h_t (2048-dim, 12.5Hz) del sub-talker Qwen3-TTS; poi sub-talker congelato produce codici RVQ (16 livelli).
+- Training: 200 step, batch 8 grad-accum 2, LR cosine 3e-4 con warmup 100, L = (1-cos) + 0.5*MSE + 0.2*CE coupling. Cos training finale 0.7257, loss latent 1.7456.
+- VAL (100 finestre mai viste): cos_sim 0.6063, mse 3.4927, coupling_ce 5.4817 (tetto oracolo teacher ~5.66-5.69), rank SVD pred 937 vs target 2044 (cum energy 0.9095) -> la pred vive in un sottospazio a meta' dimensionalita'.
+- Baseline storici: R1 cos val ~0.62-0.63, R2 cos val 0.6275. L'asintoto informativo regge intorno a 0.60-0.63 NONOSTANTE: (a) fix del mismatch training/inferenza (CausalConv1d a monte, ADR-002), (b) device-aware eval, (c) checkpoint fresco.
+- Conclusione attuale del progetto: "tetto informativo dell'adapter sul tensore della finestra con Gemma E2B congelata" — l'adapter proietta in un sottospazio a meta' dimensionalita' (rank 937 vs 2044).
+- Ipotesi di leva successiva: QLoRA co-adaptation su Gemma E2B (r=16 alpha=32, LR 1.5e-5, 2-3h).
+
+LETTERATURA LOCALE (leggila):
+- docs/sources/extracted_text/Gemma 4 Technical Report.txt (attenzione a: modalita' audio, E2B = efficiency, quantizzazione nativa, come gestiscono gli hidden states)
+- docs/sources/extracted_text/Qwen3-TTS Technical Report.txt (attenzione a: architettura code_predictor, RVQ, come generano h_t dai text+audio features, se usano LLM come backbone per i codici)
+- docs/decisions/*.md (ADR: 002 causal-conv, 005 teacher base variant, 003 separazione transformers)
+- gemma4_training_report.md (storia completa dei run)
+- kaggle_pipeline.py (architettura reale: come la Gemma riceve mel 100fps, TEXT_BLOCK_LEN=48, fpf=2, AUDIO_FEATURE_RATE=25fps -> 2 feature per frame agente 12.5Hz)
+
+DOMANDE SPECIFICHE (rispondi con citazioni da fonti):
+1) E' ragionevole che un LLM congelato (4bit) + adapter lineare/MLP sul hidden state raggiunga cos ~0.6 verso un target 2048-dim non lineare? In letteratura, quanto hidden di un LLM serve per predire codici audio RVQ? (cerca: Qwen3-TTS, CosyVoice, MaskGCT, Mini-Omni, speech-to-speech, RVQ codec prediction, hidden state regression, "prosody" "duration" conditioning).
+2) Il rank SVD ridotto (937 vs 2044) della pred e' un sintomo di cosa? (sottospazio attivato dalla Gemma 4bit? collinearita' dei token audio adiacenti? frame rate 12.5Hz troppo basso/alto per la predizione?) Cerca in letteratura la dimensionalita' efficace degli hidden states di LLM (intrinsic dimension) e se la quantizzazione 4bit la riduce.
+3) La scelta di congelare la Gemma e addestrare SOLO l'adapter e' coerente con la letteratura, o i sistemi speech-to-speech che funzionano (Qwen3-TTS stesso, Mini-Omni, GLM-4-Voice, Step-Audio) addestrano il backbone o usano LoRA? Cosa farebbe la letteratura al posto nostro per rompere l'asintoto?
+4) Il CausalConv1d k=3 con identity-init a monte dell'adapter e' giustificato in letteratura (finestre causali sui hidden states)? O esiste un pattern migliore (es. cross-attention su contesto piu' lungo, conv 1D piu' profondo, attention pooling)?
+5) La finestra di 64 frame agente (5.12s) e' sufficiente per il condizionamento prosodico? Il teacher Qwen3-TTS come condiziona la prosodia?
+6) Il sub-talker congelato (replica del code_predictor) + CE coupling e' un pattern noto? (distillazione di codice RVQ da un teacher? "codec language model distillation"?)
+
+OUTPUT: un report markdown REVISIONE_LETTERATURA.md alla radice del repo (ASCII puro dove possibile) con: (1) sintesi di 1 pagina dello stato del progetto, (2) risposta punto per punto alle 6 domande con CITAZIONI (autore, titolo, anno, arXiv id/URL, frase chiave), (3) verdetto: "limiti coerenti con la letteratura" vs "stiamo sbagliando X, Y, Z" con evidenze, (4) raccomandazioni priorizzate (cosa cambieresti, con impatto atteso), (5) bibliografia completa. Se i tool online falliscono, usa la letteratura locale e dichiaralo. COMMITTA il report. Non modificare il codice.

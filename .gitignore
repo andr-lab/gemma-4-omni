@@ -1,7 +1,14 @@
-/.antigravity
-/.venv
-/_archive_*/
-eval_r1_out_v4/
-eval_r2_out/
-eval_r2_out_final/
-eval_syntest_v2_out/
+# Environment & Agent
+.antigravity/
+.venv/
+__pycache__/
+*.pyc
+
+# Heavy Run Outputs & Local Artifacts
+_archive/eval_outputs/
+_archive/run_outputs/
+_archive_20260817/
+eval_r*/
+eval_syntest*/
+*.zip
+*.log
