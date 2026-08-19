@@ -785,6 +785,19 @@ try:
             print(f"[{_tag_err}] ERRORE durante {_phase_err}", flush=True)
             traceback.print_exc()
 
+    # ---- Libera la Gemma E2B 4bit dello STAGE2 dalla VRAM (fix CUDA OOM EVAL) ----
+    # L'EVAL_R1/R2 carica una SECONDA copia di unsloth/gemma-4-E2B-it: senza del
+    # esplicito la prima (piu' l'adapter + sub bf16) occupa 13+ GiB e il load
+    # della nuova fallisce con torch.OutOfMemoryError (v4 run: OOM a 2648s).
+    if "gemma_base" in globals() or "gemma_base" in locals():
+        try:
+            del gemma_base, gemma_tok
+        except Exception:
+            pass
+        gc.collect()
+        torch.cuda.empty_cache()
+        print("[VRAM] Gemma E2B dello STAGE2 liberata prima dell'EVAL", flush=True)
+
     # ---- SEZIONE OPZIONALE: EVAL_R1 / EVAL_R2 (valutazione adapter Stage 2 su val split) ----
     # Finestre val = idx 1000+ (mai viste nel train, che usa le prime EXTRACT_N=1000).
     # Metriche: cos_sim/MSE su frame attivi, coupling CE (sub congelato), rank SVD
