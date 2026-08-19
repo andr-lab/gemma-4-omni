@@ -1,0 +1,42 @@
+Sei un revisore avversariale architetturale a contesto fresco (DDD + SDD).
+
+CONTESTO: pipeline speech-to-speech Gemma4-Omni su Kaggle. Adapter FitNets mappa
+hidden di Gemma -> h_t (talker_hidden 2048), sub-talker Qwen3-TTS congelato genera
+cb1..cb15, decoder Code2Wav sintetizza. Cos attuale 0.627 (plateau), audio pred distrutto.
+
+UN UTENTE ha proposto: mini-blocco 1D Causal Conv k=3 sull'adapter per contesto
+temporale (240ms) prima di emettere h_t, citando la letteratura. Il nostro team ha
+trovato che la causal conv E' GIA' implementata in kaggle_pipeline.py (riga 2692
+`self.causal_conv = nn.Conv1d(hidden_size, hidden_size, kernel_size=3, padding=0)`
+e riga 2844 `adapted_hidden = self._apply_causal_conv(agent_hidden)` prima di
+`ht_adapter`) MA il training FitNets dell'adapter in kernel_src/syntest_v3_cell2.py
+riga 625 fa `h_t_pred = ht_adapter(agent_hidden)` SENZA causal conv -> MISMATCH
+training/inferenza: l'adapter è addestrato senza conv e usato in produzione con conv.
+
+COMPITI:
+1. LETTERATURA (SDD): esamina docs/sources/extracted_text/*.txt e
+   docs/decisions/*.md. Cita con URL/sezione esatti:
+   - Cosa dicono i paper su contesto temporale/convoluzione causale 1D per
+     l'adattamento di feature audio a 12.5Hz (80ms/frame)? (Qwen3-TTS Technical
+     Report, Full-Duplex Survey, Recent Advances in SLM, Mini-Omni, ecc.)
+   - ADR-002 (causal-conv1d-circular-buffer e ADR-002-Gemma4-HierarchicalMTP):
+     riassumi la decisione e i riferimenti.
+   - Il Qwen3-TTS-12Hz usa fully causal feature encoders (citazione); h_t del
+     teacher è una traiettoria con self-attention causale su tutta la storia
+     (modeling_qwen3_tts.py). QUINDI: un adapter frame-wise 1x1 che proietta ogni
+     frame isolato è handicappato rispetto a un Conv causale k=3? Giustifica.
+2. MISMATCH (DDD): valuta l'impatto del mismatch trovato (training senza conv,
+   inferenza con conv). È una causa probabile del plateau cos 0.627? Spiega il
+   meccanismo preciso. Verifica nel codice se la conv nel training esiste da
+   qualche parte o è stata rimossa/ignorata.
+3. FIX PROPOSTO: aggiungere la causal_conv (k=3, left-pad (2,0), stesso
+   peso/shared oppure fresh) NEL training FitNets PRIMA di ht_adapter, con
+   initializzazione identity-ish (peso centrale=1, laterali=0) per non rompere
+   il checkpoint R2 esistente. Valuta: (a) compatibilità checkpoint R2 (state_dict
+   senza causal_conv: si può caricare con strict=False?); (b) costo smoke; (c)
+   alternativa: addestrare da zero con conv.
+4. VERDETTO FINALE: la proposta utente (Conv1D k=3) è validata dalla letteratura?
+   Qual è la migliore via di implementazione (shared con kaggle_pipeline, fresh nel
+   training, weight-init identity)? Ordina per ROI.
+
+Sii netto, cita path+riga+sezione. NON confermare per compiacenza.
