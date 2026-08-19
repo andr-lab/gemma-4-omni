@@ -1,0 +1,79 @@
+Context caricato con successo dalla memoria globale e di workspace (`.antigravity/memory/`).
+
+Ecco la **revisione avversariale architetturale a contesto fresco**, condotta secondo i principi **DDD** (Doubt-Driven Development) e **SDD** (Source-Driven Development), con verifica diretta dei sorgenti del repository e della documentazione ufficiale.
+
+---
+
+# 📑 Valutazione delle Proposte Utente
+
+| # | Proposta Utente | Verdetto | Motivazione Tecnica & Riferimenti |
+| :--- | :--- | :---: | :--- |
+| **1a** | **Adapter più espressivo (MLP 2-3 strati SwiGLU/GELU con skip)** | ❌ **RIFIUTARE** | **Già falsificata empiricamente**: il passaggio da R1 lineare (3.15M params, $\cos = 0.6211$) a R2 Residual MLP ([`kernel_src/syntest_v3_cell2.py:L374-394`](file:///c:/Users/andre/Documents/gemma-4-omni/kernel_src/syntest_v3_cell2.py#L374-L394), 14.17M params, $+4.5\times$ parametri) ha prodotto solo $+0.0064$ di similarità cosina ($\cos = 0.6275$). Aumentare ulteriormente la profondità frame-wise non può estrarre informazione che non è presente nel singolo stato istantaneo di Gemma. |
+| **1b** | **Mini-blocco 1D Causal Conv $k=3$ sull'adapter** | 🔬 **TESTARE** *(Costo: ~5-10 min smoke GPU T4)* | **Architetturalmente fondata**: $h_t$ del teacher Qwen3-TTS è la traiettoria continua di un transformer causale 1.7B con self-attention su tutta la storia temporale ([`modeling_qwen3_tts.py:L1713-1740`](file:///c:/Users/andre/Documents/gemma-4-omni/docs/sources/qwen3_tts_official_src/modeling_qwen3_tts.py#L1713-L1740)). Mappare frame isolati a 12.5 Hz (80 ms) ignora le derivate prime/seconde ($\Delta, \Delta\Delta$) dell'eloquio. Una Causal Conv1D $k=3$ con left-padding esplicito `(2, 0)` aggrega un contesto di 240 ms senza introdurre causal leakage né latenza futura (0 ms lookahead). |
+| **2** | **Loss ibrida direzionale + modulo $\mathcal{L} = \text{MSE} + \alpha(1-\cos)$** | ❌ **RIFIUTARE / GIÀ IMPLEMENTATA** | **Già attiva e bilanciata nel codice**: in [`kernel_src/syntest_v3_cell2.py:L627-631`](file:///c:/Users/andre/Documents/gemma-4-omni/kernel_src/syntest_v3_cell2.py#L627-L631) la loss è $\mathcal{L}_{\text{latent}} = (1 - \cos) + 0.5 \cdot \text{MSE}$. Poiché $\hat{h}_t$ è vincolato da LayerNorm finale (modulo standardizzato $\approx 1.0$ per dimensione), $\text{MSE}$ e $(1-\cos)$ sono algebricamente dipendenti. Inoltre, la vera guida funzionale è già affidata alla coupling loss $\mathcal{L}_{\text{coupling}}$ ([`syntest_v3_cell2.py:L636`](file:///c:/Users/andre/Documents/gemma-4-omni/kernel_src/syntest_v3_cell2.py#L636), $\lambda = 0.2$), che propaga i gradienti della Cross-Entropy attraverso il sub-talker frozen. |
+| **3** | **Assunto: "Oracle degradato $\implies$ il sub-talker è il collo di bottiglia"** | ❌ **RIFIUTARE (ASSUNTO FALLACE)** | **Errore di interpretazione metrica**: l'MCD a 6-9 dB su Oracle con $h_t$ GT **non è un guasto**, ma la fisiologica varianza stocastica di un generatore acustico RVQ a 15 livelli ([`Qwen3-TTS Technical Report`, Sez. 2.2 & 3.1](file:///c:/Users/andre/Documents/gemma-4-omni/docs/sources/extracted_text/Qwen3-TTS%20Technical%20Report.txt)). Con Oracle l'audio è **100% chiaro e intelligibile** (`_agy_out_audit_syntest_v3.txt:L26-32`). Il vero collasso catastrofico (voce incomprensibile, MCD 10-16 dB) avviene solo su `pred` a causa dell'inadeguatezza di $\hat{h}_t$ ($\cos \approx 0.627$). |
+
+---
+
+# 🔍 Risposte Puntuali alle Domande Obbligatorie
+
+### A. Perché il sub-talker con $h_t$ GT genera residui a MCD 6-9 dB e accuratezza greedy del 5.5%?
+
+1. **Nessun bug nel wrapper (`qwen_subtalker.py`)**:
+   Il test di fedeltà `FIDELITY_PROBE` ([`kernel_src/syntest_v3_cell2.py:L1300-1375`](file:///c:/Users/andre/Documents/gemma-4-omni/kernel_src/syntest_v3_cell2.py#L1300-L1375) e [`NEXT_STEP.md:L1-10`](file:///c:/Users/andre/Documents/gemma-4-omni/NEXT_STEP.md#L1-L10)) ha dimostrato identità al 100% tra il wrapper e il `code_predictor` ufficiale del teacher Qwen3-TTS in eager/bf16:
+   - Pesi: 89/89 tensori identici ($\Delta w = 0.00\text{e}{+}00$).
+   - Logit: $\text{MAX } |\Delta \text{logits}| = 0.000000$.
+   - Cross-Entropy: $5.6875\text{ nats}$ identica al centesimo.
+   Le routine [`_forward_flat`](file:///c:/Users/andre/Documents/gemma-4-omni/qwen_subtalker.py#L263-L290), [`forward_sub_talker_finetune`](file:///c:/Users/andre/Documents/gemma-4-omni/qwen_subtalker.py#L292-L330) e [`sample_acoustic_codes`](file:///c:/Users/andre/Documents/gemma-4-omni/qwen_subtalker.py#L361-L480) replicano fedelmente la forward causale con RoPE a 16 posizioni.
+
+2. **Significato dell'accuratezza top-1 al 5.5%**:
+   Su 15 codebook con vocabolario $V=2048$, una $\text{CE} \approx 5.66\text{ nats}$ corrisponde a una perplexity di $PPX = e^{5.66} \approx 287$. La distribuzione probabilistica per i codebook acustici fini ($cb_4..cb_{15}$) è naturalmente diffusa su centinaia di centroidi validi. L'accuratezza puntuale del 5.55% è oltre **$110\times$ superiore al caso casuale** ($1/2048 \approx 0.049\%$). I residui modellano micro-fase e turbolenza stocastica: non esiste un unico codice "esatto".
+
+3. **Perché MCD è a 6-9 dB su Oracle**:
+   L'MCD (Mel-Cepstral Distortion) misura la distanza euclidea spettrale frame-per-frame contro la singola registrazione GT. Qualsiasi modello generativo neurale stocastico (es. VITS, AudioLM, Qwen3-TTS) ottiene un MCD tra 5 e 8 dB rispetto alla registrazione originale, pur risultando perfettamente naturale e trasparente all'ascolto umano.
+
+---
+
+### B. Con $h_t$ oracolare a 6-9 dB, conviene investire GPU sul sub-talker o su $h_t$?
+
+> [!IMPORTANT]
+> **Investire sul sub-talker è un errore ad altissimo rischio di regressione. Tutte le risorse GPU devono concentrarsi sul miglioramento e allineamento di $h_t$.**
+
+- **Perché NON toccare il sub-talker**: Il `code_predictor` è stato pre-addestrato da Alibaba su oltre 5.000.000 di ore di parlato multilingua ([`Qwen3-TTS Technical Report`, Sez. 3.2](file:///c:/Users/andre/Documents/gemma-4-omni/docs/sources/extracted_text/Qwen3-TTS%20Technical%20Report.txt)). Sgelarlo o addestrare un adapter su di esso con poche decine di ore di dataset su Kaggle causa **catastrophic forgetting** (come già dimostrato nello Smoke B, dove la CE è collassata a 10.60, peggiore del baseline casuale 7.62).
+- **Dove risiede il vero problema**: Il fallimento acustico non è l'oracolo (6-9 dB, comprensibile), ma la predizione dell'adapter (10-16 dB, voce distrutta). La deviazione angolare di $\cos \approx 0.627$ ($\approx 51.2^\circ$) proietta il sub-talker completamente fuori dal proprio manifold operativo.
+
+---
+
+### C. Il Causal Conv1D $k=3$ può alzare il $\cos$ oltre 0.63?
+
+**Sì, ma con un tetto asintotico**:
+1. **Analisi temporale SDD**: Nel teacher Qwen3-TTS ([`modeling_qwen3_tts.py:L1713-1740`](file:///c:/Users/andre/Documents/gemma-4-omni/docs/sources/qwen3_tts_official_src/modeling_qwen3_tts.py#L1713-L1740)), $h_t[k]$ incorpora l'attenzione causale completa sui frame audio precedenti e sul testo. L'attuale estrazione da Gemma ([`syntest_v3_cell2.py:L623`](file:///c:/Users/andre/Documents/gemma-4-omni/kernel_src/syntest_v3_cell2.py#L623)) campiona ogni 2 stati (`ST2_FPF = 2`) e l'adapter proietta frame-per-frame in modo puntuale ($1\times 1$).
+2. **Effetto del Conv1D causale $k=3$**: Permette all'adapter di osservare $[t-2, t-1, t]$ (finestra di 240 ms), catturando le derivate locali di transizione fonetica ($\Delta, \Delta\Delta$).
+3. **Stima realistica**: Il Conv1D causale può portare il coseno nell'intervallo **$\sim 0.66 - 0.70$** (+0.04/0.07). Tuttavia, **non potrà mai raggiungere $\cos \ge 0.88$ da solo**, perché:
+   - Gemma 4 E2B è congelata in 4-bit (non adatta il proprio spazio delle feature).
+   - Manca il condizionamento timbrico dello speaker vector (slot 6 disattivato in [`syntest_v3_cell2.py:L265`](file:///c:/Users/andre/Documents/gemma-4-omni/kernel_src/syntest_v3_cell2.py#L265)).
+   - Per superare 0.80 serve lo sblocco congiunto di LoRA su Gemma E2B (Stage 3 Co-adaptation).
+
+---
+
+# 🏆 D. Classifica Finale delle Leve per ROI (Impatto / Costo GPU)
+
+```
+[1. Sampling Stocastico / Per-Livello]  ──► ROI MASSIMO (Costo GPU: 0; risolve la rigidità acustica)
+                │
+[2. Causal Conv1D k=3 su Adapter]       ──► ROI ALTO (Costo GPU: ~5-10 min; modella la dinamica 240ms)
+                │
+[3. LoRA Co-adaptation su Gemma E2B]    ──► ROI ALTO A REGIME (Costo GPU: 2-3h; rompe l'asintoto cos 0.63)
+                │
+[4. Adapter MLP più profondo (R3)]      ──► ROI BASSO / RIFIUTARE (Saturazione capacità già dimostrata)
+                │
+[5. Fine-Tuning del Sub-Talker Qwen]    ──► ROI NEGATIVO / DANNOSO (Catastrophic forgetting su 5M ore)
+```
+
+| Priorità | Leva Architetturale | Impatto Atteso | Costo GPU | Verdetto & Azione |
+| :---: | :--- | :--- | :---: | :---: |
+| **1** | **Sampling Stocastico & Per-Livello ($T_{\text{decay}}$)** | Elimina i transienti metallici dell'argmax; genera parlato naturale su Oracle e migliora la stabilità su Pred. | **0 ore** *(inferenza pura)* | **ADOTTARE**: usare `temperatures_per_level` con $T=0.5-0.7$ su cb1..cb3 e greedy/$T=0.1$ su cb4..cb15 ([`qwen_subtalker.py:L371-402`](file:///c:/Users/andre/Documents/gemma-4-omni/qwen_subtalker.py#L371-L402)). |
+| **2** | **Causal Conv1D $k=3$ sull'Adapter** | Fornisce contesto temporale a 240 ms ($\Delta, \Delta\Delta$); alza il $\cos$ verso $\sim 0.67-0.70$ con zero latenza di streaming. | **~10 min** *(smoke test T4)* | **TESTARE**: inserire `nn.Conv1d(in_dim, in_dim, kernel_size=3, padding=0)` preceduto da `F.pad(x, (2, 0))` prima dell'MLP residuale. |
+| **3** | **Sblocco LoRA Gemma E2B (Stage 3 Co-adaptation)** | Permette a Gemma di co-adattare le attivazioni linguistiche/audio verso il target $h_t$, abbattendo il vero gap tra Oracle e Pred. | **~2.5h** *(run completa T4)* | **ADOTTARE**: abilitare LoRA (`r=16, alpha=32`) sui moduli di attenzione di Gemma con LR basso ($1.5 \cdot 10^{-5}$) e adapter a $1.5 \cdot 10^{-4}$. |
+| **4** | **Adapter MLP più profondo/largo (R3)** | Nullo/trascurabile ($<+0.01 \cos$); la capacità frame-wise è già in saturazione su R2. | **~1h** | **RIFIUTARE**: spreco di capacità e parametri. |
+| **5** | **Fine-tuning del Sub-Talker Qwen3-TTS** | Distruzione della quantizzazione RVQ e divergenza dei logit acustici. | **Elevato & Dannoso** | **RIFIUTARE CATEGORICAMENTE**: mantenere il sub-talker rigorosamente congelato (`requires_grad=False`). |

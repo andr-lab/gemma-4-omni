@@ -159,3 +159,57 @@
 2. **Il contenuto linguistico vive nei residui 1-7** (cb0-only = click train): il sub-talker è architetturalmente essenziale; il collo di bottiglia è la qualità di h_t.
 3. **Raccomandazione sampling per lo streaming full-duplex**: `tdecay` `0.8·0.75^(g-1)` (ricchezza cb1-cb3, greedy sui livelli profondi) — configurazione ottimale, non dannosa.
 4. **Prossima leva vera**: migliorare h_t (conditioning speaker esplicito P3, dataset più ricco, prompt migliori) — iterare sull'adapter è già dimostrato inutile (R2 ≈ R1).
+
+## 9. Risposta utente: "perché Oracle suona incomprensibile?" + valutazione proposte (agy, contesto fresco)
+
+### Domanda utente (email 5ecb1e73)
+"Perché i file Oracle suonano incomprensibili mentre i Ground Truth sono ottimi? E come hai risolto questo problema (se l'hai fatto)? Se la causa dell'oracle metallico è che ht è solo 0.6, valuta: (1) adapter MLP 2-3 strati SwiGLU/GELU con skip + mini-blocco 1D Conv k=3, (2) loss ibrida L = MSE + α(1−cos)."
+
+### Errore nella mia email precedente (corretto)
+Avevo scritto "la causa è h_t (cos 0.627)" — **parzialmente sbagliato**: oracle usa h_t **GT perfetto** (cos=1.0), quindi il degrado oracle (MCD 6-9) NON può essere colpa di h_t. La causa corretta del gap oracle vs gt_ref:
+- `gt_ref` = codici GT completi cb0..cb15 (veri dal dataset) → MCD 0, audio perfetto
+- `oracle` = cb0 GT + h_t GT + residui cb1..cb15 **generati dal sub-talker** → MCD 6-9, intelligibile ma non identico
+- `pred` = cb0 GT + h_t predetto (cos 0.63) + residui generati → MCD 10-16, voce distrutta
+
+### Confronto cieco v2 vs v3 (agy, task e63c7722) — contraddizione risolta
+L'utente aveva ascoltato le 9 wav v2 (baseline T=0.9) e le aveva giudicate "incomprensibili", mentre l'audit v3 diceva "intelligibili". MCD identici tra i due run → serviva il confronto percettivo diretto.
+**Verdetto agy (cieco, STFT+F0+formanti+HNR+LPC)**:
+- **v2 oracle = v3 oracle_t09: identica qualità percettiva, parlato pienamente intelligibile** su tutte e 3 le finestre (a/b/c)
+- v3 oracle greedy = lieve rigidità metallica sui transienti; tdecay = migliore in assoluto (voce calda, noise floor basso)
+- **pred v2 = pred v3: voce gravemente distrutta in entrambe** (RMS 30-40% del GT, F0 con salti d'ottava, flatness ×10)
+- → **L'utente ha confuso i campioni pred (davvero distorti) con gli oracle, oppure ha scambiato l'incomprensione del mandarino per un difetto di sintesi**
+
+### Valutazione proposte utente (agy, task 44764897, verdetto per proposta)
+
+| # | Proposta | Verdetto | Motivazione |
+| :--- | :--- | :---: | :--- |
+| 1a | MLP 2-3 strati SwiGLU/GELU + skip | ❌ RIFIUTARE | Già falsificata: R1 lineare 3.15M → R2 Residual MLP 14.17M (+4.5× params) = +0.006 cos (0.621→0.627). Capacità frame-wise in saturazione. |
+| 1b | Mini-blocco 1D Causal Conv k=3 | 🔬 TESTARE (~10 min) | h_t teacher = traiettoria di transformer causale con self-attention su tutta la storia (modeling_qwen3_tts.py L1713-1740); adapter frame-wise a 12.5Hz ignora derivate Δ,ΔΔ. Conv causale k=3 con left-padding (2,0) = contesto 240ms, 0 lookahead. Stima cos 0.66-0.70. |
+| 2 | Loss ibrida L = MSE + α(1−cos) | ❌ GIÀ IMPLEMENTATA | syntest_v3_cell2.py L627-631: L = (1−cos) + 0.5·MSE + 0.2·CE coupling. Con LayerNorm finale, MSE e (1−cos) algebricamente dipendenti; la guida funzionale vera è la coupling loss CE. |
+| 3 | Assunto "oracle degradato ⇒ sub-talker è il collo" | ❌ RIFIUTARE (assunto fallace) | MCD 6-9 su oracle NON è un guasto: è la varianza fisiologica di un generatore RVQ stocastico (VITS/AudioLM/Qwen3-TTS ottengono 5-8 dB vs registrazione originale). Oracle è 100% intelligibile. Il collasso è solo su pred (10-16 dB) a causa di cos 0.627 ≈ 51.2° di deviazione angolare → proietta il sub-talker fuori dal proprio manifold. |
+
+### Perché il sub-talker con h_t GT fa MCD 6-9 e acc 5.5%? (domanda A)
+1. **Nessun bug nel wrapper** — FIDELITY_PROBE (syntest_v3_cell2.py L1300-1375): 89/89 pesi identici, |Δlogits|=0, CE 5.6875 identica al centesimo.
+2. **Acc 5.5% è fisiologico**: CE 5.66 nats = perplexity ~287 su V=2048 per 15 codebook; distribuzione diffusa su centinaia di centroidi validi; 5.5% = 110× il caso casuale (0.049%). I residui modellano micro-fase e turbolenza: non esiste un codice "esatto".
+3. MCD 5-8 dB = normale per generazione neurale stocastica.
+
+### Dove investire la GPU? (domanda B) — sub-talker MAI
+- **NON toccare il sub-talker**: pre-addestrato su 5M+ ore (Qwen3-TTS Tech Report Sez 3.2); sgelarlo = catastrophic forgetting (già visto in Smoke B: CE collassata a 10.60 vs baseline 7.62).
+- Il problema vero = pred (10-16 dB): cos 0.627 proietta fuori dal manifold operativo del sub-talker.
+
+### Conv1D può superare cos 0.63? (domanda C)
+Sì, ma tetto asintotico: **0.66-0.70** (+0.04/0.07). Mai ≥0.88 da solo perché: Gemma E2B congelata in 4-bit, manca il conditioning timbrico speaker (slot 6 disattivato, syntest_v3_cell2.py L265), serve LoRA co-adaptation per superare 0.80.
+
+### 🏆 Classifica ROI (domanda D, agy)
+```
+[1] Sampling stocastico/per-livello (tdecay) ── ROI MASSIMO, costo 0 (inferenza pura)
+[2] Causal Conv1D k=3 su adapter            ── ROI ALTO, ~10 min (cos → 0.66-0.70)
+[3] LoRA co-adaptation su Gemma E2B         ── ROI ALTO a regime, 2-3h (rompe asintoto 0.63; r=16 α=32 su attention, LR 1.5e-5)
+[4] Adapter MLP più profondo (R3)           ── ROI BASSO / RIFIUTARE (saturazione dimostrata)
+[5] Fine-tuning sub-talker                  ── ROI NEGATIVO / DANNOSO (forgetting su 5M ore)
+```
+
+### Conclusione per l'utente
+- Oracle v2 che hai sentito = intelligibile (stessa qualità v3); se ti è parso incomprensibile, probabilmente ascoltavi le pred oppure il mandarino ti risultava incomprensibile — la sintesi non era rotta.
+- Le tue 2 proposte tecniche: la loss ibrida è già attiva; l'MLP espressivo è già falsificato dai dati (R2≈R1); **il Conv1D causale k=3 è la proposta nuova e validissima** — prossimo smoke test (cos stimato 0.66-0.70).
+- Prossimi passi consigliati: smoke Conv1D k=3 (30 min) → run R3 con Conv1D + tdecay → valutare LoRA co-adaptation (2-3h) per rompere l'asintoto.

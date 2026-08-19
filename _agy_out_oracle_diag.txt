@@ -1,0 +1,156 @@
+Ho caricato il contesto completo da memoria globale e di workspace.
+
+Di seguito l'analisi diagnostica approfondita sulle cause per cui i file **oracle** (generati dal sub-talker congelato a partire dal target $h_t$ reale del teacher) risultano metallici e incomprensibili, e su cosa questo comporta per l'adapter FitNets e la pipeline full-duplex.
+
+---
+
+# 🔬 Diagnosi Tecnica: Root Cause dell'Audio Metallico negli Oracle Qwen3-TTS
+
+```
+[Target h_t Reale Teacher] ──┐
+                             ├─► [Sub-Talker Qwen3] ─► [cb1..cb15 Campionati] ─┐
+[cb0 Semantico GT] ──────────┘   (Greedy Argmax: Temp=0.0)                     ├─► [Decoder Code2Wav] ─► ⚠️ AUDIO METALLICO /
+                                                                               │   (SnakeBeta ConvNet)    ARMONICHE SINUSOIDALI
+[cb0..cb15 100% GT] ───────────────────────────────────────────────────────────┴─► [Decoder Code2Wav] ─► ✅ AUDIO PERFETTO
+```
+
+---
+
+## 1. ROOT CAUSE ANALYTICS
+
+Il finding per cui l'audio **oracle** ($h_t^{\text{reale}} + cb_0^{\text{GT}} \to \text{sub-talker} \to cb_1..cb_{15} \to \text{code2wav}$) è incomprensibile e metallico, mentre **pred** lo replica fedelmente, isola con precisione matematica e acustica la catena di generazione.
+
+La causa principale è la combinazione di **due fattori strutturali concorrenti**:
+
+### A. Zero-Temperature Sampling Collapse nei Codebook Acustici Residui (Causa Primaria Immediata)
+Nel codice di valutazione ([`fitnets_extract_cell2.py:L949-950`](file:///C:/Users/andre/Documents/gemma-4-omni/kernel_src/fitnets_extract_cell2.py#L949-L950) e [`qwen_subtalker.py:L361-406`](file:///C:/Users/andre/Documents/gemma-4-omni/qwen_subtalker.py#L361-L406)), la sintesi dei 15 codebook acustici residui viene eseguita con **`temperature=0.0` (greedy argmax puro)**:
+1. **Natura dei codebook RVQ superiori ($cb_1..cb_{15}$)**: In architetture con quantizzazione vettoriale residua (RVQ) come il tokenizer Qwen3-TTS 12.5Hz (ispirato a Mimi / WavLM), $cb_0$ quantizza la struttura semantico-fonetica a bassa frequenza, mentre $cb_1..cb_{15}$ modellano le componenti stocastiche ad alta entropia (tessitura acustica, formanti fini, fase e rumore di turbolenza/fricative).
+2. **Collasso da Argmax**: Con `temperature=0.0`, l'operatore `argmax` seleziona sistematicamente il centroide modale statico per ogni codebook. Poiché la probabilità top-1 su un vocabolario di 2048 elementi è bassa (come evidenziato dalla metrica `acc_oracle = 0.0555`, cioè solo il 5.5% di match esatto con il GT), l'argmax genera **sequenze di indici quasi costanti e ripetitive frame-by-frame**.
+3. **Reazione del Decoder Code2Wav ([`code2wav_decoder.py`](file:///C:/Users/andre/Documents/gemma-4-omni/eval_r2_out_final/code2wav_decoder.py))**: Il decoder impiega blocchi di upsampling causale con attivazioni periodiche modificate **`_SnakeBeta`** ($\text{Snake}(x) = x + \frac{1}{\beta}\sin^2(\alpha x)$). Quando riceve in ingresso vettori residui statici o de-sincronizzati tra loro, la non-linearità sinusoidale di Snake trasforma i codici ripetuti in **armoniche stazionarie pure, fischio robotico e ronzio metallico**, distruggendo la naturalezza del parlato.
+4. **Protocollo Ufficiale Qwen3-TTS**: La pipeline ufficiale Qwen3-TTS non esegue mai il greedy argmax sui codebook residui: adotta campionamento probabilistico con parametri dedicati `subtalker_temperature=0.9` e `subtalker_top_k=50` (o `top_p=0.95`), che iniettano la naturale varianza spettrale richiesta dal vocoder.
+   - *Fonti ufficiali*: [Qwen3-TTS Technical Report (arXiv:2601.15621)](https://arxiv.org/abs/2601.15621), [QwenLM/Qwen3-TTS Repository](https://github.com/QwenLM/Qwen3-TTS), [Hugging Face Qwen3-TTS Model Card](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base).
+
+---
+
+### B. Manifold Shift di $h_t$: Mancanza dello Speaker Embedding nel Teacher Base
+Nel modulo di estrazione del target ([`fitnets_extract_cell2.py:L265`](file:///C:/Users/andre/Documents/gemma-4-omni/kernel_src/fitnets_extract_cell2.py#L265)):
+```python
+codec_emb_mask[0, 6] = False  # slot speaker embedding (niente voce clonata)
+```
+1. **Contratto della variante Base**: Il modello `Qwen/Qwen3-TTS-12Hz-1.7B-Base` è stato pre-addestrato su oltre 5 milioni di ore aspettandosi **sempre** un embedding di speaker valido a 2048 dimensioni alla posizione sequenziale 6 (estratto dall'ECAPA-TDNN `speaker_encoder` a partire da un audio di riferimento).
+2. **Effetto dell'azzeramento dello slot 6**: Lasciando lo slot 6 a zero (nessun condizionamento timbrico), il backbone 1.7B del talker opera in una regione non standard del proprio spazio latente. Gli stati nascosti $h_t$ risultanti risultano **traslati rispetto al manifold naturale di fonazione** su cui il `code_predictor` (sub-talker a 5 layer) è stato tarato.
+
+---
+
+### C. Perché "Pred" replica così fedelmente "Oracle"? (Il paradosso positivo)
+Il fatto che il file `eval_r2_pred_*.wav` (sintetizzato dall'adapter Gemma $\hat{h}_t$) replichi fedelmente l'audio `eval_r2_oracle_*.wav` è **la prova empirica che l'adapter FitNets ha funzionato**:
+- L'adapter R2 (MLP residuale da 14.17M parametri) ha imparato a mappare le attivazioni di Gemma direttamente sullo spazio dei vettori $h_t$ del teacher con loss di coupling $\text{CE} = 5.4121$ (ampiamente sotto la soglia gate di 5.95) e rank effettivo 1145.
+- La distorsione udibile non è generata da un difetto di convergenza di Gemma/Adapter: **l'adapter sta replicando con alta precisione un target oracolare che a sua volta è degradato a monte dal protocollo di sintesi/estrazione**.
+
+---
+
+## 2. CONSEGUENZE PER LA PIPELINE
+
+| Aspetto Pipeline | Diagnosi & Stato Reale | Conseguenza Diretta |
+| :--- | :--- | :--- |
+| **Adapter FitNets (R2)** | **Convergenza raggiunta**. L'adapter non è la causa del metallico. | **NON serve aumentare i parametri** (es. creare un R3 da 30-50M): l'adapter già satura la mappatura verso il target disponibile. |
+| **Plateau $\text{cos\_sim} \approx 0.63$** | **Asintoto informativo atteso**. | In assenza di condizionamento sullo speaker vector nel base LLM Gemma, il coseno a ~0.63-0.65 rappresenta il limite di varianza spiegabile (prosodia/contenuto medio multi-speaker). |
+| **Sub-Talker Wrapper ([`qwen_subtalker.py`](file:///C:/Users/andre/Documents/gemma-4-omni/qwen_subtalker.py))** | I pesi estratti sono identici al teacher 1:1, ma il metodo `sample_acoustic_codes` è carente del sampling stocastico (top-k / top-p). | Il wrapper necessita del campionamento stocastico per evitare il collasso dei residui. |
+| **Code2Wav Standalone** | **Integrità verificata**. | La decodifica di codici 100% GT è limpida. Il decoder non introduce distorsioni se i codici in ingresso sono consistenti. |
+
+---
+
+## 3. PIANO DI TEST DECISIVI (Prioritizzati)
+
+Per isolare e validare sperimentalmente ogni singolo anello della catena, la sequenza di test raccomandata è la seguente:
+
+```
+[TEST 1: GT 100% Decode] ────► Verifica tetto massimo decoder su queste specifiche finestre
+       │
+[TEST 2: cb0 Solo Decode] ───► Verifica intelligibilità semantica pura (senza residui acustici)
+       │
+[TEST 3: SubTalker Temp+TopK]► Sintesi Oracle e Pred con Temperature=0.85 e Top-K=50
+       │
+[TEST 4: Speaker Embedding] ──► Estrazione ht con Speaker Vector valido a pos 6
+```
+
+### 🎯 Test 1: Sanity Ceiling — Decodifica 100% GT (Priorità Massima)
+*   **Obiettivo**: Generare `eval_r2_gt_ref_{a,b,c}.wav` passando i codici `_gt_full` (16 codebook interi del dataset) direttamente a `decoder.decode(_gt_full)`.
+*   **Esito atteso**: Audio parlato naturale e pulito. Conferma al 100% che i file parquet e il decoder sono immuni da artefatti sulle 3 finestre di eval analizzate.
+
+### 🎯 Test 2: Decodifica Parziale su Solo $cb_0$ (Isolamento Semantico)
+*   **Obiettivo**: Eseguire `decoder.decode` fornendo solo $cb_0$ GT e impostando $cb_1..cb_{15}$ a 0 (o al silenzio).
+*   **Esito atteso**: Voce intelligibile ma "telefonica/roboticamente grezza" (low-bitrate 1-quantizer). Se $cb_0$ da solo è perfettamente comprensibile, si ha la certezza matematica che i residui $cb_1..cb_{15}$ campionati con argmax stavano introducendo **interferenza distruttiva di fase/armoniche**.
+
+### 🎯 Test 3: Campionamento Stocastico Top-K / Top-P nel Sub-Talker
+*   **Obiettivo**: Rieseguire la sintesi oracle e pred con `temperature=0.85`, `top_k=50`, `top_p=0.95`.
+*   **Esito atteso**: Dissoluzione delle armoniche sinusoidali stazionarie; ripristino delle tessiture fricative e del timbro naturale.
+
+### 🎯 Test 4: Estrazione $h_t$ con Speaker Embedding Centrato
+*   **Obiettivo**: Durante l'estrazione di $h_t$, popolare lo slot `input_ids[:, 6, 1]` con il vettore 2048-dim estratto da un clip audio di riferimento tramite `speaker_encoder` (o un centroide multi-speaker).
+
+---
+
+## 4. RACCOMANDAZIONI AZIONABILI
+
+### ✅ Cosa fare subito:
+1. **Aggiornare `sample_acoustic_codes` in [`qwen_subtalker.py`](file:///C:/Users/andre/Documents/gemma-4-omni/qwen_subtalker.py)**: Introdurre il filtraggio congiunto **Temperature + Top-K (50) + Top-P (0.95)** per consentire al sub-talker di generare distribuzioni di residui stabili e non collassate.
+2. **Aggiornare la cella di valutazione in [`kernel_src/fitnets_extract_cell2.py`](file:///C:/Users/andre/Documents/gemma-4-omni/kernel_src/fitnets_extract_cell2.py)**:
+   - Includere la generazione sistematica del file di riferimento `eval_r2_gt_ref_{a,b,c}.wav` (`decoder.decode(_gt_full)`).
+   - Eseguire lo sweep di sintesi con `temperature=0.85` e `top_k=50`.
+3. **Condizionamento Speaker in Fase 1 / $h_t$ Extraction**: Fornire uno speaker embedding valido nello slot 6 per far operare il Talker 1.7B nel centro della distribuzione vocale.
+
+### ❌ Cosa NON fare (spreco di risorse GPU):
+- **NON re-addestrare l'adapter FitNets con modelli più grandi (es. R3)**: Finché l'oracolo $h_t$ reale produce audio metallico a causa del sampling deterministico, aumentare la capacità di Gemma o dell'adapter non avrà alcun impatto positivo sulla qualità audio.
+- **NON sgelare il sub-talker per fare fine-tuning**: I pesi estratti sono già quelli ottimali pre-addestrati su 5M ore. Sgelarlo con pochi sample rischierebbe di distruggere il decoder RVQ.
+
+---
+
+## 5. DESCRIZIONE DEI FIX DI CODICE PROPOSTI
+
+### 1. Modifica a `sample_acoustic_codes` in [`qwen_subtalker.py`](file:///C:/Users/andre/Documents/gemma-4-omni/qwen_subtalker.py#L361-L407)
+
+Sostituire la logica di campionamento con filtro top-k / top-p:
+
+```python
+def _sample_logits(logits: torch.Tensor, temperature: float = 0.85, top_k: int = 50, top_p: float = 0.95) -> torch.Tensor:
+    if temperature <= 0.0:
+        return logits.argmax(dim=-1)
+    
+    logits = logits / temperature
+    
+    # Filtro Top-K
+    if top_k > 0:
+        val_topk, _ = torch.topk(logits, min(top_k, logits.shape[-1]), dim=-1)
+        kth_val = val_topk[..., -1, None]
+        logits = torch.where(logits < kth_val, torch.full_like(logits, -float("Inf")), logits)
+        
+    # Filtro Top-P (Nucleus)
+    if top_p < 1.0:
+        sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
+        cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+        sorted_indices_to_remove = cumulative_probs > top_p
+        sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+        sorted_indices_to_remove[..., 0] = 0
+        indices_to_remove = sorted_indices_to_remove.scatter(dim=-1, index=sorted_indices, src=sorted_indices_to_remove)
+        logits = torch.where(indices_to_remove, torch.full_like(logits, -float("Inf")), logits)
+        
+    probs = F.softmax(logits, dim=-1)
+    return torch.multinomial(probs.reshape(-1, logits.shape[-1]), 1).reshape(logits.shape[:-1])
+```
+
+### 2. Modifica alla sezione di Sintesi in [`kernel_src/fitnets_extract_cell2.py`](file:///C:/Users/andre/Documents/gemma-4-omni/kernel_src/fitnets_extract_cell2.py#L938-L967)
+
+Aggiungere la sintesi di riferimento GT puro e parametrizzare `temperature=0.85` e `top_k=50`:
+
+```python
+# Sintesi riferimento massimo GT 100%
+wav_gt = decoder.decode(torch.from_numpy(_gt_full))
+_f_gt_name = f"{_eval_wav_pfx}_gt_ref_{_tag}.wav"
+wavfile.write(os.path.join(_outd, _f_gt_name), SAMPLE_RATE, (np.asarray(wav_gt, dtype=np.float32) * 32767).astype(np.int16))
+
+# Sintesi con sampling stocastico (temperature=0.85, top_k=50)
+with torch.inference_mode():
+    ac_p = sub_st2.sample_acoustic_codes(_hp, _cb0, temperature=0.85, top_k=50, top_p=0.95)
+    ac_t = sub_st2.sample_acoustic_codes(_ht, _cb0, temperature=0.85, top_k=50, top_p=0.95)
+```

@@ -1,0 +1,62 @@
+TASK: estendere `sample_acoustic_codes` in C:/Users/andre/Documents/gemma-4-omni/qwen_subtalker.py
+per supportare temperature DIVERSE per livello codebook residuo, con TDD.
+
+## 1. OBIETTIVO E RUOLO
+Implementa e verifica (RED->GREEN->REFACTOR) la modifica. Il metodo oggi accetta
+`temperature` (scalare, 0.0 = greedy argmax, >0 = sampling con top_k/top_p) e la
+applica identica a tutti i 15 livelli residui (loop `for g in range(1, num_code_groups)`).
+
+Contratto (VINCOLANTE):
+1. Aggiungere un parametro opzionale `temperatures_per_level: Optional[Sequence[float]] = None`.
+2. Se fornito, deve avere lunghezza esattamente `num_code_groups - 1` (15) e a ogni
+   livello g il sampling usa `temperatures_per_level[g-1]` al posto di `temperature`.
+3. Retrocompatibilita' totale: se `temperatures_per_level` e' None, comportamento
+   identico a oggi (temperature scalare su tutti i livelli). Nessun parametro
+   posizionale esistente cambia ordine o default.
+4. I valori per-livello seguono le stesse regole del valore scalare: <= 0.0 -> argmax
+   greedy per quel livello; > 0.0 -> sampling top_k/top_p/temperature per quel livello.
+5. Seed riproducibile invariato: `torch.manual_seed(seed)` una volta all'inizio.
+6. Il metodo resta puro: nessun side-effect, nessun print nuovo, shape di ritorno
+   (B, T, 15) invariata.
+7. File ASCII puro (niente caratteri >127): verifica con un check finale.
+
+## 2. CONTESTO & FILE
+- File da modificare: C:/Users/andre/Documents/gemma-4-omni/qwen_subtalker.py
+  (metodo sample_acoustic_codes, righe ~361-455; leggilo per intero prima di toccare).
+- Test esistenti: C:/Users/andre/Documents/gemma-4-omni/_test_sampling.py (5 test:
+  greedy = argmax, temperatura top_k/top_p, seed riproducibile, retrocompatibilita',
+  shape). NON romperli: devono continuare a passare.
+- Ambiente: Python 3.13 locale, torch CPU disponibile. Il modulo importa torch.
+- Pattern gia' usato nel file per il seed: torch.manual_seed(seed) all'inizio se
+  seed is not None.
+
+## 3. TDD (OBBLIGATORIO)
+1. Scrivi PRIMA i test nuovi in _test_sampling.py (o in un nuovo file _test_sampling_levels.py
+   che importa _test_sampling? NO: crea un file separato _test_sampling2.py con i test nuovi,
+   senza toccare _test_sampling.py esistente):
+   a. temperatures_per_level con 15 valori >0 produce shape (B, T, 15) e valori nel
+      range vocab.
+   b. temperatures_per_level con [0.0]*15 produce ESATTAMENTE lo stesso output del
+      greedy attuale (temperature=0.0) con lo stesso seed/h_t/cb0.
+   c. temperatures_per_level con un solo livello >0 (es. livello 1) e gli altri 0.0:
+      i livelli 2..15 devono coincidere col greedy, il livello 1 no (probabilistico).
+   d. temperatures_per_level lunghezza sbagliata (14 o 16) -> ValueError.
+   e. seed riproducibile: due chiamate con stesso seed e temperatures_per_level -> output identico.
+   f. (opzionale) validazione che il file resti ASCII puro: tutti i byte < 128.
+2. Mostra RED (i test nuovi falliscono perche' il parametro non esiste).
+3. Implementa.
+4. Mostra GREEN (tutti i test nuovi + i 5 esistenti passano).
+5. Non rifattorizzare oltre: la modifica deve essere minima.
+
+## 4. OUTPUT RICHIESTO
+- Il diff esatto delle modifiche a qwen_subtalker.py.
+- Il contenuto del file di test nuovo (_test_sampling2.py).
+- L'esito dei comandi:
+  python -m py_compile qwen_subtalker.py _test_sampling.py _test_sampling2.py
+  python _test_sampling.py
+  python _test_sampling2.py
+- Un check ASCII: `python -c "print(max(open('qwen_subtalker.py','rb').read()))"` deve
+  stampare un valore < 128.
+
+Attenzione: NON modificare _test_sampling.py esistente, NON toccare altri metodi della
+classe, NON cambiare firme di altri metodi. Modifica minima e chirurgica.
