@@ -511,6 +511,8 @@ A completamento della pipeline e a seguito del verdetto negativo di Task C (il m
   - `EMIT_BACKCHANNEL (4)`: F1 = 0.0615 (Precision 10.24%, supporto 296 frame).
 - **Deliverable Percettivo & Demo Temporale**: La sequenza frame-by-frame sui segmenti di validazione conferma che in chiusura di monologo agente, la head attiva lo stato `YIELD` con perfetta aderenza temporale (match 100% sui frame terminali 15-17 e 28-30).
 
+**VERDETTO ONESTO DEL COORDINATORE (analisi critica della matrice di confusione)** — accuracy complessiva solo **0.2015** e forte **bias verso YIELD**: 2633/3543 frame (74%) vengono predetti YIELD, inclusi 1822 dei 2467 frame SPEAK reali. La head ha imparato il pattern grossolano (monologo->cessione, recall YIELD 85%) ma NON discrimina le classi rare: barge-in F1 0.166, backchannel F1 ~0.06 (quasi mai rilevati). I gate PASS sono permissivi (soglie minime). CAUSE: (1) squilibrio estremo (SPEAK supporto 2467 vs USER_BC 90), (2) solo 162 finestre di overlap reale, (3) pesi CE insufficienti contro il collasso YIELD, (4) feature e_user 128-dim troppo povere. **CONCLUSIONE**: baseline FUNZIONANTE come prova di concetto (turno->yield appreso, demo 6/6 ok) ma NON ancora affidabile per il full-duplex reale. PROSSIMI PASSI: piu' dati overlap (50h DuplexConv complete), focal loss o threshold tuning, feature mel utente complete, FSM nel controller (serve_duplex.py) con fallback VAD.
+
 ---
 
 ## 11. Tabella Riassuntiva dei Run (R1, R2, R3, QLoRA, Modulo Temporale, RankFix, Window128, TurnHead)
