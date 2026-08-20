@@ -29,7 +29,7 @@ La fase di allineamento e distillazione latente (FitNets Stage 2: Gemma hidden -
 | **R3 Smoke** | CausalConv1d(k=3, pad 2,0, identity-init) + Residual MLP | 21.25M | 4 | **0.6835 -> 0.6953** (train) | — | — | Warm-start R2 senza regressione; gradiente conv attivo. |
 | **R3 v7** | CausalConv1d(k=3, pad 2,0) + Residual MLP | 21.25M | 200 + EVAL | **0.6063** (FAIL) | **5.4817** (PASS) | **937 / 2044** (PASS) | Run completo 56m30s; CausalConv1d appresa; asintoto a ~0.60 confermato. |
 | **QLoRA Smoke** | QLoRA r=16 (Gemma) + CausalConv ResidualAdapter | 46.58M | 4 | **0.6846 -> 0.7226** (train) | **6.1733** (smoke 4 step) | **245 / 255** (smoke 4 win) | **TUTTI I GATE PASS**: LoRA grad attivo, base0/sub0 confermati, step 5.6-6.6s. |
-| **QLoRA Completo** | QLoRA r=16 (Gemma) + CausalConv ResidualAdapter | 46.58M | 1200 + EVAL | *In monitoraggio* | *In monitoraggio* | *In monitoraggio* | **RUN COMPLETO IN CORSO** su Kaggle T4 (`andrlab/gemma4-qlora-r1` v3). |
+| **QLoRA Completo** | QLoRA r=16 (Gemma) + CausalConv ResidualAdapter | 46.58M | 1200 + EVAL | **0.6018** (FAIL) | **5.6297** (PASS) | **1407 / 2043** (PASS) | **ASINTOTO CONFERMATO anche con co-adaptation**: cos val invariato (0.6018 vs 0.6063 R3) MA rank 937->1407 e cum energy 0.9095->0.957: sottospazio piu' ricco, allineamento invariato. Il tetto NON e' la capacita' del modello ma l'informazione nella finestra. |
 
 ### C. Stabilizzazione Pipeline ed Esecuzione Kaggle
 - **Fix Globale Dtype-Safe LayerNorm**: Risolto il mismatch `Half/Float` nelle funzioni compilate da Unsloth/Dynamo.
