@@ -312,6 +312,9 @@ Nonostante:
 19. **Bachlechner, T. et al.** (2021). *ReZero is All You Need: Fast Convergence in Deep Networks*. UAI 2021, arXiv:2003.04887.
 20. **Copet, J. et al.** (2024). *Simple and Controllable Music Generation*. NeurIPS 2023 / IEEE TASLP 2024.
 21. **Perez, E., Strub, F., de Vries, H., Dumoulin, V., & Courville, A.** (2018). *FiLM: Visual Reasoning with a General Conditioning Layer*. AAAI 2018.
+22. **Zhang, H., Li, W., Chen, R., Kothapally, V., Yu, M., & Yu, D. (Tencent AI Lab)** (2026). *LM-Enhanced Dialogue Management for Full-Duplex Spoken Dialogue Systems*. arXiv:2502.14145v3.
+23. **Veluri, B., Peloquin, B. N., Yu, B., Gong, H., & Gollakota, S. (Meta AI / Univ. of Washington)** (2024). *Beyond Turn-Based Interfaces: Synchronous LLMs as Full-Duplex Dialogue Agents*. EMNLP 2024, pp. 21390-21402.
+24. **Li, J. et al.** (2026). *Easy Turn: A 1145-Hour Open Turn-Taking Corpus and Multi-State Turn Detector*. Cited in Lu et al. (2026).
 
 ---
 *Report redatto e certificato in conformita' con i protocolli di validazione scientifica del progetto Gemma-4-Omni.*
