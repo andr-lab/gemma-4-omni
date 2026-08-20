@@ -69,6 +69,10 @@ try:
     STAGE2_LAMBDA_COUPLING = float(os.environ.get("STAGE2_LAMBDA_COUPLING", "0.2"))
     STAGE2_CKPT_EVERY = int(os.environ.get("STAGE2_CKPT_EVERY", "2" if SMOKE else "250"))
 
+    # --- Decorrelazione Ortogonale / Rank Enhancement (DeCov & Barlow Twins) ---
+    RANK_ENHANCE = int(os.environ.get("RANK_ENHANCE", "0"))
+    STAGE2_LAMBDA_RANK = float(os.environ.get("STAGE2_LAMBDA_RANK", "0.5"))
+
     # --- Valutazione Offline & Sintesi Audio (EVAL TEMPORAL 2) ---
     EVAL_TEMPORAL2 = int(os.environ.get("EVAL_TEMPORAL2", os.environ.get("EVAL_TEMPORAL", "1")))
     EVAL_N_VAL = int(os.environ.get("EVAL_N_VAL", "4" if SMOKE else "100"))
@@ -580,6 +584,8 @@ try:
             DEV2 = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
             print(f"[TEMPORAL2_ACTIVE] Modulo Temporale Causale v2 attivo: layers={TEMPORAL_LAYERS} dim={TEMPORAL_DIM} heads={TEMPORAL_HEADS} ff_dim={TEMPORAL_FF_DIM} window={ST2_T} (5.12s) ReZero=1", flush=True)
+            if RANK_ENHANCE == 1:
+                print(f"[RANK_ENHANCE_ACTIVE] Penalita decorrelazione ortogonale attiva: lambda_rank={STAGE2_LAMBDA_RANK}", flush=True)
             print(f"[TEMPORAL2] cfg: batches={PHASE2_SMOKE_BATCHES} bs={STAGE2_BATCH_SIZE} "
                   f"accum={STAGE2_GRAD_ACCUM} lr_adapter={TEMPORAL_LR_ADAPTER} lr_module={TEMPORAL_LR_MODULE} "
                   f"warmup={TEMPORAL_WARMUP_STEPS} min_ratio={TEMPORAL_MIN_LR_RATIO} lambda_c={STAGE2_LAMBDA_COUPLING} "
@@ -733,7 +739,7 @@ try:
             print(f"[TEMPORAL2] Inizio training loop: {PHASE2_SMOKE_BATCHES} step...", flush=True)
             for step in range(1, PHASE2_SMOKE_BATCHES + 1):
                 t0s = time.time()
-                acc_loss = acc_lat = acc_coup = acc_cos = 0.0
+                acc_loss = acc_lat = acc_coup = acc_cos = acc_rank = 0.0
                 for _mi in range(STAGE2_GRAD_ACCUM):
                     wins = [train_wins[(win_cursor + i) % avail] for i in range(STAGE2_BATCH_SIZE)]
                     win_cursor = (win_cursor + STAGE2_BATCH_SIZE) % avail
@@ -793,12 +799,33 @@ try:
                     sub_logits = sub_st2.forward_sub_talker_finetune(h_t_sub, audio_targets)
                     L_coup = sub_st2.coupling_loss(sub_logits, audio_targets, frame_weights=active_mask)
 
-                    micro_loss = (L_latent + STAGE2_LAMBDA_COUPLING * L_coup) / STAGE2_GRAD_ACCUM
+                    # Decorrelation / Orthogonality Penalty (Barlow Twins / DeCov: Cogswell et al. 2016, Zbontar et al. 2021)
+                    if RANK_ENHANCE == 1:
+                        _act_flat = active_mask.view(-1)
+                        _idx_act = torch.nonzero(_act_flat > 0.5).squeeze(-1)
+                        if _idx_act.numel() > 1:
+                            _z = h_t_pred.view(-1, 2048)[_idx_act]
+                            _M = float(_z.shape[0])
+                            _D = float(_z.shape[1])
+                            _z_cent = _z - _z.mean(dim=0, keepdim=True)
+                            _std = torch.sqrt((_z_cent ** 2).mean(dim=0, keepdim=True) + 1e-6)
+                            _z_norm = _z_cent / _std
+                            _corr = torch.matmul(_z_norm.t(), _z_norm) / _M
+                            _frob_sq = (_corr ** 2).sum()
+                            L_rank = (_frob_sq - _D) / (_D * (_D - 1.0))
+                            L_rank = L_rank.clamp(min=0.0)
+                        else:
+                            L_rank = torch.tensor(0.0, device=DEV2, dtype=torch.float32)
+                    else:
+                        L_rank = torch.tensor(0.0, device=DEV2, dtype=torch.float32)
+
+                    micro_loss = (L_latent + STAGE2_LAMBDA_COUPLING * L_coup + (STAGE2_LAMBDA_RANK * L_rank if RANK_ENHANCE == 1 else 0.0)) / STAGE2_GRAD_ACCUM
                     micro_loss.backward()
 
                     acc_loss += micro_loss.item() * STAGE2_GRAD_ACCUM
                     acc_lat += L_latent.item()
                     acc_coup += L_coup.item()
+                    acc_rank += L_rank.item() if RANK_ENHANCE == 1 else 0.0
                     acc_cos += mean_cos.item()
 
                 # Gradient Verification Gates
@@ -823,6 +850,7 @@ try:
                     "loss": round(acc_loss / STAGE2_GRAD_ACCUM, 4),
                     "latent": round(acc_lat / STAGE2_GRAD_ACCUM, 4),
                     "coupling": round(acc_coup / STAGE2_GRAD_ACCUM, 4),
+                    "rank_loss": round(acc_rank / STAGE2_GRAD_ACCUM, 6) if RANK_ENHANCE == 1 else 0.0,
                     "cos_sim": round(acc_cos / STAGE2_GRAD_ACCUM, 4),
                     "grad_norm": round(float(gn.item()), 4) if hasattr(gn, "item") else float(gn),
                     "adapter_grad_active": adapt_g,
@@ -833,8 +861,9 @@ try:
                 }
                 step_logs.append(info)
 
+                _rk_str = f" rk {info['rank_loss']:.6f}" if RANK_ENHANCE == 1 else ""
                 print(f"[TEMPORAL2] step {step}/{PHASE2_SMOKE_BATCHES} | lr_a {info['lr_adapter']:.2e} lr_t {info['lr_temporal']:.2e} "
-                      f"| loss {info['loss']:.4f} (lat {info['latent']:.4f} coup {info['coupling']:.4f}) "
+                      f"| loss {info['loss']:.4f} (lat {info['latent']:.4f} coup {info['coupling']:.4f}{_rk_str}) "
                       f"| cos {info['cos_sim']:.4f} | grad {info['grad_norm']:.4f} "
                       f"| adapt_g {info['adapter_grad_active']} temp_g {info['temporal_grad_active']} "
                       f"base0 {info['base_grad_zero']} sub0 {info['sub_grad_zero']} "
@@ -877,6 +906,8 @@ try:
                     "weight_decay": STAGE2_WEIGHT_DECAY,
                     "grad_clip": STAGE2_GRAD_CLIP,
                     "lambda_coupling": STAGE2_LAMBDA_COUPLING,
+                    "rank_enhance": RANK_ENHANCE,
+                    "lambda_rank": STAGE2_LAMBDA_RANK if RANK_ENHANCE == 1 else 0.0,
                 },
                 "gates": {
                     "base_frozen_verified": all(s["base_grad_zero"] for s in step_logs),
