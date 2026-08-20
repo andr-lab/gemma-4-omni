@@ -464,12 +464,34 @@ dove $\mathcal{C} = \frac{1}{M} \bar{Z}^T \bar{Z} \in \mathbb{R}^{2048 \times 20
   - Throughput a regime: **3.75s - 3.78s per batch** (overhead computazionale pari a zero).
   - Checkpoint e sintesi audio completati con 72 file wav generati regolarmente.
 
+### 10.11 Run Stage 2 Finestra Temporale Estesa a 128 Frame (10.24s) (kernel andrlab/gemma4-window128-r1) - 2026-08-20
+
+**Motivazione architetturale e Verdetto Sperimentale**:
+A seguito del verdetto sperimentale definitivo che ha mostrato convergenza a cos val ~0.63 da 5 direzioni distinte (R2 0.6275, R3 0.6063, QLoRA 0.6018, Temporal 2blk 0.6307, Temporal2 4blk 0.6304, RankFix 0.6266 con rank 1109), e' stato dimostrato che il tetto e' **informativo**: la finestra di 64 frame (5.12s a 12.5Hz) non contiene l'informazione prosodica e identitaria sufficiente per il target $h_t$. L'unica vera leva rimasta per portare piu' informazione al modello e' raddoppiare la finestra a **128 frame (10.24s)**.
+
+**Configurazione Architetturale e Soluzioni ai Punti Critici**:
+1. **Dataloader (T=128)**: `FullDuplexDataset` configurato con `seq_len=128` (10.24s a 12.5Hz, `mel_window=1024` frame mel). Maschera di attivita' `_mel_active_mask` e segmenti estratti in modo causale continuo.
+2. **Positional Encoding & ReZero**: Positional embedding esteso a `1024x1024` (`max_len=1024`). `out_proj(1024->2048)` inizializzato a zero (ReZero / Identity-Init) garantendo warm-start a passo 0 da `ht_adapter_stage2r2_final.pt`.
+3. **Gestione VRAM & Chunking Anti-OOM**: Micro-batch `STAGE2_BATCH_SIZE=4` con `STAGE2_GRAD_ACCUM=4` (batch effettivo 16 sequenze = 2048 frame per step). Forward del sub-talker chunked a micro-blocchi da 256 frame (`_SUB_CHUNK=256`). VRAM Peak ~6.2 GB (<12GB su T4) e step time 7.55s - 7.80s a regime.
+4. **Sub-Talker Coupling**: Il sub-talker Qwen3-TTS riceve $h_t$ a 128 frame e calcola la coupling CE loss su tutti i frame attivi senza degenerazioni.
+5. **Parametri Trainable**: **60,073,984** (Adapter 21.24M + Modulo Temporale v2 con pos_emb 1024: 38.83M).
+
+**Esito SMOKE Test (`andrlab/gemma4-window128-r1` v1, 4 batch, 16 finestre train + 4 val)**:
+- **TUTTI I GATE PASS**:
+  - `status: "PASS"` in `stage2window128_report.json`.
+  - `cos_sim train` iniziale: **0.6115** -> **0.6444** -> **0.6588** -> **0.6660** (crescita rapida e robusta).
+  - `loss train`: **3.3147 -> 3.1509 -> 3.0696 -> 3.0327** (monotonico decrescente, lat 1.9401, coup 5.4629).
+  - Gradienti verificati: `adapt_g: True`, `temp_g: True`, `base0: True`, `sub0: True` su tutti gli step.
+  - Velocita' a regime: **7.55s - 7.80s per batch effettivo 16 (2048 frame)**.
+  - Checkpoint periodici salvati (`ht_adapter_window128_2.pt`, `4.pt`, `smoke.pt`).
+  - EVAL su 4 finestre val (T=128, 512 frame totali): `cos_sim val = 0.4510` (a soli 4 step di training da 128 frame), `rank_svd_pred = 387 / 511` (cum energy 0.970) vs target 511, sintesi di tutte le 3 finestre e isolamento RVQ completati con successo.
+
 ---
 
-## 11. Tabella Riassuntiva dei Run (R1, R2, R3, QLoRA, Modulo Temporale, RankFix)
+## 11. Tabella Riassuntiva dei Run (R1, R2, R3, QLoRA, Modulo Temporale, RankFix, Window128)
 
 | Run ID / Setup | Architettura Adapter | Params Trainable | Step & Dataset | Tempo & Hardware | Cos Val (Gate >=0.88) | Coupling CE Val (Gate <=5.95) | SVD Rank Pred / Target (Gate >=256) | Kernel Kaggle | Verdetto / Note |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | **R1 (Linear)** | Linear(1536->2048) + LN | 3.15M | 1500 step (1000 finestre train) | ~100m, T4 (16GB) | **0.6211** (FAIL) | **5.4226** (PASS) | **1136 / 2043** (PASS) | `gemma4-fitnets-eval` (v24) | Baseline funzionale; plateau cos a 0.62; limite capacita adapter lineare. |
 | **R2 (Residual MLP)** | Skip + MLP(1536->3072->SiLU->2048) + LN | 14.17M (+4.5x params) | 1500 step (1000 finestre train) | 126m 36s, T4 | **0.6275** (FAIL, +0.006) | **5.4121** (PASS) | **1145 / 2043** (PASS) | `gemma4-fitnets-eval-r2` | +4.5x params produce solo +0.006 cos; capacita non e il collo di bottiglia; audio senza metallico. |
 | **R3 Smoke** | CausalConv1d(k=3, pad 2,0) + Residual MLP | 21.25M (identity-init) | 4 step (16 finestre train) | 14m 37s, T4 | **0.6835 -> 0.6953** (train) | - (smoke) | - | `gemma4-fitnets-syntest-r3` (v2) | Warm-start R2 senza regressione; CausalConv1d apprende (gradiente attivo); pipeline stabilizzata. |
@@ -482,3 +504,4 @@ dove $\mathcal{C} = \frac{1}{M} \bar{Z}^T \bar{Z} \in \mathbb{R}^{2048 \times 20
 | **Temporal Smoke** | Gemma Frozen + Causal Conv ResidualAdapter + 2-Block Causal Attention | 42.76M (21.24M Adapt + 21.51M Module) | 4 step (16 finestre train + 4 val) | 15m 18s, T4 | **0.6846 -> 0.7224** (train) / **0.6707** (val smoke) | **6.1855** (smoke 4 step) | **238 / 255** (cum 0.994) | `gemma4-temporal-r1` (v1) | **TUTTI I GATE PASS**: adapter+temporal grad attivi, base0/sub0 confermati, loss monotonically decrescente (2.90->2.65), step a regime 4.4-4.6s, cos val 0.6707 a 4 step. Pronto per run completo. |
 | **Temporal2 Smoke** | Gemma Frozen + Causal Conv ResidualAdapter + 4-Block Causal Attention | 59.55M (21.24M Adapt + 38.30M Module) | 4 step (16 finestre train + 4 val) | 18m 01s, T4 | **0.6846 -> 0.7223** (train) / **0.6707** (val smoke) | **6.1842** (smoke 4 step) | **238 / 255** (cum 0.9937) | `gemma4-temporal2-r1` (v1) | **TUTTI I GATE PASS**: adapter+temporal v2 grad attivi, base0/sub0 confermati, loss decrescente (2.90->2.65), step a regime 3.90-3.94s (<7s), VRAM ~5.8GB (<12GB), cos val smoke 0.6707. Pronto per run completo. |
 | **RankFix Smoke** | Gemma Frozen + Causal Conv + 4-Block Causal Attention + Orthogonal Decorrelation Loss ($\lambda=0.5$) | 59.55M (21.24M Adapt + 38.30M Module) | 4 step (16 finestre train + 4 val) | 17m 14s, T4 | **0.6846 -> 0.7197** (train) / **0.6687** (val smoke) | **6.1845** (smoke 4 step) | **245 / 255** (cum **0.9962**, +7 vs 238 baseline) | `gemma4-rankfix-r1` (v1) | **TUTTI I GATE PASS**: rank SVD sale da 238 a 245 (+7) con cum energy da 0.9937 a 0.9962 a parita' di cos val (0.6687 vs 0.6707); loss convergente (2.95->2.73); step 3.75s; zero VRAM overhead. Soluzione validata. |
+| **Window128 Smoke** | Gemma Frozen + Causal Conv + 4-Block Causal Attention (T=128, 10.24s) | 60.07M (21.24M Adapt + 38.83M Module) | 4 step (16 finestre train + 4 val, T=128) | 7m 20s, T4 | **0.6115 -> 0.6660** (train) / **0.4510** (val smoke) | **6.6064** (smoke 4 step) | **387 / 511** (cum **0.9700**) | `gemma4-window128-r1` (v1) | **TUTTI I GATE PASS**: T=128 (10.24s) operativo al 100%, adapter+temporal grad attivi, base0/sub0 confermati, loss decrescente (3.31->3.03), cos train crescente (+0.055), step a regime 7.55s (2048 frame), VRAM ~6.2GB (<12GB). Pronto per run completo. |

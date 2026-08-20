@@ -1,0 +1,544 @@
+Input dataset files: ['qwen_subtalker.py', 'extract_qwen_subtalker.py', 'code2wav_weights', 'qwen_subtalker', 'checkpoints', 'data', 'kaggle_pipeline.py', 'code2wav_decoder.py']
+_INPUT = /kaggle/input/datasets/andrlab/gemma-4-omni-module | _CKPT_INPUT = None
+ht_adapter R2 copiato da /kaggle/input/datasets/andrlab/gemma4-ht-adapter-r2/ht_adapter_stage2r2_final.pt a checkpoints/ht_adapter_stage2r2_final.pt
+parquet 50h presente: True
+=== SETUP COMPLETATO ===
+GPU rilevata: Tesla T4 | compute capability: 7
+>>> GPU Volta/Turing+ rilevata: installo stack aggiornato <<<
+stack cu128 rc: 0 s behaviour is the source of the following dependency conflicts.
+bigframes 2.39.0 requires google-cloud-bigquery-storage<3.0.0,>=2.30.0, which is not installed.
+google-adk 1.29.0 requires google-cloud-bigquery-storage>=2.0.0, which is not installed.
+
+transformers: 5.5.0
+unsloth: 2026.8.18
+peft: 0.19.1
+torch: 2.10.0+cu128
+check cuda: cuda ok: True Tesla T4
+[INIT] Patch globale _dtype_safe_torch_layer_norm applicata a torch e F.layer_norm
+[Pipeline Inizializzata] Modello Backbone: unsloth/gemma-4-E2B-it
+[Pipeline Inizializzata] Device attivo: cuda
+[Pipeline Secrets] Avviso caricamento secret Kaggle: Connection error trying to communicate with service.
+[PATCH sample_acoustic_codes] upgrade (top_k/top_p/seed/per-level)
+[PATCH sample_acoustic_codes] applicata con successo
+ROPE_FIX applicato: _forward_flat usa S=16 posizioni reali
+THETA_FIX installato: load_qwen_subtalker patcha rope_theta a 1e6
+[Disco] File temporanei pesanti su: /root/kaggle_big
+[Fase 1/2 - Memmap] Conversione parquet -> binari .dat (RAM peak ~3.3GB/file, una tantum)...
+  mel_user.dat scritto (3.56 GB).
+  mel_agent.dat scritto (3.56 GB).
+  codes.dat scritto (55.7 MB).
+[Fase 1/2 - Memmap] Conversione completata.
+[Fase 2 - DataLoad] Caricamento dati da cache Parquet: data/train_tokens_50.0h_2500s.parquet...
+[Fase 2 - DataLoad] Sidecar iperparametri non trovato (data/train_tokens_50.0h_2500s_hyperparams.json); uso i default del modulo.
+[Fase 2 - DataLoad] MEMORY-MAPPED: 1740383 frame agente (mel utente 13923064x128 float16 mmap, mel agente 13923064x128 mmap) in 0.00s (0 copie in RAM).
+[Fase 2 - DataLoad] Testo risposta agente: 20116/27194 finestre.
+[Fase 2 - DataLoad] Caricati 1740383 frame agente (mel utente 13923064x128, mel agente 13923064x128) da Parquet in 1.3181s.
+split train=[0,1566344) | ds_train (seq_len=128, 10.24s): 12237 finestre
+repo Qwen3-TTS clonato e importato (tokenizer sox bypassati)
+teacher caricato in 56.1s | talker hidden=2048 layers=28
+raccolte 16 finestre train (T=128, EXTRACT_N=16, SMOKE=1)
+
+================================================================================
+=== STAGE 2 WINDOW 128: CAUSAL TEMPORAL RESIDUAL ADAPTER V2 (T=128, 10.24s) -> h_t ===
+================================================================================
+[WINDOW128_ACTIVE] Modulo Temporale Causale v2 attivo: window=128 (10.24s) T=128 layers=4 dim=1024 heads=8 ff_dim=2048 ReZero=1
+[WINDOW128] cfg: batches=4 bs=4 accum=4 lr_adapter=0.00015 lr_module=0.00015 warmup=1 min_ratio=0.1 lambda_c=0.2 temp_dim=1024 temp_layers=4 temp_heads=8 temp_ff=2048
+THETA_FIX applicato: rope_theta 10000 -> 1000000 (rotary_emb ricreata)
+[WINDOW128] sub-talker caricato bf16 da /kaggle/input/datasets/andrlab/gemma-4-omni-module/qwen_subtalker e CONGELATO (181,417,216 params)
+[WINDOW128] Sposto teacher su CPU durante il caricamento di Gemma 4 E2B...
+ðŸ¦¥ Unsloth: Will patch your computer to enable 2x faster free finetuning.
+ðŸ¦¥ Unsloth Zoo will now patch everything to make training faster!
+==((====))==  Unsloth 2026.8.18: Fast Gemma4 patching. Transformers: 5.5.0.
+   \\   /|    Tesla T4. Num GPUs = 1. Max memory: 14.562 GB. Platform: Linux.
+O^O/ \_/ \    Torch: 2.10.0+cu128. CUDA: 7.5. CUDA Toolkit: 12.8. Triton: 3.6.0
+\        /    Bfloat16 = FALSE. FA [Xformers = 0.0.35. FA2 = False]
+ "-____-"     Free license: http://github.com/unslothai/unsloth
+Unsloth: Fast downloading is enabled - ignore downloading bars which are red colored!
+Unsloth: Using float16 precision for gemma4 won't work! Using float32.
+[WINDOW128] Gemma 4 E2B caricata in 4-bit su cuda:0 e CONGELATA (requires_grad=False)
+[WINDOW128] hidden_size LLM rilevato: 1536 | TemporalResidualAdapter v2 istanziato
+[WINDOW128] warm-start ht_adapter_stage2r2_final da checkpoints/ht_adapter_stage2r2_final.pt (in ht_model.adapter, missing keys: ['causal_conv.conv.weight'])
+[WINDOW128] PARAMETRI: Adapter=21,244,928 | Modulo_Temporale=38,829,056 | Base_Frozen=4,408,311,328 | Sub_Frozen=181,417,216
+[WINDOW128] TOTALE TRAINABLE: 60,073,984
+Ignored unknown kwarg option close
+Ignored unknown kwarg option close
+Ignored unknown kwarg option open
+Ignored unknown kwarg option close
+Ignored unknown kwarg option content_args
+Ignored unknown kwarg option open_pattern
+Ignored unknown kwarg option repeats
+Ignored unknown kwarg option transform
+Ignored unknown kwarg option close
+Ignored unknown kwarg option close
+Ignored unknown kwarg option open
+Ignored unknown kwarg option close
+Ignored unknown kwarg option content_args
+Ignored unknown kwarg option open_pattern
+Ignored unknown kwarg option repeats
+Ignored unknown kwarg option transform
+[WINDOW128] estrazione target h_t per 16 finestre (T=128, teacher, no_grad)...
+[WINDOW128] target estratti: 16 in 5.1s; teacher riportato su CPU (zero VRAM)
+[WINDOW128] Inizio training loop: 4 step (T=128, bs=4, accum=4)...
+[WINDOW128] step 1/4 | lr_a 1.50e-04 lr_t 1.50e-04 | loss 3.3147 (lat 2.1781 coup 5.6829) | cos 0.6115 | grad 2.7205 | adapt_g True temp_g True base0 True sub0 True | 78.87s
+[WINDOW128] step 2/4 | lr_a 1.16e-04 lr_t 1.16e-04 | loss 3.1509 (lat 2.0403 coup 5.5533) | cos 0.6444 | grad 1.0707 | adapt_g True temp_g True base0 True sub0 True | 7.55s
+[WINDOW128] checkpoint periodico: checkpoints/ht_adapter_window128_2.pt
+[WINDOW128] step 3/4 | lr_a 4.87e-05 lr_t 4.87e-05 | loss 3.0696 (lat 1.9722 coup 5.4869) | cos 0.6588 | grad 0.8755 | adapt_g True temp_g True base0 True sub0 True | 7.67s
+[WINDOW128] step 4/4 | lr_a 1.50e-05 lr_t 1.50e-05 | loss 3.0327 (lat 1.9401 coup 5.4629) | cos 0.6660 | grad 0.6770 | adapt_g True temp_g True base0 True sub0 True | 7.8s
+[WINDOW128] checkpoint periodico: checkpoints/ht_adapter_window128_4.pt
+[WINDOW128] Checkpoint salvato in: checkpoints/ht_adapter_window128_smoke.pt
+[WINDOW128] Report salvato in: ./stage2window128_report.json
+>>> STAGE 2 WINDOW 128 COMPLETATO CON STATUS: PASS <<<
+
+================================================================================
+=== EVAL_WINDOW128: VALUTAZIONE ADAPTER TEMPORALE V2 SU VAL SPLIT (T=128, 10.24s) ===
+================================================================================
+[EVAL_WINDOW128] checkpoint model: checkpoints/ht_adapter_window128_smoke.pt
+[EVAL_WINDOW128] finestre val: 4 (idx 1000..1003, n_avail=12237, T=128)
+[EVAL_WINDOW128] estrazione target h_t val (4 finestre, T=128, teacher no_grad)...
+[EVAL_WINDOW128] target val estratti in 2.0s; teacher su CPU
+[EVAL_WINDOW128] riuso Gemma E2B dello STAGE2 (in VRAM)
+Ignored unknown kwarg option close
+Ignored unknown kwarg option close
+Ignored unknown kwarg option open
+Ignored unknown kwarg option close
+Ignored unknown kwarg option content_args
+Ignored unknown kwarg option open_pattern
+Ignored unknown kwarg option repeats
+Ignored unknown kwarg option transform
+Ignored unknown kwarg option close
+Ignored unknown kwarg option close
+Ignored unknown kwarg option open
+Ignored unknown kwarg option close
+Ignored unknown kwarg option content_args
+Ignored unknown kwarg option open_pattern
+Ignored unknown kwarg option repeats
+Ignored unknown kwarg option transform
+[Code2Wav] transformers non carica il decoder (The checkpoint you are trying to load has model type `qwen3_tts_tokenizer_12hz` but Transformers does not recognize this architecture. This could be because of an issue with the checkpoint, or because your version of Transformers is out of date.
+
+You can update Transformers with the command `pip install --upgrade transformers`. If this does not work, and the checkpoint is very new, then there may not be a release version that supports this model yet. In this case, you can get the most up-to-date code by installing Transformers from source with the command `pip install git+https://github.com/huggingface/transformers.git`): provo la replica standalone...
+[Code2Wav] âœ… Replica standalone torch pura caricata (code2wav_weights, 271 tensori, upsample x1920).
+[EVAL_WINDOW128] val (T=128): cos_sim=0.4510 | mse=4.1361 | coupling_ce=6.6064
+[EVAL_WINDOW128] rank SVD effettivo (T=128): h_t_pred=387 (cum 0.970) | h_t_target=511 (cum 1.000)
+[EVAL_WINDOW128] finestre selezionate per sintesi (T=128):
+  [a] idx=1000 | n_real=128 | n_active=128 | rms_gt=0.056294
+  [b] idx=1003 | n_real=128 | n_active=128 | rms_gt=0.051363
+  [c] idx=1001 | n_real=128 | n_active=128 | rms_gt=0.049754
+[EVAL_WINDOW128] synth a: idx=1000 n_active=128 rms_gt=0.0563
+  oracle: greedy=0.0068 | t01=0.0094 | t03=0.0094 | t09=0.0031 | tdecay=0.0047
+  pred: greedy=0.0042 | t01=0.0036 | t03=0.0042 | t09=0.0026 | tdecay=0.0026
+[EVAL_WINDOW128] synth b: idx=1003 n_active=128 rms_gt=0.0514
+  oracle: greedy=0.0115 | t01=0.0104 | t03=0.0125 | t09=0.0089 | tdecay=0.0104
+  pred: greedy=0.0057 | t01=0.0057 | t03=0.0026 | t09=0.0021 | tdecay=0.0031
+[EVAL_WINDOW128] synth c: idx=1001 n_active=128 rms_gt=0.0498
+  oracle: greedy=0.0281 | t01=0.0281 | t03=0.0229 | t09=0.0172 | tdecay=0.0182
+  pred: greedy=0.0167 | t01=0.0187 | t03=0.0182 | t09=0.0146 | tdecay=0.0182
+{
+  "status": "OK",
+  "phase": "EVAL_WINDOW128",
+  "ckpt": "checkpoints/ht_adapter_window128_smoke.pt",
+  "window_t": 128,
+  "window_duration_s": 10.24,
+  "n_val": 4,
+  "val_idx_range": [
+    1000,
+    1003
+  ],
+  "cos_sim": 0.451,
+  "mse": 4.1361,
+  "coupling_ce": 6.6064,
+  "rank_svd_pred": 387,
+  "rank_svd_target": 511,
+  "cum_energy_pred": 0.9703,
+  "cum_energy_target": 1.0,
+  "sampling_protocol": {
+    "temperature": 0.9,
+    "top_k": 50,
+    "top_p": 1.0,
+    "seed": 1234
+  },
+  "variants": [
+    "greedy",
+    "t01",
+    "t03",
+    "t09",
+    "tdecay"
+  ],
+  "synth_samples": [
+    {
+      "tag": "a",
+      "idx": 1000,
+      "n_active": 128,
+      "rms_gt": 0.056294,
+      "acc": {
+        "oracle_greedy": 0.0068,
+        "oracle_t01": 0.0094,
+        "oracle_t03": 0.0094,
+        "oracle_t09": 0.0031,
+        "oracle_tdecay": 0.0047,
+        "pred_greedy": 0.0042,
+        "pred_t01": 0.0036,
+        "pred_t03": 0.0042,
+        "pred_t09": 0.0026,
+        "pred_tdecay": 0.0026
+      },
+      "sampling": {
+        "top_k": 50,
+        "top_p": 1.0,
+        "seed": 1234
+      },
+      "variants": [
+        "greedy",
+        "t01",
+        "t03",
+        "t09",
+        "tdecay"
+      ],
+      "files": {
+        "gt_ref": "eval_window128_gt_ref_a.wav",
+        "oracle_greedy": "eval_window128_oracle_a_greedy.wav",
+        "oracle_t01": "eval_window128_oracle_a_t01.wav",
+        "oracle_t03": "eval_window128_oracle_a_t03.wav",
+        "oracle_t09": "eval_window128_oracle_a_t09.wav",
+        "oracle_tdecay": "eval_window128_oracle_a_tdecay.wav",
+        "pred_greedy": "eval_window128_pred_a_greedy.wav",
+        "pred_t01": "eval_window128_pred_a_t01.wav",
+        "pred_t03": "eval_window128_pred_a_t03.wav",
+        "pred_t09": "eval_window128_pred_a_t09.wav",
+        "pred_tdecay": "eval_window128_pred_a_tdecay.wav"
+      },
+      "status": "OK"
+    },
+    {
+      "tag": "b",
+      "idx": 1003,
+      "n_active": 128,
+      "rms_gt": 0.051363,
+      "acc": {
+        "oracle_greedy": 0.0115,
+        "oracle_t01": 0.0104,
+        "oracle_t03": 0.0125,
+        "oracle_t09": 0.0089,
+        "oracle_tdecay": 0.0104,
+        "pred_greedy": 0.0057,
+        "pred_t01": 0.0057,
+        "pred_t03": 0.0026,
+        "pred_t09": 0.0021,
+        "pred_tdecay": 0.0031
+      },
+      "sampling": {
+        "top_k": 50,
+        "top_p": 1.0,
+        "seed": 1234
+      },
+      "variants": [
+        "greedy",
+        "t01",
+        "t03",
+        "t09",
+        "tdecay"
+      ],
+      "files": {
+        "gt_ref": "eval_window128_gt_ref_b.wav",
+        "oracle_greedy": "eval_window128_oracle_b_greedy.wav",
+        "oracle_t01": "eval_window128_oracle_b_t01.wav",
+        "oracle_t03": "eval_window128_oracle_b_t03.wav",
+        "oracle_t09": "eval_window128_oracle_b_t09.wav",
+        "oracle_tdecay": "eval_window128_oracle_b_tdecay.wav",
+        "pred_greedy": "eval_window128_pred_b_greedy.wav",
+        "pred_t01": "eval_window128_pred_b_t01.wav",
+        "pred_t03": "eval_window128_pred_b_t03.wav",
+        "pred_t09": "eval_window128_pred_b_t09.wav",
+        "pred_tdecay": "eval_window128_pred_b_tdecay.wav"
+      },
+      "status": "OK"
+    },
+    {
+      "tag": "c",
+      "idx": 1001,
+      "n_active": 128,
+      "rms_gt": 0.049754,
+      "acc": {
+        "oracle_greedy": 0.0281,
+        "oracle_t01": 0.0281,
+        "oracle_t03": 0.0229,
+        "oracle_t09": 0.0172,
+        "oracle_tdecay": 0.0182,
+        "pred_greedy": 0.0167,
+        "pred_t01": 0.0187,
+        "pred_t03": 0.0182,
+        "pred_t09": 0.0146,
+        "pred_tdecay": 0.0182
+      },
+      "sampling": {
+        "top_k": 50,
+        "top_p": 1.0,
+        "seed": 1234
+      },
+      "variants": [
+        "greedy",
+        "t01",
+        "t03",
+        "t09",
+        "tdecay"
+      ],
+      "files": {
+        "gt_ref": "eval_window128_gt_ref_c.wav",
+        "oracle_greedy": "eval_window128_oracle_c_greedy.wav",
+        "oracle_t01": "eval_window128_oracle_c_t01.wav",
+        "oracle_t03": "eval_window128_oracle_c_t03.wav",
+        "oracle_t09": "eval_window128_oracle_c_t09.wav",
+        "oracle_tdecay": "eval_window128_oracle_c_tdecay.wav",
+        "pred_greedy": "eval_window128_pred_c_greedy.wav",
+        "pred_t01": "eval_window128_pred_c_t01.wav",
+        "pred_t03": "eval_window128_pred_c_t03.wav",
+        "pred_t09": "eval_window128_pred_c_t09.wav",
+        "pred_tdecay": "eval_window128_pred_c_tdecay.wav"
+      },
+      "status": "OK"
+    }
+  ],
+  "rvq_isolation": [
+    {
+      "tag": "a",
+      "kind": "gt+zeros",
+      "N": 0,
+      "file": "eval_window128_rvq_gtz_a_N0.wav"
+    },
+    {
+      "tag": "a",
+      "kind": "gt+zeros",
+      "N": 1,
+      "file": "eval_window128_rvq_gtz_a_N1.wav"
+    },
+    {
+      "tag": "a",
+      "kind": "gt+zeros",
+      "N": 3,
+      "file": "eval_window128_rvq_gtz_a_N3.wav"
+    },
+    {
+      "tag": "a",
+      "kind": "gt+zeros",
+      "N": 7,
+      "file": "eval_window128_rvq_gtz_a_N7.wav"
+    },
+    {
+      "tag": "a",
+      "kind": "gt+zeros",
+      "N": 15,
+      "file": "eval_window128_rvq_gtz_a_N15.wav"
+    },
+    {
+      "tag": "a",
+      "kind": "gt+oracle_greedy",
+      "N": 0,
+      "file": "eval_window128_rvq_oracle_a_N0.wav"
+    },
+    {
+      "tag": "a",
+      "kind": "gt+oracle_greedy",
+      "N": 1,
+      "file": "eval_window128_rvq_oracle_a_N1.wav"
+    },
+    {
+      "tag": "a",
+      "kind": "gt+oracle_greedy",
+      "N": 3,
+      "file": "eval_window128_rvq_oracle_a_N3.wav"
+    },
+    {
+      "tag": "a",
+      "kind": "gt+oracle_greedy",
+      "N": 7,
+      "file": "eval_window128_rvq_oracle_a_N7.wav"
+    },
+    {
+      "tag": "a",
+      "kind": "gt+pred_greedy",
+      "N": 0,
+      "file": "eval_window128_rvq_pred_a_N0.wav"
+    },
+    {
+      "tag": "a",
+      "kind": "gt+pred_greedy",
+      "N": 1,
+      "file": "eval_window128_rvq_pred_a_N1.wav"
+    },
+    {
+      "tag": "a",
+      "kind": "gt+pred_greedy",
+      "N": 3,
+      "file": "eval_window128_rvq_pred_a_N3.wav"
+    },
+    {
+      "tag": "a",
+      "kind": "gt+pred_greedy",
+      "N": 7,
+      "file": "eval_window128_rvq_pred_a_N7.wav"
+    },
+    {
+      "tag": "b",
+      "kind": "gt+zeros",
+      "N": 0,
+      "file": "eval_window128_rvq_gtz_b_N0.wav"
+    },
+    {
+      "tag": "b",
+      "kind": "gt+zeros",
+      "N": 1,
+      "file": "eval_window128_rvq_gtz_b_N1.wav"
+    },
+    {
+      "tag": "b",
+      "kind": "gt+zeros",
+      "N": 3,
+      "file": "eval_window128_rvq_gtz_b_N3.wav"
+    },
+    {
+      "tag": "b",
+      "kind": "gt+zeros",
+      "N": 7,
+      "file": "eval_window128_rvq_gtz_b_N7.wav"
+    },
+    {
+      "tag": "b",
+      "kind": "gt+zeros",
+      "N": 15,
+      "file": "eval_window128_rvq_gtz_b_N15.wav"
+    },
+    {
+      "tag": "b",
+      "kind": "gt+oracle_greedy",
+      "N": 0,
+      "file": "eval_window128_rvq_oracle_b_N0.wav"
+    },
+    {
+      "tag": "b",
+      "kind": "gt+oracle_greedy",
+      "N": 1,
+      "file": "eval_window128_rvq_oracle_b_N1.wav"
+    },
+    {
+      "tag": "b",
+      "kind": "gt+oracle_greedy",
+      "N": 3,
+      "file": "eval_window128_rvq_oracle_b_N3.wav"
+    },
+    {
+      "tag": "b",
+      "kind": "gt+oracle_greedy",
+      "N": 7,
+      "file": "eval_window128_rvq_oracle_b_N7.wav"
+    },
+    {
+      "tag": "b",
+      "kind": "gt+pred_greedy",
+      "N": 0,
+      "file": "eval_window128_rvq_pred_b_N0.wav"
+    },
+    {
+      "tag": "b",
+      "kind": "gt+pred_greedy",
+      "N": 1,
+      "file": "eval_window128_rvq_pred_b_N1.wav"
+    },
+    {
+      "tag": "b",
+      "kind": "gt+pred_greedy",
+      "N": 3,
+      "file": "eval_window128_rvq_pred_b_N3.wav"
+    },
+    {
+      "tag": "b",
+      "kind": "gt+pred_greedy",
+      "N": 7,
+      "file": "eval_window128_rvq_pred_b_N7.wav"
+    },
+    {
+      "tag": "c",
+      "kind": "gt+zeros",
+      "N": 0,
+      "file": "eval_window128_rvq_gtz_c_N0.wav"
+    },
+    {
+      "tag": "c",
+      "kind": "gt+zeros",
+      "N": 1,
+      "file": "eval_window128_rvq_gtz_c_N1.wav"
+    },
+    {
+      "tag": "c",
+      "kind": "gt+zeros",
+      "N": 3,
+      "file": "eval_window128_rvq_gtz_c_N3.wav"
+    },
+    {
+      "tag": "c",
+      "kind": "gt+zeros",
+      "N": 7,
+      "file": "eval_window128_rvq_gtz_c_N7.wav"
+    },
+    {
+      "tag": "c",
+      "kind": "gt+zeros",
+      "N": 15,
+      "file": "eval_window128_rvq_gtz_c_N15.wav"
+    },
+    {
+      "tag": "c",
+      "kind": "gt+oracle_greedy",
+      "N": 0,
+      "file": "eval_window128_rvq_oracle_c_N0.wav"
+    },
+    {
+      "tag": "c",
+      "kind": "gt+oracle_greedy",
+      "N": 1,
+      "file": "eval_window128_rvq_oracle_c_N1.wav"
+    },
+    {
+      "tag": "c",
+      "kind": "gt+oracle_greedy",
+      "N": 3,
+      "file": "eval_window128_rvq_oracle_c_N3.wav"
+    },
+    {
+      "tag": "c",
+      "kind": "gt+oracle_greedy",
+      "N": 7,
+      "file": "eval_window128_rvq_oracle_c_N7.wav"
+    },
+    {
+      "tag": "c",
+      "kind": "gt+pred_greedy",
+      "N": 0,
+      "file": "eval_window128_rvq_pred_c_N0.wav"
+    },
+    {
+      "tag": "c",
+      "kind": "gt+pred_greedy",
+      "N": 1,
+      "file": "eval_window128_rvq_pred_c_N1.wav"
+    },
+    {
+      "tag": "c",
+      "kind": "gt+pred_greedy",
+      "N": 3,
+      "file": "eval_window128_rvq_pred_c_N3.wav"
+    },
+    {
+      "tag": "c",
+      "kind": "gt+pred_greedy",
+      "N": 7,
+      "file": "eval_window128_rvq_pred_c_N7.wav"
+    }
+  ],
+  "mean_rms_gt": 0.05247,
+  "gates": {
+    "cos_sim_ge_0.80": false,
+    "ce_val_le_5.95": false,
+    "rank_ge_1000": false
+  }
+}
+>>> EVAL WINDOW 128 COMPLETATO <<<
+=== PIPELINE WINDOW 128 COMPLETATA ===
