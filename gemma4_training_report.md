@@ -402,6 +402,35 @@ cos val 0.6063, CE 5.4817, rank 937, synth 72 wav OK.
   - Checkpoint periodici (`checkpoints/ht_adapter_temporal_2.pt`, `4.pt`, `smoke.pt`) e report JSON salvati regolarmente.
   - EVAL su 4 finestre val (smoke): `cos_sim val = 0.6707`, `mse = 3.2231`, `coupling_ce = 6.1855`, `rank_svd_pred = 238 / 255` (cum energy 0.994), sintesi 3 finestre e isolamento RVQ completati con successo.
 
+### 10.9 Run Stage 2 Modulo Temporale Causale Potenziato Temporal 2 (kernel andrlab/gemma4-temporal2-r1) - 2026-08-20
+
+**Motivazione architetturale**: Dopo che il run `gemma4-temporal-r1` ha stabilito il record storico di validazione (cos val = 0.6307) confermando che l'estensione del campo recettivo temporale e' la vera leva scientifica per superare l'asintoto informativo, e' stata sviluppata la versione potenziata **Temporal 2**:
+1. Estensione della profondita' del modulo temporale da 2 a **4 blocchi Causal Multi-Head Self-Attention Pre-LN** ($d=1024$, 8 heads, MLP 2048 con SiLU).
+2. Preservazione rigorosa della causalita' streaming (zero look-ahead al 100%) e del protocollo **ReZero / Identity-Initialization** su `out_proj(1024->2048)` per garantire il warm-start a passo 0 esatto da `ht_adapter_stage2r2_final.pt`.
+3. Backbone Gemma 4 E2B 4-bit congelata sotto `torch.no_grad()`, sub-talker Qwen3-TTS congelato in `bfloat16` con coupling loss ($\lambda=0.2$) e teacher su CPU.
+4. Probe esplicito `[TEMPORAL2_ACTIVE]` con log dinamico della configurazione architetturale.
+
+**Configurazione Architetturale e Iperparametri**:
+- **Backbone Gemma 4 E2B 4-bit**: Congelata (`requires_grad=False`, forward `no_grad()`, 0 parametri trainable).
+- **ResidualAdapter**: `CausalConv1d` (k=3, identity-init, pad 2,0) + Skip `Linear(1536, 2048)` + MLP `1536->3072->SiLU->2048` + `LayerNorm(2048)` (21.24M parametri, warm-start da R2/R3).
+- **Modulo Temporale Causale v2**: 4 blocchi Causal Multi-Head Self-Attention Pre-LN ($d=1024$, 8 teste, MLP 2048 con SiLU) + Positional Embedding (512x1024) + `out_proj(1024->2048)` con ReZero / Identity-Init (38.30M parametri).
+- **Sub-Talker Qwen3-TTS**: Congelato in `bfloat16` (181.4M parametri) per calcolo coupling loss ($\lambda = 0.2$).
+- **Teacher Qwen3-TTS**: Spostato su host CPU subito dopo l'estrazione dei target $h_t$ (zero occupazione GPU).
+- **Ottimizzatore**: AdamW differenziale (`LR_Adapter=1.5e-4`, `LR_Module=1.5e-4`) con cosine warmup schedule.
+- **Totale parametri trainable**: **59,549,696** (21.24M Adapter + 38.30M Modulo Temporale v2, vincolo < 80M rispettato).
+
+**Esito SMOKE Test (v1, 4 batch, 16 finestre train + 4 val)**:
+- **TUTTI I GATE PASS**:
+  - `status: "PASS"` in `stage2temporal2_report.json`
+  - `cos_sim` iniziale train: **0.6846** (> 0.5, warm-start esatto a passo 0)
+  - Trend loss: **2.9014 -> 2.7778 -> 2.6954 -> 2.6590** (costantemente decrescente)
+  - Trend `cos_sim` train: **0.6846 -> 0.7052 -> 0.7163 -> 0.7223**
+  - Gradienti verificati: `adapter_grad_active: True`, `temporal_grad_active: True`, `base_grad_zero: True`, `sub_grad_zero: True` su tutti gli step.
+  - Velocita' a regime: **3.90s - 3.94s per batch effettivo 16** (eccellente, vincolo < 7.0s ampiamente rispettato).
+  - VRAM Peak: **~5.8 GB** (vincolo < 12.0 GB su T4 ampiamente rispettato).
+  - Checkpoint periodici (`checkpoints/ht_adapter_temporal2_2.pt`, `4.pt`, `smoke.pt`) e report JSON salvati regolarmente.
+  - EVAL su 4 finestre val (smoke): `cos_sim val = 0.6707`, `mse = 3.2238`, `coupling_ce = 6.1842`, `rank_svd_pred = 238 / 255` (cum energy 0.9937), sintesi 3 finestre e isolamento RVQ completati con successo.
+
 ---
 
 ## 11. Tabella Riassuntiva dei Run (R1, R2, R3, QLoRA, Modulo Temporale)
@@ -416,3 +445,4 @@ cos val 0.6063, CE 5.4817, rank 937, synth 72 wav OK.
 | **QLoRA Completo** | QLoRA r=16 (Gemma) + CausalConv ResidualAdapter | 46.58M (25.3M LoRA + 21.2M Adapt) | 1200 step (1000 train + 100 val) | 2h 28m, T4 | **0.6018** (FAIL, asintoto) | **5.6297** (PASS) | **1407 / 2043** (PASS) | `gemma4-qlora-r1` (v3) | **ASINTOTO CONFERMATO anche con co-adaptation LoRA**: cos val 0.6018 (vs 0.6063 R3) invariato, MA rank pred 937->1407 (+470) e cum_energy 0.9095->0.957: il sottospazio e' piu' ricco ma non piu' allineato -> il tetto NON e' la capacita' del modello ma l'informazione disponibile nella finestra. |
 | **Temporal Completo** | Gemma Frozen + Causal Conv ResidualAdapter + 2-Block Causal Attention | 42.76M (21.24M Adapt + 21.51M Module) | 1200 step (1000 train + 100 val) | 108m 41s, T4 | **0.6307** (FAIL gate, ma MIGLIORE assoluto) | **5.4773** (PASS) | **933 / 2043** (FAIL, cum 0.9056) | `gemma4-temporal-r1` (v2) | **RECORD COS VAL 0.6307** (vs R2 0.6275, R3 0.6063, QLoRA 0.6018): primo superamento dell'asintoto storico con la sola estensione del campo recettivo (self-attention causale 2 blocchi, ReZero). MSE 3.2008 (migliore). Rank 933 simile a R3: il sottospazio resta limitato ma l'allineamento migliora. Conferma: la leva e' l'informazione temporale, non i parametri. |
 | **Temporal Smoke** | Gemma Frozen + Causal Conv ResidualAdapter + 2-Block Causal Attention | 42.76M (21.24M Adapt + 21.51M Module) | 4 step (16 finestre train + 4 val) | 15m 18s, T4 | **0.6846 -> 0.7224** (train) / **0.6707** (val smoke) | **6.1855** (smoke 4 step) | **238 / 255** (cum 0.994) | `gemma4-temporal-r1` (v1) | **TUTTI I GATE PASS**: adapter+temporal grad attivi, base0/sub0 confermati, loss monotonically decrescente (2.90->2.65), step a regime 4.4-4.6s, cos val 0.6707 a 4 step. Pronto per run completo. |
+| **Temporal2 Smoke** | Gemma Frozen + Causal Conv ResidualAdapter + 4-Block Causal Attention | 59.55M (21.24M Adapt + 38.30M Module) | 4 step (16 finestre train + 4 val) | 18m 01s, T4 | **0.6846 -> 0.7223** (train) / **0.6707** (val smoke) | **6.1842** (smoke 4 step) | **238 / 255** (cum 0.9937) | `gemma4-temporal2-r1` (v1) | **TUTTI I GATE PASS**: adapter+temporal v2 grad attivi, base0/sub0 confermati, loss decrescente (2.90->2.65), step a regime 3.90-3.94s (<7s), VRAM ~5.8GB (<12GB), cos val smoke 0.6707. Pronto per run completo. |
