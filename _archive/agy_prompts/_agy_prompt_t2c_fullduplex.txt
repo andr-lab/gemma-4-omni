@@ -1,0 +1,31 @@
+RUOLO: ingegnere ML senior del progetto "Gemma 4 Full-Duplex Omni Pipeline" (C:\Users\andre\Documents\gemma-4-omni). TASK C: ANALISI DINAMICHE FULL-DUPLEX (barge-in, yield, interrupt, backchannel) — il modello le ha imparate o serve una head apposita? Task di RICERCA E ANALISI: nessun run GPU richiesto. Devi rispondere con evidenza (dati, letteratura, architettura) e produrre un documento di proposta architetturale. NON implementare nel cell2 (il coordinatore decide dopo aver letto la tua analisi).
+
+CONTESTO (leggi i file):
+- Pipeline: Gemma E2B 4bit congelata -> ResidualAdapter -> h_t (2048, 12.5Hz, 64 frame = 5.12s) -> sub-talker Qwen3-TTS congelato -> RVQ 16 livelli -> Code2Wav. Full-duplex e' l'obiettivo finale del progetto (AGENTS.md: "Gemma 4 Full-Duplex Omni Pipeline").
+- I sistemi full-duplex SOTA in letteratura: Moshi, Mini-Omni, GLM-4-Voice, DuplexCascade, Step-Audio (21 ref in REVISIONE_LETTERATURA.md). Qwen3-TTS (il nostro sub-talker) e' un TTS, non ha logica di turno.
+- Il training attuale: finestre di 64 frame (5.12s) campionate dai dati (dataset andrlab/gemma-4-omni-module). Loss su h_t: (1-cos) + 0.5*MSE + 0.2*CE (frame attivi). Non esiste una loss o head dedicata ai comportamenti di turno.
+- File utili: AGENTS.md, REVISIONE_LETTERATURA.md, gemma4_training_report.md, docs/sources/extracted_text/ (Gemma 4 Technical Report.txt, Qwen3-TTS Technical Report.txt), docs/decisions/.
+
+FASE 1 - ANALISI DEI DATI (evidenza, non speculazione):
+1) Ispeziona i dati di training (parquet in locale e/o metadati del dataset andrlab/gemma-4-omni-module): le finestre contengono conversazioni (piu' speaker, turni alternati, sovrapposizione) o monologhi? Cerca colonne di metadati (speaker_id, turn_id, timestamp, attivita', channel, tipo di audio). Se ci sono piu' canali/tracce: esiste sovrapposizione reale (barge-in) nei dati?
+2) Definisci cosa servirebbe per imparare barge-in/yield/interrupt/backchannel: che tipo di supervisione? (a) il modello deve predire h_t del PROSSIMO speaker anche durante l'ascolto attivo (barge-in detection); (b) serve uno stato di turno (chi parla, chi ascolta); (c) backchannel (mm-hm, ok) sono eventi brevi che il modello deve produrre o riconoscere.
+3) Verifica se l'architettura attuale puo' esprimere queste dinamiche: il modello predice h_t dello stesso speaker dalla propria storia (autoregressione intra-speaker) o ha accesso all'audio dell'altro? (Dal codice: quale input vede la Gemma? Le finestre h_t sono dello stesso speaker? Guarda il dataloader del cell2.)
+
+FASE 2 - LETTERATURA (con citazioni, non a memoria):
+1) Come i SOTA full-duplex implementano il turn-taking: Moshi (turn-taking head dedicata? TextualHead? dual-stream), Mini-Omni, GLM-4-Voice (quali heads?), DuplexCascade (barge-in via VAD?), Step-Audio. Cita architetture precise (heads, loss, token speciali <user>/<assistant>).
+2) Barge-in detection: VAD-based o model-based? Cosa dice la letteratura?
+3) Backchannel generation: come i sistemi decidono quando produrre un backchannel (probabilistico? rule-based? predetto)?
+
+FASE 3 - PROPOSTA ARCHITETTURALE (documento):
+Crea docs/PROPOSAL_FULLDUPLEX_DINAMICHE.md con:
+- Verdetto: il modello ATTUALE ha o no la struttura per imparare le dinamiche full-duplex (motivato dai dati della Fase 1).
+- Se serve una head apposita: progetto concreto (tipo, input, output, loss, posizione nel flusso, params stimati, impatto VRAM T4). Opzioni da valutare: (a) TurnHead (classificatore stato turno: silent/barge-in/active-speaker/yield, loss CE, input = h_t contesto), (b) head di detection del punto di interruzione (yield), (c) token speciali nel sub-talker o conditioning, (d) training separato (stage 3) con dati conversazionali reali.
+- Dati necessari: cosa manca nei dati attuali per addestrare la head (es. dataset conversazionale a 2 canali con timestamp di turno).
+- Trade-off e raccomandazione priorizzata (qual e' il minimo intervento per un full-duplex ascoltabile?).
+- NON implementare: solo il documento.
+
+FASE 4 - COMMIT E STOP:
+- Aggiorna REVISIONE_LETTERATURA.md se necessario (aggiungi i nuovi riferimenti turn-taking) e committa ("docs: analisi dinamiche full-duplex + proposta head turn-taking").
+- RIPORTA: verdetto sintetico (il modello ha/non ha le dinamiche), evidenza dai dati, 3 raccomandazioni priorizzate. Non serve eseguire run.
+
+REGOLAMENTO: nessuna modifica al codice di training (solo docs/), ASCII puro dove serve, git commit chiari, citazioni complete (autore, anno, arXiv id, frase chiave). Alla fine: report completo.

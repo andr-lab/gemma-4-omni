@@ -1,0 +1,30 @@
+RUOLO: ingegnere ML senior del progetto "Gemma 4 Full-Duplex Omni Pipeline" (C:\Users\andre\Documents\gemma-4-omni). TASK: ESTENDERE LA FINESTRA TEMPORALE A 128 FRAME (10.24s). L'utente ha scelto questa via dopo il verdetto sperimentale. Devi implementare, validare, lanciare lo SMOKE test e FERMARTI (il run completo lo lancia il coordinatore). Lavora su un NUOVO file (kernel_src/window128_cell2.py): NON modificare temporal_cell2.py, temporal2_cell2.py, rankfix_cell2.py, qlora_cell2.py ne' syntest_v3_cell2.py.
+
+CONTESTO VERIFICATO (leggi i file per i dettagli):
+- Verdetto sperimentale definitivo: cos val converge a ~0.63 da 5 direzioni (R2 0.6275, R3 0.6063, QLoRA 0.6018, Temporal 2blk 0.6307, Temporal2 4blk 0.6304, RankFix 0.6266 rank 1109). Il tetto e' INFORMATIVO: la finestra di 64 frame (5.12s a 12.5Hz) non contiene l'informazione prosodica/identitaria del target h_t. L'unica leva rimasta: PORTARE PIU' INFORMAZIONE al modello -> finestra 128 frame (10.24s).
+- Architettura attuale (kernel_src/temporal2_cell2.py, il punto di partenza): Gemma E2B 4bit congelata (no_grad) -> ResidualAdapter (CausalConv1d k=3, MLP 1536->3072->SiLU->2048, LayerNorm) -> TemporalResidualAdapter con 4 blocchi Causal MHSA Pre-LN (d=1024, 8 heads, FF 2048 SiLU, ReZero out_proj zero-init, positional embedding) -> h_t (2048) -> sub-talker Qwen3TTS congelato -> RVQ 16 livelli. Trainable 59.55M. Loss: (1-cos) + 0.5*MSE + 0.2*CE. Step ~4s, VRAM ~5.8GB su T4.
+- Metriche attuali: cos val 0.6304, MSE 3.2032, CE 5.4774, rank 937/2043, cum 0.9059. Gate: cos_sim_ge_0.80, ce_val_le_5.95, rank_ge_1000.
+- File di riferimento: kernel_src/temporal2_cell2.py (architettura completa), tools/build_temporal2_notebook.py (builder --smoke/--full), tools/verify_temporal2.py (probe), _monitor_kernel.py (timeout in MINUTI), lezioni: source celle come lista splitlines(keepends=True), header stringa letterale, ASCII puro, py_compile, `kaggle kernels push` senza -q.
+- Dati: dataset andrlab/gemma-4-omni-module (monta qwen_subtalker.py VECCHIO senza top_k -> monkey-patch condizionale gia' esistente nel cell2), warm-start ht_adapter_stage2r2_final.pt (nel dataset andrlab/gemma4-ht-adapter-r2 e/o checkpoints/ locale).
+
+PUNTI CRITICI DA GESTIRE (analizza e risolvi con attenzione, sono le trappole principali):
+1) DATALOADER: le finestre attuali sono 64 frame. Per 128 frame: verifica che i segmenti audio nel dataset abbiano lunghezza sufficiente (10.24s x 12.5Hz = 128 frame). Se i clip sono piu' corti: gestisci con stride/padding causale o estrai finestre piu' lunghe dal dataset grezzo. NON rompere il contratto del dataloader (campiona segmenti continui, _mel_active_mask, batch).
+2) POSITIONAL ENCODING: il positional embedding attuale e' 512x1024 (max 64 frame). Estendi a 1024 x 1024 (max 128 frame) o passa a RoPE per generalizzare. Verifica che il ReZero identity-init preservi il warm-start (h_t dei primi 64 frame identico a step 0).
+3) VRAM/VELOCITA' su T4 16GB: 128 frame raddoppia T nella MHSA (128^2 vs 64^2 per head). Monitora VRAM < 12GB e step < 7s. Se serve: batch piu' piccolo (8 invece di 16), o finestra 96 come fallback (7.68s) se 128 non sta. La decisione deve essere basata sui fatti dello smoke.
+4) SUB-TALKER: coupling loss su 128 frame -> verifica che il sub-talker accetti T=128 (reshape RVQ). Se il sub-talker e' addestrato su 64 frame e la forward esplode: applica il coupling a finestra 64 (ultimi 64 frame o slicing) senza toccare i pesi del sub-talker.
+5) PROBES obbligatori nel log: "WINDOW128_ACTIVE", "T=128", warm-start verificato, riuso Gemma, _tdev, PATCH sample_acoustic_codes, EVAL_WINDOW128.
+
+FASE IMPLEMENTAZIONE:
+- Crea kernel_src/window128_cell2.py (ASCII puro) partendo da temporal2_cell2.py con le modifiche di cui sopra. Report: stage2window128_report.json. Checkpoint: checkpoints/ht_adapter_window128_{step}.pt e ht_adapter_window128_final.pt.
+- Crea tools/build_window128_notebook.py (builder con --smoke/--full) e tools/verify_window128.py (probe WINDOW128_ACTIVE, T=128, warm-start, riuso Gemma, PATCH, EVAL_WINDOW128).
+- Crea kernel_window128_r1/ (kernel-metadata.json: title/slug gemma4-window128-r1, dataset_sources identici: andrlab/gemma-4-omni-module + andrlab/gemma4-ht-adapter-r2).
+- Valida: py_compile, round-trip, probes, TDD se utile (es. test che la forward accetta T=128, causalita' preservata, warm-start).
+
+FASE SMOKE E STOP:
+- Push versione SMOKE (PHASE2_SMOKE_BATCHES=4, SMOKE=1) con `kaggle kernels push -p kernel_window128_r1`.
+- Monitora con `python _monitor_kernel.py andrlab/gemma4-window128-r1 50` fino a fine smoke.
+- Verifica gate: status PASS, loss finite decrescenti, cos train iniziale >= 0.68 (warm-start) e crescente, gradienti SOLO su adapter+modulo (base/sub zero), step < 7s, VRAM < 12GB, checkpoint salvato, cos val smoke >= 0.65 (meglio se > 0.67 del smoke 64-frame).
+- Aggiorna gemma4_training_report.md (sez. 10.11) e committa ("feat: finestra 128 frame + kernel_window128_r1 (smoke)").
+- POI FERMATI E RIPORTA: come hai gestito i 5 punti critici (soprattutto dataloader e positional), parametri effettivi (T, batch, VRAM, step), esito smoke gate per gate, comando esatto per il run completo (es. python tools/build_window128_notebook.py --full + kaggle kernels push -p kernel_window128_r1 + python _monitor_kernel.py andrlab/gemma4-window128-r1 220). NON lanciare il run completo.
+
+REGOLAMENTO: ASCII puro, py_compile sempre, niente cancellazioni, git commit chiari, report completo finale. Se la CLI kaggle manca o fallisce: riporta l'errore esatto e fermati.

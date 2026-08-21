@@ -1,0 +1,26 @@
+RUOLO: ingegnere ML senior del progetto "Gemma 4 Full-Duplex Omni Pipeline" (C:\Users\andre\Documents\gemma-4-omni). TASK A: POTENZIARE IL MODULO TEMPORALE CAUSALE. Devi implementare la versione potenziata, lanciare lo SMOKE test, verificare i gate e FERMARTI (il run completo lo lancia il coordinatore). Lavora su un NUOVO file (kernel_src/temporal2_cell2.py): NON modificare temporal_cell2.py ne' qlora_cell2.py ne' syntest_v3_cell2.py.
+
+CONTESTO (leggi i file per i dettagli, sono verificati):
+- Run TEMPORAL appena completato: kernel andrlab/gemma4-temporal-r1, TemporalResidualAdapter (ResidualAdapter CausalConv1d k=3 + 2 blocchi Causal MHSA Pre-LN d=1024, 8 heads, MLP 1024->2048, ReZero identity-init, out_proj 1024->2048), 42.76M trainable. Risultati VAL: cos 0.6307 (RECORD), MSE 3.2008, CE 5.4773, rank_svd_pred 933/2043 (cum 0.9056). Training: cos finale 0.7281, loss 2.4452, 1200 step. Primo superamento dell'asintoto storico (R2 0.6275, R3 0.6063, QLoRA 0.6018) -> la leva e' l'INFORMAZIONE TEMPORALE.
+- Codice sorgente di riferimento: kernel_src/temporal_cell2.py (architettura completa: header env var, Gemma congelata 4bit sotto no_grad, TemporalResidualAdapter, warm-start da ht_adapter_stage2r2_final.pt, teacher su CPU, monkey-patch sample_acoustic_codes top_k/top_p/seed, EVAL 100 val + synth 3 finestre + rvq_isolation, gates cos_sim_ge_0.80/ce_val_le_5.95/rank_ge_1000). Builder: tools/build_temporal_notebook.py (modo --full e --smoke), verifier: tools/verify_temporal.py, monitor: _monitor_kernel.py (timeout in MINUTI), lezioni: source celle come lista splitlines(keepends=True), header stringa letterale, ASCII puro, py_compile, `kaggle kernels push` senza -q.
+
+TASK A - POTENZIAMENTO (scegli e giustifica con la letteratura gia' raccolta in REVISIONE_LETTERATURA.md e docs/decisions/):
+1) Estendi il campo recettivo: o piu' blocchi (4) o finestra piu' lunga (128 frame = 10.24s, con stride/padding gestito) o entrambi. Target: cos val > 0.64 (record attuale 0.6307), senza OOM su T4 16GB.
+2) Mantieni: causale (streaming full-duplex), ReZero identity-init (warm-start esatto), sub-talker MAI toccato, loss invariata ((1-cos) + 0.5*MSE + 0.2*CE), Gemma congelata.
+3) Vincoli GPU: VRAM < 12GB su T4; step time < 7s; params trainable < 80M.
+4) Aggiungi un probe esplicito "TEMPORAL2_ACTIVE" e log della finestra/blocchi effettivi.
+
+FASE IMPLEMENTAZIONE:
+- Crea kernel_src/temporal2_cell2.py (ASCII puro) copiando la struttura di temporal_cell2.py e applicando il potenziamento. Report: stage2temporal2_report.json. Checkpoint: checkpoints/ht_adapter_temporal2_{step}.pt e ht_adapter_temporal2_final.pt.
+- Crea tools/build_temporal2_notebook.py (copia del builder con slug/title aggiornati) e tools/verify_temporal2.py (probe: TEMPORAL2_ACTIVE, finestra/blocchi, warm-start, riuso Gemma, _tdev, PATCH sample_acoustic_codes, EVAL_TEMPORAL2).
+- Crea la dir kernel_temporal2_r1/ con kernel-metadata.json (title/slug gemma4-temporal2-r1, dataset_sources identici: andrlab/gemma-4-omni-module + andrlab/gemma4-ht-adapter-r2).
+- Valida: py_compile, round-trip, probes, e TDD se utile (es. test che il campo recettivo effettivo >= target).
+
+FASE SMOKE E STOP:
+- Push versione SMOKE (PHASE2_SMOKE_BATCHES=4, SMOKE=1) con `kaggle kernels push -p kernel_temporal2_r1`.
+- Monitora con `python _monitor_kernel.py andrlab/gemma4-temporal2-r1 50` fino a fine smoke.
+- Verifica gate: status PASS, loss finite decrescenti, cos train iniziale >= 0.68 (warm-start) e crescente, gradienti SOLO su adapter+temporal2 (base/sub zero), step < 7s, VRAM < 12GB, checkpoint salvato, cos val smoke >= 0.65.
+- Aggiorna gemma4_training_report.md (sez. 10.9) e committa ("feat: modulo temporale potenziato temporal2 + kernel_temporal2_r1 (smoke)").
+- POI FERMATI E RIPORTA: scelta (blocchi/finestra/dim), parametri, motivazione con citazioni, esito smoke gate per gate, comando esatto per il run completo (es. python tools/build_temporal2_notebook.py --full + kaggle kernels push + python _monitor_kernel.py andrlab/gemma4-temporal2-r1 200). NON lanciare il run completo.
+
+REGOLAMENTO: ASCII puro, py_compile sempre, niente cancellazioni, git commit chiari, report completo finale. Se manca la CLI kaggle o fallisce: riporta l'errore esatto e fermati.

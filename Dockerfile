@@ -32,7 +32,6 @@ RUN groupadd -g ${GROUP_ID} appuser && \
 RUN python3 -m venv /opt/venv_phase1 && \
     /opt/venv_phase1/bin/pip install --no-cache-dir --upgrade pip setuptools wheel && \
     /opt/venv_phase1/bin/pip install --no-cache-dir \
-        transformers==4.49.0 \
         qwen-tts==0.1.1 \
         soundfile \
         librosa \
@@ -47,14 +46,15 @@ RUN python3 -m venv /opt/venv_phase1 && \
 # Phase 2 Main Environment (ADR-003: Unsloth, Gemma 4, Code2Wav, Serving)
 # ----------------------------------------------------------------------------
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    pip install --no-cache-dir torch==2.12.1 torchvision==0.27.1 && \
     pip install --no-cache-dir \
-        transformers \
+        transformers==5.5.0 \
+        git+https://github.com/unslothai/unsloth.git \
+        git+https://github.com/unslothai/unsloth-zoo.git \
         accelerate \
         bitsandbytes \
         peft \
         trl \
-        unsloth \
-        unsloth_zoo \
         fastapi \
         uvicorn \
         python-multipart \

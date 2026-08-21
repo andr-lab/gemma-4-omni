@@ -564,3 +564,28 @@ L'Iterazione 2 ha confermato l'efficacia del bilanciamento frame a 4 bucket e de
 | **R1 (Linear)** | Linear(1536->2048) + LN | 3.15M | 1500 step | ~100m, T4 | Cos Val 0.6211, CE 5.4226, Rank 1136 / 2043 | `gemma4-fitnets-eval` (v24) | Baseline lineare; plateau a ~0.62. |
 
 
+---
+
+## 12. Task 8 su RTX 3090 (2026-08-21) — Prep 20h + Eval RECORD + TurnHead v3
+
+Porting completo su **RTX 3090 locale** (gpu3090) con immagine Docker `gemma4-omni:latest`
+(fix immagine: torch==2.12.1 + torchvision==0.27.1 + transformers 5.5.0 + unsloth git — combo verificata
+con test GPU reale; torch 2.13.0 è incompatibile con unsloth_zoo, torchvision 0.28.0 non combacia con torch 2.12.1).
+
+| Fase | Risultato | Gate |
+|---|---|---|
+| Smoke Fase 2 | Loss 22.6→20.8 (coupling+text attivi), 154s, exit 0 | ✅ PASS |
+| **Prep DuplexConv v3** | **20.02h reali, 907 segmenti, 901.113 frame** (vs 7.2h Kaggle) | ✅ PASS |
+| **Eval temporal2 su 20h** | **cosine_sim_val 0.7455** (record precedente 0.6342) | ✅ **NUOVO RECORD +0.115** |
+| Eval SVD | effective rank 1537/2048, cum_energy 0.9947 | ✅ PASS |
+| **TurnHead v3** | **Best Val Acc 70.83%**, SPEAK recall 82.58%, BARGE_IN 41.25% | ✅ PASS |
+
+Dettagli:
+- Prep: `data/train_tokens_20.0h_ext_*.parquet` (mel 1.51GB, ameld 1.50GB, codes 21MB, text, turnlabels), sidecar report PASS
+- Class dist TURN (901k frame): SPEAK 61.0%, BARGE_IN 21.8%, EMIT_BC 9.1%, YIELD 0.8%, USER_BC 0% (assente nel dataset)
+- Eval: `logs/eval_report_temporal2.json` — coupling loss 10.14, latent norm mean 45.25
+- TurnHead v3: `checkpoints/turn_state_head_v3.pt` (11.6MB), `logs/turn_head_v3_training_report.json` (status PASS)
+- Confronto TurnHead: v1 acc 0.20 / v2 acc 0.166 (bias YIELD 47.7%) → **v3 acc 0.7083**, SPEAK 82.6% (il Calibrated Focal Loss risolve il collasso SPEAK della v2)
+- Limiti: USER_BACKCHANNEL a 0 frame in DuplexConv (1 campione val); sintesi audio val con mel_l1=0 (finestre senza testo)
+- Report completo: `docs/REPORT_TASK8_3090.md`
+

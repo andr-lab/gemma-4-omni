@@ -1,0 +1,25 @@
+RUOLO: ingegnere ML senior del progetto "Gemma 4 Full-Duplex Omni Pipeline" (C:\Users\andre\Documents\gemma-4-omni). TASK B: AUMENTARE IL RANK SVD DELLE PREDIZIONI. Obiettivo: capire perche' rank_svd_pred resta ~930 (933 nei run R3/TEMPORAL) contro rank_svd_target 2043 e cum_energy_pred ~0.90 vs 0.999 del target, e implementare la soluzione. Questo e' un task di RICERCA + IMPLEMENTAZIONE: analizza, formula ipotesi con letteratura, implementa la soluzione piu' promettente, lancia lo SMOKE e FERMATI (run completo al coordinatore).
+
+CONTESTO (leggi i file):
+- Metriche VAL ultimi run: R3 v7 cos 0.6063 rank 937 cum 0.9095; QLoRA cos 0.6018 rank 1407 cum 0.957 (rank salito, cos no); TEMPORAL cos 0.6307 rank 933 cum 0.9056. Target: rank 2043, cum_energy 0.9999. Il rank SVD misura la dimensione effettiva del sottospazio predetto: pred ~930 vs target ~2043 = il modello predice in un sottospazio 2x piu' stretto.
+- Architettura attuale: Gemma E2B 4bit congelata -> ResidualAdapter (CausalConv1d k=3 identity + MLP 1536->2048) -> h_t 2048-dim (12.5Hz, 64 frame) -> sub-talker congelato -> RVQ 16 livelli. Loss: (1-cos) + 0.5*MSE + 0.2*CE. Il modulo temporale (2 blocchi Causal MHSA d=1024 ReZero) e' appena stato aggiunto (cos 0.6307) e sta per essere potenziato in un task parallelo (temporal2): coordina l'analisi del rank perche' si applichi anche a quel modulo.
+- Report: gemma4_training_report.md (sez. 10.8), REVISIONE_LETTERATURA.md (21 ref), docs/decisions/ (ADR 002 conv causale, ADR 006-011).
+
+FASE 1 - ANALISI E IPOTESI (con citazioni, non a memoria):
+1) Perche' il rank della predizione e' ~930 quando l'output e' 2048-dim? Ipotesi da verificare nei dati di training (parquet in locale o nel dataset andrlab/gemma-4-omni-module): (a) il target h_t stesso ha rank intrinseco basso (~2043 e' il rank del TARGET su 100 val: verifica se il target e' quasi-full-rank o se la bassa dimensionalita' e' nella PRED); (b) il MSE domina la loss e favorisce soluzioni a bassa varianza (regressione alla media) schiacciando il sottospazio; (c) la funzione di attivazione/struttura MLP proietta su un sottospazio stretto; (d) il CE coupling (solo 0.2) non forza la ricchezza; (e) il batch di 16 finestre e la normalizzazione favoriscono collasso di rango.
+2) Cerca in letteratura tecniche per ALZARE il rank effettivo/ricchezza spettrale delle predizioni di un regressore: penalita' di ortogonalita' (Orthogonal Regularization), Spectral Restriction, batching di basso rango, dropout sul sottospazio, repulsive/whitening loss, Barlow Twins-style (cross-correlation verso identity per decorrelare le feature), softmax-free, aumento del rango della matrice di output tramite mixing/attention across frames. Cita almeno 3 tecniche con riferimenti (autore, anno, arXiv id, frase chiave) e valuta applicabilita' al nostro caso (h_t 2048, T=64, batch 16, T4 16GB).
+3) Definisci la METRICA di successo: il rank SVD su 100 val deve salire (target: > 1200) SENZA degradare cos (target: >= 0.63) e MSE (<= 3.3). Verifica che il rank non sia un artefatto di scala (normalizza prima di SVD? spiega).
+
+FASE 2 - IMPLEMENTAZIONE (minima, chirurgica):
+- Implementa la soluzione piu' promettente come EXTENSION OPT-IN nel cell2: flag RANK_ENHANCE=1 (default OFF nel training normale, ON nel run di validazione dell'ipotesi). Deve essere compatibile con kernel_src/temporal2_cell2.py (task parallelo: se temporal2_cell2.py esiste gia', aggiungi li' il flag; altrimenti crea kernel_src/rankfix_cell2.py come derivato di temporal_cell2.py). La soluzione NON deve cambiare la loss di base: aggiunge un termine opzionale (es. lambda_rank * penalita' spettrale o orthogonality) o una modifica architetturale piccola (es. head di mixing).
+- Valida: py_compile, round-trip, probes RANK_ENHANCE, TDD se utile.
+- Crea kernel_rankfix_r1/ (kernel-metadata.json identico per dataset_sources: andrlab/gemma-4-omni-module + andrlab/gemma4-ht-adapter-r2, slug gemma4-rankfix-r1).
+
+FASE 3 - SMOKE E STOP:
+- Push versione SMOKE (PHASE2_SMOKE_BATCHES=4, SMOKE=1, RANK_ENHANCE=1) con `kaggle kernels push -p kernel_rankfix_r1`.
+- Monitora con `python _monitor_kernel.py andrlab/gemma4-rankfix-r1 50` fino a fine smoke.
+- Verifica: status PASS, rank val smoke (deve salire vs baseline senza il termine: confronta con/senza), cos non crollato, loss finita, VRAM ok, checkpoint salvato.
+- Aggiorna gemma4_training_report.md (sez. 10.10) e committa ("feat: rank enhance (penalita spettrale/orth) + kernel_rankfix_r1 (smoke)").
+- POI FERMATI E RIPORTA: ipotesi (con citazioni), soluzione implementata, esito smoke (rank con/senza, cos, mse), comando esatto per il run completo. NON lanciare il run completo.
+
+REGOLAMENTO: ASCII puro, py_compile sempre, niente cancellazioni, git commit chiari, report completo finale. Se la CLI kaggle manca o fallisce: riporta l'errore esatto e fermati.

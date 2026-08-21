@@ -26,7 +26,6 @@ RUN groupadd -g ${GROUP_ID} appuser && \
 
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir \
-        transformers==4.49.0 \
         qwen-tts==0.1.1 \
         soundfile \
         librosa \
