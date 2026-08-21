@@ -1,0 +1,17 @@
+{
+  "id": "andrlab/gemma4-prep-mdc-cpu-r1",
+  "title": "gemma4-prep-mdc-cpu-r1",
+  "code_file": "gemma4-prep-mdc-cpu-r1.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": [
+    "andrlab/gemma-4-omni-module"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

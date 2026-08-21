@@ -1,8 +1,18 @@
 # -*- coding: utf-8 -*-
 import os, sys, json, ast, argparse
 
-def build_notebook(out_dir="kernel_prep_mdc_r1", slug="gemma4-prep-mdc-r1"):
+def build_notebook(out_dir="kernel_prep_mdc_r1", slug="gemma4-prep-mdc-r1", cpu=False):
     os.makedirs(out_dir, exist_ok=True)
+
+    # Per il run CPU (quota GPU esaurita): target ridotto (15h ~ 7h CPU) e
+    # budget runtime esteso (9h = 32400s) per il generatore lazy.
+    env_override = ""
+    if cpu:
+        env_override = (
+            'os.environ["PREP_MAX_RUNTIME_SEC"] = "32400"  # 9h CPU\n'
+            'os.environ["PREP_TARGET_HOURS"] = "15.0"      # ~7h CPU realistiche\n'
+            "os.environ[\"CUDA_VISIBLE_DEVICES\"] = \"\"   # forza CPU\n"
+        )
     
     cell0_source = """# -*- coding: utf-8 -*-
 # ============================================================================
@@ -65,6 +75,11 @@ sys.stdout.flush()
 
     with open("kernel_src/prep_mdc_cell1.py", "r", encoding="utf-8") as f:
         prep_code = f.read()
+
+    if env_override:
+        # inietta le env subito dopo l'header (dopo la prima riga di docstring)
+        first_newline = prep_code.find("\n")
+        prep_code = prep_code[:first_newline + 1] + env_override + prep_code[first_newline + 1:]
 
     # Validazione AST
     for idx, code in enumerate([cell0_source, cell1_install, prep_code]):
@@ -130,10 +145,10 @@ sys.stdout.flush()
         "language": "python",
         "kernel_type": "notebook",
         "is_private": True,
-        "enable_gpu": True,
+        "enable_gpu": not cpu,
         "enable_tpu": False,
         "enable_internet": True,
-        "machine_shape": "NvidiaTeslaT4",
+        "machine_shape": "NvidiaTeslaT4" if not cpu else "",
         "dataset_sources": [
             "andrlab/gemma-4-omni-module"
         ],
@@ -141,6 +156,8 @@ sys.stdout.flush()
         "kernel_sources": [],
         "model_sources": []
     }
+    if cpu:
+        meta.pop("machine_shape", None)
     meta_path = os.path.join(out_dir, "kernel-metadata.json")
     with open(meta_path, "w", encoding="utf-8", newline="\n") as f:
         json.dump(meta, f, indent=2)
@@ -152,5 +169,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--out-dir", default="kernel_prep_mdc_r1")
     parser.add_argument("--slug", default="gemma4-prep-mdc-r1")
+    parser.add_argument("--cpu", action="store_true", help="Genera variante CPU (senza GPU, target 15h, budget 9h)")
     args = parser.parse_args()
-    build_notebook(out_dir=args.out_dir, slug=args.slug)
+    build_notebook(out_dir=args.out_dir, slug=args.slug, cpu=args.cpu)
