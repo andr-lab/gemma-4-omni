@@ -589,3 +589,40 @@ Dettagli:
 - Limiti: USER_BACKCHANNEL a 0 frame in DuplexConv (1 campione val); sintesi audio val con mel_l1=0 (finestre senza testo)
 - Report completo: `docs/REPORT_TASK8_3090.md`
 
+
+---
+
+## 13. Task 9B su RTX 3090 (2026-08-21) — Prep MDC 16h + Adapter Italiano SOTA
+
+### 13.1 Prep MDC italiano (16.0h)
+- Dataset: `OpenSpeechHub/Common_Voice_17_0-It` (repo_type="dataset"), tokenizer Qwen3-TTS, CPU-only
+- **16.0h audio italiano puro, 9185 clip, 720.014 frame agente, 1873 barge-in** — status PASS
+- Parquet: `data/train_tokens_mdc_16.0h_9185s_*` + copie standard `train_tokens_mdc_50.0h_2500s_*` (loader compatibile)
+- Class dist TURN: YIELD 40.0%, EMIT_BC 30.6%, SPEAK 24.2%, BARGE_IN 5.2%, USER_BC 0%
+- Script: `prep_mdc_3090.py` (20KB); report: `data/prep_mdc_report.json`
+
+### 13.2 Training Adapter Italiano (Task 6B) — 🏆 NUOVO RECORD SOTA
+- Script: `train_adapter_it_3090.py` (18.5KB); docker `gemma4-omni:latest`, GPU RTX 3090
+- Isolamento architetturale: Gemma 4 E2B **congelato** (4-bit), sub-talker Qwen3-TTS **congelato**; allenabili SOLO 16.53M param (causal_conv 7.08M + semantic_head 6.30M + ht_adapter 3.15M)
+- Training: 2532 step, 21.1 min, throughput 2.38 batch/s, picco VRAM 13.8GB/24GB
+- **Cosine Similarity Val: 0.9232** (benchmark precedente 0.7455 → **+23.8%**)
+- SVD: effective rank 1455/2048, cum energy top-1000 99.89% (nessun collasso)
+- Gate: Initial Loss 33.61 (range OK, non collassata), Val Loss 18.54, Coupling 5.53, Text 5.28
+- Checkpoint: `checkpoints/adapter_it/` (step 250..2500 + final) e `checkpoints/gemma4_duplex_sota` (copia standard per serving)
+- Samples: 8 coppie generated/oracle in `samples/`
+- Report: `docs/REPORT_TASK9B_ADAPTER_IT.md`, `logs/adapter_it_training_report.json`
+
+### 13.3 Confronto Storico cos sim (val)
+| Run | cos sim |
+|---|---|
+| R1 | 0.6211 |
+| R2 | 0.6275 |
+| R3 | 0.6063 |
+| QLoRA | 0.6018 |
+| Temporal | 0.6307 |
+| Temporal2 | 0.6304 |
+| RankFix | 0.6266 |
+| Window128 | 0.5859 |
+| **Eval temporal2 su 20h (Task 8)** | **0.7455** |
+| **Adapter Italiano MDC 16h (Task 9B)** | 🏆 **0.9232** |
+
