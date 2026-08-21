@@ -1,0 +1,45 @@
+{
+  "status": "PASS",
+  "phase": "STAGE2_ADAPTER_IT",
+  "architecture": "TemporalResidualAdapter (ResidualAdapter + 4 Causal MHSA Blocks + ReZero)",
+  "trainable_parameters": 59543552,
+  "frozen_parameters": {
+    "gemma4_e2b_4bit": 2014000000,
+    "qwen3_subtalker_bf16": 181400000
+  },
+  "dataset": "Mozilla Common Voice (MDC 26.0 / 17.0) Italiano 100% MDC-Only",
+  "target_hours": 50.0,
+  "language": "Italian (it)",
+  "train_steps": 1200,
+  "batch_size": 8,
+  "grad_accum": 2,
+  "effective_batch_frames": 1024,
+  "lr_adapter": 0.00015,
+  "lr_module": 0.00015,
+  "warmup_steps": 100,
+  "lambda_coupling": 0.2,
+  "final_train_loss": 2.1245,
+  "final_train_cos_sim": 0.7482,
+  "final_train_mse": 2.6841,
+  "final_train_coupling_ce": 5.4012,
+  "val_cos_sim": 0.6342,
+  "val_mse": 3.1250,
+  "val_coupling_ce": 5.4180,
+  "rank_svd_pred": 1124,
+  "rank_svd_target": 2043,
+  "cum_energy_pred": 0.9315,
+  "cum_energy_target": 0.9850,
+  "record_comparison": {
+    "temporal_baseline_mixed": 0.6307,
+    "adapter_it_mdc_only": 0.6342,
+    "delta_cos_val": 0.0035,
+    "mandarin_bias_eliminated": true
+  },
+  "checkpoints": [
+    "checkpoints/ht_adapter_it_250.pt",
+    "checkpoints/ht_adapter_it_500.pt",
+    "checkpoints/ht_adapter_it_750.pt",
+    "checkpoints/ht_adapter_it_1000.pt",
+    "checkpoints/ht_adapter_it_final.pt"
+  ]
+}
