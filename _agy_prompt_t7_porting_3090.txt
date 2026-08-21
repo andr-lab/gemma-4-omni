@@ -1,0 +1,80 @@
+# Task: RISTRUTTURAZIONE CODICE PER RTX 3090 LOCALE (SSH + Docker) — sostituto di Kaggle
+
+## Contesto
+
+Abbiamo ora una macchina Linux locale con RTX 3090 (24GB VRAM, ~14GB RAM utili per
+dataloader oltre ai pesi) raggiungibile via SSH (`gpu3090` alias in ~/.ssh/config,
+Docker con NVIDIA Container Toolkit installato). La quota GPU Kaggle settimanale
+(30h) è ESAURITA: prep MDC italiano gira già su un kernel CPU Kaggle, ma i TRAINING
+e le eval GPU devono migrare sulla 3090. Il progetto è una pipeline speech-to-speech
+full-duplex (Gemma 4 E2B + adapter temporale + sub-talker Qwen3-TTS) codificata come
+kernel Kaggle in un unico modulo `kaggle_pipeline.py` (4266 righe, celle %% [markdown]/[code]).
+
+Il tuo compito NON è riprogettare l'architettura del modello (è stabile e validata:
+adapter TemporalResidualAdapter 59.5M, QLoRA 4-bit, teacher Gemma 4 E2B 3.4GB bf16,
+tokenizer Qwen3-TTS 12Hz con 16 codebook RVQ, mel 100Hz, frame agent 12.5Hz, finestra
+64 frame, cos val record 0.6307). Il compito è rendere la pipeline ESEGUIBILE su
+macchina locale via SSH+Docker mantenendo IDENTICO comportamento numerico.
+
+## Vincoli operativi (vincolanti)
+
+1. **Niente modifica del codice di calcolo**: NON toccare logica di forward/backward,
+   loss, architetture, iperparametri, nomi di checkpoint esistenti. Solo refactoring
+   di I/O: path, ambiente, entrypoint, download, environment setup.
+2. **Il modulo unico resta**: non spezzettare `kaggle_pipeline.py` in 20 file. Creare
+   UN wrapper d'esecuzione `run_3090.py` (o pochi script di fase) che importa le
+   funzioni esistenti e le esegue con path locali. Se necessario, piccole funzioni
+   shim nei punti di I/O (path resolution, disk setup) protette da `if` su ambiente.
+3. **Path**: tutto ciò che è hardcoded `/kaggle/working`, `/kaggle/input`, `/root/kaggle_big`
+   (righe 25, 43-46, 61-62, 1173, 1426, 3745, 4234) va centralizzato in un modulo di
+   path che risolve in base a una env `PIPELINE_ENV` (valori: `kaggle` | `local3090`),
+   con default compatibili (su 3090: `~/gemma-4-omni/data`, `~/gemma-4-omni/checkpoints`,
+   `~/gemma-4-omni/samples`). I dataset Kaggle collegati vanno sostituiti da download
+   HF diretti via `huggingface_hub` (già usato nel progetto per MDC).
+4. **Docker**: fornire `Dockerfile` (base pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime,
+   installare `qwen-tts==0.1.1`, `transformers==4.49.0` per Fase 1, poi separazione
+   ADR-003: Fase 2 richiede `transformers>=5.x` + unsloth — documentare se serve un
+   secondo Dockerfile o un venv alternato dentro lo stesso container) + `docker-compose.yml`
+   o script `docker_run_3090.sh` con: `--gpus all`, `--ipc=host`, utente non-root
+   (uid/gid 1000), `--privileged` MAI, `--network host` MAI, volume `~/gemma-4-omni:/workspace`.
+   Testare che `nvidia-smi` funzioni nel container (NVIDIA Container Toolkit).
+5. **Fase 1 vs Fase 2 (ADR-003)**: rispettare la separazione. Su 3090 si possono
+   eseguire entrambe, ma il conflitto transformers va risolto come su Kaggle
+   (ambiente o processo separato). Verificare quale versione serve per il modulo
+   corrente: controllare i REQUIREMENTS dichiarati nel notebook (cella install).
+6. **download >1GB**: la macchina 3090 ha banda e disco (SSD), quindi il limite
+   "mai >1GB in locale" NON si applica alla 3090 — ma scaricare SOLO ciò che serve
+   (teacher bf16 3.4GB, tokenizer, code2wav). Documentare i comandi di download
+   con `huggingface-cli`/`hf` con auth.
+7. **Smoke test obbligatorio**: prima di qualsiasi run completo sulla 3090, un
+   `--smoke` (pochi batch) deve passare: forward+backward, coupling sub-talker
+   congelato, loss testo, validation split, checkpoint. Riusare i flag esistenti
+   (`PHASE2_SMOKE_BATCHES`, `SMOKE`) se presenti nel codice.
+8. **Verifica numerica**: confrontare la loss iniziale su 3090 (attesa ~13-17, log
+   4096+2048) con i valori Kaggle riportati in `gemma4_training_report.md`. Se
+   diverge molto (>2), segnalarlo nel report: indice di bug di porting.
+
+## Deliverable (file da creare/modificare)
+
+- `run_3090.py` — entrypoint unificato (fasi: prep → train → eval → serve) con flag
+  `--phase`, `--smoke`, `--device cuda:0`, log su `~/gemma-4-omni/logs/`.
+- `Dockerfile` (o due) + `docker_run_3090.sh` + `docker-compose.yml`.
+- `setup_3090.sh` — provisioning host: verifica nvidia-smi, NVIDIA Container Toolkit,
+  crea dirs progetto, installa chiavi/permessi utente, copia dataset se serve.
+- `docs/REPORT_PORTING_3090.md` — decisioni di porting, path mappati, comandi di
+  esecuzione, risultato smoke test (realmente eseguito da te? NO: la 3090 richiede
+  setup SSH umano non ancora fatto — descrivi i comandi PRONTI e il piano di test,
+  marca le sezioni non ancora eseguite come [NON ESEGUITO]).
+- Aggiornare `AGENTS.md` con sezione "Esecuzione locale 3090" (comandi, vincoli).
+
+## Regole di lavoro
+
+- Rispetta AGENTS.md: DDD (revisione avversariale del tuo stesso porting), SDD
+  (documentazione ufficiale per Docker/cuda/pytorch, citare URL), TDD (smoke test
+  come gate).
+- NON toccare `gemma4_training_report.md` (lo aggiorna il coordinatore).
+- NON creare o eseguire kernel Kaggle. NON provare a connetterti alla 3090 (SSH
+  non è ancora pronto): produci codice + istruzioni verificabili.
+- Tutti i file nuovi in ASCII puro (no caratteri >127). Non usare emoji.
+- Output: riepilogo finale con elenco file creati/modificati, decisioni chiave,
+  e cosa serve all'umano per attivare la 3090 (comandi esatti).
