@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import os, sys, json, ast, argparse
 
-def build_notebook(out_dir="kernel_prep_r1", slug="gemma4-prep-duplexconv-r1"):
+def build_notebook(out_dir="kernel_prep_r1", slug="gemma4-prep-duplexconv-r1", enable_gpu=False):
     os.makedirs(out_dir, exist_ok=True)
     
     cell0_source = """# -*- coding: utf-8 -*-
@@ -10,7 +10,8 @@ def build_notebook(out_dir="kernel_prep_r1", slug="gemma4-prep-duplexconv-r1"):
 # ============================================================================
 import os, sys, traceback
 try:
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    if os.environ.get("CUDA_VISIBLE_DEVICES") is None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     import json, time, gc, shutil, zipfile, hashlib
 
     _CANDIDATES = [
@@ -66,6 +67,13 @@ sys.stdout.flush()
     with open("kernel_src/prep_duplexconv_cell1.py", "r", encoding="utf-8") as f:
         prep_code = f.read()
 
+    for idx, code in enumerate([cell0_source, cell1_install, prep_code]):
+        try:
+            ast.parse(code)
+        except SyntaxError as e:
+            print(f"ERRORE DI SINTASSI IN CELLA {idx}: {e}")
+            raise
+
     nb = {
         "cells": [
             {
@@ -106,8 +114,13 @@ sys.stdout.flush()
     }
 
     nb_path = os.path.join(out_dir, f"{slug}.ipynb")
-    with open(nb_path, "w", encoding="utf-8") as f:
+    with open(nb_path, "w", encoding="utf-8", newline="\n") as f:
         json.dump(nb, f, indent=2)
+
+    with open(nb_path, "rb") as f:
+        data = f.read()
+    non_ascii = [b for b in data if b > 127]
+    assert len(non_ascii) == 0, f"Trovati {len(non_ascii)} byte non-ASCII nel notebook!"
 
     meta = {
         "id": f"andrlab/{slug}",
@@ -115,10 +128,10 @@ sys.stdout.flush()
         "code_file": f"{slug}.ipynb",
         "language": "python",
         "kernel_type": "notebook",
-        "is_private": "true",
-        "enable_gpu": "true",
-        "enable_tpu": "false",
-        "enable_internet": "true",
+        "is_private": True,
+        "enable_gpu": bool(enable_gpu),
+        "enable_tpu": False,
+        "enable_internet": True,
         "dataset_sources": [
             "andrlab/gemma-4-omni-module"
         ],
@@ -126,16 +139,20 @@ sys.stdout.flush()
         "kernel_sources": [],
         "model_sources": []
     }
+    if enable_gpu:
+        meta["machine_shape"] = "NvidiaTeslaT4"
     meta_path = os.path.join(out_dir, "kernel-metadata.json")
-    with open(meta_path, "w", encoding="utf-8") as f:
+    with open(meta_path, "w", encoding="utf-8", newline="\n") as f:
         json.dump(meta, f, indent=2)
 
-    print(f"[OK] Notebook generato: {nb_path}")
+    print(f"[OK] Notebook generato: {nb_path} ({len(data)} bytes, 0 non-ASCII)")
     print(f"[OK] Metadata generato: {meta_path}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--out-dir", default="kernel_prep_r1")
     parser.add_argument("--slug", default="gemma4-prep-duplexconv-r1")
+    parser.add_argument("--gpu", action="store_true", default=False)
     args = parser.parse_args()
-    build_notebook(out_dir=args.out_dir, slug=args.slug)
+    build_notebook(out_dir=args.out_dir, slug=args.slug, enable_gpu=args.gpu)
+
