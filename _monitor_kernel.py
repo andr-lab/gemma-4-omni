@@ -17,12 +17,20 @@ def sh(cmd, **kw):
     return subprocess.run(cmd, **kw)
 
 def fetch_log():
-    with open(OUT, "w", encoding="utf-8", errors="replace") as f:
+    try:
+        env = dict(os.environ)
+        env["PYTHONIOENCODING"] = "utf-8"
         r = subprocess.run(["kaggle", "kernels", "logs", KERNEL],
-                           env={**os.environ, "PYTHONIOENCODING": "utf-8"},
-                           capture_output=True, text=True, timeout=180)
-        f.write(r.stdout)
-    return os.path.getsize(OUT) if os.path.exists(OUT) else 0
+                           env=env, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=180)
+        with open(OUT, "w", encoding="utf-8", errors="replace") as f:
+            f.write(r.stdout or "")
+            if r.stderr:
+                f.write("\n--- STDERR ---\n" + r.stderr)
+        return os.path.getsize(OUT) if os.path.exists(OUT) else 0
+    except Exception as e:
+        print(f"fetch_log warning: {e}", flush=True)
+        return 0
 
 t0 = time.time()
 last = None
