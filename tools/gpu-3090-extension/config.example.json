@@ -1,0 +1,9 @@
+{
+  "sshHost": "gpu3090",
+  "remoteUser": "andrea",
+  "remoteBaseDir": "~/gemma-4-omni",
+  "dockerImage": "pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime",
+  "containerUid": 1000,
+  "containerGid": 1000,
+  "defaultTimeoutSec": 600
+}
