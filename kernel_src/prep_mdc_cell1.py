@@ -53,64 +53,64 @@ try:
     print("\n[PREP MDC 2/4] Caricamento clip audio e trascrizioni MDC Italiano...", flush=True)
     import io, librosa
 
-    def load_mdc_clips(max_clips=50000):
-        clips = []
-        # Opzione 1: Hugging Face datasets streaming
+    def iter_mdc_clips(max_clips=50000):
+        # FIX v3 (coordinatore, 2026-08-21): il caricamento v2 accumulava TUTTE le clip
+        # decodificate in RAM (~20GB per 46k clip) -> OOM sulla T4 (16GB) -> kernel died.
+        # Ora e' un GENERATORE LAZY: decodifica riga per riga e fa yield, memoria ~costante.
+        # Streaming via datasets fallisce ("AudioDecoder object has no attribute get") e
+        # datacollective richiede MDC_API_KEY, quindi: parquet HF diretti (huggingface_hub
+        # + pandas + soundfile, bytes mp3 48kHz -> 24kHz mono). 4 parquet ~= 46k clip ~= 58h.
+        total = 0
         try:
-            from datasets import load_dataset
-            print("  - Tentativo caricamento via Hugging Face: OpenSpeechHub/Common_Voice_17_0-It (streaming)...", flush=True)
-            ds = load_dataset("OpenSpeechHub/Common_Voice_17_0-It", split="train", streaming=True)
-            count = 0
-            for row in ds:
-                audio_dict = row.get("audio", {})
-                text = row.get("text", "") or row.get("sentence", "")
-                if audio_dict and text:
-                    arr = audio_dict.get("array")
-                    sr_in = audio_dict.get("sampling_rate", 48000)
-                    if arr is not None and len(arr) > 0:
-                        y = np.asarray(arr, dtype=np.float32)
+            from huggingface_hub import hf_hub_download
+            hf_repo = "OpenSpeechHub/Common_Voice_17_0-It"
+            n_parquet = max(1, int(math.ceil(TARGET_HOURS / 14.5)))  # ~14.5h per parquet
+            n_parquet = min(n_parquet, 40)
+            print(f"  - [PARQUET] Streaming {n_parquet} parquet da {hf_repo} (generatore lazy, RAM ~costante)...", flush=True)
+            for pi in range(n_parquet):
+                if total >= max_clips:
+                    break
+                fname = f"data/train-{pi:05d}-of-00040.parquet"
+                try:
+                    local = hf_hub_download(repo_id=hf_repo, filename=fname, repo_type="dataset")
+                except Exception:
+                    local = hf_hub_download(repo_id=hf_repo, filename=fname, repo_type="dataset", revision="main")
+                print(f"    [PARQUET {pi+1}/{n_parquet}] streaming {fname}...", flush=True)
+                df = pd.read_parquet(local)
+                for _, row in df.iterrows():
+                    if total >= max_clips:
+                        break
+                    try:
+                        t = str(row.get("text") or "").strip()
+                        audio_val = row.get("audio")
+                        raw = None
+                        if isinstance(audio_val, dict):
+                            raw = audio_val.get("bytes")
+                        elif audio_val is not None:
+                            raw = bytes(audio_val)
+                        if not raw or not t:
+                            continue
+                        y, sr_in = sf.read(io.BytesIO(raw), dtype="float32")
+                        if y.ndim > 1:
+                            y = y.mean(axis=1)
                         if sr_in != SAMPLE_RATE:
                             y = librosa.resample(y, orig_sr=sr_in, target_sr=SAMPLE_RATE)
-                        rms = float(np.sqrt(np.mean(y**2))) + 1e-8
-                        y = y * (0.05 / rms)
-                        clips.append({"audio": y, "text": text.strip()})
-                        count += 1
-                        if count % 1000 == 0:
-                            print(f"    [HF Stream] Caricati {count}/{max_clips} clip...", flush=True)
-                        if count >= max_clips:
-                            break
-            if clips:
-                print(f"[PREP MDC] Caricati con successo {len(clips)} clip da Hugging Face!", flush=True)
-                return clips
-        except Exception as e:
-            print(f"  - [AVVISO] HF Stream fallito o non disponibile: {e}", flush=True)
-
-        # Opzione 2: datacollective locale / API
-        try:
-            print("  - Tentativo caricamento via datacollective (MDC 26.0)...", flush=True)
-            df_mdc = KP.load_mozilla_italian_dataset(max_samples=max_clips)
-            for _, row in df_mdc.iterrows():
-                p = str(row.get("path") or "").strip()
-                t = str(row.get("sentence") or "").strip()
-                if p and os.path.isfile(p) and t:
-                    try:
-                        y, sr_in = librosa.load(p, sr=SAMPLE_RATE, mono=True)
-                        if len(y) > 0:
+                        if len(y) > SAMPLE_RATE:  # >= 1s di audio
                             rms = float(np.sqrt(np.mean(y**2))) + 1e-8
                             y = y.astype(np.float32) * (0.05 / rms)
-                            clips.append({"audio": y, "text": t})
+                            total += 1
+                            yield {"audio": y, "text": t}
                     except Exception:
                         pass
-                if len(clips) >= max_clips:
-                    break
-            if clips:
-                print(f"[PREP MDC] Caricati {len(clips)} clip da Mozilla Data Collective!", flush=True)
-                return clips
+                del df
+                gc.collect()
+            if total == 0:
+                print("  - [AVVISO] Parquet HF non caricati (nessun clip valido)", flush=True)
         except Exception as e:
-            print(f"  - [AVVISO] Datacollective fallito: {e}", flush=True)
+            print(f"  - [AVVISO] Parquet HF fallito: {e}", flush=True)
 
-        # Fallback sintetico per smoke test locale
-        if not clips:
+        # Fallback sintetico per smoke test locale (mai raggiunto su Kaggle con internet)
+        if total == 0:
             print("  - [FALLBACK MOCK] Creazione 50 clip simulati per test...", flush=True)
             for i in range(50):
                 dur = np.random.uniform(2.5, 5.0)
@@ -118,11 +118,9 @@ try:
                 t_arr = np.linspace(0, dur, n_samples, dtype=np.float32)
                 freq = np.random.uniform(150, 300)
                 y = 0.05 * np.sin(2 * np.pi * freq * t_arr)
-                clips.append({"audio": y, "text": f"Questa e la frase di prova numero {i+1} in italiano."})
-        return clips
+                yield {"audio": y, "text": f"Questa e la frase di prova numero {i+1} in italiano."}
 
-    all_clips = load_mdc_clips(max_clips=MAX_CLIPS)
-    print(f"[PREP MDC] Totale clip disponibili per la preparazione: {len(all_clips)}", flush=True)
+    all_clips_iter = iter_mdc_clips(max_clips=MAX_CLIPS)
 
     # ---------------------------------------------------------------------------
     # 3. Costruzione Dialoghi Dual-Channel Simulati e Tokenizzazione
@@ -143,13 +141,18 @@ try:
     dialogue_idx = 0
 
     # Elabora in micro-dialoghi composti da coppie di clip Utente-Agente
-    while clip_idx < len(all_clips) - 1:
+    # (consumo del generatore lazy: coppie consecutive, niente lista in RAM)
+    _it = iter(all_clips_iter)
+    while True:
         if (time.time() - t_start) > MAX_RUNTIME_SEC:
             print(f"[PREP MDC] Raggiunto limite temporale ({MAX_RUNTIME_SEC}s). Arresto acquisizione.", flush=True)
             break
 
-        c_user = all_clips[clip_idx]
-        c_agent = all_clips[clip_idx + 1]
+        try:
+            c_user = next(_it)
+            c_agent = next(_it)
+        except StopIteration:
+            break
         clip_idx += 2
         dialogue_idx += 1
 
