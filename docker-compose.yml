@@ -1,0 +1,155 @@
+# docker-compose.yml - Multi-service orchestration for Gemma 4 Full-Duplex on RTX 3090
+# Pure ASCII encoding - Compliant with NVIDIA Container Toolkit and non-root security constraints.
+
+services:
+  train:
+    image: gemma4-omni:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gemma4_train_3090
+    ipc: host
+    user: "1000:1000"
+    working_dir: /workspace
+    environment:
+      - PIPELINE_ENV=local3090
+      - CUDA_VISIBLE_DEVICES=0
+      - HF_TOKEN=${HF_TOKEN}
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./:/workspace
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: python run_3090.py --phase train
+
+  train-smoke:
+    image: gemma4-omni:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gemma4_smoke_3090
+    ipc: host
+    user: "1000:1000"
+    working_dir: /workspace
+    environment:
+      - PIPELINE_ENV=local3090
+      - CUDA_VISIBLE_DEVICES=0
+      - HF_TOKEN=${HF_TOKEN}
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./:/workspace
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: python run_3090.py --phase train --smoke
+
+  prep:
+    image: gemma4-omni:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gemma4_prep_3090
+    ipc: host
+    user: "1000:1000"
+    working_dir: /workspace
+    environment:
+      - PIPELINE_ENV=local3090
+      - CUDA_VISIBLE_DEVICES=0
+      - HF_TOKEN=${HF_TOKEN}
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./:/workspace
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: python run_3090.py --phase prep
+
+  prep-smoke:
+    image: gemma4-omni:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gemma4_prep_smoke_3090
+    ipc: host
+    user: "1000:1000"
+    working_dir: /workspace
+    environment:
+      - PIPELINE_ENV=local3090
+      - CUDA_VISIBLE_DEVICES=0
+      - HF_TOKEN=${HF_TOKEN}
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./:/workspace
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: python run_3090.py --phase prep --smoke
+
+  eval:
+    image: gemma4-omni:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gemma4_eval_3090
+    ipc: host
+    user: "1000:1000"
+    working_dir: /workspace
+    environment:
+      - PIPELINE_ENV=local3090
+      - CUDA_VISIBLE_DEVICES=0
+      - HF_TOKEN=${HF_TOKEN}
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./:/workspace
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: python run_3090.py --phase eval
+
+  serve:
+    image: gemma4-omni:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gemma4_serve_3090
+    ipc: host
+    user: "1000:1000"
+    working_dir: /workspace
+    environment:
+      - PIPELINE_ENV=local3090
+      - CUDA_VISIBLE_DEVICES=0
+      - HF_TOKEN=${HF_TOKEN}
+      - PYTHONUNBUFFERED=1
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./:/workspace
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: python run_3090.py --phase serve --port 8000

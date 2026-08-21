@@ -44,3 +44,51 @@ Comportamento guidato dai test: RED → GREEN → REFACTOR.
 - **Debugging**: usare `debugging-and-error-recovery` per root-cause sistematico; mai fix a tentativi (niente "guess and pray").
 - **Checkpoint & metriche**: ogni run salva checkpoint in `checkpoints/`, wav ascoltabili in `samples/` e report. Confrontare i risultati col report precedente (`gemma4_training_report.md`). Loss iniziale attesa ~13-17 (log 4096 + log 2048), NON ~0.002.
 - **Comunicazione**: alla fine del lavoro informare l'utente via email (estensione email-status / send_status_email), con stato (fatto/in corso/bloccato), file toccati, test eseguiti, prossimi passi.
+
+## Esecuzione locale 3090 (RTX 3090 SSH + Docker)
+
+A causa dell'esaurimento della quota GPU Kaggle (30h/settimana), i training pesanti e le eval GPU migrano sulla macchina Linux locale con NVIDIA GeForce RTX 3090 (24GB VRAM, ~14GB RAM per dataloader), raggiungibile via SSH (alias `gpu3090` in `~/.ssh/config`).
+
+### Vincoli operativi e di sicurezza (obbligatori)
+- **Non-root container**: eseguire sempre come utente `uid:gid 1000:1000` (`appuser`) per garantire che i file creati nei volumi montati abbiano i permessi corretti.
+- **Shared memory**: usare sempre `--ipc=host` per prevenire errori di bus (`SIGBUS`) nel DataLoader PyTorch durante il passaggio dei batch tra processi worker.
+- **Isolamento di rete e privilegi**:
+  - MAI usare `--privileged`.
+  - MAI usare `--network host`. Per il serving REST usare esclusivamente il port mapping esplicito `-p 8000:8000`.
+- **Volume di lavoro**: montare sempre il repository host in `/workspace` (`-v ~/gemma-4-omni:/workspace`).
+- **Download > 1GB su 3090**: il vincolo "mai > 1GB in locale" non si applica alla macchina 3090 (dotata di SSD veloce e banda). Scaricare direttamente via `huggingface-cli` o `huggingface_hub` solo i modelli strettamente necessari (`unsloth/gemma-4-E2B-it`, `Qwen/Qwen3-TTS-12Hz-1.7B-Base`, `Qwen/Qwen3-TTS-Tokenizer-12Hz`).
+
+### Comandi di esecuzione standard su 3090
+Tutti i comandi vanno eseguiti all'interno di `~/gemma-4-omni` sull'host `gpu3090`:
+
+```bash
+# Provisioning host e verifica NVIDIA Container Toolkit (una tantum)
+./setup_3090.sh
+
+# 1. Smoke test rapido di validazione (4 batch, gate numerici)
+./docker_run_3090.sh smoke
+# oppure con docker compose:
+docker compose run --rm train-smoke
+
+# 2. Training completo Fase 2 (Gemma 4 QLoRA + TemporalResidualAdapter)
+./docker_run_3090.sh train
+# oppure con docker compose:
+docker compose run --rm train
+
+# 3. Data Preparation Fase 1 (RVQ Tokenization + Parquet/memmap)
+./docker_run_3090.sh prep
+
+# 4. Valutazione e sintesi campioni audio di verifica
+./docker_run_3090.sh eval
+
+# 5. Serving API REST FastAPI (porta 8000)
+./docker_run_3090.sh serve
+
+# 6. Shell interattiva non-root nel container
+./docker_run_3090.sh bash
+```
+
+### Verifica numerica obbligatoria
+- **Loss iniziale attesa**: ~13.0 - 17.0 (somma dei logit semantici e acustici al passo 0).
+- **Divergenza critica**: se la loss iniziale supera 19.0 o collassa < 1.0 (indice di dati degenerati o allineamento errato), fermare l'esecuzione e investigare prima di consumare cicli di calcolo.
+
