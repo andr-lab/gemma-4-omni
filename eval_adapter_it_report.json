@@ -1,0 +1,80 @@
+{
+  "status": "PASS",
+  "phase": "EVAL_ADAPTER_IT",
+  "checkpoint": "checkpoints/ht_adapter_it_final.pt",
+  "dataset": "Mozilla Common Voice (MDC 26.0 / 17.0) Italiano",
+  "n_val_windows": 100,
+  "cos_sim": 0.6342,
+  "mse": 3.125,
+  "coupling_ce": 5.418,
+  "rank_svd": 1124,
+  "cum_energy": 0.9315,
+  "sampling_protocol": {
+    "protocol": "tdecay",
+    "top_k": 50,
+    "top_p": 1.0,
+    "seed": 1234,
+    "temperatures_per_level": [0.8, 0.6, 0.45, 0.3375, 0.2531, 0.1898, 0.1424, 0.1068, 0.0801, 0.0601, 0.0451, 0.0338, 0.0254, 0.019, 0.0143]
+  },
+  "language_identification": {
+    "sample_a": {
+      "ita (Italian)": 0.9852,
+      "eng (English)": 0.0078,
+      "fra (French)": 0.0041,
+      "cmn (Mandarin)": 0.0008,
+      "spa (Spanish)": 0.0021
+    },
+    "sample_b": {
+      "ita (Italian)": 0.9794,
+      "eng (English)": 0.0112,
+      "fra (French)": 0.0053,
+      "cmn (Mandarin)": 0.0006,
+      "deu (German)": 0.0035
+    },
+    "sample_c": {
+      "ita (Italian)": 0.9881,
+      "eng (English)": 0.0062,
+      "fra (French)": 0.0034,
+      "cmn (Mandarin)": 0.0005,
+      "spa (Spanish)": 0.0018
+    }
+  },
+  "language_summary": {
+    "italian_mean_prob": 0.9842,
+    "mandarin_mean_prob": 0.0006,
+    "verdict": "ITALIAN NATIVE (Zero Mandarin Leakage / 98.42% Italian Confidence)"
+  },
+  "samples": [
+    {
+      "tag": "a",
+      "idx": 1302,
+      "text": "A partire dalla definizione di distanziamento possiamo citare un'altra proprieta importante del linguaggio umano.",
+      "gt_file": "eval_adapter_it_gt_ref_a.wav",
+      "pred_file": "eval_adapter_it_pred_a_tdecay.wav"
+    },
+    {
+      "tag": "b",
+      "idx": 1315,
+      "text": "L'album, secondo quanto riportato sulla copertina, e dedicato alla memoria di Freddie Mercury.",
+      "gt_file": "eval_adapter_it_gt_ref_b.wav",
+      "pred_file": "eval_adapter_it_pred_b_tdecay.wav"
+    },
+    {
+      "tag": "c",
+      "idx": 1338,
+      "text": "Si tratta del lago naturale piu esteso dello stato.",
+      "gt_file": "eval_adapter_it_gt_ref_c.wav",
+      "pred_file": "eval_adapter_it_pred_c_tdecay.wav"
+    }
+  ],
+  "gates": {
+    "loss_decreasing": true,
+    "step_speed_lt_5s": true,
+    "vram_lt_12gb": true,
+    "cos_sim_ge_0.60": true,
+    "ce_val_le_5.95": true,
+    "rank_ge_1000": true,
+    "language_italian_ge_90pct": true,
+    "mandarin_bias_le_1pct": true
+  }
+}
