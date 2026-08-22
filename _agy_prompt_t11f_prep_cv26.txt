@@ -1,0 +1,67 @@
+# TASK AGY 11F — TOKENIZZAZIONE CV26 ITALIANO (MDC 26) + VERIFICA PERCETTIVA + PREP v3
+
+## CONTESTO (aggiornato — il coordinatore ha fatto il lavoro preparatorio, NON rifarlo)
+
+L'utente aveva insistito che MDC 26 esiste usando il pacchetto ufficiale `datacollective`.
+Il Task 11D cercava slug sbagliati ("common-voice-26", "cv-corpus-26.0") → 404. Il
+coordinatore ha trovato nel registry ufficiale MDC il dataset reale e lo ha GIÀ scaricato
+ed estratto su gpu3090:
+
+- **Dataset**: "Common Voice Scripted Speech 26.0 - Italian"
+  - ID: `cmqini14100vmnq07309ocknr` (slug: common-voice-scripted-speech-26-0-italia-86af0723)
+  - Metodo: SDK datacollective 0.5.7, POST https://mozilladatacollective.com/api/datasets/{id}/download
+    con header `Authorization: Bearer $MDC_API_KEY` (env) → downloadUrl pre-signed
+- **File scaricato**: `/workspace/mdc26_it/cv-corpus-26.0-2026-06-12-it.tar.gz` (10,513,001,291 bytes, verificato)
+- **Estratto**: `/workspace/mdc26_it/cv-corpus-26.0-2026-06-12/it/`
+  - clips/ : 283.867 file mp3 (11GB, 32kHz)
+  - train.tsv: 173.597 clip | dev.tsv: 15.185 | test.tsv: 15.184 | validated.tsv: 240.596
+  - colonne: client_id, path, sentence_id, sentence (TESTO ITALIANO), sentence_domain, up/down_votes, age, gender, accents, variant, locale, segment
+- **Esempi testo**: "Per tutte le Chiese Cristiane è il Terzo Patriarca." / "I piatti sono influenzati dalle tribù locali come anche dalla cucina colombiana."
+- Clip campione verificate leggibili: `_sample1.mp3` (4.39s), `_sample2.mp3` (4.79s), sr=32000
+
+La chiave API MDC è in env `MDC_API_KEY` SOLO nel container docker lanciato dal
+coordinatore (MAI scriverla in file di codice o git).
+
+## OBIETTIVO — PREP v3: tokenizza CV26 it in codici RVQ Qwen3-TTS + mel numpy
+
+Ripeti per il dataset CV26 it il flusso di tokenizzazione già collaudato per MDC v2
+(guarda lo script prep MDC v2 esistente e la cella prep di kaggle_pipeline.py — usa
+la STESSA pipeline, NON reinventare):
+
+1. **Lettura e filtraggio**:
+   - Carica train.tsv (+ eventualmente validated che non sia in train). Filtra per:
+     - `up_votes - down_votes >= 2` (clip validate)
+     - durata clip ragionevole: 1.0s ≤ durata ≤ 15s (usa `clip_durations.tsv` se serve, o misura con soundfile)
+     - testo non vuoto, solo caratteri validi (filtra righe con caratteri strani)
+   - Obiettivo: **≥ 50 ore di parlato attivo** se possibile (CV26 it ha ~280k clip; anche al 60% di filtraggio siamo ampiamente sopra). Se il volume è enorme, valuta un campionamento stratificato per parlante (es. max N clip per client_id) per diversità, ma NON ridurre sotto le ~30h.
+2. **Tokenizzazione RVQ (Qwen3-TTS Tokenizer 12Hz, 16 codebook)**:
+   - Usa IL DECODER/ENCODER UFFICIALE: `Qwen3TTSTokenizerV2Model` (qwen-tts 0.1.1, venv phase1 `/opt/venv_phase1/bin/python`) — STESSO ambiente verificato nel Task 11E (il worker subprocess funziona).
+   - Output per clip: `codes` (T_frames x 16, int), mel numpy (bit-pari col Gemma4AudioFeatureExtractor), durata.
+   - Salva parquet con colonne come il prep v2 (verifica lo schema esistente: `data/train_tokens_mdc_v2_15.0h_11599s_codes.parquet` + file mel).
+   - Nome output: `train_tokens_cv26_it_XX.Xh_NNNNNs_codes.parquet`
+3. **Controlli anti-artefatto OBBLIGATORI (lezione dai 3 artefatti passati)**:
+   - `CONSTANT_MEL_RATIO`: percentuale di clip con mel quasi costante — deve essere < 2% (il v2 degenerato era 44.66%, il v2 buono 0.96%)
+   - distribuzione target: N valori distinti in CB0 per finestra campione (minimo ~20-30 diversi)
+   - decodifica di 8 clip tokenizzate con decoder ufficiale → wav in `samples_cv26/` → verifica: corr@12.5Hz in [-0.1, +0.1], sub<100Hz < 2%, peak/rms 3-10
+4. **Smoke**: prepara il training con 2-4 batch (PHASE2_SMOKE_BATCHES) e verifica che loss iniziale sia ~13-17 (NON ~0.002) prima di qualsiasi run completo.
+
+## VERIFICA PERCETTIVA OBBLIGATORIA (verdetto di agy, non solo metriche)
+Genera 4-6 wav decodificati da clip CV26 it casuali e **ASCOLTALI direttamente**
+(sintassi `@percorso/file.wav` nel prompt — Gemini CLI supporta attachment audio).
+Per ciascuno scrivi un verdetto percettivo esplicito: VOICE CHIARA / VOCE CON
+ARTEFATTI (descrivi cosa senti) / RUMORE NON VOCALE. Se anche UNO è rumore:
+DIAGNOSI, non proseguire. Il verdetto va in docs/REPORT_TASK11F_PREP_CV26.md.
+
+## REGOLE OPERATIVE
+- Comandi >2-3 min SEMPRE nohup + polling (nohup bash -c '...' > /tmp/job_11f.log 2>&1 & echo PID=$!). MAI comandi docker sincroni lunghi.
+- Calcolo SOLO su gpu3090 (docker: --gpus all --user 1000:1000 --ipc=host -v ~/gemma-4-omni:/workspace -e HF_HOME/HF_HUB_CACHE/PIPELINE_ENV, MAI --privileged/--network host).
+- Tokenizzazione CPU-bound + GPU: usa il worker venv phase1 come nel Task 11E; parallelizza con multiprocessing sui core (3090 ha molti core) ma attento a RAM (~14GB disponibili per dataloader; il dataset è su disco).
+- NON modificare il codice di calcolo di training. NON scrivere la chiave API in file.
+- Se la tokenizzazione completa richiede >2h: tokenizza prima un subset (es. 5-10h) per validare il flusso end-to-end con verifica percettiva, POI lancia il run completo in background e riporta lo stato.
+
+## OUTPUT RICHIESTO
+1. parquet `data/train_tokens_cv26_it_*_codes.parquet` + mel numpy + sidecar (schema come v2)
+2. Metriche anti-artefatto (constant mel ratio, distribuzione CB0, durata totale, N clip)
+3. 4-6 wav decodificati in `samples_cv26/` + verdetto percettivo per ciascuno
+4. `docs/REPORT_TASK11F_PREP_CV26.md` con: parametri, filtri, metriche, verdetti percettivi, tempi
+5. Smoke training (2-4 batch) con loss iniziale verificata ~13-17
