@@ -1,0 +1,69 @@
+# TASK AGY 11B — TRAINING COMPLETO ADAPTER v2 con VOCI REALI (dataset gia' pronto)
+
+## Stato (verificato dal coordinatore — NON rifare la diagnosi)
+
+Il dataset MDC v2 con voci reali e' GIA' PRONTO sulla 3090:
+- `data/train_tokens_mdc_v2_15.0h_11599s_{mel,ameld,codes,text,turnlabels}.parquet`
+- **15.00h audio reale, 11599 clip, CONSTANT_MEL_RATIO 0.0096 (0.96% frame costanti — SANO)**
+- Copie standard gia' create: `train_tokens_mdc_50.0h_2500s_*`
+- Codebook 0: 2033 token unici su 675010 frame
+- Lo SMOKE training e' gia' PASSATO (4 step, initial loss 25.67, val loss 25.36,
+  cos sim 0.7936 su dati reali) — il run completo NON e' stato lanciato
+- Script pronti: `train_adapter_it_3090.py` (auto-discover il dataset piu' grande),
+  `check_voice_quality.py` (validazione voce), `prep_mdc_v2_3090.py`
+- Checkpoint smoke parziali in `checkpoints/gemma4_duplex_sota_v2/` (solo step 4, da SOVRASCRIVERE col run completo)
+
+## LEZIONE CRITICA (timeout print-mode) — LEGGERE PRIMA DI TUTTO
+
+Comandi lunghi (> 2-3 min) SEMPRE in nohup + polling, MAI sincroni:
+
+    ssh gpu3090 "cd ~/gemma-4-omni && nohup bash -c 'COMANDO' > /tmp/job_x.log 2>&1 & echo PID=$!"
+
+poi polling breve (< 60s per ssh):
+    ssh gpu3090 "tail -5 /tmp/job_x.log; pgrep -f COMANDO | head -1 || echo DONE"
+
+Se il job nohup non finisce entro la tua sessione: lascialo girare, scrivi stato
+parziale e log path nel report. Ogni singolo ssh < 60s.
+
+## OBIETTIVO UNICO — TRAINING COMPLETO ADAPTER su dati v2 reali
+
+1. SMOKE (obbligatorio): lancia con `--smoke` (o max 8 batch) e verifica:
+   - initial loss ~13-17 NON collassata
+   - GPU attiva (nvidia-smi)
+   - Il dataset caricato e' il v2 (15.0h, const ratio 0.96%) — passa
+     esplicitamente `--dataset data/train_tokens_mdc_v2_15.0h_11599s`
+2. RUN COMPLETO in nohup: stessi iperparametri del run che ha prodotto il SOTA
+   precedente (2532 step, ~21 min, throughput 2.38 batch/s, 16.53M trainable).
+   Checkpoint in `checkpoints/gemma4_duplex_sota_v2/` (sovrascrivi lo smoke),
+   copia standard in `checkpoints/gemma4_duplex_sota`.
+3. VALIDAZIONE OBBLIGATORIA post-training:
+   - Genera 4-8 wav predicted+oracle in `samples/`
+   - Esegui `check_voice_quality.py` su di essi: DEVONO contenere voce
+     (frazione frame costanti bassa, energia variabile, dom_freq NON a 440Hz
+     costante, presenza armoniche). SE SONO SINUSOIDI: il dataset/decoder e'
+     ancora rotto — FERMATI, diagnostica, NON dichiarare successo.
+   - Riporta cos sim val SOLO se il target mel e' ricco (const < 5%), insieme
+     alla voice quality check.
+4. Report `logs/adapter_it_v2_training_report.json` + `docs/REPORT_TASK11B_ADAPTER_V2.md` con:
+   - gate smoke, metriche finali (loss, cos sim, SVD), voice quality check
+   - confronto col vecchio 0.9279 (artefatto): spiega che il nuovo cos sim sara'
+     probabilmente piu' basso MA onesto, con voci reali nei wav
+
+## Regole operative (SEMPRE)
+
+- Calcolo SOLO su gpu3090 (SSH alias gpu3090, utente administrator).
+- Docker: docker run --rm --gpus all --user 1000:1000 --ipc=host \
+    -v /home/administrator/gemma-4-omni:/workspace -w /workspace \
+    -e HF_HOME=/workspace/hf_cache -e HF_HUB_CACHE=/workspace/hf_cache/hub \
+    -e PIPELINE_ENV=local3090 -e PYTHONUNBUFFERED=1 \
+    gemma4-omni:latest python SCRIPT.py [flags]
+- MAI sudo via BatchMode. NO --privileged, NO --network host.
+- NON modificare kaggle_pipeline.py se non shim I/O minimi.
+- NON toccare gemma4_training_report.md (lo aggiorna il coordinatore).
+- Comando fallito: diagnosi sistematica root-cause, MAI fix a tentativi.
+
+## Output richiesto
+
+Al termine: docs/REPORT_TASK11B_ADAPTER_V2.md + logs/adapter_it_v2_training_report.json.
+Se il training non finisce in sessione: lascia il job in nohup, scrivi stato
+parziale + log path e segnala al coordinatore.
