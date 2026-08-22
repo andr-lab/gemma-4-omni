@@ -244,3 +244,25 @@ Alla domanda "TurnHead(DuplexConv) + Adapter(MDC) può dare il full-duplex?", la
 5. TurnHead retrocessa a segnale ausiliario finché non ridiventa abbastanza accurata.
 
 Con questi 5 passi il sistema diventa realmente full-duplex sull'architettura che abbiamo già, senza ricostruzioni revolutionary.
+
+---
+
+## APPENDICE (22/8 sera) — Risultati empirici Task 11H
+
+### Dataset THv5 con GT nativo: distribuzione classi reale
+5997 segmenti / 6.099.319 frame etichettati da vadFlagPerFrmPerTrack + state:
+SPEAK 76,87% | USER_BC 15,70% | BARGE_IN 7,11% | YIELD 0,33% | **EMIT_BC 0%**
+
+### Scoperta strutturale su DuplexConv
+Analisi di 400 JSON campionati: le utterance del canale agente NON scendono mai
+sotto ~1,76s (p10) → il backchannel dell'agente come "emissione breve <0,8s"
+NON ESISTE nei dati. Inoltre l'81% delle utterance agente sovrappone tratti
+utente >2s → i due canali non sono turni alternati puliti ma conversazioni
+multi-party ad alta sovrapposizione (coerente col README: multi-party).
+
+### Conseguenze per TurnHead v5
+1. Classi effettive: 4 (eliminare EMIT_BC o ridefinirlo su intervalli brevi relativi)
+2. YIELD 0,33% richiede weighted sampling/focal loss (come fatto in v4)
+3. La supervisione resta SUPERIORE alle euristiche v4 (VAD frame-level reale),
+   ma il backchannel agent dovrà essere insegnato con dati dedicati (dialoghi it
+   sintetici dual-channel col nostro stack) o micro-turni generati (Path C).
