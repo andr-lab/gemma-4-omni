@@ -1,5 +1,15 @@
 # TASK AGY 11G — DIAGNOSI ADAPTER "VOCE ROBOTICA" + FIX + RETRAIN (priorità ALTA)
 
+## AGGIORNAMENTO POST-11F (22/8 ore 19:10) — DATI CV26 PRONTI ✅
+Il Task 11F è morto per timeout agy MA il job nohup è sopravvissuto e ha completato:
+- `data/train_tokens_cv26_it_40.8h_31916s_{mel,ameld,codes}.parquet` — **40,8h, 31.916 clip, 5.986 parlanti** (stratificato max 60/parlante da pool 219.645 clip / 324.96h filtrato)
+- Schema identico al v2 (16 codebook RVQ, 4096 semantico + 2048 acustici × 15)
+- Gate numerico indipendente del coordinatore: corr@12.5Hz ∈ [-0.074,+0.058] su tutti gli 8 sample decodificati (`samples_cv26/sample_0X_cv26.wav`), CB0 = 240 valori distinti/500 frame, peak/rms 4.1-4.7 → NON degenere, usa QUESTO dataset per il retrain.
+- Nota: il passo 5/5 di agy (analisi anti-artefatto completa) non è mai partito: la tua diagnosi può integrarla (CONSTANT_MEL_RATIO formale sull'intero mel.parquet).
+
+## SCOPERTA STRUTTURALE DUPLEXCONV (per contesto futuro, NON azione ora)
+Il README ufficiale HF rivela campi che NON usiamo: `vadFlagPerFrmPerTrack` (VAD frame-level per canale), `state` (<|complete|>/<|incomplete|> stato del turno), `speaker.segments` (diarizzazione). Il dataset è CINESE 2.000h; companion SmoothConv = 100h annotate da umani. Questo abiliterà un retraining TurnHead con label reali (vedi docs/REVIEW_PIPELINE_FULLDUPLEX.md) — non parte in questo task.
+
 ## FEEDBACK PERCETTIVO DELL'UTENTE (22/8, dopo il Task 11E — ascolto diretto reale)
 > "Oracle va benissimo, la voce generated è incomprensibile e robotica. probabilmente l'adapter non è allenato correttamente."
 
@@ -35,12 +45,10 @@ Dopo la diagnosi: APPLICA IL FIX (può includere: predire direttamente i codici 
 cross-entropy multi-codebook, o ri-encode corretto, o sampling migliore, o architettura
 adapter adeguata). NON limitarti a documentare: il fix va implementato e verificato.
 
-## OBIETTIVO 2 — RETRAIN con il dataset CV26 it (se il Task 11F ha prodotto i parquet)
+## OBIETTIVO 2 — RETRAIN con il dataset CV26 it v3 (PRONTO, vedi aggiornamento sopra)
 
-Il Task 11F (in parallelo) sta tokenizzando CV26 it (283k clip reali, 173k train).
-Se `data/train_tokens_cv26_it_*.parquet` è pronto (verifica), il retrain dell'adapter
-corretto usa QUEL dataset (molto più grande e vario del v2). Se non è pronto, retrain
-sul v2 con il fix di OBIETTIVO 1 e documenta che il retrain CV26 seguirà.
+Usa `data/train_tokens_cv26_it_40.8h_31916s_*.parquet` (40,8h reali verificate, gate PASS).
+Smoke PRIMA (PHASE2_SMOKE_BATCHES=2-4): loss iniziale ~13-17 obbligatoria. Poi run completo in nohup.
 
 ## OBIETTIVO 3 — VERIFICA PERCETTIVA OBBLIGATORIA (verdetto di agy, non solo metriche)
 

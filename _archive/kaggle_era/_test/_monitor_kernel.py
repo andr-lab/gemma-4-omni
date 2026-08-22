@@ -41,7 +41,12 @@ while time.time() - t0 < TIMEOUT:
     if status != last:
         print(f"[{int(time.time()-t0)}s] {status}", flush=True)
         last = status
-    if "complete" in status.lower() or "error" in status.lower() or "cancel" in status.lower():
+    s_low = status.lower()
+    is_kernel_complete = "kernelworkerstatus.complete" in s_low or ("has status" in s_low and "complete" in s_low)
+    is_kernel_error = "kernelworkerstatus.error" in s_low or ("has status" in s_low and "error" in s_low)
+    is_kernel_cancel = "kernelworkerstatus.cancel" in s_low or ("has status" in s_low and "cancel" in s_low)
+
+    if is_kernel_complete or is_kernel_error or is_kernel_cancel:
         time.sleep(15)
         n = fetch_log()
         if n == 0:
@@ -56,7 +61,7 @@ while time.time() - t0 < TIMEOUT:
             print(txt[-4000:], flush=True)
         else:
             print("LOG NON SALVATO", flush=True)
-        sys.exit(0 if "complete" in status.lower() else 1)
+        sys.exit(0 if is_kernel_complete else 1)
     time.sleep(POLL)
 print("TIMEOUT monitor", flush=True)
 sys.exit(2)

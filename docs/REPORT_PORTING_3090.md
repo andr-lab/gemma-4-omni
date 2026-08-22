@@ -142,3 +142,20 @@ When SSH connection to `gpu3090` is ready:
 3. Execute `./setup_3090.sh` to build Docker image and verify NVIDIA Container Toolkit.
 4. Execute `./docker_run_3090.sh smoke` to validate numerical stability and initial loss.
 5. If initial loss is in range `13.0 - 17.0`, proceed with full training: `./docker_run_3090.sh train`.
+
+---
+
+## 8. Execution Log (aggiornato dal coordinatore, 2026-08-21)
+
+| Step | Stato | Note |
+| :--- | :--- | :--- |
+| SSH gpu3090 (192.168.0.186, user administrator) | DONE | Chiave ed25519 in ~/.ssh/config, BatchMode |
+| Docker + gruppo docker + NVIDIA Container Toolkit | DONE | `--gpus all` validato, RTX 3090 24GB |
+| Pull pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime | DONE | 11.9GB |
+| Download modelli HF (cache persistente ~/gemma-4-omni/hf_cache) | DONE | unsloth/gemma-4-E2B-it + Qwen3-TTS-Tokenizer-12Hz + Qwen3-TTS-12Hz-1.7B-Base (15GB) |
+| Sync checkpoint temporal2 (record 0.6307) + turnhead_v2 | DONE | ~2GB LAN |
+| Sync moduli python su 3090 | DONE | kaggle_pipeline.py, run_3090.py, paths.py, qwen_subtalker.py, extract_qwen_subtalker.py, serve_duplex.py |
+| HF_HOME patch in docker_run_3090.sh | DONE | `-e HF_HOME=/workspace/hf_cache` + `HF_HUB_CACHE` |
+| Build immagine gemma4-omni:latest | IN CORSO | FIX: rimosso `datacollective` (package Kaggle-only, non su PyPI; loader legacy MDC non usato dal prep v3) |
+| Smoke test (gate loss 13-17) | PENDING | dopo build |
+| Full training su 3090 | PENDING | dopo smoke gate |

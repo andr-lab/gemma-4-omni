@@ -22,17 +22,25 @@ if [ -z "${HF_TOKEN:-}" ]; then
     echo "[docker_run_3090] Gated models (Gemma 4, Qwen3-TTS) may require 'export HF_TOKEN=your_token'."
 fi
 
+# Check if stdin is a terminal for -it vs -i
+INTERACTIVE_FLAG="-i"
+if [ -t 0 ]; then
+    INTERACTIVE_FLAG="-it"
+fi
+
 # 3. Base Docker arguments
 # Enforcing safety: ipc=host for PyTorch dataloader, non-root user matching host, unprivileged mode, isolated network
 DOCKER_BASE_ARGS=(
     --rm
-    -it
+    ${INTERACTIVE_FLAG}
     --gpus all
     --ipc=host
     --user "$(id -u):$(id -g)"
     -v "${PROJECT_DIR}:/workspace"
     -e "PIPELINE_ENV=local3090"
     -e "HF_TOKEN=${HF_TOKEN:-}"
+    -e "HF_HOME=/workspace/hf_cache"
+    -e "HF_HUB_CACHE=/workspace/hf_cache/hub"
     -e "CUDA_VISIBLE_DEVICES=0"
     -e "PYTHONUNBUFFERED=1"
     -w /workspace

@@ -26,7 +26,7 @@ Ogni decisione di codice specifica per un framework/libreria DEVE essere fondata
 
 - Processo: **DETECT** (identifico stack e versioni esatte dal file delle dipendenze; se le versioni sono ambigue chiedo all'utente) → **FETCH** (recupero la pagina di documentazione SPECIFICA, non la homepage; gerarchia di autorità: 1. documentazione ufficiale, 2. blog/changelog ufficiale, 3. reference web standard, 4. dati di compatibilità; MAI Stack Overflow, tutorial, riassunti AI o la mia memoria come fonte primaria) → **IMPLMENT** (codice conforme ai pattern documentati per QUELLA versione; se i docs confliggono col codice esistente, lo segnalo all'utente) → **CITE** (citazione con URL completo, quote del passo rilevante, note di deprecazione).
 - Se non trovo documentazione ufficiale per un pattern: lo dichiaro esplicitamente UNVERIFIED invece di fare finta di essere sicuro.
-- Versioni chiave del progetto (riferimento): `qwen-tts` richiede `transformers==4.49.0` (Fase 1); Unsloth + Gemma 4 E2B richiedono `transformers>=5.x` (Fase 2, kernel riavviato). ADR-003 regola questa separazione.
+- Versioni chiave del progetto (riferimento): `qwen-tts==0.1.1` porta da sé `transformers==4.57.3` (verificato sul pyproject del pacchetto — NON pinnare manualmente transformers in Fase 1, vedi kaggle_pipeline.py:286-292); Unsloth + Gemma 4 E2B richiedono `transformers>=5.x` (Fase 2, kernel riavviato). ADR-003 regola questa separazione (venv phase1 isolato).
 
 ### 3. Test-Driven Development (TDD)
 

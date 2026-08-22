@@ -157,15 +157,18 @@ def main():
     dom_freqs = []
     results = []
 
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
     for f in files:
         try:
-            y, sr = sf.read(f)
-            res = analyze_single_waveform(y, sr)
+            wav, sr = sf.read(f)
+            res = analyze_single_waveform(wav, sr=sr)
             res["filename"] = os.path.basename(f)
-            res["filepath"] = f
             results.append(res)
-
-            icon = "✅ PASS" if res["status"] == "PASS" else "❌ FAIL"
+            icon = "[PASS]" if res["status"] == "PASS" else "[FAIL]"
             if res["status"] != "PASS":
                 all_pass = False
 
@@ -174,7 +177,7 @@ def main():
                 f"{icon:8s} | {res['filename']:24s} | {res['clip_pct']:5.2f}% | {res['peak_rms']:6.2f} | {res['dyn']:6.3f} | {res['dom_freq_hz']:7.1f}Hz | {res['harmonics_gt30']:10d} | {res['reason']}"
             )
         except Exception as e:
-            print(f"❌ ERROR  | {os.path.basename(f):24s} | Failed to read/analyze: {e}")
+            print(f"[FAIL] ERROR  | {os.path.basename(f):24s} | Failed to read/analyze: {e}")
             all_pass = False
 
     # Multi-file global check: Diversity of dominant frequencies
@@ -184,15 +187,15 @@ def main():
     print("=" * 96)
     print("=== SUMMARY METRICS & GLOBAL QUALITY GATES ===")
     print(f"  - Total files analyzed:             {len(files)}")
-    print(f"  - Single-file quality gates:        {'✅ ALL PASSED' if all_pass else '❌ FAILED'}")
-    print(f"  - Dominant frequency diversity:     {unique_doms} distinct frequencies (Target >= 3): {'✅ PASS' if dom_diversity_pass else '❌ FAIL'}")
+    print(f"  - Single-file quality gates:        {'[ALL PASSED]' if all_pass else '[FAILED]'}")
+    print(f"  - Dominant frequency diversity:     {unique_doms} distinct frequencies (Target >= 3): {'[PASS]' if dom_diversity_pass else '[FAIL]'}")
     if dom_freqs:
         unique_vals = [float(x) for x in np.unique(np.round(dom_freqs, 1))]
         print(f"    Unique dominant frequencies (Hz): {unique_vals}")
 
     overall_success = all_pass and dom_diversity_pass
     print("-" * 96)
-    print(f"FINAL QUALITY GATE VERDICT: {'🏆 100% ALL PASSED (REAL HUMAN SPEECH)' if overall_success else '❌ VERIFICATION FAILED'}")
+    print(f"FINAL QUALITY GATE VERDICT: {'[100% ALL PASSED - REAL HUMAN SPEECH]' if overall_success else '[VERIFICATION FAILED]'}")
     print("=" * 96)
 
     sys.exit(0 if overall_success else 1)

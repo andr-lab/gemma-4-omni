@@ -1,5 +1,5 @@
 # %% [markdown]
-# # PIPELINE FULL-DUPLEX DUAL-CHANNEL (GEMMA 4 E2B + QWEN3-TTS) - KAGGLE STANDALONE
+# # PIPELINE FULL-DUPLEX DUAL-CHANNEL (GEMMA 4 E2B + QWEN3-TTS)
 #
 # Questa pipeline è strutturata in **2 FASI DISACCOPPIATE** (ADR-003) per eliminare qualsiasi conflitto tra `qwen-tts` e `transformers>=5.x`:
 #
@@ -10,22 +10,16 @@
 import os
 
 # ============================================================================
-# FIX MULTI-GPU KAGGLE 2xT4 (CUDA error: an illegal memory access)
-# Unsloth ha bug di sincronizzazione multi-GPU noti su Kaggle 2xT4
-# (issue #3389 e #3434): con device_map="balanced" il dispatch + la
-# quantizzazione su 2 GPU corrompono la memoria CUDA (cudaErrorIllegalAddress).
-# Gemma 4 E2B in 4-bit occupa solo ~3-4GB -> sta comodamente su UNA T4 (16GB).
-# Forziamo una singola GPU PRIMA di qualsiasi import torch.
-# NOTA: se torch è già stato importato nel kernel (es. run fallita in precedenza),
-#       riavviare il kernel Kaggle: CUDA_VISIBLE_DEVICES non ha effetto a runtime.
+# SINGLE-GPU (default): Gemma 4 E2B in 4-bit occupa ~3-4GB e sta su una sola
+# GPU; il multi-GPU con device_map="balanced" ha dato errori CUDA illegal memory
+# access in passato (dispatch + quantizzazione su più device). Forziamo una
+# singola GPU PRIMA di qualsiasi import torch.
+# ============================================================================
 # ============================================================================
 if "CUDA_VISIBLE_DEVICES" not in os.environ:
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # Default single-GPU
 import sys
 
-_kaggle_modules = "/kaggle/input/datasets/andrlab/gemma-4-omni-modules"
-if os.path.isdir(_kaggle_modules):
-    sys.path.insert(0, _kaggle_modules)
 if "." not in sys.path:
     sys.path.insert(0, ".")
 import json
@@ -45,17 +39,15 @@ from tqdm.auto import tqdm
 
 
 # ---------------------------------------------------------------------------
-# DISCO KAGGLE: /kaggle/working ha quota ~20GB (persistito), il disco principale
-# ~50GB. I download pesanti (tar MDC ~10GB + clip estratti ~10GB, jsons DuplexConv,
-# wav temporaneo) vanno sul DISCO GRANDE: env KAGGLE_BIG_DISK se impostato, altrimenti
-# /root/kaggle_big su Kaggle, altrimenti ./data in locale. I PARQUET finali restano
-# in data/ (working) per la Fase 2 (persistenza tra riavvii del kernel).
+# DISCO GRANDE per i file temporanei pesanti (tar dataset, jsons, wav temporanei):
+# env BIG_DISK_DIR se impostato, altrimenti ./data in locale. I PARQUET finali
+# restano in data/ per la Fase 2.
 # ---------------------------------------------------------------------------
 _BIG_DISK_CACHE: Optional[str] = None
 
 
 def big_disk_base() -> str:
-    """Percorso del disco grande per i file temporanei pesanti (env > Kaggle > locale)."""
+    """Percorso del disco grande per i file temporanei pesanti (env > locale)."""
     global _BIG_DISK_CACHE
     if _BIG_DISK_CACHE is not None:
         return _BIG_DISK_CACHE
@@ -65,13 +57,9 @@ def big_disk_base() -> str:
         return _BIG_DISK_CACHE
     except Exception:
         pass
-    candidates = []
-    env = (os.environ.get("BIG_DISK_DIR") or os.environ.get("KAGGLE_BIG_DISK", "")).strip()
-    if env:
-        candidates.append(env)
-    if os.path.isdir("/kaggle/working"):  # siamo su Kaggle
-        candidates.append("/root/kaggle_big")
-    candidates.append(os.path.join(os.getcwd(), "data"))  # fallback locale/working
+    env = os.environ.get("BIG_DISK_DIR", "").strip()
+    candidates = [env] if env else []
+    candidates.append(os.path.join(os.getcwd(), "data"))  # fallback locale
     for c in candidates:
         try:
             os.makedirs(c, exist_ok=True)
@@ -255,19 +243,7 @@ print(f"[Pipeline Inizializzata] Modello Backbone: {MODEL_NAME}")
 print(f"[Pipeline Inizializzata] Device attivo: {DEVICE}")
 sys.stdout.flush()
 
-# Configurazione Secrets Kaggle
-if "KAGGLE_URL_BASE" in os.environ:
-    try:
-        from kaggle_secrets import UserSecretsClient
-
-        secrets = UserSecretsClient()
-        os.environ["HF_TOKEN"] = secrets.get_secret("HF_TOKEN")
-        os.environ["MDC_API_KEY"] = secrets.get_secret("MDC_API_KEY")
-        print(
-            "[Pipeline Secrets] Secrets Kaggle caricati correttamente (HF_TOKEN, MDC_API_KEY)."
-        )
-    except Exception as e:
-        print(f"[Pipeline Secrets] Avviso caricamento secret Kaggle: {e}")
+# Secrets (HF_TOKEN, MDC_API_KEY) passati via variabili d'ambiente — mai nel codice/git.
 sys.stdout.flush()
 
 # %% [markdown]
@@ -1181,7 +1157,7 @@ def load_duplex_annotations(download_dir: Optional[str] = None) -> Dict[str, str
     in archivi separati `{Edu,edu,none_Edu}/jsons.tar.gz` (~57+24+150 MB). Ogni JSON
     (es. `Edu--000001.json`) ha `asr[track][utterance]` con `labels.txt` (trascrizione),
     `startInMs`/`endInMs`, `state` (<|complete|>/<|incomplete|>). L'estrazione va sul
-    DISCO GRANDE (non in /kaggle/working): ~230MB tar + ~1GB estratti.
+    DISCO GRANDE: ~230MB tar + ~1GB estratti.
 
     Ritorna la mappa key -> path del file JSON estratto (i file restano su disco;
     l'archivio .tar.gz viene rimosso per liberare spazio).
@@ -1434,7 +1410,7 @@ def load_mozilla_italian_dataset(
             f"[Fase 1 - MDC] Caricamento dataset Mozilla Data Collective Italiano ({dataset_id})..."
         )
         sys.stdout.flush()
-        # Scarica sul DISCO GRANDE (~50GB), NON in /kaggle/working (quota 20GB):
+        # Scarica sul DISCO GRANDE, NON nella working dir del progetto:
         # tar ~10GB + clip estratti ~10GB non stanno nella quota working.
         mdc_dir = os.path.join(big_disk_base(), "mdc_download")
         df = load_dataset(dataset_id, download_directory=mdc_dir, show_progress=True)
@@ -3983,7 +3959,7 @@ def demo_talk(
 
     In Kaggle il kernel NON ha microfono: registra il tuo parlato (telefono,
     registratore, ffmpeg) e caricalo in una di queste posizioni:
-      1) input_wav=/kaggle/input/<dataset>/parlato.wav (dataset collegato)
+      1) input_wav=samples/user_input.wav (o percorso assoluto)
       2) samples/user_input.wav  (upload nel notebook via "Add data" o file upload)
       3) input_wav=<percorso qualsiasi> (es. campioni di prova in working)
     Il wav viene ri-campionato a 16kHz, trasformato in mel e processato dal
@@ -4486,7 +4462,7 @@ def run_training_pipeline(duplex_model=None, num_epochs: int = 1):
         sys.stdout.flush()
     print("\n🎤 PER PARLARE COL MODELLO (demo):")
     print("  - carica il tuo parlato come wav (il kernel Kaggle non ha microfono):")
-    print("      * samples/user_input.wav  oppure  /kaggle/input/<dataset>/parlato.wav")
+    print("      * samples/user_input.wav  oppure  percorso wav assoluto")
     print("  - poi esegui:  demo_talk(duplex_model)")
     print(
         "  - conversazione a catena multi-turno: demo_conversation(duplex_model, synth_ds)"
@@ -4512,7 +4488,7 @@ def run_training_pipeline(duplex_model=None, num_epochs: int = 1):
 
 
 if __name__ == "__main__":
-    print("=== SCRIPT KAGGLE DUAL-PHASE READY ===")
+    print("=== PIPELINE DUAL-PHASE READY ===")
     sys.stdout.flush()
     # Nota: Su Kaggle eseguire prima execute_phase_1() nella Fase 1,
     # poi riavviare il kernel e lanciare run_training_pipeline() nella Fase 2.
