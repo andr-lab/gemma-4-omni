@@ -2442,6 +2442,8 @@ class Code2WavDecoder(nn.Module):
                 break
 
         if venv_py is None:
+            print(f"[Code2Wav][DEBUG] _start_worker FAIL: venv non trovato tra {venv_candidates}")
+            sys.stdout.flush()
             return False
 
         worker_candidates = [
@@ -2456,6 +2458,8 @@ class Code2WavDecoder(nn.Module):
                 break
 
         if worker_script is None:
+            print(f"[Code2Wav][DEBUG] _start_worker FAIL: worker script non trovato tra {worker_candidates}")
+            sys.stdout.flush()
             return False
 
         try:
