@@ -1,0 +1,67 @@
+# TASK AGY 11G — DIAGNOSI ADAPTER "VOCE ROBOTICA" + FIX + RETRAIN (priorità ALTA)
+
+## FEEDBACK PERCETTIVO DELL'UTENTE (22/8, dopo il Task 11E — ascolto diretto reale)
+> "Oracle va benissimo, la voce generated è incomprensibile e robotica. probabilmente l'adapter non è allenato correttamente."
+
+Questo è il criterio DECISIVO (l'utente ha ascoltato davvero, non metriche). Due verdetti chiari:
+- **Oracle** (codici GT → decoder ufficiale) = VOICE CHIARA ✅
+- **Generated** (codici predetti dall'adapter → decoder ufficiale) = ROBOTICA / INCOMPRENSIBILE ❌
+
+CONSEGUENZA LOGICA: la catena di decodifica è CORRETTA (Task 11E risolto, oracolo ok).
+Il problema è **a monte**: i codici RVQ predetti dall'adapter sono sbagliati/degenerati
+anche se le metriche mel (cos sim 0.9366, mel-L1 0.6621) sembravano buone.
+Le metriche sul mel NON catturano la qualità dei codici discreti → altro artefatto "metriche buone, audio cattivo".
+
+## OBIETTIVO 1 — DIAGNOSI (root cause, con EVIDENZA, non speculazione)
+
+Rispondi con misure reali a queste domande, confrontando il percorso generated vs oracle:
+
+1. **Come vengono generati i wav "generated_*"?** Trova lo script/percorso in kaggle_pipeline.py
+   (synthesize_examples o equivalente). Determina ESATTAMENTE:
+   - l'adapter predice i MEL e poi li ri-encode in codici RVQ? oppure predice i codici direttamente?
+   - quale encoder VQ viene usato per ri-encode dei mel predetti (se applicabile)?
+   - c'è teacher forcing / exposure bias? (in training i mel GT, in inferenza i mel predetti)
+2. **Confronto codici GT vs codici predetti** (stesse finestre degli 8 sample generated):
+   - errore medio per codebook (L1/L2 su indici), % di codebook con indice esatto identico
+   - distribuzione degli indici predetti: concentrati su pochi valori? diversi dal GT?
+   - il ri-encode mel→codici dei mel predetti produce codici stabili o "codebook interpolation"?
+3. **Mismatch di ottimizzazione**: se l'adapter è addestrato su mel (MSE/cos sim) ma l'uso
+   finale è codici discreti → il gradiente non ottimizza la giusta funzione di perdita.
+   Quantificalo: quanto cambia la cos sim mel quando si usano i codici predetti vs GT?
+4. **Qualità del campionamento**: i codici predetti sono argmax? sampling? temperatura?
+   Un campionamento sbagliato (es. media della distribuzione) produce "codebook medio" = robotico.
+
+Dopo la diagnosi: APPLICA IL FIX (può includere: predire direttamente i codici con loss
+cross-entropy multi-codebook, o ri-encode corretto, o sampling migliore, o architettura
+adapter adeguata). NON limitarti a documentare: il fix va implementato e verificato.
+
+## OBIETTIVO 2 — RETRAIN con il dataset CV26 it (se il Task 11F ha prodotto i parquet)
+
+Il Task 11F (in parallelo) sta tokenizzando CV26 it (283k clip reali, 173k train).
+Se `data/train_tokens_cv26_it_*.parquet` è pronto (verifica), il retrain dell'adapter
+corretto usa QUEL dataset (molto più grande e vario del v2). Se non è pronto, retrain
+sul v2 con il fix di OBIETTIVO 1 e documenta che il retrain CV26 seguirà.
+
+## OBIETTIVO 3 — VERIFICA PERCETTIVA OBBLIGATORIA (verdetto di agy, non solo metriche)
+
+Dopo il fix: rigenera 4-6 wav (generated) + i corrispondenti oracle, e **ASCOLTALI
+direttamente** (sintassi `@percorso/file.wav` nel prompt — Gemini CLI supporta audio).
+Per ciascuno verdetto esplicito: VOICE CHIARA / VOCE CON ARTEFATTI (descrivi) / RUMORE.
+Se ancora robotico: continua a diagnosticare, NON dichiarare successo. Criterio minimo
+di accettazione: generated comprensibile e simile in qualità all'oracle (non identico,
+ma stesso ordine di qualità percettiva).
+
+## REGOLE OPERATIVE
+- Comandi >2-3 min SEMPRE nohup + polling (nohup bash -c '...' > /tmp/job_11g.log 2>&1 & echo PID=$!). MAI comandi docker sincroni lunghi.
+- Calcolo SOLO su gpu3090. Docker: --gpus all --user 1000:1000 --ipc=host -v ~/gemma-4-omni:/workspace -e HF_HOME/HF_HUB_CACHE/PIPELINE_ENV. MAI --privileged/--network host.
+- Il Task 11F potrebbe ancora usare la GPU (tokenizzazione CV26): controlla nvidia-smi e coordina (se il training adapter serve la GPU e 11F sta tokenizzando, scegli la priorità giusta: la diagnosi adapter può girare prima con un subset).
+- Decoder ufficiale: usa SEMPRE il percorso subprocess/venv_phase1 già integrato (Code2WavDecoder → official_subprocess). MAI la replica standalone.
+- NON rompere il codice di training esistente senza documentare il perché (ADR se serve).
+- Checkpoint in checkpoints/, wav in samples/, report in docs/REPORT_TASK11G_ADAPTER_FIX.md.
+
+## OUTPUT RICHIESTO
+1. Diagnosi con numeri reali (le 4 domande sopra) + root cause dichiarata
+2. Fix implementato (diff kaggle_pipeline.py o nuovo modulo adapter) + py_compile OK
+3. Retrain (CV26 se pronto, altrimenti v2) con loss iniziale verificata ~13-17 (NON ~0.002)
+4. 4-6 wav generated rigenerati + verdetti percettivi di agy (ASCOLTO, non solo metriche)
+5. docs/REPORT_TASK11G_ADAPTER_FIX.md completo
