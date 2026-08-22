@@ -1,0 +1,35 @@
+# TASK 11H — VERIFICA PERCETTIVA FINALE (giudice: agy che ASCOLTA e TRASCRIVE)
+
+Sei il giudice finale della qualità vocale. Il coordinatore ha generato 8 wav col
+checkpoint adapter v3 (CV26 italiano, 40.8h) usando la pipeline con decoder ufficiale.
+Il feedback dell'utente sulla versione precedente (v2) era: "voce generated
+incomprensibile e robotica". Devi stabilire se la v3 ha risolto.
+
+## File da ascoltare (directory locale C:\Users\andre\Documents\gemma-4-omni\_wav_v3\)
+- generated_000.wav ... generated_007.wav  → voce generata dal MODELLO v3
+- oracle_001.wav, oracle_003.wav          → controllo (codici ground truth)
+
+## Testi attesi (da README.txt, finestre di validazione CV26)
+- 000: "L'isola è circondata da acque cristalline..." (verifica nel README)
+- 001: "Il perizoma è dorato all'esterno e dipinto di rosso all'interno."
+- 002: "Nel Permiano, l'Euramerica divenne parte del più grande supercontinente Pangea."
+- 003: "Questa ipotesi venne scartata."
+- 004: "Gli altri Yuan sono autorizzati a proporre conti legislativi allo Yuan legislativo."
+- 005: "Venne sepolto nella basilica di San Vito."
+- 006/007: "Secondo alcuni storici fu Kathryn a coniare il soprannome Machine Gun Kelly."
+
+## PROTOCOLLO OBBLIGATORIO (per OGNI file)
+1. ASCOLTA il file con la sintassi @percorso (es. @_wav_v3/generated_001.wav)
+2. TRASCRIVI ESATTAMENTE ciò che senti, parola per parola
+3. CONFRONTA con il testo atteso: quante parole corrispondono?
+4. Verdetto: INTELLIGIBILE (trascrizione ≥80% corretta, voce naturale) /
+   PARZIALE (40-80%, artefatti presenti — descrivili) /
+   INCOMPRENSIBILE (<40% o rumore non vocale)
+5. Per gli oracle: solo conferma che sono voce pulita (controllo)
+
+## REGOLE
+- NON usare metriche numeriche come criterio: il tuo ORECCHIO decide.
+- Se UN SOLO generated è INCOMPRENSIBILE, riporta esattamente cosa senti
+  (parole? rumore? robotica? palinsesto?) — servirà per la diagnosi.
+- Output finale: tabella file → trascrizione → % match → verdetto + giudizio
+  complessivo comparativo vs il problema "robotica" della v2.
