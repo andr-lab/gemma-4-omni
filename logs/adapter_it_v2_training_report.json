@@ -1,0 +1,27 @@
+{
+  "status": "COMPLETED",
+  "task": "TASK_6B_ADAPTER_IT",
+  "dataset_prefix": "/workspace/data/train_tokens_mdc_v2_15.0h_11599s",
+  "dataset_hours": 15.0,
+  "total_steps": 2374,
+  "initial_loss": 29.470775604248047,
+  "final_train_loss": 15.207876205444336,
+  "val_loss": 19.54025993347168,
+  "val_coupling_loss": 7.27869953095913,
+  "val_text_loss": 0.0,
+  "cosine_sim_val": 0.9366057148575783,
+  "svd_metrics": {
+    "effective_rank": 1510,
+    "dim": 2048,
+    "cum_energy_1000": 0.9983,
+    "condition_number": 105811847.47,
+    "top_singular_val": 1291.051513671875
+  },
+  "trainable_params_m": 16.53,
+  "elapsed_sec": 1177.89,
+  "checkpoints": {
+    "final": "checkpoints/gemma4_duplex_sota_v2/final",
+    "standard": "checkpoints/gemma4_duplex_sota"
+  },
+  "log_file": "/workspace/logs/adapter_it_train_log_20260822_115317.tsv"
+}

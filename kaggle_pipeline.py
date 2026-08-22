@@ -19,10 +19,15 @@ import os
 # NOTA: se torch è già stato importato nel kernel (es. run fallita in precedenza),
 #       riavviare il kernel Kaggle: CUDA_VISIBLE_DEVICES non ha effetto a runtime.
 # ============================================================================
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # Force single-GPU su Kaggle 2xT4
+if "CUDA_VISIBLE_DEVICES" not in os.environ:
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # Default single-GPU
 import sys
 
-sys.path.insert(0, "/kaggle/input/datasets/andrlab/gemma-4-omni-modules")
+_kaggle_modules = "/kaggle/input/datasets/andrlab/gemma-4-omni-modules"
+if os.path.isdir(_kaggle_modules):
+    sys.path.insert(0, _kaggle_modules)
+if "." not in sys.path:
+    sys.path.insert(0, ".")
 import json
 import time
 import gc
@@ -54,8 +59,14 @@ def big_disk_base() -> str:
     global _BIG_DISK_CACHE
     if _BIG_DISK_CACHE is not None:
         return _BIG_DISK_CACHE
+    try:
+        import paths
+        _BIG_DISK_CACHE = paths.get_big_disk_dir()
+        return _BIG_DISK_CACHE
+    except Exception:
+        pass
     candidates = []
-    env = os.environ.get("KAGGLE_BIG_DISK", "").strip()
+    env = (os.environ.get("BIG_DISK_DIR") or os.environ.get("KAGGLE_BIG_DISK", "")).strip()
     if env:
         candidates.append(env)
     if os.path.isdir("/kaggle/working"):  # siamo su Kaggle
@@ -2486,7 +2497,14 @@ class Code2WavDecoder(nn.Module):
                     else:
                         wav = self.decoder_module(x.transpose(1, 2))  # (B, CB, T)
                     if isinstance(wav, torch.Tensor):
-                        return wav.cpu().numpy().squeeze()
+                        wav_arr = wav.cpu().numpy().squeeze()
+                        # Normalizzazione di picco (PEAK NORMALIZATION) in [-1.0, 1.0]:
+                        # Il modulo neurale restituisce valori grezzi non scalati (|x| > 30),
+                        # che saturano e clippano a -1/+1 se scritti direttamente in PCM_16.
+                        max_val = float(np.max(np.abs(wav_arr)))
+                        if max_val > 1e-8:
+                            wav_arr = wav_arr / max_val
+                        return wav_arr.astype(np.float32)
             except Exception as e:
                 print(f"[Code2Wav] Avviso decodifica: {e}")
                 sys.stdout.flush()
@@ -3883,6 +3901,20 @@ def run_training_pipeline(duplex_model=None, num_epochs: int = 1):
         user_mel, agent_mel, agent_codes, text_by_window = load_tokens_from_parquet(
             parquet_cache
         )
+    elif os.environ.get("SMOKE") == "1" or os.environ.get("PHASE2_SMOKE_BATCHES"):
+        print(
+            "[Fase 2 - Training] SMOKE MODE ATTIVO: Nessun parquet in data/, generazione dati sintetici (4 finestre da 64 frame)..."
+        )
+        sys.stdout.flush()
+        n_frames = 256  # 4 finestre da 64
+        user_mel = np.random.randn(n_frames * MEL_PER_AGENT_FRAME, MEL_BINS).astype(np.float32)
+        agent_mel = np.random.randn(n_frames * MEL_PER_AGENT_FRAME, MEL_BINS).astype(np.float32)
+        agent_codes = np.random.randint(0, 2048, size=(N_CODEBOOKS, n_frames), dtype=np.int16)
+        agent_codes[0] = np.random.randint(0, 2048, size=n_frames, dtype=np.int16)
+        text_by_window = [[101, 102, 103]] * (n_frames // 64)
+        global SEGMENT_ENDS, TOKENIZER_REAL_ENCODING_ACTIVE
+        SEGMENT_ENDS = [n_frames]
+        TOKENIZER_REAL_ENCODING_ACTIVE = True
     else:
         print(
             "[Fase 2 - Training] Cache Parquet non trovata: attesi "
