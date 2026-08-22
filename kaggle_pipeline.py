@@ -2896,6 +2896,43 @@ class FullDuplexDataset(Dataset):
 
 # %% [code]
 # Cell 6: Definizione Modello Gemma4FullDuplexModel
+
+
+class ResidualAdapter(nn.Module):
+    """Residual Latent Adapter for h_t prediction with skip connection and LayerNorm."""
+
+    def __init__(self, in_features: int = 1536, out_features: int = 2048, hidden_dim: int = 3072):
+        super().__init__()
+        self.skip = nn.Linear(in_features, out_features)
+        self.mlp = nn.Sequential(
+            nn.Linear(in_features, hidden_dim),
+            nn.SiLU(),
+            nn.Dropout(0.05),
+            nn.Linear(hidden_dim, out_features),
+        )
+        self.norm = nn.LayerNorm(out_features)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.norm(self.skip(x) + self.mlp(x))
+
+
+class DeepSemanticHead(nn.Module):
+    """Deep Semantic Head for CB0 codebook prediction (2048 classes) with LayerNorm and SiLU."""
+
+    def __init__(self, in_features: int = 1536, hidden_dim: int = 2048, vocab_size: int = 2048):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_features, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.SiLU(),
+            nn.Dropout(0.05),
+            nn.Linear(hidden_dim, vocab_size),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
 class Gemma4FullDuplexModel(nn.Module):
     """
     Architettura Full-Duplex Gemma-4 con COUPLING Qwen3-TTS (ADR-005) — unico percorso.
@@ -2908,7 +2945,7 @@ class Gemma4FullDuplexModel(nn.Module):
         self.base_model = base_model
         self.causal_conv = nn.Conv1d(hidden_size, hidden_size, kernel_size=3, padding=0)
         # Head semantica sul codebook 0 (vocabolario SEMANTIC_VOCAB_SIZE, es. 4096)
-        self.semantic_head = nn.Linear(hidden_size, SEMANTIC_VOCAB_SIZE)
+        self.semantic_head = DeepSemanticHead(hidden_size, hidden_dim=2048, vocab_size=2048)
 
         # ---- Coupling Qwen3-TTS (ADR-005): UNICO percorso - MTP legacy RIMOSSO ----
         # Il sub-talker è OBBLIGATORIO: se la dir manca (Fase 1 senza
@@ -2923,9 +2960,8 @@ class Gemma4FullDuplexModel(nn.Module):
         base_dev = next(base_model.parameters()).device
         if st_dev != base_dev:
             self.subtalker.to(base_dev)
-        self.ht_adapter = nn.Sequential(
-            nn.Linear(hidden_size, COUPLING_TALKER_HIDDEN),
-            nn.LayerNorm(COUPLING_TALKER_HIDDEN),
+        self.ht_adapter = ResidualAdapter(
+            hidden_size, out_features=COUPLING_TALKER_HIDDEN, hidden_dim=3072
         )
         print(
             f"[Coupling] ✅ SUB-TALKER Qwen3-TTS caricato e congelato ({QWEN_SUBTALKER_DIR}). "
@@ -3055,7 +3091,7 @@ class Gemma4FullDuplexModel(nn.Module):
         ]  # (B, n_agent, H)
 
         # Allineamento automatico delle teste al device di output di Gemma
-        if self.semantic_head.weight.device != h_device:
+        if next(self.semantic_head.parameters()).device != h_device:
             self.semantic_head.to(h_device)
 
         adapted_hidden = self._apply_causal_conv(agent_hidden)
@@ -3227,7 +3263,7 @@ class Gemma4FullDuplexModel(nn.Module):
         # Device-check esplicito per le teste custom: il checkpoint le ricarica su CPU
         # e il forward() le sposta in base a h_device, ma generate() NON passava da
         # forward() -> RuntimeError mat2 on cpu / mat1 on cuda (bug diagnosi v6).
-        if self.semantic_head.weight.device != adapted_hidden.device:
+        if next(self.semantic_head.parameters()).device != adapted_hidden.device:
             self.semantic_head.to(adapted_hidden.device)
         cb0_logits = self.semantic_head(adapted_hidden)
         cb0_sampled = (
