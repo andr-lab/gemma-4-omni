@@ -1,0 +1,101 @@
+# TASK AGY 10 — TurnHead ottimizzato 20h DuplexConv + Valutazione Italiano + Retraining MDC su RTX 3090
+
+## Contesto
+
+Sei sulla macchina RTX 3090 locale (alias SSH `gpu3090`, utente `administrator`,
+192.168.0.186). Stato attuale della pipeline (verificato dal coordinatore):
+
+- **Dataset DuplexConv 20.02h** gia' pronto: `data/train_tokens_20.0h_ext_{mel,ameld,codes,text,turnlabels}.parquet` (901.113 frame, 907 segmenti, class dist: SPEAK 61.0%, BARGE_IN 21.8%, EMIT_BC 9.1%, YIELD 0.8%, USER_BC 0%)
+- **TurnHead v3 gia' addestrato** su quei 20h: val acc 70.83%, SPEAK recall 82.6%, BARGE_IN 41.3% — script `train_turnhead_v3_3090.py` (13.8KB), checkpoint `checkpoints/turn_state_head_v3.pt`
+- **Dataset MDC italiano 16.0h** pronto: `data/train_tokens_mdc_16.0h_9185s_*` + copie std `data/train_tokens_mdc_50.0h_2500s_*` (9185 clip, 720.014 frame, 1873 barge-in)
+- **Adapter Italiano SOTA** addestrato su MDC: cos sim 0.9232 (+23.8% vs 0.7455), checkpoint `checkpoints/gemma4_duplex_sota` — script `train_adapter_it_3090.py` (18.5KB)
+- Immagine Docker `gemma4-omni:latest` (torch 2.12.1 + torchvision 0.27.1 + transformers 5.5.0 + unsloth git) — GIA' verificata e funzionante
+
+## LEZIONE CRITICA (timeout print-mode) — LEGGERE PRIMA DI TUTTO
+
+I comandi lunghi (> 2-3 min: training, eval, download grossi) vanno SEMPRE
+lanciati con nohup + polling, MAI sincroni in print-mode (agy e' morto 3 volte
+per questo). Pattern obbligatorio:
+
+    ssh gpu3090 "cd ~/gemma-4-omni && nohup bash -c 'COMANDO_LUNGO' > /tmp/job_xxx.log 2>&1 & echo PID=$!"
+
+poi POLLING con comandi BREVI (< 60s):
+    ssh gpu3090 "tail -5 /tmp/job_xxx.log; pgrep -f COMANDO_LUNGO | head -1 || echo DONE"
+
+Ogni singolo comando ssh che lanci deve completare in < 60 secondi. Se un job
+in nohup impiega piu' della tua sessione: lascialo girare, scrivi lo stato
+parziale nel report e segnala al coordinatore (il coordinatore fa il follow-up).
+
+## OBIETTIVO 1 — Training TurnHead ottimizzato con le ore di DuplexConv
+
+Il TurnHead v3 e' gia' un successo (70.83% acc) ma l'utente chiede un training
+OTTIMIZZATO con TUTTE le ore disponibili di DuplexConv. Obiettivi di
+miglioramento rispetto alla v3:
+1. Rivedi la configurazione v3 (`train_turnhead_v3_3090.py`): epoche, batch,
+   focal gamma, sampling, LR. Proponi e applica ottimizzazioni motivate
+   (es. piu' epoche con early stopping su val acc, LR schedule, piu' bucket).
+2. Il collasso di USER_BACKCHANNEL (0% recall) e YIELD (4.67%) va affrontato:
+   il dataset ha ~0 frame USER_BC e pochi YIELD. Valuta: oversampling mirato,
+   class weights nel focal loss, o soglia di decisione calibrata a val.
+3. Lancia smoke (gate: val acc > 0.65, SPEAK > 70%, BARGE_IN > 35%) poi run
+   completo su 20h. Checkpoint in checkpoints/turn_state_head_v4.pt,
+   report logs/turn_head_v4_training_report.json.
+4. Confronta v4 vs v3 (acc, per-class recall, confusion matrix).
+
+## OBIETTIVO 2 — Valutazione capacita' linguistica italiana del modello
+
+Valuta se Gemma 4 E2B (congelato, 4-bit) + adapter produce output linguistico
+italiano corretto:
+1. Costruisci un mini-test con 20-30 frasi italiane (naturale parlato,
+   incluse interiezioni, barge-in, backchannel: "ma certo", "senti", "aspetta",
+   "mmm", "giusto", "ecco", "davvero?", "va bene", "pero'", "allora"...).
+2. Forward del backbone con input mel/codes italiani (usa i dati MDC val):
+   valuta text CE su testo italiano, perplexity, e qualita' dei token cb0
+   predetti (distribuzione vs attesa).
+3. Decodifica 3-5 campioni audio italiani con l'adapter SOTA
+   (checkpoints/gemma4_duplex_sota) e confronta con l'oracle.
+4. Scrivi docs/REPORT_TASK10_ITALIANO.md con: metriche linguistiche, esempi
+   decodificati, giudizio qualitativo (buono/medio/insufficiente) e se serve
+   retraining.
+
+## OBIETTIVO 3 — Eventuale retraining con MDC (dati piu' recenti)
+
+Se la valutazione italiana (OBIETTIVO 2) risulta insufficiente o se ci sono
+dati migliori disponibili:
+1. VERIFICA la disponibilita' di Common Voice 26 italiano:
+   - Il repo HF `Peacockery/common-voice-scripted-speech-26` NON contiene
+     l'italiano (verificato: 18 lingue caricate, nessun file __it__).
+   - Controlla `https://huggingface.co/api/datasets?search=common_voice_26`
+     per altri repo con italiano.
+   - Il download da Mozilla Data Collective (commonvoice.mozilla.org /
+     datacollective) richiede account/auth: valuta se fattibile via API
+     pubblica, altrimenti segnala come BLOCKED e continua con v17.
+2. Se trovi dati italiani nuovi e validi: estendi il prep (pattern di
+   prep_mdc_3090.py) e retraining adapter con i dati combinati
+   (v17 16h + nuovi). GATE: cos sim >= 0.9232 (non peggiorare il SOTA).
+3. Se non trovi nulla di utilizzabile: documenta la ricerca e mantieni il SOTA
+   attuale, segnalando che la v26 italiana richiede auth manuale.
+
+## Regole operative
+
+- Calcolo SOLO su gpu3090. Comando fallito: diagnosi sistematica, MAI tentativi.
+- NON modificare il codice di calcolo in kaggle_pipeline.py se non shim I/O minimi.
+- NON toccare gemma4_training_report.md (lo aggiorna il coordinatore).
+- MAI sudo via BatchMode. Docker senza --privileged, senza --network host,
+  utente non-root uid/gid 1000, --ipc=host, timeout espliciti.
+- Docker run standard:
+  docker run --rm --gpus all --user 1000:1000 --ipc=host \
+    -v /home/administrator/gemma-4-omni:/workspace -w /workspace \
+    -e HF_HOME=/workspace/hf_cache -e HF_HUB_CACHE=/workspace/hf_cache/hub \
+    -e PIPELINE_ENV=local3090 -e PYTHONUNBUFFERED=1 \
+    gemma4-omni:latest python SCRIPT.py [flags]
+
+## Output richiesto
+
+Al termine scrivi:
+- docs/REPORT_TASK10_TURNHEAD_V4.md (OBIETTIVO 1: config ottimizzata, gate, metriche v4 vs v3)
+- docs/REPORT_TASK10_ITALIANO.md (OBIETTIVO 2: valutazione linguistica italiana)
+- docs/REPORT_TASK10_MDC26.md (OBIETTIVO 3: ricerca v26, esito retraining o BLOCKED)
+- Aggiorna NEXT_STEP.md se necessario.
+Se un job in nohup non finisce in sessione: lascialo girare e segnala al
+coordinatore con il container/pid/log path.
