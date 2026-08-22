@@ -1,0 +1,77 @@
+# TASK AGY 11C — FIX CLIPPING DECODER (onda saturata) + RIGENERAZIONE WAV + VERIFICA VOCE
+
+## CONTESTO — NUOVO BUG SCOPERTO dal coordinatore (verificato numericamente, NON rifare la diagnosi)
+
+Il Task 11B ha prodotto cos sim 0.9366 su mel reali (OK, training valido), MA i wav
+generati sono ancora INASCOLTABILI: **onda saturata a 2000Hz, non voce**. Verifica
+indipendente del coordinatore su `_wav_predicted_v2/generated_000.wav`:
+- **91% dei campioni a |x|>0.99** (clipping totale), peak/rms=1.03 (onda quasi quadra)
+- **dyn=0.00** (frame RMS std=0.003, nessuna dinamica temporale)
+- dom=2000Hz identico per TUTTI i wav (generated E oracle E test_duplex_decoded)
+- Il vecchio test_decode (v1) aveva peak/rms=6.46, 0% clip — range vocale sano
+
+### ROOT CAUSE (confermata)
+`code2wav_decoder.py` classe `Code2WavDecoderModule.forward()` (righe ~305-327):
+restituisce `wav.squeeze(1)` SENZA clamp/normalizzazione finale. Output grezzo con
+codici reali v2: **min=-33.9 max=38.2 rms=8.77** (verificato su GPU con codici dal
+parquet v2). Poi `synthesize_examples` in kaggle_pipeline.py (riga ~3707) fa
+`sf.write(p_gen, wav_gen, 24000)` senza normalizzare → int16 satura → clip.
+La doc del decoder dice "clamp finale in [-1,1]" ma il forward reale non lo applica.
+Il selftest MAXDIFF=0.0 vs decoder ufficiale confronta i PESI, non la normalizzazione
+del segnale finale.
+
+## OBIETTIVO — FIX E VERIFICA CON VOCI REALI
+
+### 1. FIX normalizzazione (minimo, NON toccare il calcolo)
+Applica PEAK NORMALIZATION all'output del decoder PRIMA di scrivere il wav:
+- In `kaggle_pipeline.py` `synthesize_examples`: dopo `decoder.decode(...)`:
+  `wav = wav / max(1e-8, np.abs(wav).max())` (o nel wrapper Code2WavDecoder.decode
+  se piu' pulito — decide tu, mantenendo il contratto: output in [-1,1])
+- Oppure fix in `code2wav_decoder.py` se preferisci (ma ricorda: NON modificare
+  il calcolo, solo la normalizzazione di uscita)
+- VERIFICA la scelta: con il fix, decodifica di 64 frame codici reali deve dare
+  peak<=1.0, clip>99% < 1%
+
+### 2. RIGENERA i sample wav con il fix
+- 8 finestre generated+oracle in samples/ (nuovo run sintesi con il modello SOTA v2)
+- test_duplex_decoded.wav rigenerato
+
+### 3. VERIFICA VOCE INDIPENDENTE (metriche OBBLIGATORIE, scrivi check_voice_quality2.py)
+Per OGNI wav, deve passare TUTTI:
+- **clip>99% < 1%** (frazione campioni |x|>0.99)
+- **peak/rms tra 3 e 10** (voce umana; onda quadra ~1.0)
+- **dyn > 0.1** (std frame-RMS / mean frame-RMS, voce varia nel tempo)
+- **dom_freq varia tra finestre** (NON 2000Hz fisso): almeno 3 frequenze
+  dominanti diverse tra i 16 wav; nessun tono puro singolo
+- **armoniche > 20** (bin FFT sopra 30% del picco, voce = molte armoniche)
+- Se anche UN wav fallisce: FERMATI, diagnostica, NON dichiarare successo.
+
+### 4. Confronto col report precedente
+Aggiorna docs/REPORT_TASK11B_ADAPTER_V2.md con sezione "Fix clipping decoder" o
+scrivi docs/REPORT_TASK11C_FIX_CLIPPING.md con: root cause, fix applicato,
+prima/dopo (metriche vecchie vs nuove), esito verifica voce.
+
+## LEZIONE CRITICA (timeout print-mode) — LEGGERE PRIMA DI TUTTO
+
+Comandi > 2-3 min SEMPRE nohup + polling, MAI sincroni:
+    ssh gpu3090 "cd ~/gemma-4-omni && nohup bash -c 'COMANDO' > /tmp/job_x.log 2>&1 & echo PID=$!"
+poi polling breve (<60s): ssh gpu3090 "tail -5 /tmp/job_x.log; pgrep -f COMANDO || echo DONE"
+Se il job non finisce in sessione: lascialo girare, scrivi stato + log path nel report.
+
+## Regole operative (SEMPRE)
+- Calcolo SOLO su gpu3090 (SSH alias gpu3090, utente administrator).
+- Docker: docker run --rm --gpus all --user 1000:1000 --ipc=host \
+    -v /home/administrator/gemma-4-omni:/workspace -w /workspace \
+    -e HF_HOME=/workspace/hf_cache -e HF_HUB_CACHE=/workspace/hf_cache/hub \
+    -e PIPELINE_ENV=local3090 -e PYTHONUNBUFFERED=1 \
+    gemma4-omni:latest python SCRIPT.py [flags]
+- MAI sudo via BatchMode. NO --privileged, NO --network host.
+- NON modificare il codice di calcolo (forward/backward): SOLO normalizzazione
+  di uscita/shims I/O. NON toccare gemma4_training_report.md.
+- Comando fallito: diagnosi sistematica, MAI fix a tentativi.
+
+## Output richiesto
+- docs/REPORT_TASK11C_FIX_CLIPPING.md
+- samples/*.wav rigenerati (8 generated + 8 oracle + test_duplex_decoded)
+- check_voice_quality2.py con le metriche sopra
+- Log/metriche della verifica voce (prima vs dopo)
