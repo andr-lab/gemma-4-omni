@@ -1,0 +1,105 @@
+# TASK AGY 11 — FIX ARTEFATTO SINUSOIDE + NUOVO TRAINING CON VOCI REALI + Common Voice 26 (chiave API)
+
+## CONTESTO CRITICO — ARTEFATTO SCOPERTO DALL'UTENTE
+
+Le performance ottimali in italiano erano un ARTEFATTO: gli audio oracle E generati
+sono sinusoidali (frequenza dominante ~440Hz = sinusoide A4), NON ci sono voci.
+
+### Diagnosi GIA' VERIFICATA dal coordinatore (NON rifare, parti da qui)
+
+1. `_wav_predicted/generated_000.wav` e `oracle_000.wav` sono IDENTICI
+   (stessi 6554 valori unici, rms 0.0707, peak 0.1000, dom_freq 439.5Hz) = sinusoide.
+2. **Dataset MDC 16h DEGENERATO**: `data/train_tokens_mdc_16.0h_9185s_mel.parquet`
+   (5.760.112 x 128, float16): **44.66% dei frame mel sono costanti a -6.90625**
+   (= floor mel = SILENZIO puro). Un mel costante decodifica come sinusoide.
+   I codes RVQ sono reali (2048 unici, range 0-2047) ma i mel sono piatti.
+3. **Dataset DuplexConv 20h SANO**: `data/train_tokens_20.0h_ext_mel.parquet`
+   solo 2.76% frame costanti, 14717 valori unici, min -6.906 max 4.824.
+4. La cos sim 0.9279 (adapter italiano) era ALTA PROPRIO PERCHE' il target mel era
+   piatto: predire una costante da' cos sim alta. E' un artefatto di valutazione.
+
+### Causa probabile del 44.7% di mel costanti in MDC (da verificare)
+
+Il prep MDC (`prep_mdc_3090.py`) concatena clip Common Voice con 0.4s di silenzio
+tra i turni (silence_arr), normalizza RMS a 0.05, salta clip < 0.5s. Sospetti:
+- Molti clip CV17-it sono corti o con silenzio nei bordi
+- Il windowing a 64 agent-frame (512 mel frame = 5.12s) con padding genera
+  finestre quasi tutte di silenzio
+- Serve VAD/soglia di energia per filtrare clip e finestre silenziose
+
+## OBIETTIVO 1 — DIAGNOSI e FIX del prep per VOCI REALI
+
+1. Quantifica il problema sul MDC attuale: frazione di finestre (64 agent-frame)
+   con >50% frame mel costanti. Salta/riempi le finestre degenerate.
+2. Root-cause: campiona 10 clip audio grezzi di Common Voice v17 it
+   (dal parquet audio bytes) e misura energia/voce. Verifica se il silenzio
+   viene dal dataset sorgente o dal prep (padding/windowing).
+3. Implementa nel prep (o in un nuovo script prep_mdc_v2_3090.py):
+   - VAD o soglia energia (RMS/zero-crossing) per escludere clip silenziosi
+   - Finestre valide: richiedi che almeno il 60-70% dei mel frame della finestra
+     abbia std > 1e-3 (non costante)
+   - Riduci il padding di silenzio se eccessivo (0.4s va bene se il resto e' voce)
+   - Verifica finale: frazione frame mel costanti < 5%, e genera 3 wav di test
+     che DEVONO contenere voce (analisi: dom_freq NON a 440Hz, energia variabile,
+     spettro vocale 80-4000Hz). Scrivi il test come script riutilizzabile
+     `check_voice_quality.py` (metrica: frazione frame costanti, rms medio,
+     dom_freq, presenza armoniche).
+
+## OBIETTIVO 2 — Download Common Voice 26 ITALIANO con la chiave API
+
+L'utente ha fornito la chiave per Mozilla Data Collective / Common Voice 26:
+
+    c77d2b51d520d6e126d898f69291e32e98a42a223d1cb57b4285983302be6e31
+
+1. Esplora l'API: base `https://commonvoice.mozilla.org/api/v1/` (es.
+   /api/v1/{lang}/datasets, /api/v1/user, header Authorization: Bearer TOKEN
+   o token come query param). La lingua italiana e' `it`.
+2. Trova il dataset Common Voice 26 italiano (validated). Scaricalo sulla 3090
+   (SSD veloce, download >1GB OK) in ~/gemma-4-omni/cv26_it/.
+3. Se l'API non e' quella giusta, prova anche:
+   - https://datacollective.mozilla.org o commonvoice.mozilla.org con la chiave
+   - Il formato potrebbe essere tar.gz con file validated.tsv + clip mp3/wav.
+4. VERIFICA: conta clip italiani, ore stimate, ascolta/analizza 3 clip
+   (energia, frequenza) per confermare voci reali.
+
+## OBIETTIVO 3 — NUOVO TRAINING ADAPTER con voci reali
+
+1. Prepara il dataset con il prep FIXATO (OBIETTIVO 1) usando:
+   - CV 26 italiano se scaricato (OBIETTIVO 2), altrimenti CV 17 it
+   - Target: almeno 10-15h di audio REALI (voce, niente silenzio)
+   - Parquet in data/train_tokens_mdc_v2_* + copie std train_tokens_mdc_50.0h_2500s_*
+2. Riadatta `train_adapter_it_3090.py` per il nuovo dataset (shim I/O minimi).
+3. Smoke test (gate: initial loss 13-17 non collassata, GPU attiva) poi run
+   completo. Checkpoint in checkpoints/gemma4_duplex_sota_v2/.
+4. VALIDAZIONE OBBLIGATORIA post-training: genera 4-8 wav predicted+oracle e
+   verifica con check_voice_quality.py che CONTENGANO VOCI (non sinusoidi).
+   Se la cos sim e' alta MA i wav sono sinusoidi: il dataset e' ancora
+   degenerato, FERMATI e diagnostica prima di procedere.
+5. La metrica cos sim e' valida SOLO se il target mel e' ricco (frazione
+   costanti < 5%). Riporta sempre entrambe: cos sim + voice quality check.
+
+## Regole operative (SEMPRE)
+
+- Calcolo SOLO su gpu3090 (SSH alias gpu3090, utente administrator).
+- LEZIONE TIMEOUT: comandi > 2-3 min SEMPRE nohup + polling, MAI sincroni:
+    ssh gpu3090 "cd ~/gemma-4-omni && nohup bash -c 'COMANDO' > /tmp/job_x.log 2>&1 & echo PID=$!"
+    poi polling breve: ssh gpu3090 "tail -5 /tmp/job_x.log; pgrep -f COMANDO || echo DONE"
+  Ogni singolo ssh < 60s.
+- Docker: docker run --rm --gpus all --user 1000:1000 --ipc=host \
+    -v /home/administrator/gemma-4-omni:/workspace -w /workspace \
+    -e HF_HOME=/workspace/hf_cache -e HF_HUB_CACHE=/workspace/hf_cache/hub \
+    -e PIPELINE_ENV=local3090 -e PYTHONUNBUFFERED=1 \
+    gemma4-omni:latest python SCRIPT.py [flags]
+- MAI sudo via BatchMode. NO --privileged, NO --network host. NON modificare
+  kaggle_pipeline.py se non shim I/O minimi. NON toccare gemma4_training_report.md.
+- Comando fallito: diagnosi sistematica root-cause, MAI fix a tentativi.
+
+## Output richiesto
+
+Al termine scrivi docs/REPORT_TASK11_VOCI_REALI.md con:
+1. Root-cause del 44.7% mel costanti (dati alla mano)
+2. Fix applicato al prep + metriche voce del nuovo dataset (frazione costanti, ore reali)
+3. Esito download CV26 italiano (clip, ore) o BLOCKED con motivazione
+4. Nuovo training: gate smoke, metriche finali, cos sim + voice quality check
+5. Percorsi checkpoint e wav
+Se un job in nohup non finisce: lascialo girare e segnala container/pid/log al coordinatore.
