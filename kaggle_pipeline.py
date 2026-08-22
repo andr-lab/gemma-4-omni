@@ -2409,26 +2409,180 @@ class Code2WavDecoder(nn.Module):
     """
     Decoder Audio Standalone Code2Wav (da Qwen3-TTS Tokenizer 12Hz):
     Converte matrici di 16 codebook RVQ in audio PCM waveform a 24kHz.
-    Funziona in Fase 2 SENZA richiedere la libreria qwen-tts o versioni vecchie di transformers.
+    Funziona in Fase 2 SENZA richiedere la libreria qwen-tts o versioni vecchie di transformers nel processo principale.
 
     Percorsi di caricamento (in ordine):
-      1) AutoModel.from_pretrained (solo se la transformers corrente registra
-         `qwen3_tts_tokenizer_12hz` — tipicamente NO su transformers 5.x);
-      2) Replica torch pura da `code2wav_weights/` (estratta in Fase 1 da
-         extract_code2wav_decoder_weights, bit-exact verificata vs il decoder
-         ufficiale: MAXDIFF=0.0 su T=5..80);
-      3) Fallback mock (sinusoide) — solo se nessuno dei due è disponibile.
+      1) In-process: Decoder Ufficiale Qwen3TTSTokenizerV2Model (se qwen_tts è importabile direttamente);
+      2) Subprocess: Decoder Ufficiale via /opt/venv_phase1/bin/python + decode_official_worker.py (ADR-003);
+      3) In-process: AutoModel.from_pretrained (fallback standard transformers);
+      4) Replica torch pura da `code2wav_weights/`;
+      5) Fallback mock (sinusoide) — solo se nessuno dei precedenti è disponibile.
     """
 
     def __init__(self, model_name: str = "Qwen/Qwen3-TTS-Tokenizer-12Hz"):
         super().__init__()
         self.model_name = model_name
         self.decoder_module = None
-        self._wrapper_mode = True  # True: Qwen3TTSTokenizerV2Model.decode((B,T,CB)); False: forward((B,CB,T))
+        self._worker_proc = None
+        self._venv_py = None
+        self._worker_script = None
+        self._wrapper_mode = "unknown"
+        import atexit
+        atexit.register(self._cleanup_worker)
         self._init_decoder()
 
+    def _cleanup_worker(self):
+        """Termina e libera esplicitamente il processo worker subprocess."""
+        if self._worker_proc is not None:
+            try:
+                self._worker_proc.stdin.write(json.dumps({"command": "exit"}) + "\n")
+                self._worker_proc.stdin.flush()
+            except Exception:
+                pass
+            try:
+                self._worker_proc.terminate()
+                self._worker_proc.wait(timeout=1.0)
+            except Exception:
+                try:
+                    self._worker_proc.kill()
+                except Exception:
+                    pass
+            self._worker_proc = None
+
+    def _start_worker(self) -> bool:
+        """Avvia il worker subprocess nel venv phase1 in modalità daemon persistente."""
+        import subprocess
+
+        self._cleanup_worker()
+
+        venv_candidates = [
+            "/opt/venv_phase1/bin/python",
+            os.environ.get("VENV_PHASE1_PYTHON", ""),
+        ]
+        venv_py = None
+        for p in venv_candidates:
+            if p and os.path.exists(p):
+                venv_py = p
+                break
+
+        if venv_py is None:
+            return False
+
+        worker_candidates = [
+            "/workspace/decode_official_worker.py",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "decode_official_worker.py"),
+            os.path.join(os.getcwd(), "decode_official_worker.py"),
+        ]
+        worker_script = None
+        for w in worker_candidates:
+            if w and os.path.exists(w):
+                worker_script = w
+                break
+
+        if worker_script is None:
+            return False
+
+        try:
+            cmd = [venv_py, worker_script, "--daemon", "--model_name", self.model_name]
+            proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+
+            # Legge risposta handshake READY ignorando eventuali banner/warning delle librerie
+            start_t = time.time()
+            ready = False
+            while time.time() - start_t < 35.0:
+                line = proc.stdout.readline()
+                if not line:
+                    break
+                line = line.strip()
+                if line == "READY":
+                    ready = True
+                    break
+
+            if not ready:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                return False
+
+            self._worker_proc = proc
+            self._venv_py = venv_py
+            self._worker_script = worker_script
+            return True
+        except Exception as e:
+            print(f"[Code2Wav] Avviso avvio worker subprocess: {e}")
+            sys.stdout.flush()
+            return False
+
+    def _read_worker_line(self, timeout: float = 60.0):
+        """Legge una riga JSON dal worker subprocess."""
+        if self._worker_proc is None or self._worker_proc.stdout is None:
+            return None
+        start_t = time.time()
+        while time.time() - start_t < timeout:
+            line = self._worker_proc.stdout.readline()
+            if not line:
+                return None
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("{") and line.endswith("}"):
+                try:
+                    return json.loads(line)
+                except Exception:
+                    pass
+        return None
+
     def _init_decoder(self):
-        # 1) Wrapper transformers (solo se supportato dalla versione corrente)
+        # 1) Modello ufficiale in-process Qwen3TTSTokenizerV2Model
+        try:
+            import types
+            import importlib.machinery
+            if "torchaudio" not in sys.modules:
+                mock_ta = types.ModuleType("torchaudio")
+                mock_ta.__spec__ = importlib.machinery.ModuleSpec("torchaudio", None)
+                sys.modules["torchaudio"] = mock_ta
+                sys.modules["torchaudio._extension"] = types.ModuleType("torchaudio._extension")
+                sys.modules["torchaudio.compliance"] = types.ModuleType("torchaudio.compliance")
+                sys.modules["torchaudio.compliance.kaldi"] = types.ModuleType("torchaudio.compliance.kaldi")
+
+            Qwen3TTSTokenizerV2Model = None
+            try:
+                from qwen_tts.core.tokenizer_12hz.modeling_qwen3_tts_tokenizer_v2 import Qwen3TTSTokenizerV2Model
+            except Exception:
+                pass
+
+            if Qwen3TTSTokenizerV2Model is not None:
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                tok_model = Qwen3TTSTokenizerV2Model.from_pretrained(
+                    self.model_name,
+                    token=os.environ.get("HF_TOKEN")
+                )
+                tok_model = tok_model.to(device).eval()
+                self.decoder_module = tok_model
+                self._wrapper_mode = "official_inprocess"
+                print(f"[Code2Wav] ✅ Decoder Ufficiale Qwen3TTSTokenizerV2Model caricato in-process su {device}.")
+                sys.stdout.flush()
+                return
+        except Exception as e:
+            print(f"[Code2Wav] Info caricamento in-process ufficiale: {e}")
+            sys.stdout.flush()
+
+        # 2) Decoder Ufficiale via Subprocess nel venv Phase 1 (ADR-003)
+        if self._start_worker():
+            self._wrapper_mode = "official_subprocess"
+            print(f"[Code2Wav] ✅ Decoder Ufficiale Qwen3TTSTokenizerV2Model attivo via Subprocess ({self._venv_py}).")
+            sys.stdout.flush()
+            return
+
+        # 3) Wrapper transformers AutoModel
         try:
             from transformers import AutoModel
 
@@ -2444,8 +2598,7 @@ class Code2WavDecoder(nn.Module):
             if self.decoder_module is None and hasattr(tokenizer_model, "model"):
                 self.decoder_module = getattr(tokenizer_model.model, "decoder", None)
             if self.decoder_module is not None:
-                if not hasattr(self.decoder_module, "decode"):
-                    self._wrapper_mode = False
+                self._wrapper_mode = "transformers_automodel"
                 print(
                     "[Code2Wav] ✅ Decoder Audio Standalone PyTorch (transformers) caricato."
                 )
@@ -2457,13 +2610,13 @@ class Code2WavDecoder(nn.Module):
             )
             sys.stdout.flush()
 
-        # 2) Replica torch pura (Fase 2, zero transformers)
+        # 4) Replica torch pura (Fase 2, zero transformers)
         try:
             from code2wav_decoder import load_code2wav_decoder
 
             decoder_module, cfg = load_code2wav_decoder(CODE2WAV_WEIGHTS_DIR)
             self.decoder_module = decoder_module
-            self._wrapper_mode = False
+            self._wrapper_mode = "standalone_replica"
             print(
                 f"[Code2Wav] ✅ Replica standalone torch pura caricata ({CODE2WAV_WEIGHTS_DIR}, "
                 f"{len(decoder_module.state_dict())} tensori, upsample x{decoder_module.total_upsample})."
@@ -2475,45 +2628,115 @@ class Code2WavDecoder(nn.Module):
                 f"[Code2Wav] ⚠️ Replica standalone non disponibile ({e}): modalità sintetizzatore mock attiva."
             )
             sys.stdout.flush()
+            self._wrapper_mode = "mock"
 
-    def decode(self, audio_codes: torch.Tensor) -> np.ndarray:
-        """Decodifica i token audio in forma d'onda waveform float32."""
+    def decode(self, audio_codes: torch.Tensor, normalize: bool = True) -> np.ndarray:
+        """Decodifica i token audio in forma d'onda waveform float32 a 24kHz."""
+        # Estrai array numpy per compatibilità uniforme
+        if isinstance(audio_codes, torch.Tensor):
+            codes_np = audio_codes.detach().cpu().numpy()
+        else:
+            codes_np = np.asarray(audio_codes)
+
+        # 1. Percorso Subprocess Ufficiale (se attivo)
+        if self._worker_proc is not None:
+            import uuid
+            uid = uuid.uuid4().hex[:8]
+            in_f = f"/tmp/c2w_in_{os.getpid()}_{uid}.npy"
+            out_f = f"/tmp/c2w_out_{os.getpid()}_{uid}.npy"
+            try:
+                np.save(in_f, codes_np)
+                req = json.dumps({"input_file": in_f, "output_file": out_f, "normalize": normalize})
+                self._worker_proc.stdin.write(req + "\n")
+                self._worker_proc.stdin.flush()
+                resp = self._read_worker_line(timeout=60.0)
+                if resp is not None and resp.get("status") == "ok" and os.path.exists(out_f):
+                    wav_arr = np.load(out_f)
+                    return wav_arr.astype(np.float32)
+            except Exception as e:
+                print(f"[Code2Wav] Avviso decodifica worker: {e}, tento riavvio worker...")
+                sys.stdout.flush()
+                if self._start_worker():
+                    try:
+                        np.save(in_f, codes_np)
+                        req = json.dumps({"input_file": in_f, "output_file": out_f, "normalize": normalize})
+                        self._worker_proc.stdin.write(req + "\n")
+                        self._worker_proc.stdin.flush()
+                        resp = self._read_worker_line(timeout=60.0)
+                        if resp is not None and resp.get("status") == "ok" and os.path.exists(out_f):
+                            wav_arr = np.load(out_f)
+                            return wav_arr.astype(np.float32)
+                    except Exception:
+                        pass
+            finally:
+                if os.path.exists(in_f):
+                    try: os.remove(in_f)
+                    except Exception: pass
+                if os.path.exists(out_f):
+                    try: os.remove(out_f)
+                    except Exception: pass
+
+        # 2. Percorso In-Process (ufficiale in-process, transformers o replica standalone)
         if self.decoder_module is not None:
             try:
                 with torch.no_grad():
-                    if self._wrapper_mode:
-                        # il wrapper (GPU se caricato lì): non forzare CPU
-                        x = audio_codes
-                    else:
-                        # replica standalone: sta su CPU (pesi estratti su disco)
-                        x = audio_codes.detach().cpu()
+                    x = torch.from_numpy(codes_np).clone() if isinstance(codes_np, np.ndarray) else audio_codes.clone()
                     if x.dim() == 2:
-                        x = x.unsqueeze(0)  # (1, T, CB)
-                    # Convenzione unica: `decode()` accetta (B, T, CB) (T=frame audio,
-                    # CB=N_CODEBOOKS). Nessuna euristica sulla shape: con T==CB era
-                    # ambigua e trasponeva contenuti validi (bug T=16).
-                    if self._wrapper_mode:
-                        wav = self.decoder_module.decode(x)
+                        if x.shape[0] == 16 and x.shape[1] != 16:
+                            x = x.transpose(0, 1)  # (T, 16)
+                        x = x.unsqueeze(0)  # (1, T, 16)
+                    elif x.dim() == 3:
+                        if x.shape[1] == 16 and x.shape[2] != 16:
+                            x = x.transpose(1, 2)  # (B, T, 16)
+
+                    x = torch.clamp(x, min=0, max=2047).long()
+
+                    if self._wrapper_mode in ("official_inprocess", "transformers_automodel") or hasattr(self.decoder_module, "decode"):
+                        dev = next(self.decoder_module.parameters()).device
+                        out = self.decoder_module.decode(x.to(dev))
+                        if hasattr(out, "audio_values"):
+                            wav = out.audio_values[0]
+                        elif hasattr(out, "audio"):
+                            wav = out.audio[0]
+                        elif isinstance(out, (list, tuple)):
+                            wav = out[0]
+                        else:
+                            wav = out
+                        if isinstance(wav, torch.Tensor):
+                            wav_arr = wav.cpu().numpy().squeeze()
+                        else:
+                            wav_arr = np.array(wav).squeeze()
                     else:
-                        wav = self.decoder_module(x.transpose(1, 2))  # (B, CB, T)
-                    if isinstance(wav, torch.Tensor):
-                        wav_arr = wav.cpu().numpy().squeeze()
-                        # Normalizzazione di picco (PEAK NORMALIZATION) in [-1.0, 1.0]:
-                        # Il modulo neurale restituisce valori grezzi non scalati (|x| > 30),
-                        # che saturano e clippano a -1/+1 se scritti direttamente in PCM_16.
-                        max_val = float(np.max(np.abs(wav_arr)))
-                        if max_val > 1e-8:
-                            wav_arr = wav_arr / max_val
-                        return wav_arr.astype(np.float32)
+                        wav = self.decoder_module(x.transpose(1, 2).cpu())
+                        if isinstance(wav, torch.Tensor):
+                            wav_arr = wav.cpu().numpy().squeeze()
+                        else:
+                            wav_arr = np.array(wav).squeeze()
+
+                    wav_arr = wav_arr.astype(np.float32)
+                    if normalize:
+                        p_peak = float(np.percentile(np.abs(wav_arr), 99.7))
+                        if p_peak > 1e-8:
+                            wav_arr = np.clip(wav_arr / (p_peak * 1.05), -1.0, 1.0).astype(np.float32)
+                        else:
+                            max_val = float(np.max(np.abs(wav_arr)))
+                            if max_val > 1e-8:
+                                wav_arr = (wav_arr / max_val).astype(np.float32)
+                    return wav_arr
             except Exception as e:
                 print(f"[Code2Wav] Avviso decodifica: {e}")
                 sys.stdout.flush()
 
-        # Fallback sintetico per test
-        t_len = audio_codes.shape[1] if audio_codes.dim() == 3 else audio_codes.shape[0]
+        # 3. Fallback sintetico per test
+        t_len = codes_np.shape[1] if codes_np.ndim == 3 else (codes_np.shape[0] if codes_np.shape[0] != 16 else codes_np.shape[1])
         num_samples = int(t_len * (24000 / FRAME_RATE_HZ))
         t = np.linspace(0, t_len / FRAME_RATE_HZ, num_samples)
         return (0.1 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+
+    def __del__(self):
+        """Cleanup worker process on garbage collection."""
+        self._cleanup_worker()
+
 
 
 class FullDuplexDataset(Dataset):
