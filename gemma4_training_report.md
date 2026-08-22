@@ -626,3 +626,26 @@ Dettagli:
 | **Eval temporal2 su 20h (Task 8)** | **0.7455** |
 | **Adapter Italiano MDC 16h (Task 9B)** | 🏆 **0.9232** |
 
+
+---
+
+## 14. Task 10 su RTX 3090 (2026-08-22) — TurnHead v4 + Valutazione Italiano + Ricerca MDC26
+
+### 14.1 TurnHead v4 ottimizzato (20h DuplexConv)
+- **Checkpoint**: `checkpoints/turn_state_head_v4.pt` (4.72M params), report `logs/turn_head_v4_training_report.json`
+- Architettura: Pre-LN Deep Residual MLP, Calibrated Focal Loss v4 (weights [1.0,3.0,1.6,1.0,2.0], gamma 1.2, smoothing 0.04), dataset COMPLETO 20h (836K frame, caching zero-copy), Gate-Aware checkpoint selection, post-training logit bias calibration b=[0,1,0,0,0]
+- **Risultati**: Acc 66.76% (gate >=65 PASS), SPEAK recall **88.51%** (+5.9), YIELD recall **40.11%** (+758.9%! risolve il collasso v3), BARGE_IN 35.75% (prec 54.26%), Balanced Acc **41.24%** (+53.3%), Macro F1 35.53% (+20.9%)
+- Inferenza real-time: 12.5 FPS (80ms step), testa MLP <0.2ms su GPU
+
+### 14.2 Valutazione linguistica italiana (adapter SOTA)
+- **Giudizio: BUONO — SOTA CONFERMATA, retraining NON necessario**
+- Cosine sim 0.9279 (+24.5% vs 0.7455), SVD rank 1537/2048, coupling loss 3.22 (-61.9%), cb0 Top-1 35.38% / Top-5 55.76%, entropia 4.19 bits (250 token, nessun collasso)
+- 22 frasi italiane naturali (backchannel, segnali discorsivi, barge-in, dialoghi) → backbone Gemma E2B IT riconosce costrutti morfosintattici, coerenza semantica senza allucinazioni
+- Report: `docs/REPORT_TASK10_ITALIANO.md`, `logs/italian_linguistics_report.json`
+
+### 14.3 Ricerca MDC26 (Common Voice 26 italiano)
+- `Peacockery/common-voice-scripted-speech-26`: 68 lingue ma **it NON incluso** ❌
+- `deepdml/common_voice_26_0`: **gated** (401 Unauthorized) ❌
+- `mozilla-foundation/common_voice_17_0`: richiede auth manuale ❌
+- **Decisione**: SOTA attuale mantenuto (16h MDC it, cos 0.9279), nessun downgrade; report `docs/REPORT_TASK10_MDC26.md`
+
