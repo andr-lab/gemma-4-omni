@@ -1,0 +1,117 @@
+# TASK AGY 11D — IL SUONO È ANCORA RUMORE ("PALE DI ELICA") — DEVI ASCOLTARE GLI AUDIO (MULTIMODALE) E TROVARE IL VERO PROBLEMA
+
+## SITUAZIONE CRITICA (feedback utente, ascolto diretto)
+
+L'utente ha ASCOLTATO i wav del Task 11C (quelli dichiarati "100% PASS" con metriche
+numeriche) e dice: **"i wav sono ancora rumore, sembrano pale di un'elica"**.
+
+Lezione: le metriche numeriche (0% clip, peak/rms 5-8, dinamica, armoniche) NON
+garantiscono voce intelligibile. Il suono prodotto è un rumore meccanico periodico.
+Il problema NON è risolto. Il Task 11C ha solo smesso di saturare, ma il decoder
+(standalone) produce ancora qualcosa di NON vocale.
+
+## OBIETTIVO PRIMARIO: ASCOLTA TU STESSO GLI AUDIO (capacità multimodale Gemini)
+
+Sei un agente Gemini multimodale: PUOI ascoltare i file audio. Usa la sintassi
+`@percorso/file.wav` nel tuo prompt per caricare e ascoltare gli audio.
+
+Audio da ascoltare OBBLIGATORIAMENTE (copie locali già scaricate):
+- @C:/Users/andre/Documents/gemma-4-omni/_wav_v3/generated_000.wav  (modello)
+- @C:/Users/andre/Documents/gemma-4-omni/_wav_v3/generated_001.wav
+- @C:/Users/andre/Documents/gemma-4-omni/_wav_v3/oracle_000.wav    (codici GT reali del dataset decodificati)
+- @C:/Users/andre/Documents/gemma-4-omni/_wav_v3/oracle_001.wav
+- @C:/Users/andre/Documents/gemma-4-omni/_wav_v3/test_duplex_decoded.wav
+
+Dopo l'ascolto, riporta un VERDETTO PERCETTIVO per ciascuno:
+voce chiara / voce robotica / rumore meccanico / tono puro / altro.
+Se la sintassi @file non funziona in print mode, usa comunque l'analisi
+spettrale avanzata (spettrogramma, formanti F1-F3, pitch tracking, cepstrum)
+e SCRIVI nel report cosa riesci a sentire e cosa no.
+
+## DIAGNOSI DOPPIA (il cuore del task)
+
+### A. Il decoder standalone è infedele? (IPOTESI PRINCIPALE)
+Il decoder usato dalla pipeline è una REPLICA torch pura (`code2wav_decoder.py`)
+estratta in Fase 1. Il Task 11C ha fixato Snake1d (exp alpha/beta) e il clipping,
+ma il suono resta meccanico. Il decoder UFFICIALE Qwen3-TTS potrebbe produrre
+voce vera dagli stessi codici.
+
+Procedura:
+1. Nel container installa il pacchetto ufficiale: `pip install qwen-tts==0.1.1`
+   (porta transformers 4.57.3 — OK, NON pinnare transformers manualmente).
+   ATTENZIONE: `docker run --rm` non persiste le installazioni → installa E
+   testa nello STESSO comando docker.
+2. Decodifica gli STESSI codici GT (da data/train_tokens_mdc_v2_15.0h_11599s_codes.parquet,
+   prime 64 righe) con:
+   a. il decoder standalone (code2wav_decoder.py)
+   b. il decoder ufficiale via qwen-tts (Qwen3TTSTokenizerV2Model / il metodo
+      corretto per la versione 0.1.1 — consulta la doc del pacchetto)
+3. Salva entrambi i wav e ASCOLTALI (o analizzali spettralmente se non puoi).
+4. Se l'ufficiale produce VOCE e lo standalone rumore → la replica standalone
+   è sbagliata da qualche parte (layer mancante, ordine codebook, normalizzazione
+   interna, RVQ residual sum, split semantic/acoustic, ecc.). Trova la DIFFERENZA
+   ESATTA (confronta gli output campione-per-campione se le dimensioni coincidono).
+
+### B. Il dataset è voce reale? (IPOTESI ALTERNATIVA)
+Se ANCHE il decoder ufficiale produce rumore dai codici GT → i codici estratti
+nel prep v2 sono sbagliati (estrazione Qwen3-TTS errata). In tal caso:
+- verifica la pipeline di tokenizzazione usata da prep_mdc_v2_3090.py
+- decodifica qualche clip del dataset ORIGINALE (mp3 CV17) con qwen-tts per
+  confermare che i file sorgente sono voci reali
+- ripara la tokenizzazione e RIGENERA i parquet
+
+## MDC 26 (richiesta esplicita utente): "usa il dataset MDC 26 per il training"
+
+L'utente vuole il training sul dataset Mozilla Data Collective **v26** (Common Voice
+26) in italiano. Hai la chiave API (SOLO per uso nel prompt, MAI scriverla in file
+di codice o git):
+
+**CHIAVE API MDC: c77d2b51d520d6e126d898f69291e32e98a42a223d1cb57b4285983302be6e31**
+
+Nel Task 10 era risultato "non disponibile" (Peacockery senza it, deepdml gated,
+auth manuale). Nel Task 11 hai esplorato l'SDK `datacollective` e la sua API senza
+completare il download (cartella cv26_it/ vuota). RIPRENDI DA LÌ:
+1. Usa l'SDK `datacollective` (installato nel container) con la chiave API per
+   scaricare il dataset v26 italiano. Se l'SDK non basta, esplora l'API REST
+   Mozilla Data Collective (endpoint dati finali / cli.py del pacchetto).
+2. Verifica PERCETTIVAMENTE (ascolto o spettrogramma) che i file scaricati siano
+   VOCI REALI (parlato, non toni).
+3. Se v26 it non è proprio scaricabile: documenta il motivo ESATTO (errore API,
+   URL, gating) e usa comunque il miglior dataset di voci reali VERIFICATO.
+
+## TRAINING FINALE (solo dopo A+B risolti)
+
+1. Dopo aver capito perché il suono è meccanico e averlo risolto (decoder ufficiale
+   o dataset rigenerato), riallinea: l'adapter SOTA v2 esiste già (cos sim 0.9366).
+2. Se il problema era il decoder: NON serve ritrainare, basta rigenerare i wav con
+   il decoder corretto. Se il problema era il dataset: tokenizza MDC 26 (o CV17
+   rivisto) e ritraina (pattern Task 11B, ~2532 step, nohup).
+3. RIGENERA i sample (8 generated + 8 oracle + duplex) con il decoder corretto.
+4. **VERIFICA FINALE = ASCOLTO TU** (multimodale): i nuovi wav devono suonare come
+   VOCE (anche robotica, ma parlato). Se senti ancora "elica" o rumore meccanico:
+   FERMATI e diagnostica. NON dichiarare successo con sole metriche numeriche.
+
+## REGOLE OPERATIVE (OBLIGATORIE)
+- Comandi >2-3 min SEMPRE nohup + polling, MAI sincroni in print-mode:
+    ssh gpu3090 "cd ~/gemma-4-omni && nohup bash -c 'COMANDO' > /tmp/job_11d.log 2>&1 & echo PID=$!"
+  poi polling: ssh gpu3090 "tail -5 /tmp/job_11d.log; pgrep -f 'pattern' || echo DONE"
+  Se il job non finisce: scrivi stato + log path, non bloccare.
+- Calcolo SOLO su gpu3090 (SSH alias gpu3090). Docker:
+    docker run --rm --gpus all --user 1000:1000 --ipc=host \
+      -v /home/administrator/gemma-4-omni:/workspace -w /workspace \
+      -e HF_HOME=/workspace/hf_cache -e HF_HUB_CACHE=/workspace/hf_cache/hub \
+      -e PIPELINE_ENV=local3090 -e PYTHONUNBUFFERED=1 \
+      gemma4-omni:latest bash -c 'pip install -q qwen-tts==0.1.1 && python SCRIPT.py'
+- MAI sudo BatchMode. NO --privileged, NO --network host.
+- NON modificare il codice di calcolo (forward/backward training): il decoder
+  ufficiale va integrato come wrapper I/O in Code2WavDecoder.decode (kaggle_pipeline.py).
+- MAI scrivere la chiave API in codice o git.
+- Fix con diagnosi, MAI a tentativi.
+
+## OUTPUT RICHIESTO
+1. Verdetto percettivo sugli audio ascoltati (cosa suona, cosa no)
+2. Root cause finale: decoder standalone infedele / dataset sbagliato / entrambi
+3. Fix applicato (diff) con verifica sintattica
+4. Wav rigenerati in samples/ + report docs/REPORT_TASK11D_VOCE_REALE.md
+5. Esito download MDC 26 (fatto / motivo esatto del blocco)
+6. La tua verifica percettiva FINALE sui nuovi wav
