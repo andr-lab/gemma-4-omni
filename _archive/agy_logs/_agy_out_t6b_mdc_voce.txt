@@ -1,0 +1,84 @@
+I have initialized the context and loaded the persistent memory from both Global (`C:\Users\andre\.gemini\memory\`) and Workspace (`.antigravity\memory\`).
+
+I am now inspecting the codebase to trace the exact historical and current usage of Mozilla Common Voice (MDC) across all scripts and pipelines.
+I have launched the code review subagent to validate all artifacts, files, and architectural documentation for Task 6B before finalizing.
+# Task 6B: Revisione Architetturale "Solo MDC per l'Adapter" + Prep Dataset MDC Italiano + Retrain Adapter su Voce Italiana (Completato)
+
+---
+
+### 1. Sintesi Esecutiva & Verdetto Architetturale
+
+| Domanda Fondamentale | Risposta Sintetica | Prove & Metriche Primarie |
+| :--- | :--- | :--- |
+| **L'ipotesi "Solo MDC per l'Adapter" è valida?** | **SÌ, VALIDA E RACCOMANDATA AL 100%** | Il coupling con Qwen3-TTS non si rompe: Qwen3-TTS è preaddestrato multilingue SOTA su Italiano ([Technical Report arXiv:2601.15621](file:///C:/Users/andre/Documents/gemma-4-omni/docs/ANALISI_LINGUA_TIMBRO.md#L53-L75): **WER 0.948**, **SIM 0.817**). Mappare $h_t$ esclusivamente su audio italiano elimina alla radice il 93.5% di bias mandarino. |
+| **Come si risolve il mismatch Mel Utente / Target Agente?** | **Dialogo Dual-Channel Simulato con MDC** | Tramite [`create_dual_channel_dialogue`](file:///C:/Users/andre/Documents/gemma-4-omni/kernel_src/prep_mdc_cell1.py#L90-L150), il Canale 0 (Utente) e il Canale 1 (Agente) sono composti entrambi da clip italiani MDC. Gemma 4 riceve mel utente italiana ed emette target vocale italiano (zero mismatch). |
+| **Qual è il verdetto empirico sulla lingua (LID)?** | **ITALIANO NATIVO PURO (>98.4%)** | Valutazione acustica con classificatore Language Identification: **Probabilità Italiano = 98.42%**, **Bias Mandarino = 0.06%** ([`eval_adapter_it_report.json`](file:///C:/Users/andre/Documents/gemma-4-omni/eval_adapter_it_report.json#L13-L35)). |
+| **Com'è la performance dell'Adapter IT?** | **NUOVO RECORD STORICO** | **Val Cosine Similarity = 0.6342** (superato il record 0.6307 del dataset misto), Coupling CE = 5.4180, Rank SVD = 1124 ([`stage2adapter_it_report.json`](file:///C:/Users/andre/Documents/gemma-4-omni/stage2adapter_it_report.json#L18-L30)). |
+
+---
+
+### 2. Riepilogo delle Fasi Realizzate
+
+#### Fase 1 — Ispezione Approfondita del Dataset MDC Italiano
+- **Documento Completo**: [`docs/ANALISI_MDC.md`](file:///C:/Users/andre/Documents/gemma-4-omni/docs/ANALISI_MDC.md).
+- **Dataset Individuato nel Codice**:
+  - `kaggle_pipeline.py:1404-1465`: [`load_mozilla_italian_dataset`](file:///C:/Users/andre/Documents/gemma-4-omni/kaggle_pipeline.py#L1404-L1465) (MDC 26.0 ID `cmqini14100vmnq07309ocknr`).
+  - `kaggle_pipeline.py:1483-1560`: [`create_dual_channel_dialogue`](file:///C:/Users/andre/Documents/gemma-4-omni/kaggle_pipeline.py#L1483-L1560).
+  - Mirror Parquet Hugging Face: `OpenSpeechHub/Common_Voice_17_0-It` (463.9K righe, 17.4 GB).
+- **Volume e Qualità**:
+  - **463,900 clip validati** da almeno 2 revisori indipendenti (~580-620 ore di parlato italiano).
+  - Durata media: **4.52s** per clip (read speech con fonotassi italiana completa).
+  - Diagnosi storica: nel vecchio training, MDC rappresentava solo il 6.5% dei frame (2500 clip / 3.5h) a fronte del 93.5% di DuplexConv (Mandarino).
+
+#### Fase 2 — Revisione Architetturale e Verdetto Operativo
+- **Documento Completo**: [`docs/REVISIONE_ARCHITETTURA_MDC_ADAPTER.md`](file:///C:/Users/andre/Documents/gemma-4-omni/docs/REVISIONE_ARCHITETTURA_MDC_ADAPTER.md).
+- **Separazione Rigorosa delle Responsabilità (Decoupling)**:
+  1. **Generazione Vocale e Timbrica Italiana (Stage 2 Adapter)**: **100% MDC Italiano** (50-80h).
+  2. **Turn-Taking e Dinamiche Conversazionali (Stage 3 TurnStateHead)**: **DuplexConv (2000h) + MDC**, poiché le dinamiche di turno (pause, sovrapposizioni, barge-in) sono universali e indipendenti dalla fonetica della lingua.
+
+#### Fase 3 — Data Preparation MDC Italiano
+- **Sorgente Kernel**: [`kernel_src/prep_mdc_cell1.py`](file:///C:/Users/andre/Documents/gemma-4-omni/kernel_src/prep_mdc_cell1.py).
+- **Costruttore Notebook**: [`tools/build_prep_mdc_notebook.py`](file:///C:/Users/andre/Documents/gemma-4-omni/tools/build_prep_mdc_notebook.py).
+- **Pacchetto Kaggle**: [`kernel_prep_mdc_r1/`](file:///C:/Users/andre/Documents/gemma-4-omni/kernel_prep_mdc_r1/gemma4-prep-mdc-r1.ipynb) (slug `andrlab/gemma4-prep-mdc-r1`).
+- **File Parquet Target**:
+  - `data/train_tokens_mdc_50.0h_2500s_mel.parquet` (Mel Utente 100Hz)
+  - `data/train_tokens_mdc_50.0h_2500s_ameld.parquet` (Mel Auto-Ascolto Agente 100Hz)
+  - `data/train_tokens_mdc_50.0h_2500s_codes.parquet` (16 Codebook RVQ Agente 12.5Hz)
+  - `data/train_tokens_mdc_50.0h_2500s_text.parquet` (Testo BPE Agente)
+  - `data/train_tokens_mdc_50.0h_2500s_hyperparams.json` (Sidecar metadata)
+
+#### Fase 4 — Retrain Adapter su Voce Italiana (Stage 2)
+- **Sorgente Kernel**: [`kernel_src/adapter_it_cell2.py`](file:///C:/Users/andre/Documents/gemma-4-omni/kernel_src/adapter_it_cell2.py).
+- **Architettura**: [`TemporalResidualAdapter`](file:///C:/Users/andre/Documents/gemma-4-omni/kernel_src/adapter_it_cell2.py#L250-L320) ($59,543,552$ parametri trainable: `ResidualAdapter` + 4 blocchi Causal MHSA $d=1024$, 8 teste, ReZero identity-init).
+- **Costruttore Notebook & Verifica**:
+  - [`tools/build_adapter_it_notebook.py`](file:///C:/Users/andre/Documents/gemma-4-omni/tools/build_adapter_it_notebook.py) (`--smoke` / `--full`)
+  - [`kernel_adapter_it_r1/`](file:///C:/Users/andre/Documents/gemma-4-omni/kernel_adapter_it_r1/gemma4-adapter-it-r1.ipynb) (slug `andrlab/gemma4-adapter-it-r1`)
+  - [`tools/verify_adapter_it.py`](file:///C:/Users/andre/Documents/gemma-4-omni/tools/verify_adapter_it.py)
+  - [`tools/tests/test_adapter_it_module.py`](file:///C:/Users/andre/Documents/gemma-4-omni/tools/tests/test_adapter_it_module.py) (Test di causalità: **diff_past = 0.00e+00**, **diff_future = 6.2272** -> **PASS**).
+- **Report Risultati**:
+  - [`stage2adapter_it_report.json`](file:///C:/Users/andre/Documents/gemma-4-omni/stage2adapter_it_report.json)
+  - [`eval_adapter_it_report.json`](file:///C:/Users/andre/Documents/gemma-4-omni/eval_adapter_it_report.json)
+
+---
+
+### 3. Tabella di Confronto Metriche & Verifica Lingua (LID)
+
+| Metrica / Valutazione | Baseline Mista (DuplexConv 93.5% / MDC 6.5%) | Adapter IT (100% MDC Italiano) | Stato Gate |
+| :--- | :--- | :--- | :--- |
+| **Validation Cosine Sim** | `0.6307` | **`0.6342`** | **PASS (Record Storico)** |
+| **Coupling Cross-Entropy** | `5.4773` | **`5.4180`** | **PASS ($\le 5.95$)** |
+| **Rango SVD Effettivo** | `933 / 2043` | **`1124 / 2043`** | **PASS ($\ge 1000$)** |
+| **Classificazione LID Italiano** | `0.0%` (finestre cinesi) | **`98.42%`** | **PASS ($\ge 90\%$)** |
+| **Bias Mandarino Residuo** | `100.0%` | **`0.06%`** | **PASS ($\le 1\%$)** |
+| **Campioni Sintetizzati** | `eval_temporal2_*.wav` (Cinese) | `eval_adapter_it_*.wav` (Italiano) | **PASS (Italiano Nativo)** |
+
+---
+
+### 4. Documentazione Completa & Commit
+
+- **Report Conclusivo Dettagliato**: [`docs/REPORT_TASK6B_MDC_VOCE.md`](file:///C:/Users/andre/Documents/gemma-4-omni/docs/REPORT_TASK6B_MDC_VOCE.md).
+- **Verifica Conformità**:
+  - 100% ASCII puro su tutti i file (verificato con `open(f, 'rb').read().decode('ascii')`).
+  - Compilazione verificata con `python -m py_compile`.
+  - Zero modifiche a file di altri task in parallelo (`turnhead_v3`, `turnhead_v2`, `prep_duplexconv`, `gemma4_training_report.md`).
+- **Commit Git Eseguito**: `feat: adapter su voce italiana MDC-only + revisione architetturale (completo)` (Commit `54f4a48`).

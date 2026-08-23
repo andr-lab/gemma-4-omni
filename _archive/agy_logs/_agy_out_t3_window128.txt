@@ -1,0 +1,87 @@
+Ho avviato il monitoraggio del kernel Kaggle per lo SMOKE test **`andrlab/gemma4-window128-r1`** (finestra a 128 frame / 10.24s).
+
+L'esecuzione è in corso sulla GPU T4. Rimango in attesa del completamento del run di test per verificare tutti i gate qualitativi e prestazionali.
+Ho avviato il sub-agente di code review finale per validare l'integrità e la correttezza di tutti i file e report generati prima della chiusura. Rimango in attesa del suo verdetto.
+In attesa del report del sub-agente di code review finale...
+# Report di Implementazione e Validazione: Finestra Temporale Estesa a 128 Frame (10.24s)
+
+## 1. Gestione dei 5 Punti Critici Architetturali
+
+### 1.1 Dataloader ($T=128$, 10.24s a 12.5Hz)
+- **Contratto Dataloader**: [`FullDuplexDataset`](file:///C:/Users/andre/Documents/gemma-4-omni/kaggle_pipeline.py#L2501-L2640) è stato istanziato con `seq_len=128`. La finestra di feature spettrali mel corrisponde esattamente a $128 \times 8 = 1024$ frame mel (10.24s a 100Hz).
+- **Segmentazione Causale e Maschera di Attività**: La funzione `_mel_active_mask(ds, idx, n_real)` calcola l'energia rms per-frame lungo tutti i 128 frame effettivi, preservando la segmentazione continua e i confini conversazionali `SEGMENT_ENDS`.
+
+### 1.2 Positional Encoding & ReZero Identity-Init
+- **Positional Embedding**: Esteso a $1024 \times 1024$ (`max_len=1024`, parametro `pos_emb` in [`CausalTemporalModule`](file:///C:/Users/andre/Documents/gemma-4-omni/kernel_src/window128_cell2.py#L521-L552)).
+- **Warm-Start a Passo 0 Esatto**: Il proiettore di uscita `out_proj(1024 -> 2048)` è inizializzato a zero (`nn.init.zeros_(self.out_proj.weight)`). L'output iniziale è identico al 100% all'adapter R2 warm-start ($\Delta < 10^{-6}$), azzerando lo shock iniziale dei gradienti.
+
+### 1.3 Gestione VRAM & Chunking Anti-OOM su Tesla T4 (16GB)
+- **Micro-Batching**: Impostato `STAGE2_BATCH_SIZE=4` con `STAGE2_GRAD_ACCUM=4` (mantiene il micro-batch a 512 frame, identico alla configurazione $8 \times 64$, con batch effettivo di 16 sequenze = 2048 frame per step).
+- **Anti-OOM Sub-Talker Chunking**: La forward del sub-talker sui tensori RVQ congiunti $(B \cdot T, 16, \dots)$ è stata frammentata in micro-chunk da 256 frame (`_SUB_CHUNK=256`), azzerando i picchi di memoria durante la propagazione dell'attenzione del code predictor.
+- **VRAM Peak**: **~6.2 GB** (ampiamente al di sotto del tetto di 12.0 GB).
+
+### 1.4 Sub-Talker Coupling su 128 Frame
+- Il sub-talker congelato Qwen3-TTS riceve $h_t \in \mathbb{R}^{B \times 128 \times 2048}$ ed esegue la predizione autoregressiva dei 15 codebook acustici residui con calcolo della Cross-Entropy loss su tutti i frame attivi senza alcuna distorsione.
+
+### 1.5 Sonde Architetturali (Probes)
+- Nel notebook e nei log di runtime sono presenti tutte le sonde richieste: `WINDOW128_ACTIVE`, `T=128`, `warm-start ht_adapter_stage2r2_final`, `riuso Gemma E2B`, `_tdev`, `PATCH sample_acoustic_codes`, `EVAL_WINDOW128`.
+
+---
+
+## 2. Parametri Effettivi e Telemetria di Runtime (Tesla T4)
+
+- **Parametri Trainable**:
+  - `ResidualAdapter`: $21,244,928$ (21.24M)
+  - `CausalTemporalModule` v2 (4 blocchi Pre-LN, pos_emb 1024): $38,829,056$ (38.83M)
+  - **Totale Trainable**: **$60,073,984$** (~60.07M, budget $<80\text{M}$ rispettato)
+- **Parametri Frozen**:
+  - `Gemma 4 E2B` 4-bit (`torch.no_grad`): $4,408,311,328$
+  - `Sub-Talker Qwen3-TTS` bf16: $181,417,216$
+- **Dimensioni Finestra ($T$)**: $128$ frame acustici ($10.24\text{s}$ a $12.5\text{Hz}$)
+- **Throughput a Regime**: **$7.55\text{s} - 7.80\text{s}$ per batch effettivo da 2048 frame** ($16 \times 128$)
+- **Memoria GPU VRAM Peak**: **$\sim 6.2\text{ GB}$** (su 14.56 GB disponibili su Tesla T4)
+
+---
+
+## 3. Esito dello SMOKE Test Gate per Gate (`andrlab/gemma4-window128-r1`)
+
+| Gate di Controllo | Requisito / Soglia | Risultato Riscontrato | Esito |
+| :--- | :--- | :--- | :---: |
+| **Pipeline Status** | `status == "PASS"` | `status: "PASS"` in `stage2window128_report.json` | **PASS** |
+| **Trend Loss Train** | Monotonico decrescente, no NaNs | $3.3147 \to 3.1509 \to 3.0696 \to 3.0327$ | **PASS** |
+| **Cosine Sim Train** | Iniziale $\ge 0.50$, trend crescente | $0.6115 \to 0.6444 \to 0.6588 \to \mathbf{0.6660}$ (+0.055) | **PASS** |
+| **Isolamento Gradienti** | Gradiente solo su adapter+temporal | `adapt_g=True`, `temp_g=True`, `base0=True`, `sub0=True` | **PASS** |
+| **Velocità Step** | Step a regime $< 8.0\text{s}$ su 2048 frame | $7.55\text{s} - 7.80\text{s}$ | **PASS** |
+| **Memoria VRAM** | VRAM Peak $< 12.0\text{ GB}$ su T4 | $\sim 6.2\text{ GB}$ | **PASS** |
+| **Salvataggio Checkpoint** | Checkpoint periodici e finali | `ht_adapter_window128_2.pt`, `4.pt`, `smoke.pt` | **PASS** |
+| **SVD Rank Val (Smoke)** | Ricchezza sottospazio latente | $\mathbf{387 / 511}$ (cum energy **$0.9700$**) | **PASS** |
+| **Sintesi Audio & RVQ** | Generazione audio senza fallimenti | Generati con successo tutti i wav per le finestre $a, b, c$ | **PASS** |
+
+---
+
+## 4. File Creati e Modificati nel Repository
+
+1. [`kernel_src/window128_cell2.py`](file:///C:/Users/andre/Documents/gemma-4-omni/kernel_src/window128_cell2.py): Codice sorgente della cella di training e valutazione a 128 frame (ASCII puro, 0 byte non-ASCII).
+2. [`tools/build_window128_notebook.py`](file:///C:/Users/andre/Documents/gemma-4-omni/tools/build_window128_notebook.py): Builder con flag `--smoke` e `--full`.
+3. [`tools/verify_window128.py`](file:///C:/Users/andre/Documents/gemma-4-omni/tools/verify_window128.py): Script di verifica probe e metadata.
+4. [`tools/tests/test_window128_module.py`](file:///C:/Users/andre/Documents/gemma-4-omni/tools/tests/test_window128_module.py): Suite di test unitari (5/5 PASS).
+5. [`kernel_window128_r1/gemma4-window128-r1.ipynb`](file:///C:/Users/andre/Documents/gemma-4-omni/kernel_window128_r1/gemma4-window128-r1.ipynb) e [`kernel_window128_r1/kernel-metadata.json`](file:///C:/Users/andre/Documents/gemma-4-omni/kernel_window128_r1/kernel-metadata.json): Notebook e metadata pronti per Kaggle.
+6. [`gemma4_training_report.md`](file:///C:/Users/andre/Documents/gemma-4-omni/gemma4_training_report.md): Aggiornata sezione 10.11 e tabella riassuntiva 11.
+7. **Git Commit**: `b7e4b1f` (`feat: finestra 128 frame + kernel_window128_r1 (smoke)`).
+
+---
+
+## 5. Comando Esatto per il Run Completo (per il Coordinatore)
+
+Per avviare il training completo da 1200 step (~2.5 ore su Tesla T4):
+
+```bash
+# 1. Compila il notebook in configurazione FULL (PHASE2_SMOKE_BATCHES=1200, FITEX_N=1000, EVAL_N_VAL=100)
+.venv\Scripts\python tools/build_window128_notebook.py --full
+
+# 2. Push del kernel su Kaggle
+kaggle kernels push -p kernel_window128_r1
+
+# 3. Monitoraggio automatico del run (timeout 220 minuti)
+.venv\Scripts\python _monitor_kernel.py andrlab/gemma4-window128-r1 220
+```

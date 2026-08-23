@@ -1,0 +1,80 @@
+Ho completato l'implementazione del modulo potenziato **Temporal 2** (4 blocchi Causal Multi-Head Self-Attention Pre-LN, ReZero identity-init, 59.51M parametri trainable) e ho avviato lo SMOKE test su Kaggle:
+
+- **Kernel**: `andrlab/gemma4-temporal2-r1` (v1)
+- **Modalità**: SMOKE (4 batch, 16 finestre train, 4 finestre val)
+- **Monitor**: in ascolto (timeout 50 min).
+
+Attendo il completamento dell'esecuzione remota per verificare tutti i gate numerici e procedurali.
+**Sub-agente di Final Code Review avviato** per validare in autonomia tutte le modifiche architetturali, verificare l'assenza di regressioni sui file storici e testare la coerenza dei probe e dei vincoli. Attendo il resoconto del revisore.
+# Task A — Potenziamento del Modulo Temporale Causale (`Temporal 2`)
+
+Ho completato la progettazione, l'implementazione, il test unitario TDD e l'esecuzione dello **SMOKE test su Kaggle T4** per la versione potenziata del modulo temporale (**Temporal 2**). Tutti i gate di verifica numerici e strutturali sono stati superati con successo.
+
+---
+
+## 1. Scelta Architetturale e Parametri Trainable
+
+### Configurazione di `Temporal 2`:
+- **Modulo Temporale Causale v2**: **4 blocchi** Causal Multi-Head Self-Attention Pre-LN ($d_{\text{model}}=1024$, $8\text{ teste}$, $d_{\text{head}}=128$, $d_{\text{ff}}=2048$ con attivazione SiLU) + Positional Embedding ($512 \times 1024$).
+- **ReZero / Identity-Initialization**: Proiezione di uscita `out_proj(1024 -> 2048)` inizializzata a zero (`nn.init.zeros_`), garantendo che all'avvio ($step=0$) il residuo sia $\Delta h = 0$ con warm-start esatto a precisione macchina ($< 10^{-7}$) da [`ht_adapter_stage2r2_final.pt`](file:///c:/Users/andre/Documents/gemma-4-omni/checkpoints/ht_adapter_stage2r2_final.pt).
+- **Residual Adapter a monte**: Invariato (`CausalConv1d` $k=3$, left-pad 2,0 + Skip `Linear(1536, 2048)` + MLP `1536->3072->SiLU->2048` + `LayerNorm(2048)`).
+- **Backbone & Sub-Talker**: Gemma 4 E2B congelata in 4-bit sotto `torch.no_grad()` (0 parametri trainable); sub-talker Qwen3-TTS congelato in `bfloat16` con coupling loss ($\lambda=0.2$); teacher su CPU.
+
+### Conteggio Parametri:
+- **Residual Adapter**: $21,244,928$ parametri (~$21.24\text{M}$)
+- **Causal Temporal Module v2 (4 blocchi)**: $38,304,768$ parametri (~$38.30\text{M}$)
+- **Totale Trainable**: **$59,549,696$ parametri** (~$59.55\text{M}$ $\ll 80\text{M}$ vincolo).
+
+---
+
+## 2. Motivazione Scientifica & Letteratura
+
+1. **Superamento dell'Asintoto tramite Profondità Temporale**: Il run `gemma4-temporal-r1` (2 blocchi) ha ottenuto il record storico di validazione $\cos_{\text{val}} = \mathbf{0.6307}$ (superando R2 $0.6275$, R3 $0.6063$ e QLoRA $0.6018$), dimostrando che la capacità del backbone non era il collo di bottiglia ma l'elaborazione delle relazioni temporali nella finestra.
+2. **Architettura a 4 Blocchi Transformer**: In linea con *Freeze-Omni* (*Wang et al., 2024, arXiv:2411.00774*), *Mini-Omni* (*Xie & Wu, 2024, arXiv:2408.16703*) e *Moshi* (*Défossez et al., 2024, arXiv:2410.00037*), l'adozione di un decoder multi-strato compatto (4 blocchi) consente alla rappresentazione latente di modellare gerarchie prosodiche a lungo raggio lungo tutti i $5.12\text{s}$ ($T=64$).
+3. **ReZero Warm-Start**: Seguendo *Bachlechner et al. (UAI 2021, arXiv:2003.04887)*, l'azzeramento dei pesi di proiezione residua assicura convergenza rapida e azzera lo shock di transizione all'inizio del training.
+
+---
+
+## 3. Esito dello SMOKE Test su Kaggle (`andrlab/gemma4-temporal2-r1` v1)
+
+| Gate di Verifica | Valore Rilevato | Soglia / Requisito | Esito |
+| :--- | :--- | :--- | :--- |
+| **Stato Kernel & Report** | `COMPLETE` / `PASS` in `stage2temporal2_report.json` | `status == "PASS"` | ✅ **PASS** |
+| **Cosine Sim Iniziale Train** | **`0.6846`** | $\ge 0.68$ (Warm-start preservato) | ✅ **PASS** |
+| **Trend Cosine Sim Train** | **`0.6846 -> 0.7052 -> 0.7163 -> 0.7223`** | Monotonico crescente | ✅ **PASS** |
+| **Trend Loss Totale** | **`2.9014 -> 2.7778 -> 2.6954 -> 2.6590`** | Monotonico decrescente e finito | ✅ **PASS** |
+| **Isolamento Gradienti** | `adapt_g=True`, `temp_g=True`, `base0=True`, `sub0=True` | Gradiente SOLO su adapter+temporal2 | ✅ **PASS** |
+| **Throughput Step a Regime** | **`3.90s - 3.94s`** per batch effettivo 16 | $< 7.0\text{s}$ | ✅ **PASS** |
+| **VRAM Peak su Tesla T4** | **`~5.8 GB`** | $< 12.0\text{ GB}$ (su 16GB T4) | ✅ **PASS** |
+| **Checkpoints & Salto Pesi** | `checkpoints/ht_adapter_temporal2_4.pt` e `smoke.pt` | File generati e caricati in EVAL | ✅ **PASS** |
+| **Cosine Sim Val (Smoke)** | **`0.6707`** (4 finestre val, MSE $3.2238$, CE $6.1842$) | $\ge 0.65$ | ✅ **PASS** |
+| **Sintesi Audio & RVQ Isolation** | 3 finestre $\times$ (gt_ref, oracle 5 varianti, pred 5 varianti) | 72 wav generati con status OK | ✅ **PASS** |
+
+---
+
+## 4. File Implementati e Aggiornati nel Repository
+
+- [`kernel_src/temporal2_cell2.py`](file:///c:/Users/andre/Documents/gemma-4-omni/kernel_src/temporal2_cell2.py): Sorgente Cella 2 autonomo per Temporal 2 (ASCII puro, probe `[TEMPORAL2_ACTIVE]`, ReZero).
+- [`tools/build_temporal2_notebook.py`](file:///c:/Users/andre/Documents/gemma-4-omni/tools/build_temporal2_notebook.py): Builder notebook Jupyter v4 (`--smoke` e `--full`).
+- [`tools/verify_temporal2.py`](file:///c:/Users/andre/Documents/gemma-4-omni/tools/verify_temporal2.py): Verificatore statico AST e probe (`TEMPORAL2_ACTIVE`, `layers=`, warm-start, riuso Gemma, `_tdev`, `PATCH sample_acoustic_codes`, `EVAL_TEMPORAL2`).
+- [`tools/tests/test_temporal2_module.py`](file:///c:/Users/andre/Documents/gemma-4-omni/tools/tests/test_temporal2_module.py): Suite di 5 test unitari TDD (Shape, Identity-Init, Causalità rigorosa, Budget parametri $59.55\text{M}$, Autograd).
+- [`kernel_temporal2_r1/`](file:///c:/Users/andre/Documents/gemma-4-omni/kernel_temporal2_r1/): Directory kernel con `kernel-metadata.json` e notebook `gemma4-temporal2-r1.ipynb`.
+- [`gemma4_training_report.md`](file:///c:/Users/andre/Documents/gemma-4-omni/gemma4_training_report.md): Sezione 10.9 e Tabella 11 aggiornate.
+- **Git Commit**: `feat: modulo temporale potenziato temporal2 + kernel_temporal2_r1 (smoke)` ([`b7612ca`](file:///c:/Users/andre/Documents/gemma-4-omni)).
+
+---
+
+## 5. Istruzioni per il Coordinatore (Esecuzione del Run Completo)
+
+Come richiesto, **mi sono fermato senza lanciare il run completo**. Il coordinatore può avviare il training a regime (1200 step, ~1.5h su T4) eseguendo:
+
+```bash
+# 1. Generazione del notebook per il run completo (1200 step, 100 finestre val)
+python tools/build_temporal2_notebook.py --full
+
+# 2. Push su Kaggle
+kaggle kernels push -p kernel_temporal2_r1
+
+# 3. Monitoraggio fino al completamento
+python _monitor_kernel.py andrlab/gemma4-temporal2-r1 200
+```

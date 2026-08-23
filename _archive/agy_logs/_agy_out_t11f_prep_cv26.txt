@@ -1,0 +1,76 @@
+I have loaded the persistent memory context (both Global and Workspace) and verified the environment on `gpu3090`.
+
+Cleaning up idle test worker containers on `gpu3090` to ensure full GPU resources (~24GB VRAM) are available for the CV26 Italian preparation pipeline. I will proceed with inspecting the CV26 dataset and setting up the tokenization scripts as soon as the cleanup finishes.
+Verifying the `venv_phase1` environment with `qwen-tts` inside the Docker container on `gpu3090`.
+Running the tokenizer model test inside the `venv_phase1` Docker container on `gpu3090`.
+Running the updated 2D input test for `Qwen3TTSTokenizerV2Model` in `venv_phase1`.
+Inspecting `Qwen3TTSTokenizerV2Model.encode` and `Qwen3TTSTokenizer.encode` in `venv_phase1`.
+Testing `Qwen3TTSTokenizer` encoding and decoding in `venv_phase1` on `gpu3090`.
+Analyzing the Common Voice 26.0 Italian dataset distribution, duration, votes, and quality filters on `gpu3090`.
+Benchmarking single-stream tokenization and mel extraction speed on RTX 3090.
+Testing batched audio encoding with `Qwen3TTSTokenizer` on RTX 3090.
+Testing stratified speaker sampling on CV26 Italian pool.
+Running the smoke data preparation on `gpu3090` to validate the end-to-end CV26 pipeline.
+Running the fixed smoke data prep and sample audio decoding verification.
+I have launched the **CV26 Italian (Common Voice 26.0 / MDC 26)** high-quality speech preparation job in background on `gpu3090` (RTX 3090, 24GB VRAM):
+
+### Configuration:
+- **Target Hours**: $\ge 50.0\text{h}$ of active Italian speech (~32,000+ clips)
+- **Quality Filters**: Up-votes $-$ down-votes $\ge 2$, duration $1.0\text{s} \le t \le 15.0\text{s}$, valid Italian text & punctuation
+- **Speaker Stratification**: Balanced sampling capped at 60 clips/speaker across $>6,000$ distinct Italian speakers
+- **Dual-Channel Turn Dynamics**: 0.15s pauses, 20% conversational barge-in injection
+- **RVQ Neural Codec**: Official `Qwen3TTSTokenizerV2Model` (16 codebooks @ 12.5Hz) on GPU + Log-Mel feature extractor (128 bins @ 100Hz)
+- **Monitoring**: Background execution via `nohup` with periodic polling.
+
+I will monitor progress and report back.
+### 📊 Telemetry Update:
+- **Throughput**: ~13.8 clips/sec (~40x real-time speed)
+- **Processed**: 1,200 clips (1.53h of speech) in 1.8 minutes
+- **Estimated Completion**: ~37 minutes
+- **GPU VRAM**: 2.4 GB allocated, temperature 55°C
+
+Continuing monitoring via background polling.
+### 📊 Telemetry Update (7.0 min elapsed):
+- **Progress**: 4,849 / 31,991 clips (15.2%)
+- **Speech Audio Processed**: 6.21 hours
+- **Barge-In Turns**: 987 turns injected (~20.4%)
+- **Speed**: 12.5–13.5 clips/sec (~38x real-time)
+- **Estimated Remaining Time**: ~33 minutes
+- **Hardware Telemetry**: 2.6 GB VRAM, 61°C GPU temp.
+
+Continuing monitoring in background.
+### 📊 Telemetry Update (17.1 min elapsed):
+- **Progress**: 12,174 / 31,991 clips (38.1%)
+- **Speech Audio Processed**: 15.60 hours
+- **Barge-In Injections**: 2,468 turns (20.3%)
+- **Throughput**: ~14.5 clips/sec (~43x real-time)
+- **Estimated Remaining Time**: ~23 minutes
+- **Hardware Telemetry**: 2.8 GB VRAM, 62°C GPU temp.
+
+Continuing monitoring in background.
+### 📊 Telemetry Update (27.2 min elapsed):
+- **Progress**: 19,403 / 31,991 clips (60.7%)
+- **Speech Audio Processed**: 24.88 hours
+- **Barge-In Injections**: 3,978 turns (20.5%)
+- **Estimated Remaining Time**: ~15–17 minutes
+- **Hardware Telemetry**: 2.8 GB VRAM, 62°C GPU temp.
+
+Continuing monitoring in background.
+### 📊 Telemetry Update (37.3 min elapsed):
+- **Progress**: 26,717 / 31,991 clips (83.5%)
+- **Speech Audio Processed**: 34.17 hours
+- **Barge-In Injections**: 5,483 turns (20.5%)
+- **Estimated Time to Completion**: ~5–6 minutes
+- **Hardware Telemetry**: 2.8 GB VRAM, 62°C GPU temp.
+
+Will check again upon completion.
+### 📊 Telemetry Update:
+- **Progress**: 31,124 / 31,991 clips (97.3%)
+- **Speech Audio Processed**: 39.75 hours of active speech
+- **Barge-In Injections**: 6,356 turns
+- **Status**: Approaching chunk streaming merge, anti-artifact analysis, and sample audio decoding.
+
+Checking final completion in ~90 seconds.
+Waiting for the Parquet merge, anti-artifact analysis, and sample audio decoding to finalize on `gpu3090`.
+Checking the Parquet merge progress and process status.
+Error: timeout waiting for response

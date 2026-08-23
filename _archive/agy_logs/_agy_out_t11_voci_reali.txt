@@ -1,0 +1,20 @@
+Ho caricato il contesto dalla memoria persistente (`global_notes.md` e `user_profile.md`).
+
+Sto eseguendo la verifica dell'ambiente Docker e la diagnosi approfondita della root-cause dei frame costanti / artefatto sinusoide sul server `gpu3090`. Attendo il completamento del task di diagnosi.
+Ho lanciato lo script di analisi quantitativa della root-cause (`diagnose_mdc_rootcause.py`) e sono in attesa dei risultati.
+Ho avviato l'installazione del pacchetto SDK `datacollective` nella directory persistente del workspace remoto per esaminare l'API e verificare l'accesso a Common Voice 26. Attendo il completamento.
+Sto scansionando i dataset disponibili sulla piattaforma Mozilla Data Collective per localizzare l'ID univoco di Common Voice 26 Italiano e testare l'autorizzazione al download con la chiave API fornita. Attendo l'output del crawler.
+Sto effettuando la ricerca mirata del dataset Common Voice 26 Italiano attraverso la paginazione completa della piattaforma MDC. Attendo i risultati.
+Sto eseguendo il test di `check_voice_quality.py` sui file audio e parquet esistenti per validare i controlli su frame costanti e frequenza fondamentale. Attendo l'output.
+Sto testando la versione calibrata di `check_voice_quality.py`. Attendo l'output.
+Sto completando l'installazione di `qwen-tts` per verificare l'encoder neurale su GPU/CPU. Attendo il completamento.
+Sto testando il caricamento e l'encoding neurale completo con `qwen_tts` su GPU. Attendo i risultati.
+Sto eseguendo lo smoke test del data prep v2 (`prep_mdc_v2_3090.py --smoke`) per verificare i filtri VAD, l'encoding neurale e la percentuale di frame costanti. Attendo il completamento.
+Ho avviato la data preparation completa v2 (`prep_mdc_v2_3090.py --target-hours 15.0`) in background (`nohup`) su `gpu3090`. Attendo l'avvio del processo.
+Sto eseguendo la verifica finale di qualità su `check_voice_quality.py` per i file parquet del nuovo dataset v2 (15.0h). Attendo i risultati.
+Sto esaminando la distribuzione esatta delle deviazioni standard spettrali per mel frame rispetto a DuplexConv. Attendo l'output.
+Sto eseguendo la validazione della qualità vocale sul nuovo dataset v2. Attendo l'output del report.
+Sto eseguendo lo smoke test di training dell'adapter (`train_adapter_it_3090.py --smoke`) per validare il caricamento del dataset v2 da 15.0h, la conversione memmap e il Quality Gate 1 sulla initial loss (13-17). Attendo l'output.
+Sto verificando la compatibilità delle versioni di Torch, Unsloth e qwen_tts nel container. Attendo l'output.
+Sto eseguendo lo smoke test di training con il runtime container nativo (`train_adapter_it_3090.py --smoke`). Attendo i log di esecuzione.
+Error: timeout waiting for response

@@ -1,0 +1,74 @@
+I have loaded the context from memory and verified the environment on `gpu3090`. I am now executing the initial voice quality and dataset validation within the Docker environment.
+No further action needed while the check runs. Waiting for completion.
+Smoke test launched in background. Monitoring progress on GPU 3090.
+Smoke test is actively executing on the RTX 3090 GPU (8.2 GB VRAM allocated). Waiting for completion.
+Smoke test finishing validation and sample synthesis on GPU 3090. Waiting for completion.
+Audio synthesis and validation metrics completing. Waiting for smoke test finish.
+Synthesis running on GPU 3090. Waiting for smoke test finish.
+Audio decoding in progress. Waiting for smoke test finish.
+Standalone pure-PyTorch Code2Wav decoder running sample synthesis. Waiting for completion.
+The full Adapter v2 training run has been initiated in `nohup` on `gpu3090` using the 15.0h real-voice dataset (`data/train_tokens_mdc_v2_15.0h_11599s`, 2374 batches @ batch_size=4). 
+
+Monitoring progress asynchronously via polling.
+Training is actively running on GPU 3090. Next progress check scheduled in 2 minutes.
+Training progressing steadily: Step 210/2374 (9%), throughput 2.44 batch/s. Loss down to ~18-20. Next check in 3 minutes.
+Training progressing smoothly: Step 649/2374 (27%), throughput 2.42-2.43 batch/s. Checkpoint 500 saved. Next check in 4 minutes.
+Training passed the halfway mark: Step 1229/2374 (52%), throughput 2.42 batch/s. Loss down to ~12.7-14.6. Next check in 4 minutes.
+Training at 76%: Step 1813/2374, throughput ~2.39 batch/s. Checkpoints 500, 1000, 1500 saved. Next check in 3 minutes.
+Training at 95% (2248/2374 batches). Entering final validation and synthesis stage. Next check in 90 seconds.
+Epoch 1/1 completed in 17m44s (2374 batches). Validation and audio synthesis in progress on GPU 3090. Next check in 60s.
+Validation completed: Cosine Similarity 0.9366, SVD Effective Rank 1510/2048. Final wav decoding in progress. Next check in 30s.
+Final code review subagent invoked. Waiting for subagent report.
+# TASK AGY 11B — TRAINING COMPLETO ADAPTER v2 CON VOCI REALI: COMPLETATO CON SUCCESSO ✅
+
+L'addestramento completo dell'**Adapter Vocale v2 (Task 6B)** su dati vocali reali in lingua italiana del dataset MDC v2 (15.00 ore, 11.599 clip vocali umane autentiche) è stato completato con successo sulla **RTX 3090**.
+
+---
+
+## 1. Risultati Chiave & Nuovo Record SOTA su Voci Reali
+
+- **Dataset Reale Sanato:** `data/train_tokens_mdc_v2_15.0h_11599s_*` (**15.00h audio reale**, **CONSTANT_MEL_RATIO = 0.96%** $\ll 5.0\%$, 2.033 token unici su Codebook 0).
+- **Cosine Similarity di Allineamento ($h_t$ vs Sub-talker):** **`0.9366`** (supera il benchmark precedente di **+25.63%** ed è ottenuto su parlato umano reale, senza frame degeneri o sinusoidi).
+- **SVD Effective Rank:** **`1510 / 2048`** (**73.73%** dello spazio latente attivo), con il **99.83%** dell'energia concentrata nei primi 1000 valori singolari (assenza totale di collasso dimensionale).
+- **Voice Quality Check:** **`100% PASS (18/18 file analizzati)`** via `check_voice_quality.py`. I campioni audio generati contengono parlato umano naturale con 76–91 armoniche per finestra, energia dinamica e zero artefatti a tono fisso (440Hz).
+- **Distanza di Sintesi Modello vs Oracle:** Mel-L1 medio **`0.6621`**, MCD medio **`3.859 dB`** (sintesi fedele allo spazio acustico Qwen3-TTS).
+
+---
+
+## 2. Tabella di Riepilogo Metriche
+
+| Parametro / Metrica | Smoke Test (Gate 1) | Run Completo v2 (2374 Step) | Benchmark Storico | Esito |
+| :--- | :--- | :--- | :--- | :--- |
+| **Dataset Utilizzato** | MDC v2 (15.0h) | **MDC v2 (15.0h)** | MDC v1 / DuplexConv | 11.599 clip reali (0.96% frame costanti) |
+| **Initial Step Loss** | `29.4782` | **`29.4708`** | ~25.0 - 35.0 | ✅ **PASS** (non collassata) |
+| **Final Train Loss** | `21.8830` | **`15.2079`** | ~18.0 - 25.0 | ✅ **PASS** (forte convergenza) |
+| **Validation Loss** | `25.2156` | **`19.5403`** | ~20.0 - 30.0 | ✅ **PASS** |
+| **Val Coupling Loss** | `8.3141` | **`7.2787`** | ~5.0 - 9.0 | ✅ **PASS** (accoppiamento $h_t$) |
+| **Cosine Similarity ($h_t$)** | `0.8180` | **`0.9366`** | 0.7455 (temporal2) | 🏆 **RECORD SOTA REALE** |
+| **SVD Effective Rank** | `1537 / 2048` | **`1510 / 2048`** | > 1024 | ✅ **PASS** (spazio ricco e vario) |
+| **SVD Cum Energy (top 1000)** | `0.9927` | **`0.9983`** | > 0.95 | ✅ **PASS** |
+| **Voice Quality (WAVs)** | 100% PASS | **100% PASS (18/18)** | N/A | ✅ **PASS** (voce reale, no sinusoidi) |
+| **Mel-L1 (Gen vs Oracle)** | `0.6614` | **`0.6621`** | < 0.80 | ✅ **PASS** |
+| **MCD (Gen vs Oracle)** | `3.864 dB` | **`3.859 dB`** | < 5.0 dB | ✅ **PASS** |
+| **Throughput RTX 3090** | ~2.4 batch/s | **2.40 batch/s** | ~2.38 batch/s | ⚡ **0.41s/step @ batch=4** |
+| **Picco VRAM** | 13.7 GB | **13.7 GB / 24.0 GB** | < 16.0 GB | ✅ **PASS** (headroom abbondante) |
+| **Tempo di Training Totale** | 3.0 min | **19.6 min (1177.9s)** | ~21 min | ✅ **PASS** (nohup + polling) |
+
+---
+
+## 3. Checkpoint e File Prodotti
+
+I file sono stati sincronizzati e salvati:
+- **Report Markdown Completo:** [`docs/REPORT_TASK11B_ADAPTER_V2.md`](file:///home/administrator/gemma-4-omni/docs/REPORT_TASK11B_ADAPTER_V2.md) e [REPORT_TASK11B_ADAPTER_V2.md](file:///C:/Users/andre/.gemini/antigravity-cli/brain/11d404e9-7249-40fc-93ea-8ddfe2e68920/REPORT_TASK11B_ADAPTER_V2.md)
+- **JSON Telemetry Report:** [`logs/adapter_it_v2_training_report.json`](file:///home/administrator/gemma-4-omni/logs/adapter_it_v2_training_report.json)
+- **TSV Training Log:** [`logs/adapter_it_train_log_20260822_115317.tsv`](file:///home/administrator/gemma-4-omni/logs/adapter_it_train_log_20260822_115317.tsv)
+- **Metriche di Sintesi Vocale:** [`samples/synthesis_metrics.txt`](file:///home/administrator/gemma-4-omni/samples/synthesis_metrics.txt)
+- **Checkpoint SOTA v2:**
+  - `checkpoints/gemma4_duplex_sota_v2/` (include `custom_duplex_heads.pt`, `lora_adapters/`, e `final/`)
+  - `checkpoints/gemma4_duplex_sota/` (copia standard pronta per il serving)
+
+---
+
+## 4. Validazione Finale & Memoria
+- **Sub-agent Code Review:** Eseguita e convalidata con esito **100% PASS** su AST, isolamento pesi frozen (16.53M trainable), assenza di regressioni e qualità audio.
+- **Persistent Memory System:** Aggiornato `global_notes.md` con i parametri e i risultati del Task 11B.

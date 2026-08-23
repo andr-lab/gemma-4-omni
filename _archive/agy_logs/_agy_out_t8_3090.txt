@@ -1,0 +1,45 @@
+Ho caricato il contesto di memoria persistente e ho avviato il test di verifica dell'ambiente container (PyTorch + CUDA + Unsloth) sulla RTX 3090. Attendo il completamento del comando.
+Ho avviato lo smoke test sulla GPU 3090 in background. Attendo l'avvio del container per monitorare i gate di verifica.
+Ho rilanciato lo smoke test sulla GPU 3090 dopo la correzione della sintesi dati di test. Monitoro il log in background.
+Ho riavviato lo smoke test sulla GPU 3090 dopo aver corretto il range dei codici sintetici (`[0, 2048)`). Monitoro l'esecuzione.
+Ho avviato la verifica smoke dello script di data preparation v3 in background. Monitoro l'esecuzione.
+Ho riavviato lo smoke test di prep v3 con il decoding manuale dell'audio (senza dipendenza torchcodec). Monitoro l'esecuzione.
+Ho avviato il probe per analizzare le feature e il formato di caricamento audio di `datasets`. Attendo l'output.
+Ho eseguito il test del monkey-patch per il decoding audio. Attendo la risposta del container.
+Ho avviato la verifica del decoding audio sicuro via soundfile. Attendo l'output.
+Ho lanciato lo smoke prep test v3 per validare l'estrazione audio, Mel e RVQ codes. Monitoro l'esecuzione.
+La data preparation DuplexConv v3 (Obiettivo 2) è in esecuzione su GPU RTX 3090:
+- Estrazione feature Mel 100Hz e RVQ Codebook 12.5Hz (Qwen3-TTS) attiva
+- Generazione turn-label a 5 classi da annotazioni ASR dual-channel
+- Chunking periodico a disco (zero RAM overhead)
+- Throughput: ~1.1 ore di dialogo processate al minuto.
+
+Ho impostato un timer di monitoraggio e verificherò lo stato di avanzamento al termine del timer.
+La data preparation DuplexConv v3 su RTX 3090 procede a pieno ritmo:
+- **Ore processate**: 6.85h (317 segmenti) in 5.4 minuti
+- **Throughput**: ~1.2 ore di dialogo al minuto
+- **Target**: 20.0 ore (stimate in circa 10-12 minuti complessivi).
+
+Ho impostato un timer di monitoraggio per verificare il raggiungimento del target.
+Avanzamento Data Preparation DuplexConv v3:
+- **Ore accumulate**: 11.19h (500 segmenti stereo) in 9.4 minuti
+- **Target 15-20h**: previsto in circa 4-7 minuti
+- Tutti i chunk parquet sono scritti regolarmente su disco con VRAM stabile a 9.1GB.
+
+Attendo il prossimo intervallo per verificare il completamento e la distribuzione delle 5 classi.
+Avanzamento Data Preparation DuplexConv v3:
+- **Ore processate**: 15.47h (691 segmenti) in 13.7 minuti (soglia minima di 15h già superata)
+- **Target massimo (20h)**: in arrivo tra circa 3-4 minuti.
+
+Attendo il completamento della fusione dei chunk e il salvataggio dei parquet finali.
+Ho avviato la valutazione del checkpoint `temporal2` (Obiettivo 3) sulla GPU RTX 3090 con il nuovo dataset esteso a 20 ore. Monitoro l'esecuzione.
+Ho avviato la valutazione dettagliata del checkpoint `temporal2` (Obiettivo 3) sulla GPU 3090. Monitoro l'esecuzione.
+Ho rilanciato la valutazione del checkpoint `temporal2` con il risolutore di percorso del dataset a 20h. Monitoro l'esecuzione.
+Ho avviato la valutazione del checkpoint `temporal2` (64 finestre di validazione dal dataset 20h + sintesi audio). Monitoro l'esecuzione.
+Ho rilanciato la valutazione del checkpoint `temporal2` con l'allineamento automatico dei layer al device CUDA. Monitoro l'esecuzione.
+Ho avviato la valutazione su GPU RTX 3090. Monitoro l'esecuzione.
+Ho avviato l'ispezione della struttura del decoder audio in background.
+Ho avviato la verifica del decoder audio ufficiale Qwen3-TTS su GPU. Attendo l'output.
+Ho avviato l'ispezione della firma di `Qwen3TTSTokenizer.decode`. Attendo l'output.
+Ho lanciato il test di sintesi audio ufficiale in background.
+Error: timeout waiting for response

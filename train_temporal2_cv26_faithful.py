@@ -81,7 +81,7 @@ try:
     # --- Dataset & Checkpoint Paths ---
     OUTPUT_DIR = "/workspace/checkpoints"
     TARGETS_DIR = os.path.join(OUTPUT_DIR, "fitnets_targets")
-    QWEN3_TTS_SRC_DIR = "/kaggle/working/qwen3tts_src"
+    QWEN3_TTS_SRC_DIR = os.environ.get("QWEN3_TTS_SRC", "/workspace/.pylibs")
 
     QWEN_SUBTALKER_CANDIDATE_PATHS = (
         "/kaggle/input/datasets/andrlab/gemma-4-omni-module/qwen_subtalker",

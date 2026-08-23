@@ -1,0 +1,13 @@
+Ho avviato la diagnosi sui codici RVQ e sull'adapter all'interno del container Docker su `gpu3090`. Attendo il completamento per analizzare i risultati numerici reali.
+Esecuzione del test diagnostico avviata su Docker. Attendo i risultati dell'analisi quantitativa.
+Diagnostica riavviata con allineamento corretto dei device dei sottomoduli. Attendo i risultati quantitativi.
+Ispezione delle feature audio e degli hidden states di Gemma 4 avviata. Attendo l'output.
+Smoke test avviato su Docker per verificare l'initial loss gate (13-17) e la corretta propagazione dei gradienti QLoRA + Adapter. Attendo il completamento.
+Il job di addestramento dell'Adapter v3 su dataset CV26 40.8h (con QLoRA co-adaptation, DeepSemanticHead e ResidualAdapter) è stato avviato in background su `gpu3090`. Ho impostato un promemoria automatico per monitorare la telemetria di addestramento e la convergenza della loss.
+Il training è attivo sulla GPU (occupazione VRAM: 8.8GB, consumo 127W). Ho impostato un timer di 3 minuti per verificare i passi di ottimizzazione e l'evoluzione della loss.
+Il training sta procedendo con throughput di 1.78 batch/s. La loss complessiva è già scesa a 5.66-8.47 con picchi di Top-1 al 29.7% e Top-5 al 50.0%. Ho impostato un timer di 5 minuti per monitorare l'avanzamento verso il primo checkpoint a step 500.
+Il training ha superato il batch 817 (step ~408). La loss semantica CB0 è scesa a 5.699 (rispetto a ~8.81 della versione precedente). Ho impostato un timer di 3 minuti per verificare il salvataggio del primo checkpoint periodico a step 500.
+Il checkpoint a step 500 (`ckpt_step_500`) è stato salvato con successo. Il modello ha superato il batch 1132 mantenendo un throughput stabile di ~1.78 batch/s. Ho impostato un timer di 6 minuti per monitorare l'avanzamento verso step 1000 (`ckpt_step_1000`).
+Il training è a batch 1746 (step ~873). La loss CB0 è stabilmente scesa a 4.48-5.54 (con Top-1 al 17.2% e Top-5 al 37.5%). Ho impostato un timer di 4 minuti per verificare il raggiungimento di step 1000 e il salvataggio di `ckpt_step_1000`.
+Il checkpoint a step 1000 (`ckpt_step_1000`) è stato completato e salvato. La loss CB0 è scesa a 4.50 con Top-1 al 18.0% e Top-5 al 42.2%. Ho impostato un timer di 9 minuti per verificare l'avanzamento a step 1500 (`ckpt_step_1500`).
+Error: timeout waiting for response
