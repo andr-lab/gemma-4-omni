@@ -21,3 +21,22 @@ l'argmax autoregressivo le amplifica in loop degenerati.
 ## Lezione di protocollo (vincolante per il futuro)
 Il giudice percettivo NON deve MAI ricevere il testo atteso prima della
 trascrizione. Il confronto avviene SOLO dopo, lato coordinatore.
+
+## APPENDICE 23/8 ore 12:30 — Diagnostica ibrida + ricetta originale + TurnHead v5
+
+### 1. Ricetta originale (Task 11I, heads v2) su CV26 40.8h
+cos sim val 0.9598 (> benchmark 0.7455) MA blind ASR sui generated:
+silenzio o italiano fluente con contenuto allucinato. Stesso fallimento della v3.
+
+### 2. Diagnostica ibrida (cb0 GT + livelli 1..15 da sub-talker su h_t predetto)
+Voce naturale ma contenuto SBAGLIATO anche con cb0 ground truth.
+→ Il guasto è nell'interfaccia h_t→sub-talker, non solo nella predizione cb0.
+→ L'unica catena che produce contenuto corretto resta il decode full-GT (oracle).
+
+### 3. TurnHead v5 (GT nativo): due run entrambi collassati
+Run 1 (YIELD weight 6.0): predice YIELD al 98%. Run 2 (pesi moderati): BARGE_IN 85%.
+Le feature di input (spettro mel medio/frame) non discriminano le classi native reali.
+
+### Lezione metodologica
+Le metriche latenti (cos sim, mel-l1) NON predicono la qualità percettiva
+dell'inferenza libera. Gate obbligatorio: blind ASR + ascolto utente.
