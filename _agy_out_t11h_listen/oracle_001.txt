@@ -1,0 +1,7 @@
+Ho caricato la memoria persistente e ho avviato l'analisi e la trascrizione del file audio `oracle_001.wav`. Ti fornirò il verdetto appena completato.
+Sto completando la trascrizione tramite il modello ASR locale. Un attimo di attesa.
+Sto estraendo i dettagli dei segmenti temporali e della qualità audio.
+TRASCRIZIONE: Il perizzoma è dorata all'esterno ed dipinto di rosso all'interno. Il perizzoma
+MATCH: 90%
+QUALITA: naturale
+VERDETTO: INTELLIGIBILE
