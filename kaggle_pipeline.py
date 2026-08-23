@@ -2948,8 +2948,16 @@ class Gemma4FullDuplexModel(nn.Module):
         super().__init__()
         self.base_model = base_model
         self.causal_conv = nn.Conv1d(hidden_size, hidden_size, kernel_size=3, padding=0)
-        # Head semantica sul codebook 0 (vocabolario SEMANTIC_VOCAB_SIZE, es. 4096)
-        self.semantic_head = DeepSemanticHead(hidden_size, hidden_dim=2048, vocab_size=2048)
+        # Head semantica sul codebook 0 — architettura selezionabile via env:
+        #   PIPELINE_HEAD_ARCH=v2 → teste ORIGINALI (nn.Linear + Sequential adapter),
+        #     la ricetta dell'era temporal2 (cos sim ~0.62-0.75 su DuplexConv)
+        #   PIPELINE_HEAD_ARCH=v3 → DeepSemanticHead + ResidualAdapter (Task 11G/11H)
+        _head_arch = os.environ.get("PIPELINE_HEAD_ARCH", "v3").strip().lower()
+        self._head_arch = _head_arch
+        if _head_arch == "v2":
+            self.semantic_head = nn.Linear(hidden_size, SEMANTIC_VOCAB_SIZE)
+        else:
+            self.semantic_head = DeepSemanticHead(hidden_size, hidden_dim=2048, vocab_size=2048)
 
         # ---- Coupling Qwen3-TTS (ADR-005): UNICO percorso - MTP legacy RIMOSSO ----
         # Il sub-talker è OBBLIGATORIO: se la dir manca (Fase 1 senza
@@ -2964,9 +2972,16 @@ class Gemma4FullDuplexModel(nn.Module):
         base_dev = next(base_model.parameters()).device
         if st_dev != base_dev:
             self.subtalker.to(base_dev)
-        self.ht_adapter = ResidualAdapter(
-            hidden_size, out_features=COUPLING_TALKER_HIDDEN, hidden_dim=3072
-        )
+        if _head_arch == "v2":
+            self.ht_adapter = nn.Sequential(
+                nn.Linear(hidden_size, COUPLING_TALKER_HIDDEN),
+                nn.LayerNorm(COUPLING_TALKER_HIDDEN),
+            )
+        else:
+            self.ht_adapter = ResidualAdapter(
+                hidden_size, out_features=COUPLING_TALKER_HIDDEN, hidden_dim=3072
+            )
+        print(f"[Coupling] Architettura heads: {self._head_arch}")
         print(
             f"[Coupling] ✅ SUB-TALKER Qwen3-TTS caricato e congelato ({QWEN_SUBTALKER_DIR}). "
             "I codebook acustici 1..15 sono generati dal sub-talker (qualità nativa Qwen); "
