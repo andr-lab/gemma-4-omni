@@ -163,7 +163,7 @@ def main():
 
     def synth(text, ch):
         out, sr = tts.generate_voice_clone(
-            text=text, language="it",
+            text=text, language="italian",
             ref_audio=ref_agent_wav if ch == 1 else ref_user_wav,
             x_vector_only_mode=True,
             non_streaming_mode=True,
