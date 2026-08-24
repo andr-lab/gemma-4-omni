@@ -229,6 +229,58 @@ implementato come transizioni tra token di controllo).
 **MDC26 resta necessario** (livello 1: fonetica reale, varietà prosodica umana che il
 sintetico non ha). Il sintetico NON lo sostituisce: lo completa con le dinamiche.
 
+### 2.7 Ricognizione dataset conversazionali italiani (2026-08-25)
+
+Esito: **NON esiste stereo italiano pubblico** (conferma survey 2606.19453: dati
+Type C pubblici ≈ 5.000h, dominati da inglese). Censimento:
+
+| Dataset | Lingua/Formato | Dimensione | Accesso | Uso |
+|---|---|---|---|---|
+| **Kaggle nexdatafrank/italian-spontaneous-dialogue-telephony-speech** | IT, mono 8kHz, trascrizioni con disfluenze ([S] silenzio, [N] rumore, [T]) | sample 118KB (7 clip); completo commerciale ~120GB | gratuito solo sample | riferimento di STILE parlato spontaneo per la riscrittura; NON training |
+| **MagicHub ASR-ItaCSC (italian-conversational-speech-corpus)** | IT, mono, 28 conversazioni (3 coppie parlanti), trascrizioni | 10.43h, 785MB | commerciale (login) | riferimento di stile; NON training |
+| **HF UniDataPro/ud-nlp "499h telephone dialogues"** | IT (asserito) | CSV placeholder 195B, path inesistenti | pubblico | **FAKE/honeypot: scartare** |
+| **HF SerFabio89/italian-open-sft-chat-dataset** | IT testuale, multi-turno | 55.439 dialoghi (train 283MB parquet) | pubblico CC-BY-NC | **contenuto testuale per lo stereo IT sintetico (livello 2)** |
+| **DuplexConv** (HF qualialabsAI) | ZH stereo, LLM-annotated | 2.000h, ~5TB | pubblico CC-BY-NC | statistiche timing + schema annotazione + detector acustico (livello 3) |
+
+Conclusione operativa: lo stereo IT sintetico si costruisce da **SerFabio89 (contenuto)
++ stile Nexdata/MagicHub (disfluenze) + statistiche DuplexConv (timing) + Qwen3-TTS
+(sintesi dual-role)**. I dataset commerciali italiani non sono né necessari né
+scaricabili senza licenza.
+
+### 2.8 Costruzione dello stereo IT sintetico (dettaglio)
+
+**Osservazione critica**: i dialoghi testuali italiani (SerFabio89) sono
+HALF-DUPLEX: turni puliti senza interruzioni/overlap/backchannel. Il contenuto
+testuale da solo NON insegna le dinamiche → le dinamiche vanno INIETTATE come
+strato di sintesi (survey 7.4), non cercate nel testo.
+
+Pipeline (ricetta 1+2+3 del survey, adattata):
+1. **Script di contenuto**: dialoghi SFT IT + riscrittura stile parlato (disfluenze
+   "e, eh...", marcatori [S] silenzio / [N] rumore — stile dal campione Nexdata).
+2. **Iniezione dinamiche a livello di segmento**:
+   (a) turni puliti (T1);
+   (b) BACKCHANNEL agente: clip brevi "mh-mh / sì / capito / ok" inserite DURANTE
+       il turno utente (T3·I2);
+   (c) BARGE-IN agente: onset anticipato vs fine turno utente (T3·I4), overlap
+       injection con T∼N(0.6, 0.4²) (distribuzione MinMo, survey 7.4);
+   (d) YIELD agente: l'utente inizia durante il turno agente → l'agente si ferma
+       (taglio + silenzio);
+   (e) OVERLAP sostenuto (T4): pochi casi, cella più difficile (nessun dato
+       pubblico la copre — survey Tab.6).
+   Le STATISTICHE di timing (rate backchannel/min, durate overlap, distribuzione
+   inter-turn) vengono da DuplexConv (dinamiche vocali lingua-indipendenti).
+3. **Sintesi fisica**: Qwen3-TTS dual-role su 2 canali con 2 voci diverse
+   (utente = voce X, agente = voce Qwen; voice cloning 3s) → STEREO con
+   sovrapposizioni REALI (i canali si sommano dove c'è overlap).
+4. **GT by construction**: turn state frame-level USER/AGENT/BOTH/NONE + etichette
+   evento (backchannel, barge-in, yield, overlap) → supervisione perfetta per i
+   token di controllo del predittore cb0 (niente euristiche stile TurnHead v4).
+5. **Selezione WER** (J-Moshi 3.4: 10 campioni → scegli il migliore; WER 24.6%).
+
+**Cosa impara il modello**: non le dinamiche "dal testo", ma a PRODURRE backchannel/
+barge-in/yield nei casi sintetici dove l'AGENTE li compie (scenari b/c/d), con GT
+frame-level by construction.
+
 ---
 
 ## 3. Bibliografia essenziale (tutti letti in questa sessione)
