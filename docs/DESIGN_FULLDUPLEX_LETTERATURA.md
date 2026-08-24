@@ -223,8 +223,13 @@ implementato come transizioni tra token di controllo).
 | Livello | Dato | Ruolo | Uso |
 |---|---|---|---|
 | 1. Fonetica IT | **MDC26/CV26** (mono, reale) | lingua/fonetica italiana per adapter + predittore cb0 | pre-training predittore (IN CORSO v3) + adapter (fatto) + ancora testuale P3 |
-| 2. Dinamiche IT | **Stereo IT sintetico** (da creare: dialoghi testuali IT → Qwen3-TTS 2 ruoli/voci diverse → overlap injection T∼N(0.6,0.4²) → turn state GT by-construction → WER-selection) | dinamiche full-duplex italiane + etichette turno perfette | fine-tuning predittore cb0 (token di controllo) |
-| 3. Formato/benchmark | **DuplexConv** (stereo ZH, LLM-annotated) | schema di annotazione GT da replicare; detector acustico lingua-indipendente (overlap/barge-in è acustico); validazione policy | NON training diretto dello stack (cinese) |
+| 2. Dinamiche IT | **Stereo IT sintetico** (da creare: contenuto SerFabio89 → sintesi dual-role Qwen3-TTS → overlap injection → GT by construction) | dinamiche full-duplex italiane + etichette turno perfette | fine-tuning predittore cb0 (token di controllo) |
+| 3. Formato/benchmark | **DuplexConv** (stereo ZH) — SOLO RIFERIMENTO DOCUMENTALE, NON scaricato (5TB): schema annotazione + distribuzioni timing citate in letteratura (MinMo T∼N(0.6,0.4²), survey Tab.6) | — | — |
+
+**Selezione minimale (rev. 2026-08-25)**: i soli dati necessari sono **MDC26/CV26
+(già in uso, nessun download)** + **SerFabio89 SFT (283MB, unico download nuovo)**.
+DuplexConv non si scarica (statistiche dalla letteratura per la prima iterazione);
+Nexdata/MagicHub esclusi (stile opzionale, disfluenze con regole semplici).
 
 **MDC26 resta necessario** (livello 1: fonetica reale, varietà prosodica umana che il
 sintetico non ha). Il sintetico NON lo sostituisce: lo completa con le dinamiche.
