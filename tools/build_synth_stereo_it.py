@@ -126,15 +126,50 @@ def main():
     proc = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
     tts = Qwen3TTSModel(model=model, processor=proc)
 
-    print("[SYNTH] carico ref audio (x-vector, solo timbro)...", flush=True)
+    print("[SYNTH] genero reference voices pulite (voce canonica Qwen3-TTS, zero clipping)...", flush=True)
     import soundfile as sf
-    ref_user, _ = sf.read(args.ref_user, dtype="float32")
-    ref_agent, _ = sf.read(args.ref_agent, dtype="float32")
 
-    def synth(text, ref):
+    # VOICE REF: generata dal modello stesso (timbro canonico Qwen3-TTS =
+    # timbro del sub-talker del nostro sistema), normalizzata per evitare
+    # il clipping sistematico dei wav storici (peak 1.0).
+    REF_TXT_AGENT = ("Questa è una frase di riferimento per la voce dell'assistente. "
+                     "Il cielo è azzurro e il mare è calmo.")
+    REF_TXT_USER = ("Salve, come stai? Vorrei chiederti una cosa importante "
+                    "a proposito del progetto di domani.")
+
+    def _gen_ref(text, ref_audio=None):
         out, sr = tts.generate_voice_clone(
-            text=text, language="it", ref_audio=ref,
-            x_vector_only_mode=True, non_streaming_mode=True,
+            text=text, language="it",
+            ref_audio=ref_audio,          # None -> voce di default del modello
+            x_vector_only_mode=ref_audio is not None,
+            non_streaming_mode=True,
+            do_sample=True, temperature=0.9, top_k=50, top_p=0.9,
+        )
+        w = np.asarray(out[0], dtype=np.float32)
+        if sr != SR:
+            import librosa
+            w = librosa.resample(w, orig_sr=sr, target_sr=SR)
+        # normalizzazione anti-clipping (headroom 0.85)
+        peak = float(np.abs(w).max())
+        if peak > 0.85:
+            w = w * (0.85 / peak)
+        return w
+
+    # vo ci utente: voce umana diversa dall'agente — se --ref-user è un file
+    # esistente lo usa (pulito), altrimenti voce di default con testo diverso.
+    if args.ref_user and os.path.isfile(args.ref_user):
+        ref_user_wav, _ = sf.read(args.ref_user, dtype="float32")
+        ref_user_wav = ref_user_wav / max(float(np.abs(ref_user_wav).max()), 1e-6)
+    else:
+        ref_user_wav = None
+    ref_agent_wav = None
+
+    def synth(text, ch):
+        out, sr = tts.generate_voice_clone(
+            text=text, language="it",
+            ref_audio=ref_user_wav if ch == 0 else None,
+            x_vector_only_mode=(ch == 0 and ref_user_wav is not None),
+            non_streaming_mode=True,
             do_sample=True, temperature=0.9, top_k=50, top_p=0.9,
         )
         wav = np.asarray(out[0], dtype=np.float32)
@@ -158,7 +193,7 @@ def main():
         for (s, txt) in script:
             ch = s["ch"]
             try:
-                wav = synth(txt, ref_agent if ch == 1 else ref_user)
+                wav = synth(txt, ch)
             except Exception as e:
                 print(f"[SYNTH] ERR {txt[:40]}: {e}", flush=True)
                 continue
