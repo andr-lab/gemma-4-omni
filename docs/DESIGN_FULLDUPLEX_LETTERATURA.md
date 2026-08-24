@@ -195,6 +195,40 @@ Nessun training diretto dello stack su di esso. Il training delle dinamiche IT v
 SOLO dallo stereo IT sintetico (ricetta 1+2 survey: dual-role TTS + overlap injection
 T∼N(0.6,0.4²), generato con Qwen3-TTS).
 
+### 2.5 REV.3 — chi decide il QUANDO: il predittore cb0 come dialogue manager
+
+**Problema sollevato**: (a) marcatori BPE in Gemma richiederebbero insegnarle QUANDO
+produrli = retraining (vietato); (b) token nel vocabolario del solo predittore =
+Gemma "cieca" alle dinamiche?
+
+**Soluzione**: il predittore cb0 NON è cieco — riceve gli hidden h_t di Gemma che
+contengono la comprensione completa del contesto dialogico frame-per-frame (audio
+utente + testo + storia). È il pattern Qwen2.5-Omni (Talker ← hidden del Thinker)
+e Moshi (RQ-Transformer ← hidden del backbone).
+
+Divisione dei ruoli (definitiva):
+| Funzione | Chi la fa | Come |
+|---|---|---|
+| Capire il contesto (utente parla? interrompe? pausa?) | Gemma (congelata) | hidden h_t frame-per-frame |
+| DECIDERE il timing (backchannel/yield/barge-in/silence) | Predittore cb0 (addestrabile) | token di controllo nel suo vocabolario, condizionati su h_t |
+| Dire il contenuto | Gemma | testo → ancora testuale (P3) |
+| Suonare (voce IT) | Sub-talker (congelato) | — |
+
+Gemma non genera i token di turno: **li autorizza con i suoi hidden**. Il predittore
+cb0 è il dialogue manager implicito del sistema (stato IDLE/LISTEN/SPEAK/WAIT/DUAL
+implementato come transizioni tra token di controllo).
+
+### 2.6 Pipeline dati a 3 livelli (definitiva)
+
+| Livello | Dato | Ruolo | Uso |
+|---|---|---|---|
+| 1. Fonetica IT | **MDC26/CV26** (mono, reale) | lingua/fonetica italiana per adapter + predittore cb0 | pre-training predittore (IN CORSO v3) + adapter (fatto) + ancora testuale P3 |
+| 2. Dinamiche IT | **Stereo IT sintetico** (da creare: dialoghi testuali IT → Qwen3-TTS 2 ruoli/voci diverse → overlap injection T∼N(0.6,0.4²) → turn state GT by-construction → WER-selection) | dinamiche full-duplex italiane + etichette turno perfette | fine-tuning predittore cb0 (token di controllo) |
+| 3. Formato/benchmark | **DuplexConv** (stereo ZH, LLM-annotated) | schema di annotazione GT da replicare; detector acustico lingua-indipendente (overlap/barge-in è acustico); validazione policy | NON training diretto dello stack (cinese) |
+
+**MDC26 resta necessario** (livello 1: fonetica reale, varietà prosodica umana che il
+sintetico non ha). Il sintetico NON lo sostituisce: lo completa con le dinamiche.
+
 ---
 
 ## 3. Bibliografia essenziale (tutti letti in questa sessione)
