@@ -94,10 +94,10 @@ def main():
     ap.add_argument("--n", type=int, default=10)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--max-turns", type=int, default=24)
-    ap.add_argument("--ref-user", default="/workspace/samples_temp_0.7_robust/oracle_000.wav",
-                    help="voce UTENTE (umana italiana)")
-    ap.add_argument("--ref-agent", default="/workspace/samples_ars/free_000.wav",
-                    help="voce AGENTE (timbro sub-talker Qwen)")
+    ap.add_argument("--ref-user", default="/workspace/_rankfix_verify/eval_temporal2_gt_ref_a.wav",
+                    help="voce UTENTE (parlato GT reale italiano, run rankfix r1_v3 — audio ottimo, no clipping)")
+    ap.add_argument("--ref-agent", default="/workspace/_rankfix_verify/eval_temporal2_oracle_a_greedy.wav",
+                    help="voce AGENTE (oracle sub-talker con cb0 GT = timbro del nostro sistema, run rankfix r1_v3)")
     ap.add_argument("--smoke", action="store_true", help="1 dialogo, 6 turni, niente salvataggio GT esteso")
     args = ap.parse_args()
     if args.smoke:
@@ -126,49 +126,28 @@ def main():
     proc = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
     tts = Qwen3TTSModel(model=model, processor=proc)
 
-    print("[SYNTH] genero reference voices pulite (voce canonica Qwen3-TTS, zero clipping)...", flush=True)
+    print("[SYNTH] ref voices: utente=gt_ref rankfix (voce umana IT), agente=oracle rankfix (timbro sub-talker)...", flush=True)
     import soundfile as sf
 
-    # VOICE REF: generata dal modello stesso (timbro canonico Qwen3-TTS =
-    # timbro del sub-talker del nostro sistema), normalizzata per evitare
-    # il clipping sistematico dei wav storici (peak 1.0).
-    REF_TXT_AGENT = ("Questa è una frase di riferimento per la voce dell'assistente. "
-                     "Il cielo è azzurro e il mare è calmo.")
-    REF_TXT_USER = ("Salve, come stai? Vorrei chiederti una cosa importante "
-                    "a proposito del progetto di domani.")
-
-    def _gen_ref(text, ref_audio=None):
-        out, sr = tts.generate_voice_clone(
-            text=text, language="it",
-            ref_audio=ref_audio,          # None -> voce di default del modello
-            x_vector_only_mode=ref_audio is not None,
-            non_streaming_mode=True,
-            do_sample=True, temperature=0.9, top_k=50, top_p=0.9,
-        )
-        w = np.asarray(out[0], dtype=np.float32)
-        if sr != SR:
-            import librosa
-            w = librosa.resample(w, orig_sr=sr, target_sr=SR)
-        # normalizzazione anti-clipping (headroom 0.85)
-        peak = float(np.abs(w).max())
-        if peak > 0.85:
-            w = w * (0.85 / peak)
+    def _load_ref(path):
+        w, _ = sf.read(path, dtype="float32")
+        pk = float(np.abs(w).max())
+        if pk > 0.85:
+            w = w * (0.85 / pk)
         return w
 
-    # vo ci utente: voce umana diversa dall'agente — se --ref-user è un file
-    # esistente lo usa (pulito), altrimenti voce di default con testo diverso.
-    if args.ref_user and os.path.isfile(args.ref_user):
-        ref_user_wav, _ = sf.read(args.ref_user, dtype="float32")
-        ref_user_wav = ref_user_wav / max(float(np.abs(ref_user_wav).max()), 1e-6)
-    else:
-        ref_user_wav = None
-    ref_agent_wav = None
+    # ref UTENTE: parlato GT reale italiano (voce umana, run rankfix r1_v3)
+    # ref AGENTE: oracle sub-talker con cb0 GT = timbro esatto del nostro sistema
+    ref_user_wav = _load_ref(args.ref_user) if os.path.isfile(args.ref_user) else None
+    ref_agent_wav = _load_ref(args.ref_agent) if os.path.isfile(args.ref_agent) else None
+    if ref_user_wav is None or ref_agent_wav is None:
+        raise SystemExit(f"[SYNTH] ref mancanti: user={args.ref_user} agent={args.ref_agent}")
 
     def synth(text, ch):
         out, sr = tts.generate_voice_clone(
             text=text, language="it",
-            ref_audio=ref_user_wav if ch == 0 else None,
-            x_vector_only_mode=(ch == 0 and ref_user_wav is not None),
+            ref_audio=ref_agent_wav if ch == 1 else ref_user_wav,
+            x_vector_only_mode=True,
             non_streaming_mode=True,
             do_sample=True, temperature=0.9, top_k=50, top_p=0.9,
         )
