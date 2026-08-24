@@ -132,15 +132,16 @@ def main():
     os.makedirs(args.out, exist_ok=True)
 
     import torch
-    from transformers import AutoModel, AutoProcessor
+    from qwen_tts.core.models import Qwen3TTSForConditionalGeneration, Qwen3TTSProcessor
     from qwen_tts.inference.qwen3_tts_model import Qwen3TTSModel
 
     snaps = sorted(glob.glob("/workspace/.hf_cache/models--Qwen--Qwen3-TTS-12Hz-1.7B-Base/snapshots/*"))
     model_id = snaps[-1] if snaps else "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
     print(f"[SYNTH] modello: {model_id}", flush=True)
     dev = "cuda" if torch.cuda.is_available() else "cpu"
-    model = AutoModel.from_pretrained(model_id, trust_remote_code=True).to(dev)
-    proc = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+    model = Qwen3TTSForConditionalGeneration.from_pretrained(
+        model_id, trust_remote_code=True, torch_dtype=torch.bfloat16).to(dev)
+    proc = Qwen3TTSProcessor.from_pretrained(model_id, trust_remote_code=True)
     tts = Qwen3TTSModel(model=model, processor=proc)
 
     print("[SYNTH] ref voices: utente=gt_ref rankfix (voce umana IT), agente=oracle rankfix (timbro sub-talker)...", flush=True)
