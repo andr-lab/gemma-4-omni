@@ -56,6 +56,36 @@ Il nostro design — predire il **codebook semantico cb0** con un predittore aut
 
 ## 2. Design raccomandato (evidence-based)
 
+### 2.0 Ruoli dei componenti (chiarimento architetturale, 2026-08-24)
+
+Domanda: "il cosa dire a livello semantico non dovrebbe venire da Gemma? Allora l'AR Head è un altro adapter tra gli hidden di Gemma e il codebook semantico del subtalker?"
+
+**Risposta: SÌ — l'AR Head è concettualmente l'ADAPTER SEMANTICO.** Il contenuto viene da Gemma; l'AR head lo realizza nella sequenza discreta cb0 che il sub-talker congelato esige in ingresso. Non è un cervello, è un traduttore. La catena completa:
+
+```
+Gemma (cosa dire, a livello di significato)
+  → hidden 1536
+  → TemporalResidualAdapter = ADAPTER ACUSTICO (proietta in spazio talker 2048,
+      addestrato per i RESIDUI cb1..15 con cb0 GT) → h_t
+  → AR-SemanticDecoder = ADAPTER SEMANTICO (mappa contenuto di Gemma via h_t
+      → sequenza discreta cb0, 2048 classi) → cb0
+  → Sub-Talker MTP (congelato) → residui → Code2Wav → voce
+```
+
+Perché l'AR head NON è solo un'altra proiezione per-frame:
+1. **È autoregressivo**: cb0 è una sequenza con struttura fonotattica (12.5Hz); i probe mostrano per-frame 3.7% vs con storia codici 12% → il contesto temporale è necessario.
+2. **È generativo**: all'inferenza cb0 va campionato dalla distribuzione, non mappato.
+3. **Esce in spazio discreto** (2048 classi).
+
+Perché è scarso (top-1 12%) pur avendo il contenuto in Gemma: il canale h_t è strozzato — l'adapter acustico è stato addestrato per i residui (cb0 GT), non per conservare l'info semantica (probe: 3.7% per-frame). In più il mapping testo→cb0 è intrinsecamente non uno-a-uno (2509.17021) → il top-1 esatto ha un tetto; conta la distribuzione campionata.
+
+**Conseguenza di design**: il fix non è "renderlo più intelligente" ma **riaprire un canale diretto Gemma→cb0**:
+1. **Ancora testuale (P3)**: condizionare l'AR head sugli embedding del testo generato da Gemma (inner monologue, Moshi; nel backbone originale Qwen3-TTS cb0 è predetto da text embeddings). È l'unico predittore semantico in letteratura senza condizionamento testuale → il nostro gap principale.
+2. **cb0-pressure sull'adapter (P4)**: ri-addestrare l'adapter con loss semantica ausiliaria (SemBridge) perché h_t conservi il contenuto.
+3. **Metrica**: non top-1 (tetto intrinseco) ma qualità del parlato campionato (blind ASR + mel cos-sim).
+
+Tabella ruoli: Adapter = proiezione di spazio (✅); AR head = predittore semantico cb0, adapter semantico (⚠️ collo); Sub-Talker = voce (✅ congelato); TurnHead = turn-taking, va ripensata come token di controllo nel prompt di Gemma (DuplexCascade) o stream separato (Moshi), non classificatore esterno (❌ v5 collassato).
+
 ### 2.1 Architettura target (full-duplex, requisiti utente)
 
 ```
