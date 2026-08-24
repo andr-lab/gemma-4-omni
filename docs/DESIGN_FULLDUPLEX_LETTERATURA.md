@@ -224,12 +224,24 @@ implementato come transizioni tra token di controllo).
 |---|---|---|---|
 | 1. Fonetica IT | **MDC26/CV26** (mono, reale) | lingua/fonetica italiana per adapter + predittore cb0 | pre-training predittore (IN CORSO v3) + adapter (fatto) + ancora testuale P3 |
 | 2. Dinamiche IT | **Stereo IT sintetico** (da creare: contenuto SerFabio89 → sintesi dual-role Qwen3-TTS → overlap injection → GT by construction) | dinamiche full-duplex italiane + etichette turno perfette | fine-tuning predittore cb0 (token di controllo) |
-| 3. Formato/benchmark | **DuplexConv** (stereo ZH) — SOLO RIFERIMENTO DOCUMENTALE, NON scaricato (5TB): schema annotazione + distribuzioni timing citate in letteratura (MinMo T∼N(0.6,0.4²), survey Tab.6) | — | — |
+| 3. Timing/struttura | **SmoothConv** (HF qualialabsAI, 100h ZH stereo, **annotazione UMANA**: turn complete/incomplete/backchannel, speech event, other_turn, timings float) — campione 5-10h | **partitura temporale reale** (overlap/backchannel/gap) per lo stereo IT sintetico + statistiche timing | time-structure transfer: griglia temporale reale riempita con voce IT (Qwen3-TTS) |
 
 **Selezione minimale (rev. 2026-08-25)**: i soli dati necessari sono **MDC26/CV26
-(già in uso, nessun download)** + **SerFabio89 SFT (283MB, unico download nuovo)**.
-DuplexConv non si scarica (statistiche dalla letteratura per la prima iterazione);
-Nexdata/MagicHub esclusi (stile opzionale, disfluenze con regole semplici).
+(già in uso, nessun download)** + **SerFabio89 SFT (283MB, contenuto)** +
+**SmoothConv campione 5-10h (partitura temporale reale)**. DuplexConv (5TB) NON
+si scarica: SmoothConv (100h, annotazione umana migliore) basta per statistiche
+e template. Nexdata/MagicHub esclusi (stile opzionale).
+
+**Perché SmoothConv sì (rev. utente 2026-08-25)**: il timing del turn-taking è
+STRUTTURA TEMPORALE UNIVERSALE (cross-lingua): la forma di un overlap (quando
+inizia, quanto dura, come si risolve) e dei backchannel non-lessicali è un
+fenomeno acustico/fisico, non linguistico. J-Moshi mostra che NON trasferiscono
+le STATISTICHE quantitative (frequenza per lingua: JP 8.1s/min vs EN 3.3s), ma
+per l'italiano non esistono dati reali → i pattern reali cinesi battono la
+gaussiana sintetica (MinMo T∼N(0.6,0.4²)). Uso = **time-structure transfer**:
+griglia temporale di SmoothConv riempita con voce italiana Qwen3-TTS → overlap
+strutturalmente reali nel sintetico. NIENTE training diretto del predittore cb0
+su SmoothConv (cb0 cinesi = fuori dominio fonetico).
 
 **MDC26 resta necessario** (livello 1: fonetica reale, varietà prosodica umana che il
 sintetico non ha). Il sintetico NON lo sostituisce: lo completa con le dinamiche.
