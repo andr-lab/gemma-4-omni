@@ -58,6 +58,32 @@ Strade candidate (da letteratura): decoding autoregressivo/scheduled sampling de
 semantica; talker nativo AR condizionato da Gemma (opzione consigliata, coerente con
 Moshi/FireRedTTS3); verifica con blind ASR a ogni passo.
 
+## 4b. TASK 12 IN CORSO — AR-SemanticDecoder (24 agosto 2026)
+
+**Pattern VALL-E** per colmare il gap cb0 libero, sopra l'adapter validato CONGELATO:
+```
+Gemma frozen → TemporalResidualAdapter (congelato) → h_t
+                                                     ▼
+        [NUOVO] AR-SemanticDecoder: 4 layer causali, d=1024, 8 heads
+        passo t: emb(cb0_{t-1}) + proj(h_t) → logits cb0_t (rolling)
+                                                     ▼
+        sequenza cb0 completa → Sub-Talker frozen → residui → Code2Wav
+```
+- Training: teacher forcing CE (BOS=0) → scheduled sampling 35% (Bengio 2015)
+- Condition dropout 10% (abilita future classifier-free guidance, VALL-E 2)
+- Inferenza: repetition-aware sampling (penalità su token ripetuti nelle ultime 12 posizioni,
+  VALL-E 2) + top-k 50 + temp 0.9
+- File: `tools/train_ar_semantic.py`, `tools/gen_ar_semantic.py`
+- Infrastruttura: estrazione h_t/cb0 precomputata e cachata su disco
+  (`cache_ars_full.pt`, 25.791 finestre train + 2.865 val) — il training con cache costa
+  ~40s per 2.000 step
+- Evidenza primo run (2.000 step): loss ~7.5 (ln 2048=7.62, appena sotto il caso casuale),
+  TF-acc val 3,4% → modello sotto-addestrato; rilanciato a 100.000 step (chain detached
+  `ars_chain`, log `/workspace/logs/chain_ars.log`)
+- Gate pendente: generazione libera + blind ASR (mai testo atteso prima della trascrizione)
+- Revisione avversariale a contesto fresco delegata ad agy (letteratura via API arxiv ufficiale:
+  VALL-E 2 repetition-aware sampling/CFG, ELLA-V constrained decoding)
+
 ## 5. MANIFEST PULIZIA (23 agosto 2026)
 
 ### Rimossi dal 3090 (~7GB → `_archive_ckpts/`)
