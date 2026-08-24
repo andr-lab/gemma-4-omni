@@ -92,7 +92,45 @@ Qwen parla già italiano); DuplexConv serve (per le dinamiche di turn-taking, NO
 la fonetica — è cinese). Il gap da colmare per il full-duplex italiano è lo **stereo
 italiano sintetico** (pattern J-Moshi: dialoghi testuali → Qwen3-TTS multi-stream → WER-selection).
 
+## 4. Integrazione survey full-duplex (2606.19453) — tipologia dati e realization gap
+
+Il survey formalizza **tre tipi di dati** (Sez. 7.1):
+- **Type A — single-stream**: audio mono senza struttura dialogica (ASR-style, tipo MDC26):
+  "supplies the LLM's speech-token vocabulary but does not teach duplex dynamics".
+- **Type B — single-stream dialogue/instruction**: QA mono (VoiceAssistant-400K, InstructS2S-200K):
+  insegna "answer in speech" ma non il timing duplex.
+- **Type C — two-stream time-synchronous**: due canali allineati frame-level (Fisher,
+  Switchboard, CANDOR, Easy Turn, **DuplexConv**): "the only data type that directly
+  teaches full-duplex behavior". → **CONFERMA del nostro verdetto: MDC26 è Type A,
+  DuplexConv è Type C.**
+
+**Realization gap** (Sez. 8): il comportamento full-duplex osservato NON è determinato
+solo dall'architettura ma dalla **cell-coverage dei dati di training**: Mini-Omni2 e
+OmniFlatten hanno la stessa architettura (L2 flattened) ma solo OmniFlatten mostra
+backchannel/concurrent speech su FDB — "the aligning factor is what data each system
+was post-trained on". Moshi acquisisce il turn-taking nel fine-tuning su Fisher (Type C).
+MinMo: predictor 1-layer funziona grazie a 4.000h di dialogue mix (3.000 reali +
+1.000 simulate con etichette euristiche).
+
+**Dati pubblici Type C ≈ 5.000h totali** (Fisher ~2.000h è il dominante) — i dataset
+pubblici per il full-duplex sono scarsi e quasi tutti inglesi (Sez. 7.2-7.3).
+**Celle mai coperte dai dati pubblici**: T4 (sustained concurrent speech) e T3·I7
+(third-party voice) — spiegano perché nessun sistema pubblico le raggiunge.
+
+**Ricette di sintesi Type C** (Sez. 7.4, in ordine di espressività):
+1. Dual-role TTS (script LLM → due canali TTS): copre solo T1 (turn puliti)
+2. **Overlap injection**: dual-role TTS + overlap random ai confini di turno → T2 e
+   barge-in parziale (MinMo: distribuzione inter-turn T∼N(0.6, 0.4²))
+3. Backchannel insertion: richiede Type C sorgente (dipendenza circolare)
+4. **Silent-token augmentation** (OmniFlatten `silent_speech_token`): segna "qui il
+   sistema deve tacere" a livello di token — T5 esprimibile senza modificare l'audio
+5. Time-anchor self-supervision (SyncLLM [S0]/[S1] ai confini di chunk)
+
+→ Per il nostro stereo IT sintetico: ricetta 1+2 (dual-role TTS + overlap injection)
+è la più praticabile; la ricetta 4 (silent token) è direttamente applicabile al nostro
+predittore cb0 (token di silenzio nel flusso).
+
 ---
 Fonti: J-Moshi arXiv:2506.02979 (letto per intero); README DuplexConv HF
 qualialabsAI/DuplexConv; report interni REPORT_TASK10_*.md; survey full-duplex
-2606.19453 (integrazione subagent).
+2606.19453 (lettura diretta Sez. 7-8).
