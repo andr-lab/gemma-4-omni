@@ -148,11 +148,11 @@ def main():
     import soundfile as sf
 
     def _load_ref(path):
-        w, _ = sf.read(path, dtype="float32")
+        w, sr = sf.read(path, dtype="float32")
         pk = float(np.abs(w).max())
         if pk > 0.85:
             w = w * (0.85 / pk)
-        return w
+        return w, sr
 
     # ref UTENTE: parlato GT reale italiano (voce umana, run rankfix r1_v3)
     # ref AGENTE: oracle sub-talker con cb0 GT = timbro esatto del nostro sistema
