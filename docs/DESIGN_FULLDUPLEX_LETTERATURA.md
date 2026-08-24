@@ -149,7 +149,38 @@ Tabella ruoli: Adapter = proiezione di spazio (✅); AR head = predittore semant
 | 3 | **Ancora testuale**: condizionare AR su testo T di Gemma | 2410.00037, 2508.15827 | medio (cache testo + embedding) | il fix strutturale per "free ≈ ancorato" |
 | 4 | **cb0-pressure**: ritrain adapter con loss semantica ausiliaria | 2608.07462 + nostri probe | alto (retrain adapter) | ripristina l'info cb0 in h_sub |
 | 5 | Se top-1 < 15% dopo 1-4: **Opzione B** (proiezione addestrata + backbone 1.7B) | 2503.20215, 2601.16023 | alto | ceiling di capacità |
-| 6 | **Turn-taking**: special tokens + policy duplex | 2603.09180, 2606.19453 | medio | backchannel/barge-in/yield/interrupt |
+| 6 | **Turn-taking**: special tokens nel flusso Gemma (NON TurnHead esterna) | 2603.09180, 2606.19453 | medio | backchannel/barge-in/yield/interrupt |
+
+### 2.4 DECISIONE: niente TurnHead esterna — token di controllo nel flusso Gemma (2026-08-24)
+
+**Decisione**: abbandonare TurnHead (classificatore esterno su feature grezze, v3-v5
+collassati: bACC 41%, YIELD/BARGE_IN collapse) in favore di **special tokens nel
+vocabolario di Gemma**: `<backchannel>`, `<yield>`, `<barge_in>`, `<interrupt>`,
+`<speak>` (+ `<user_is_speaking>`, `<user_finish>`, `<user_interrupting>`,
+`<user_thinking>` stile DuplexCascade).
+
+Evidenze:
+1. **DuplexCascade (2603.09180)**: turn-taking = special tokens nel flusso LLM con
+   loss pesata (10× eventi rari). Il controllo del turno È il modello, non un modulo.
+2. **Moshi (2410.00037)**: multi-stream (testo+audio utente+audio agente); la decisione
+   di parlare/cedere è implicita nel flusso generativo.
+3. **Survey full-duplex (2606.19453)**: i sistemi evoluti implementano la decision
+   state machine (IDLE/LISTEN/SPEAK/WAIT/DUAL) dentro il modello.
+4. **Prova negativa interna**: TurnHead v3-v5 — un classificatore su mel/z 2304-dim
+   non vede il contesto linguistico/pragmatico dove vive la decisione di turno.
+
+Perché è il pattern giusto nel nostro design:
+- Gemma è già un LLM che genera token: i token di controllo sono naturali, stessa CE loss.
+- Il modello decide col contesto completo (linguistico + pragmatico + storico).
+- La loss pesata (DuplexCascade 10×) risolve lo sbilanciamento che ha ucciso v4/v5.
+- Si integra con l'ancora testuale (P3): testo → token di turno → cb0 nello stesso flusso
+  (pattern Moshi inner monologue + Mini-Omni text-instructed).
+
+**Ruolo di DuplexConv in questo quadro**: non più training di una testa separata, ma
+FONTE DI ETICHETTE per la supervisione dei token di controllo (VAD frame-level per
+canale + turn state `<|complete|>` + interruzioni = GT nativo, più pulito delle
+etichette euristiche). Il gap per le statistiche di turno IT resta lo stereo IT
+sintetico (J-Moshi pattern).
 
 ---
 
