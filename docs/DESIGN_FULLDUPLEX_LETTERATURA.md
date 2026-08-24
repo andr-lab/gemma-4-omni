@@ -151,13 +151,22 @@ Tabella ruoli: Adapter = proiezione di spazio (✅); AR head = predittore semant
 | 5 | Se top-1 < 15% dopo 1-4: **Opzione B** (proiezione addestrata + backbone 1.7B) | 2503.20215, 2601.16023 | alto | ceiling di capacità |
 | 6 | **Turn-taking**: special tokens nel flusso Gemma (NON TurnHead esterna) | 2603.09180, 2606.19453 | medio | backchannel/barge-in/yield/interrupt |
 
-### 2.4 DECISIONE: niente TurnHead esterna — token di controllo nel flusso Gemma (2026-08-24)
+### 2.4 DECISIONE: niente TurnHead esterna — token di controllo nel flusso (2026-08-24, rev.2)
 
 **Decisione**: abbandonare TurnHead (classificatore esterno su feature grezze, v3-v5
-collassati: bACC 41%, YIELD/BARGE_IN collapse) in favore di **special tokens nel
-vocabolario di Gemma**: `<backchannel>`, `<yield>`, `<barge_in>`, `<interrupt>`,
-`<speak>` (+ `<user_is_speaking>`, `<user_finish>`, `<user_interrupting>`,
-`<user_thinking>` stile DuplexCascade).
+collassati: bACC 41%, YIELD/BARGE_IN collapse) in favore di token di controllo nel
+flusso generativo.
+
+**REV.2 — i token NON vanno nel vocabolario di Gemma** (Gemma è congelata per
+preservare ragionamento/tool calling; estendere il vocabolario richiederebbe retraining
+di embedding+lm_head, stile Mini-Omni2 vocab 181k). I token di controllo vivono nel
+componente ADDESTRABILE:
+- (a) **nel vocabolario del predittore cb0**: alterna codebook e token di controllo
+  (`<silence>`, `<backchannel>`, `<yield>`) nello stesso flusso AR — ricetta 4 del
+  survey (silent-token augmentation, OmniFlatten `silent_speech_token`);
+- (b) **marcatori testuali BPE esistenti** generati da Gemma ("[backchannel]",
+  "[yield]") senza estensione del vocabolario (in-context), tradotti in pattern
+  acustici dal predittore cb0 addestrato su coppie testo+marcatore→cb0.
 
 Evidenze:
 1. **DuplexCascade (2603.09180)**: turn-taking = special tokens nel flusso LLM con
@@ -165,22 +174,26 @@ Evidenze:
 2. **Moshi (2410.00037)**: multi-stream (testo+audio utente+audio agente); la decisione
    di parlare/cedere è implicita nel flusso generativo.
 3. **Survey full-duplex (2606.19453)**: i sistemi evoluti implementano la decision
-   state machine (IDLE/LISTEN/SPEAK/WAIT/DUAL) dentro il modello.
+   state machine (IDLE/LISTEN/SPEAK/WAIT/DUAL) dentro il modello; silent-token
+   augmentation esprime T5 a livello di token senza modificare l'audio.
 4. **Prova negativa interna**: TurnHead v3-v5 — un classificatore su mel/z 2304-dim
    non vede il contesto linguistico/pragmatico dove vive la decisione di turno.
 
 Perché è il pattern giusto nel nostro design:
-- Gemma è già un LLM che genera token: i token di controllo sono naturali, stessa CE loss.
-- Il modello decide col contesto completo (linguistico + pragmatico + storico).
+- Gemma (congelata) genera testo: i marcatori testuali (b) sono in-context, zero retraining.
+- Il predittore cb0 (addestrabile) è il punto di sintesi: token di controllo (a) o
+  traduzione dei marcatori (b) → pattern acustici (silenzio, backchannel breve).
 - La loss pesata (DuplexCascade 10×) risolve lo sbilanciamento che ha ucciso v4/v5.
-- Si integra con l'ancora testuale (P3): testo → token di turno → cb0 nello stesso flusso
-  (pattern Moshi inner monologue + Mini-Omni text-instructed).
+- Si integra con l'ancora testuale (P3): testo → token di turno → cb0 nello stesso flusso.
 
-**Ruolo di DuplexConv in questo quadro**: non più training di una testa separata, ma
-FONTE DI ETICHETTE per la supervisione dei token di controllo (VAD frame-level per
-canale + turn state `<|complete|>` + interruzioni = GT nativo, più pulito delle
-etichette euristiche). Il gap per le statistiche di turno IT resta lo stereo IT
-sintetico (J-Moshi pattern).
+**REV.2 — DuplexConv NON addestra le dinamiche italiane** (è cinese; J-Moshi §5:
+le statistiche di turn-taking variano per lingua: overlap GT JP 8.1s/min vs EN 3.3).
+Ruolo ridotto a: (1) riferimento di FORMATO/etichette GT (VAD frame-level + turn state)
+per costruire/validare il nostro pipeline di etichettatura; (2) eventuale detector
+acustico di eventi (riconoscimento di overlap/barge-in è lingua-indipendente).
+Nessun training diretto dello stack su di esso. Il training delle dinamiche IT viene
+SOLO dallo stereo IT sintetico (ricetta 1+2 survey: dual-role TTS + overlap injection
+T∼N(0.6,0.4²), generato con Qwen3-TTS).
 
 ---
 
