@@ -24,6 +24,23 @@ import numpy as np
 sys.path.insert(0, "/workspace")
 sys.path.insert(0, "/workspace/qwen3tts_src")
 
+# Mock torchaudio/sox (il tokenizer 25Hz viene importato anche se inutilizzato;
+# stesso fix di decode_official_worker.py per il 12Hz)
+import types, importlib.machinery
+try:
+    import torchaudio  # noqa
+except Exception:
+    mock_ta = types.ModuleType("torchaudio")
+    mock_ta.__spec__ = importlib.machinery.ModuleSpec("torchaudio", None)
+    sys.modules["torchaudio"] = mock_ta
+    sys.modules["torchaudio._extension"] = types.ModuleType("torchaudio._extension")
+    sys.modules["torchaudio.compliance"] = types.ModuleType("torchaudio.compliance")
+    mock_kaldi = types.ModuleType("torchaudio.compliance.kaldi")
+    sys.modules["torchaudio.compliance.kaldi"] = mock_kaldi
+for _m in ("sox",):
+    if _m not in sys.modules:
+        sys.modules[_m] = types.ModuleType(_m)
+
 SR = 24000
 FPS = 12.5
 FRAME = 1.0 / FPS
