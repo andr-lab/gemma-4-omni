@@ -1,0 +1,63 @@
+*Contesto di memoria persistente caricato con successo (`global_notes.md`, `user_profile.md`).*
+
+---
+
+### 1. VERDETTO DIREZIONE: L'AR per cb0 è la strada giusta?
+**SÌ sul principio architetturale, NO sull'attuale formulazione.**
+- **Perché AR è necessaria**: Una testa non-autoregressiva (NAR/one-shot) assume indipendenza condizionale tra frame adiacenti data $h_t$. Poiché a 12.5Hz (80ms/frame) i fonemi si estendono su 2–5 frame, la predizione NAR priva di memoria della traiettoria fonetica produce instabilità di fase, jitter e collasso su n-gram ripetuti ("lo che è la cosa è..."). L'approccio gerarchico AR (Codebook 0 semantico-prosodico) + NAR/MTP (Codebook 1..15 acustici) è lo standard di riferimento (VALL-E, SoundStorm, Moshi).
+- **Il difetto concettuale attuale**: Il modulo sta trattando il problema come un *Text-LM causale libero* anziché come un **transducer allineato frame-per-frame**. Se $h_t$ è già a 12.5Hz e sincronizzato, il decoder non deve inventare la sequenza temporale, ma solo modellare la transizione tra stati discreti $cb_{0,t}$ condizionata puntualmente su $h_t$.
+
+---
+
+### 2. BUG & DEBOLEZZE DELL'ARTEFATTO (Analisi Avversariale & Fix)
+
+1. **Scheduled Sampling prematuro a step 1200 (Causa del collasso TF-Acc 3.4%)**:
+   - *Problema*: A step 1200 con loss 7.5 (caso casuale $\ln(2048)=7.62$), il modello predice rumore uniforme. Sostituire il 35% dei token con predizioni correnti inietta 35% di spazzatura nell'input, impedendo la convergenza dell'attention causale.
+   - *Fix*: Eliminare lo step-switch fisso. Adottare **Curriculum Learning basato su metrica**: $\epsilon = 0.0$ finché la Validation Top-1 Acc $\ge 40\%$, poi rampa lineare fino a un massimo del $15\%$.
+2. **Iniezione debole di $h_t$ (Layer 0 vs Cross-Layer)**:
+   - *Problema*: Sommare/concatenare $\text{proj}(h_t)$ solo all'embedding di ingresso fa svanire il condizionamento acustico attraverso i 4 layer di Transformer causale.
+   - *Fix*: Applicare condizionamento continuo a ogni layer tramite **Adaptive LayerNorm (AdaLN)** o **Cross-Attention** esplicita su $h_{\le t}$.
+3. **Repetition Penalty cieca vs Fonetica Continua**:
+   - *Problema*: A 12.5Hz, vocali prolungate o consonanti tenute *devono* ripetere lo stesso codice $cb_0$ per 2–4 frame consecutivi. Una penalità generica su finestra 12 frame spezza le vocali naturali e introduce glottalizzazioni artificiali.
+   - *Fix*: Penalizzare solo ripetizioni identiche con lunghezza consecutiva $> 5$ frame (>400ms) o n-gram di lunghezza $N \ge 2$, non token singoli isolati.
+4. **Vocabolario sparsificato (~240/2048 codici attivi)**:
+   - *Problema*: 1800 classi non utilizzate ricevono gradienti negativi costanti sprecando capacità rappresentativa e gonfiando la cross-entropy.
+   - *Fix*: Applicare **Label Smoothing** ($0.05$) e inizializzazione della bias head con $\log(p_{\text{prior}})$ della distribuzione empirica di $cb_0$.
+5. **Positional Encoding Assoluto su Finestre Rolling**:
+   - *Problema*: L'encoding assoluto degrada quando la sequenza eccede la finestra di training (64 frame).
+   - *Fix*: Sostituire con **RoPE (Rotary Position Embedding)** causale.
+
+---
+
+### 3. LETTERATURA: EVIDENZE & CITAZIONI VERIFICATE
+
+1. **VALL-E (2023)** — [*arXiv:2301.02111*](http://arxiv.org/abs/2301.02111):
+   - *Titolo*: *Neural Codec Language Models are Zero-Shot Text to Speech Synthesizers*.
+   - *Rilevanza*: Dimostra l'efficacia di AR su $cb_0$ + NAR su residui, ma documenta formalmente i limiti di robustezza intrinseci (loop infiniti, omissione parole, allucinazioni fonetiche su inferenza non vincolata).
+2. **VALL-E 2 (2024)** — [*arXiv:2406.05370*](http://arxiv.org/abs/2406.05370):
+   - *Titolo*: *VALL-E 2: Neural Codec Language Models are Human Parity Zero-Shot Text to Speech Synthesizers*.
+   - *Rilevanza*: Introduce il **Repetition Aware Sampling (RAS)** che monitora l'history con finestra $t_n$ e threshold $t_r$ commutando dinamicamente tra nucleus e fallback sampling per rompere i cicli stocastici, combinato con Grouped Code Modeling.
+3. **ELLA-V (2024)** — [*arXiv:2401.07333*](http://arxiv.org/abs/2401.07333) & **VALL-E R (2024)** — [*arXiv:2406.07855*](http://arxiv.org/abs/2406.07855):
+   - *Titoli*: *ELLA-V: Stable Neural Codec Language Modeling with Alignment-guided Sequence Reordering* / *VALL-E R: Robust and Efficient Zero-Shot Text-to-Speech Synthesis via Monotonic Alignment*.
+   - *Rilevanza*: Risolvono l'instabilità dell'AR imponendo **vincoli di allineamento monotonico** tra rappresentazione di guida e token acustici, eliminando le allucinazioni tipiche del decoding AR puro.
+4. **Consenso su $cb_0$ in Qwen3-TTS / RVQ 12.5Hz**:
+   - $cb_0$ è **ibrido (semantico + contorno F0/energia coarse)**. A differenza di Mimi/Moshi che usa distillazione HuBERT esplicita, in RVQ standard $cb_0$ quantizza la porzione a più alta energia dell'encoder. Il fatto che su CV26 italiano siano attivi ~240 codici riflette la specifica varietà fonotattica italiana nello spazio latente multilingua di Qwen3.
+
+---
+
+### 4. GATE PERCETTIVO PRE-INFERENZA (Checklist Oggettiva)
+
+Prima di effettuare test di ascolto o sprecare cicli di sintesi Code2Wav:
+1. **Teacher-Forcing Accuracy**: Val Top-1 $\ge \mathbf{45\%}$ e Val Top-5 $\ge \mathbf{75\%}$ (con loss $< 2.2$).
+2. **Open-Loop Perplexity**: PPL su rolling generation libera $\le \mathbf{15.0}$.
+3. **ASR Quality Gate (Whisper-large-v3 su 50 clip synthetic)**:
+   - CER $\le \mathbf{8.0\%}$, WER $\le \mathbf{14.0\%}$.
+   - Tasso di frame di silenzio anomalo ($>1.0\text{s}$) $\le \mathbf{1.5\%}$.
+   - Tasso di loop n-gram ($N \ge 3$) $=\mathbf{0\%}$.
+
+---
+
+### 5. RISCHI DI ROTTURA & PRESERVAZIONE DELL'ADAPTER SOTA
+
+- **Isolamento dei Gradienti**: L'adapter SOTA (${\text{cos\_sim}} = 0.9232$) e il base LLM Gemma 4 devono rimanere **rigorosamente congelati** (`torch.no_grad()`). Non eseguire fine-tuning end-to-end congiunto: distruggerebbe lo spazio $h_t$ allineato per il sub-talker MTP.
+- **Accoppiamento $h_t + cb_0$ nel Sub-Talker**: Durante l'inferenza, il sub-talker MTP riceve $h_t$ reale e $cb_0$ predetto. Se $cb_0$ diverge semanticamente da $h_t$, l'MTP produrrà codici acustici incoerenti. Monitorare sempre la coupling cross-entropy dei codebook 1..15 per validare che l'AR-Decoder sia sincrono con $h_t$.
