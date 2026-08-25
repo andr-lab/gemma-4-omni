@@ -103,8 +103,8 @@ def extract(ds, limit, subsample=1):
             ad.to(next(duplex_model.ht_adapter.parameters()).dtype)).float()
         sub.append(h_s.squeeze(0).cpu())
         cs.append(item["audio_targets"][:, 0].clone())
-        if (i + 1) % 200 == 0:
-            print(f"[CACHE2]   ... {i+1}/{min(limit, len(ds))}", flush=True)
+        if (len(raw) > 0) and (len(raw) % 200 == 0):
+            print(f"[CACHE2]   ... {len(raw)} finestre estratte", flush=True)
     return raw, sub, htx, cs
 
 
