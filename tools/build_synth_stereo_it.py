@@ -186,6 +186,17 @@ def main():
     model = Qwen3TTSForConditionalGeneration.from_pretrained(
         model_id, trust_remote_code=True, torch_dtype=torch.bfloat16).to(dev)
     proc = Qwen3TTSProcessor.from_pretrained(model_id, trust_remote_code=True)
+    # FIX: il decoder RVQ->wav (speech_tokenizer) viene caricato SENZA device
+    # (Qwen3TTSTokenizer.device=None -> decode su CPU). Spostalo su GPU.
+    if hasattr(model, "speech_tokenizer") and model.speech_tokenizer is not None:
+        st = model.speech_tokenizer
+        if hasattr(st, "model") and st.model is not None:
+            st.model = st.model.to(dev)
+            st.device = torch.device(dev)
+            print(f"[SYNTH] speech_tokenizer -> {dev} "
+                  f"(device={st.device})", flush=True)
+        else:
+            print("[SYNTH] WARN: speech_tokenizer senza .model", flush=True)
     tts = Qwen3TTSModel(model=model, processor=proc)
 
     print("[SYNTH] ref voices: utente=gt_ref rankfix (voce umana IT), agente=oracle rankfix (timbro sub-talker)...", flush=True)
