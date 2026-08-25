@@ -287,7 +287,6 @@ def main():
         #    sovrapposizione tra slot di canali diversi, per una durata <=
         #    overlap_gr (clampato alla durata del wav e al tempo disponibile).
         end_ch = [0.0, 0.0]          # fine attuale per canale
-        placed_slots = []            # slot della griglia gia' considerati
         for idx, (s, txt, ch) in enumerate(script):
             print(f"[SYNTH] turno {idx}/{len(script)} ch={ch} '{txt[:50]}'", flush=True)
             try:
@@ -300,27 +299,21 @@ def main():
             _t.cuda.empty_cache()
             dur = len(wav) / SR
             other = 1 - ch
-            # overlap nella GRIGLIA: esiste uno slot precedente dell'ALTRO
-            # canale che si sovrappone temporalmente a questo slot?
-            overlap_gr = 0.0
-            for ps in placed_slots:
-                if ps["ch"] != ch:
-                    ov = max(0.0, min(s["end"], ps["end"]) - max(s["start"], ps["start"]))
-                    overlap_gr = max(overlap_gr, ov)
             # 1) sequenziale sul proprio canale
             start = max(s["start"], end_ch[ch])
-            # 2) overlap con l'altro canale SOLO se la griglia lo dichiara,
-            #    probabilita' 0.35, overlap limitato a 0.8s per transizione
-            #    (target ~4-8% del tempo, statistica reale SmoothConv 5.9%)
-            if (overlap_gr > 0.10 and rng.random() < 0.35):
-                # non attendere l'altro canale: parti allo start slot
-                start = max(start, end_ch[other] - 0.8)   # overlap <= 0.8s
+            # 2) OVERLAP INJECTION (survey 7.4 ricetta 2, MinMo T~N(0.6,0.4^2)):
+            #    overlap random ai confini di turno con prob 0.35, durata
+            #    ~N(0.5, 0.2) clamp [0.25, 0.9]s -> target ~5% del tempo
+            #    (statistica reale SmoothConv 5.9%). La griglia dà il timing
+            #    dei turni; l'overlap si inietta come da letteratura.
+            if (idx > 0 and end_ch[other] > start and rng.random() < 0.35):
+                ov = float(np.clip(rng.gauss(0.5, 0.2), 0.25, 0.9))
+                start = max(start, end_ch[other] - ov)
             else:
-                # niente overlap voluto: attendi la fine dell'altro canale
+                # niente overlap: attendi la fine dell'altro canale
                 start = max(start, end_ch[other])
             (ch0 if ch == 0 else ch1).append((start, wav))
             end_ch[ch] = max(end_ch[ch], start + dur)
-            placed_slots.append({"ch": ch, "start": s["start"], "end": s["end"]})
 
         if not ch0 and not ch1:
             continue
