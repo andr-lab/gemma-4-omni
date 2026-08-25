@@ -1,20 +1,70 @@
 #!/usr/bin/env python3
 """
-temporal_adapter.py — TemporalResidualAdapter v2 (estratta da
+temporal_adapter.py — TemporalResidualAdapter v2 (estratta 1:1 da
 train_temporal2_cv26_faithful.py, architettura canonica Task 11F/11I-bis).
 
-BUG RISOLTO (2026-08-25): il runtime kaggle_pipeline costruiva ht_adapter come
-ResidualAdapter semplice (PIPELINE_HEAD_ARCH=v3) ma il checkpoint canonico
+BUG RADICE RISOLTO (2026-08-25): il runtime kaggle_pipeline costruiva
+ht_adapter come ResidualAdapter runtime (in_features/out_features, NO
+causal_conv interno, NO modulo temporal) ma il checkpoint canonico
 checkpoints/ht_adapter_temporal2_final.pt è la TemporalResidualAdapter v2
-(adapter + CausalTemporalModule, 63 chiavi). load_gemma4_duplex_checkpoint
-cerca custom_duplex_heads.pt (assente) -> adapter mai caricato -> h_sub
-spazzatura -> residui sub-talker random -> "elica".
+(CausalConv1d + skip_proj/mlp/norm + CausalTemporalModule, 63 chiavi).
+load_gemma4_duplex_checkpoint cercava custom_duplex_heads.pt (assente) ->
+adapter mai caricato -> h_sub spazzatura -> residui sub-talker random -> "elica".
 
-Questo modulo espone le classi in modo riutilizzabile dal runtime e dai tool.
+Questo modulo è AUTOSUFFICIENTE (non importa kaggle_pipeline): replica le
+classi del trainer 1:1 così il checkpoint si carica con strict=True.
 """
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+class CausalConv1d(nn.Module):
+    """Conv1D causale k=3 con left-pad (2,0): contesto [t-2,t-1,t]=240ms, 0 look-ahead.
+    Identity-init: peso centrale=I, laterali=0 -> forward(x)==x a passo 0."""
+
+    def __init__(self, channels, kernel_size=3):
+        super().__init__()
+        self.conv = nn.Conv1d(channels, channels, kernel_size=kernel_size, padding=0, bias=False)
+        self._reset_identity_parameters()
+
+    def _reset_identity_parameters(self):
+        nn.init.zeros_(self.conv.weight)
+        with torch.no_grad():
+            _c = self.conv.kernel_size[0] - 1
+            for i in range(self.conv.weight.shape[0]):
+                self.conv.weight[i, i, _c] = 1.0
+
+    def forward(self, x):
+        x_t = x.transpose(1, 2)
+        x_pad = F.pad(x_t, (2, 0))
+        out = self.conv(x_pad)
+        return out.transpose(1, 2)
+
+
+class ResidualAdapter(nn.Module):
+    """Adapter MLP residuale: CausalConv1D -> LayerNorm( MLP(h) + skip(h) ).
+    skip_proj: Linear(in_dim, out_dim); mlp: Linear -> SiLU -> Linear; norm."""
+
+    def __init__(self, in_dim=1536, out_dim=2048, hidden_dim=3072, use_causal_conv=True):
+        super().__init__()
+        self.use_causal_conv = use_causal_conv
+        if use_causal_conv:
+            self.causal_conv = CausalConv1d(in_dim)
+        self.skip_proj = nn.Linear(in_dim, out_dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, out_dim),
+        )
+        self.norm = nn.LayerNorm(out_dim)
+
+    def forward(self, x):
+        if self.use_causal_conv:
+            x = self.causal_conv(x)
+        h_proj = self.skip_proj(x)
+        h_mlp = self.mlp(x)
+        return self.norm(h_mlp + h_proj)
 
 
 class CausalSelfAttentionBlock(nn.Module):
@@ -61,8 +111,7 @@ class CausalSelfAttentionBlock(nn.Module):
 class CausalTemporalModule(nn.Module):
     """Modulo Temporale Causale v2 (4 blocchi Transformer causali Pre-LN).
     Mappa h_adapt (2048D) -> h_t (2048D), finestra T=64 (5.12s a 12.5Hz).
-    Identity-Init su out_proj (ReZero): delta iniziale nullo.
-    """
+    Identity-Init su out_proj (ReZero): delta iniziale nullo."""
 
     def __init__(self, in_dim=2048, hidden_dim=1024, n_layers=4, n_heads=8,
                  d_ff=2048, max_len=512):
@@ -89,15 +138,12 @@ class CausalTemporalModule(nn.Module):
 
 
 class TemporalResidualAdapter(nn.Module):
-    """Wrapper composito: ResidualAdapter (1536->2048) + CausalTemporalModule.
-    Architettura CANONICA del progetto (checkpoint ht_adapter_temporal2_final.pt).
-    """
+    """Wrapper composito: ResidualAdapter (1536->2048) + CausalTemporalModule (2048->2048)."""
 
     def __init__(self, in_dim=1536, out_dim=2048, hidden_dim=3072,
                  temp_dim=1024, temp_layers=4, temp_heads=8, temp_ff=2048,
                  use_causal_conv=True):
         super().__init__()
-        from kaggle_pipeline import ResidualAdapter
         self.adapter = ResidualAdapter(in_dim=in_dim, out_dim=out_dim,
                                        hidden_dim=hidden_dim,
                                        use_causal_conv=use_causal_conv)
@@ -120,33 +166,30 @@ def build_ht_temporal_adapter(hid, temp_dim=1024, temp_layers=4, temp_heads=8,
 
 
 def load_temporal_adapter_checkpoint(ckpt_path, device="cuda", dtype=torch.float32):
-    """Carica ht_adapter_temporal2_final.pt in un TemporalResidualAdapter v2."""
+    """Carica ht_adapter_temporal2_final.pt in un TemporalResidualAdapter v2 (strict)."""
     ck = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    # determina dims dalle chiavi
-    in_dim = ck["adapter.skip_proj.weight"].shape[1] if "adapter.skip_proj.weight" in ck else 1536
-    out_dim = ck["adapter.skip_proj.weight"].shape[0] if "adapter.skip_proj.weight" in ck else 2048
+    in_dim = ck["adapter.skip_proj.weight"].shape[1]
+    out_dim = ck["adapter.skip_proj.weight"].shape[0]
+    hidden_dim = ck["adapter.mlp.0.weight"].shape[0]
     temp_dim = ck["temporal.in_proj.weight"].shape[0]
-    n_layers = sum(1 for k in ck if k.startswith("temporal.layers.") and k.endswith(".ln1.weight"))
-    n_heads = ck["temporal.layers.0.q_proj.weight"].shape[0] // (
-        ck["temporal.layers.0.q_proj.weight"].shape[1] // 1 or 1)
     d_ff = ck["temporal.layers.0.mlp.0.weight"].shape[0]
-    n_heads = ck["temporal.layers.0.q_proj.weight"].shape[0] // (
-        ck["temporal.layers.0.q_proj.weight"].shape[1] // (
-            ck["temporal.layers.0.q_proj.weight"].shape[1] // 128 or 1) or 1)
-    # fallback: head_dim 128 (config sub-talker) -> n_heads = d_model // 128
-    d_model = ck["temporal.in_proj.weight"].shape[0]
-    n_heads = d_model // 128
+    n_layers = sum(1 for k in ck if k.startswith("temporal.layers.") and k.endswith(".ln1.weight"))
+    head_dim = ck["temporal.layers.0.q_proj.weight"].shape[1] // (
+        ck["temporal.layers.0.q_proj.weight"].shape[0] // 128 or 1)
+    n_heads = ck["temporal.layers.0.q_proj.weight"].shape[0] // head_dim if head_dim else 8
+
     model = TemporalResidualAdapter(
-        in_dim=in_dim, out_dim=out_dim, hidden_dim=3072,
-        temp_dim=d_model, temp_layers=n_layers, temp_heads=n_heads, temp_ff=d_ff,
+        in_dim=in_dim, out_dim=out_dim, hidden_dim=hidden_dim,
+        temp_dim=temp_dim, temp_layers=n_layers, temp_heads=n_heads, temp_ff=d_ff,
         use_causal_conv=True,
     )
-    # rimappa: ck 'adapter.X'/'temporal.X' -> model 'adapter.X'/'temporal.X' (stesso nome)
     missing, unexpected = model.load_state_dict(ck, strict=False)
-    print(f"[TEMPORAL] ckpt {ckpt_path}: {len(ck)} chiavi caricate, "
+    print(f"[TEMPORAL] ckpt {ckpt_path}: {len(ck)} chiavi, "
           f"missing={len(missing)} unexpected={len(unexpected)}", flush=True)
     if missing:
         print(f"[TEMPORAL] missing: {list(missing)[:8]}", flush=True)
+    if unexpected:
+        print(f"[TEMPORAL] unexpected: {list(unexpected)[:8]}", flush=True)
     model.to(device=device, dtype=dtype)
     model.eval()
     return model
