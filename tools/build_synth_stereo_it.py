@@ -48,7 +48,7 @@ FRAME = 1.0 / FPS
 BACKCHANNEL_IT = ["mh-mh", "sì", "capito", "ok", "ah", "ecco", "mh", "già", "certo", "eh"]
 
 
-def clean_text(t: str, max_len: int = 220) -> str:
+def clean_text(t: str, max_len: int = 120) -> str:
     import re
     t = t.replace("**", "").replace("##", "").replace("#", "").replace("`", "")
     t = t.replace("---", " ").replace("###", "")
@@ -306,12 +306,14 @@ def main():
                 overlap_gr = max(0.0, min(s["end"], last_slot["end"]) - max(s["start"], last_slot["start"]))
             # 1) sequenziale sul proprio canale
             start = max(s["start"], end_ch[ch])
-            # 2) overlap con l'altro canale SOLO se la griglia lo dichiara
-            if overlap_gr > 0.15 and end_ch[other] > start:
-                avail = min(dur, end_ch[other] - start)   # quanto può sovrapporsi
-                ov = min(overlap_gr, avail)
-                start = end_ch[other] - ov                 # arretra fino a ov
-                start = max(start, end_ch[ch])             # mai prima del proprio canale
+            # 2) overlap con l'altro canale SOLO se la griglia lo dichiara,
+            #    cap 0.8s e probabilita' 0.35 (target ~6% del tempo, statistica
+            #    reale SmoothConv 212s/h = 5.9%)
+            if (overlap_gr > 0.15 and end_ch[other] > start
+                    and rng.random() < 0.35):
+                ov = min(overlap_gr, 0.8, end_ch[other] - start)
+                start = end_ch[other] - ov
+                start = max(start, end_ch[ch])
             (ch0 if ch == 0 else ch1).append((start, wav))
             end_ch[ch] = max(end_ch[ch], start + dur)
             last_slot = {"ch": ch, "start": s["start"], "end": s["end"]}
