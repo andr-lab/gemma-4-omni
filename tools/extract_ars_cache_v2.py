@@ -32,6 +32,8 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--dataset", default="/workspace/data/train_tokens_cv26_it_40.8h_31916s.parquet")
 ap.add_argument("--adapter-ckpt", default="/workspace/checkpoints/ht_adapter_temporal2_final.pt")
 ap.add_argument("--output", default="/workspace/cache_ars_full_v2.pt")
+ap.add_argument("--subsample", type=int, default=1,
+                help="estrai 1 finestra ogni N (default 1 = tutte; 4 = ~6.4k train, ~65min in parallelo)")
 ap.add_argument("--smoke", action="store_true")
 args = ap.parse_args()
 
@@ -72,9 +74,11 @@ TEXT_BLOCK_LEN = KP.TEXT_BLOCK_LEN
 
 
 @torch.inference_mode()
-def extract(ds, limit):
+def extract(ds, limit, subsample=1):
     raw, sub, htx, cs = [], [], [], []
     for i in range(min(limit, len(ds))):
+        if i % subsample != 0:
+            continue
         item = ds[i]
         T = item["audio_targets"].shape[0]
         inp = {"input_ids": item["input_ids"].unsqueeze(0).to(device),
@@ -106,8 +110,8 @@ def extract(ds, limit):
 
 n_tr = min(len(ds_train), 300) if args.smoke else len(ds_train)
 n_va = min(len(ds_val), 40) if args.smoke else min(len(ds_val), 100)
-tr_raw, tr_sub, tr_htx, tr_c = extract(ds_train, n_tr)
-va_raw, va_sub, va_htx, va_c = extract(ds_val, n_va)
+tr_raw, tr_sub, tr_htx, tr_c = extract(ds_train, n_tr, args.subsample)
+va_raw, va_sub, va_htx, va_c = extract(ds_val, n_va, args.subsample)
 
 print("[CACHE2] 4/4 Salvataggio...", flush=True)
 torch.save({"tr_raw": tr_raw, "tr_sub": tr_sub, "tr_htx": tr_htx, "tr_c": tr_c,
