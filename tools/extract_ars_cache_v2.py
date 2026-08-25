@@ -33,7 +33,9 @@ ap.add_argument("--dataset", default="/workspace/data/train_tokens_cv26_it_40.8h
 ap.add_argument("--adapter-ckpt", default="/workspace/checkpoints/ht_adapter_temporal2_final.pt")
 ap.add_argument("--output", default="/workspace/cache_ars_full_v2.pt")
 ap.add_argument("--subsample", type=int, default=1,
-                help="estrai 1 finestra ogni N (default 1 = tutte; 4 = ~6.4k train, ~65min in parallelo)")
+                help="estrai 1 finestra ogni N (default 1 = tutte)")
+ap.add_argument("--batch-size", type=int, default=16,
+                help="batch per forward Gemma (default 16; ridurre a 8/4 in parallelo con altri processi GPU)")
 ap.add_argument("--smoke", action="store_true")
 args = ap.parse_args()
 
@@ -117,8 +119,8 @@ def extract(ds, limit, subsample=1, batch_size=16):
 
 n_tr = min(len(ds_train), 300) if args.smoke else len(ds_train)
 n_va = min(len(ds_val), 40) if args.smoke else min(len(ds_val), 100)
-tr_raw, tr_sub, tr_htx, tr_c = extract(ds_train, n_tr, args.subsample)
-va_raw, va_sub, va_htx, va_c = extract(ds_val, n_va, args.subsample)
+tr_raw, tr_sub, tr_htx, tr_c = extract(ds_train, n_tr, args.subsample, args.batch_size)
+va_raw, va_sub, va_htx, va_c = extract(ds_val, n_va, args.subsample, args.batch_size)
 
 print("[CACHE2] 4/4 Salvataggio...", flush=True)
 torch.save({"tr_raw": tr_raw, "tr_sub": tr_sub, "tr_htx": tr_htx, "tr_c": tr_c,
