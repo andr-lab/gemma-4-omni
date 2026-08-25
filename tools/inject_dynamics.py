@@ -37,7 +37,8 @@ def read_wav(path):
 
 def write_wav(path, x, sr):
     x16 = (np.clip(x, -1, 1)*32767).astype(np.int16)
-    w = wave.open(path, 'wb'); w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr)
+    nch = 2 if (x.ndim == 2 and x.shape[1] == 2) else 1
+    w = wave.open(path, 'wb'); w.setnchannels(nch); w.setsampwidth(2); w.setframerate(sr)
     w.writeframes(x16.tobytes()); w.close()
 
 def main():
