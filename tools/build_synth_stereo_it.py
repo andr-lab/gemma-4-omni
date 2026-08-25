@@ -82,13 +82,24 @@ def load_score(json_path: str):
 
 
 def build_script(slots, dialogue_msgs, rng):
-    """Assegna i turni ai canali per RUOLO (user->ch0, assistant->ch1),
-    usando la partitura solo per timing/overlap. I backchannel della
-    partitura diventano frasi brevi IT sul canale dell'ascoltatore."""
+    """Assegna i turni ai canali per RUOLO (user->ch0, assistant->ch1)
+    ALTERNATI, usando la partitura SOLO per il timing (start/end) e i
+    backchannel. NIENTE ciclaggio dei turni (evita ripetizioni).
+    I backchannel della partitura diventano frasi brevi IT sul canale
+    dell'ascoltatore (quello NON attivo nello slot)."""
     user_turns = [clean_text(m["content"]) for m in dialogue_msgs
                   if m.get("role") == "user" and clean_text(m["content"])]
     asst_turns = [clean_text(m["content"]) for m in dialogue_msgs
                   if m.get("role") == "assistant" and clean_text(m["content"])]
+    # dedup: rimuovi turni quasi identici consecutivi (evita ripetizioni nel mix)
+    def _dedup(turns):
+        out = []
+        for t in turns:
+            if out and t[:60] == out[-1][:60]:
+                continue
+            out.append(t)
+        return out
+    user_turns, asst_turns = _dedup(user_turns), _dedup(asst_turns)
     # fallback: se manca un ruolo, dividi i turni disponibili
     if not user_turns and asst_turns:
         user_turns = asst_turns[: len(asst_turns) // 2]
@@ -97,20 +108,35 @@ def build_script(slots, dialogue_msgs, rng):
         asst_turns = user_turns[: len(user_turns) // 2]
         user_turns = user_turns[len(user_turns) // 2:]
     ui, ai = 0, 0
+    # stato dell'altro canale per i backchannel (chi sta parlando)
+    last_role = None
     script = []
     for s in slots:
-        ch = s["ch"]
         tt = s["turn"]
         if tt.lower().startswith("backchannel"):
-            # il backchannel va sull'ALTRO canale rispetto al turno corrente
+            # backchannel: sul canale OPPOSTO all'ultimo turno (ascoltatore)
+            role = "assistant" if last_role == "user" else "user"
             txt = rng.choice(BACKCHANNEL_IT)
-        elif ch == 0:
-            txt = user_turns[ui % len(user_turns)] if user_turns else rng.choice(BACKCHANNEL_IT)
-            ui += 1
+            ch = 1 if role == "assistant" else 0
+            script.append((s, txt, ch))
+            continue
+        # alternanza per ruolo, indipendente dal canale dello slot
+        if (ui + ai) % 2 == 0:
+            if ui < len(user_turns):
+                txt, ch, role = user_turns[ui], 0, "user"; ui += 1
+            elif ai < len(asst_turns):
+                txt, ch, role = asst_turns[ai], 1, "assistant"; ai += 1
+            else:
+                continue
         else:
-            txt = asst_turns[ai % len(asst_turns)] if asst_turns else rng.choice(BACKCHANNEL_IT)
-            ai += 1
-        script.append((s, txt))
+            if ai < len(asst_turns):
+                txt, ch, role = asst_turns[ai], 1, "assistant"; ai += 1
+            elif ui < len(user_turns):
+                txt, ch, role = user_turns[ui], 0, "user"; ui += 1
+            else:
+                continue
+        last_role = role
+        script.append((s, txt, ch))
     return script
 
 
@@ -253,8 +279,7 @@ def main():
         # Regola: start_turno_i = max(start_slot_i, end_wav_precedente - overlap_grq)
         # con overlap_grq = sovrapposizione reale tra slot i-1 e i nella griglia.
         prev_end_wav = -1.0
-        for idx, (s, txt) in enumerate(script):
-            ch = s["ch"]
+        for idx, (s, txt, ch) in enumerate(script):
             print(f"[SYNTH] turno {idx}/{len(script)} ch={ch} '{txt[:50]}'", flush=True)
             try:
                 wav = synth(txt, ch)
