@@ -314,6 +314,9 @@ def main():
                 ov = min(overlap_gr, 0.8, end_ch[other] - start)
                 start = end_ch[other] - ov
                 start = max(start, end_ch[ch])
+            else:
+                # niente overlap voluto: attendi la fine dell'altro canale
+                start = max(start, end_ch[other])
             (ch0 if ch == 0 else ch1).append((start, wav))
             end_ch[ch] = max(end_ch[ch], start + dur)
             last_slot = {"ch": ch, "start": s["start"], "end": s["end"]}
