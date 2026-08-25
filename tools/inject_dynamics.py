@@ -105,8 +105,9 @@ def main():
         del mix
 
         inserts = []  # (time_sec, channel, clip_wav)
-        # BC agente (sintetizzati) durante turni utente
-        n_bc_agent = min(args.bc_per_dialogo, len(user_windows), len(bc_agent))
+        # BC agente (sintetizzati) durante turni utente: meta' delle clip
+        n_bc_agent = max(1, args.bc_per_dialogo // 2)
+        n_bc_agent = min(n_bc_agent, len(user_windows), len(bc_agent))
         for k in range(n_bc_agent):
             t0, t1 = rng.choice(user_windows)
             pos = rng.uniform(t0 + 0.3, max(t0 + 0.3, t1 - 1.2))
@@ -114,9 +115,12 @@ def main():
             if csr != SR:
                 import librosa
                 clip = librosa.resample(clip, orig_sr=csr, target_sr=SR)
+            clip = clip[: int(0.6 * SR)]   # tronca a 0.6s (backchannel breve)
+            if len(clip) < int(0.15 * SR):
+                continue
             inserts.append((pos, 1, clip))
-        # BC utente (reali SmoothConv) durante turni agente
-        n_bc_user = max(1, args.bc_per_dialogo // 2)
+        # BC utente (reali SmoothConv) durante turni agente: meta' delle clip
+        n_bc_user = args.bc_per_dialogo - n_bc_agent
         for k in range(n_bc_user):
             if not agent_windows:
                 break
@@ -126,6 +130,9 @@ def main():
             if csr != SR:
                 import librosa
                 clip = librosa.resample(clip, orig_sr=csr, target_sr=SR)
+            clip = clip[: int(0.6 * SR)]
+            if len(clip) < int(0.15 * SR):
+                continue
             inserts.append((pos, 0, clip))
 
         if args.dry:
