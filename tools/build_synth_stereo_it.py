@@ -328,6 +328,11 @@ def main():
             i0, i1 = int(s * SR), min(int(s * SR) + len(w), n)
             mix[i0:i1, 1] += w[: i1 - i0]
         mix = np.clip(mix, -1.0, 1.0)
+        # normalizzazione anti-clipping post-mix (somma dei canali negli overlap)
+        pk = float(np.abs(mix).max())
+        if pk > 0.85:
+            mix = mix * (0.85 / pk)
+        mix = np.clip(mix, -1.0, 1.0)
 
         # GT frame-level 12.5Hz: USER/AGENT/BOTH/NONE + eventi
         # (overlap = entrambi attivi; backchannel = turno breve agente < 1.2s)
