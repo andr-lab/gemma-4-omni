@@ -1,10 +1,28 @@
 # Design Evidence-Based — Full-Duplex Gemma-4-E2B × Qwen3-TTS
 
-**Data**: 2026-08-24 · **Scopo**: fondare le scelte architetturali del progetto su letteratura 2024-2026, rispondere alla domanda "errori implementativi, di dati o architetturali?" e proporre il design del modello full-duplex (Gemma-4-E2B = intelligenza/ragionamento/tool calling, Qwen3-TTS = voce, + turn-taking: backchanneling, barge-in, yield, interrupt).
+**Data**: 2026-08-24 (aggiornato 2026-08-25 con verdetto sperimentale v5) · **Scopo**: fondare le scelte architetturali del progetto su letteratura 2024-2026, rispondere alla domanda "errori implementativi, di dati o architetturali?" e proporre il design del modello full-duplex (Gemma-4-E2B = intelligenza/ragionamento/tool calling, Qwen3-TTS = voce, + turn-taking: backchanneling, barge-in, yield, interrupt).
 
 ---
 
-## 1. Il verdetto: implementativo, dati o architetturale?
+## 0. REVISIONE 2026-08-25 — Verdetto sperimentale (SUPERSEDE la sez. 1 per le conclusioni operative)
+
+Gli esperimenti del 25 agosto (blind ASR) hanno rivisto il verdetto: il pattern cb0+residui è corretto, MA il collo NON era l'informazione in h_sub per il predittore cb0 — era **il formato/lo spazio di h dato al MTP**:
+
+- **LOOP A**: past_hidden del backbone in loop (codici GT, cache, testo per frame) + MTP isolato da [h, cb0] → **parlato fluente** → il MTP PUÒ generare dal solo cb0 quando h è ricorrente (riga 1740 modeling_qwen3_tts.py: `past_hidden=hidden_states[:,-1:,:]`).
+- **LOOP B**: h_sub dell'adapter (cos 0.63) nel loop → elica → il ponte Gemma→talker non allinea abbastanza.
+- **oracle 23 ago** (h_t statico, passata unica): garbled → il formato h della passata unica è fuori distribuzione per il MTP.
+- **NATIVE** (talker completo dal testo): ASR esatto → il percorso testo→talker funziona nativamente.
+
+**Conseguenza (architettura v5, FISSATA — vedi `docs/VERDETTO_TASK12_ARCHITETTURA_V5.md`)**:
+- Niente AR decoder per cb0, niente MTP isolato, niente coupling cos-MSE statico (tetto ~0.63).
+- Runtime = Gemma (congelata) → h_raw → **[PROIEZIONE addestrata, unico componente trainabile]** → backbone Qwen3-TTS in loop (congelato: codec_head cb0 + MTP residui, protocollo nativo) → Code2Wav.
+- Lezione Qwen3-Omni (2509.17765): token discreti per il contenuto, hidden per l'espressività → il testo di Gemma resta nel prefill (canale contenuto), h_proj è il canale espressivo.
+- Ambiente: Gemma (unsloth, transformers 5.5.0) + teacher (qwen3tts_src patchato, 3 shim) coesistono in UN processo → runtime monoprocesso possibile (container `gemma4-omni-v5:latest`).
+- La sezione 1 sotto resta valida come ANALISI DELLA LETTERATURA (perché il pattern era giusto), ma le sue conclusioni operative (P1-P6 su AR decoder) sono superate dal verdetto v5.
+
+---
+
+## 1. Il verdetto (2026-08-24, storico): implementativo, dati o architetturale?
 
 **Sintesi: il pattern architetturale è corretto e confermato dalla letteratura; il collo di bottiglia è (a) informazione: h_sub non contiene l'informazione cb0, (b) scala: 40h vs 5M ore, (c) una mancanza implementativa: l'hybrid training (TF+free-running) non è mai stato applicato.**
 

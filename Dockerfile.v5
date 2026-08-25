@@ -1,0 +1,5 @@
+# Ambiente UNIFICATO per runtime full-duplex: Gemma (unsloth, transformers>=5) + teacher Qwen3-TTS (qwen3tts_src patchato)
+FROM gemma4-omni:latest
+RUN pip install --quiet librosa sox onnxruntime einops faster-whisper 2>&1 | tail -2
+# patch compat transformers 5.x: @check_model_inputs() -> @check_model_inputs
+RUN sed -i 's/@check_model_inputs()/@check_model_inputs/' /workspace/qwen3tts_src/qwen_tts/core/tokenizer_12hz/modeling_qwen3_tts_tokenizer_v2.py || true
