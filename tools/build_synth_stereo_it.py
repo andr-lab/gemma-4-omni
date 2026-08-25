@@ -188,13 +188,17 @@ def main():
 
         ch0, ch1 = [], []   # (start_sec, wav)
         t_cur = 0.0
-        for (s, txt) in script:
+        for idx, (s, txt) in enumerate(script):
             ch = s["ch"]
+            print(f"[SYNTH] turno {idx}/{len(script)} ch={ch} '{txt[:50]}'", flush=True)
             try:
                 wav = synth(txt, ch)
             except Exception as e:
                 print(f"[SYNTH] ERR {txt[:40]}: {e}", flush=True)
                 continue
+            print(f"[SYNTH]   -> {len(wav)/SR:.1f}s", flush=True)
+            import torch as _t
+            _t.cuda.empty_cache()
             dur = len(wav) / SR
             (ch0 if ch == 0 else ch1).append((t_cur, wav))
             # gap dello slot reale (partitura) se >0, altrimenti 0.25s
