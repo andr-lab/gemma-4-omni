@@ -307,13 +307,11 @@ def main():
             # 1) sequenziale sul proprio canale
             start = max(s["start"], end_ch[ch])
             # 2) overlap con l'altro canale SOLO se la griglia lo dichiara,
-            #    cap 0.8s e probabilita' 0.35 (target ~6% del tempo, statistica
-            #    reale SmoothConv 212s/h = 5.9%)
-            if (overlap_gr > 0.15 and end_ch[other] > start
-                    and rng.random() < 0.35):
-                ov = min(overlap_gr, 0.8, end_ch[other] - start)
-                start = end_ch[other] - ov
-                start = max(start, end_ch[ch])
+            #    probabilita' 0.35, overlap limitato a 0.8s per transizione
+            #    (target ~4-8% del tempo, statistica reale SmoothConv 5.9%)
+            if (overlap_gr > 0.15 and rng.random() < 0.35):
+                # non attendere l'altro canale: parti allo start slot
+                start = max(start, end_ch[other] - 0.8)   # overlap <= 0.8s
             else:
                 # niente overlap voluto: attendi la fine dell'altro canale
                 start = max(start, end_ch[other])
