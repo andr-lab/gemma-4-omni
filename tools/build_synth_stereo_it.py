@@ -131,8 +131,8 @@ def main():
     ap.add_argument("--max-turns", type=int, default=24)
     ap.add_argument("--ref-user", default="/workspace/_rankfix_verify/eval_temporal2_gt_ref_a.wav",
                     help="voce UTENTE (parlato GT reale italiano, run rankfix r1_v3 — audio ottimo, no clipping)")
-    ap.add_argument("--ref-agent", default="/workspace/_rankfix_verify/eval_temporal2_oracle_a_greedy.wav",
-                    help="voce AGENTE (oracle sub-talker con cb0 GT = timbro del nostro sistema, run rankfix r1_v3)")
+    ap.add_argument("--ref-agent", default="/workspace/checkpoints/eval_temporal2_rvq_oracle_a_N7.wav",
+                    help="voce AGENTE (oracle N7: 7 codebook GT ancorati = timbro sub-talker PULITO; blind ASR esatto; greedy era incomprensibile)")
     ap.add_argument("--smoke", action="store_true", help="1 dialogo, 6 turni, niente salvataggio GT esteso")
     args = ap.parse_args()
     if args.smoke:
