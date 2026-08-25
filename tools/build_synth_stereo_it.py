@@ -278,7 +278,16 @@ def main():
         # sovrapposti), i canali si mixano davvero (sovrapposizione fisica).
         # Regola: start_turno_i = max(start_slot_i, end_wav_precedente - overlap_grq)
         # con overlap_grq = sovrapposizione reale tra slot i-1 e i nella griglia.
-        prev_end_wav = -1.0
+        ch0, ch1 = [], []   # (start_sec, wav)
+        # TIME-STRUCTURE TRANSFER corretto:
+        #  - STESSO canale: sempre sequenziale (il turno parte dopo la fine del
+        #    precedente sullo stesso canale) -> mai due voci sovrapposte sul
+        #    proprio canale.
+        #  - CANALI DIVERSI: overlap SOLO dove la griglia reale SmoothConv ha
+        #    sovrapposizione tra slot di canali diversi, per una durata <=
+        #    overlap_gr (clampato alla durata del wav e al tempo disponibile).
+        end_ch = [0.0, 0.0]          # fine attuale per canale
+        last_slot = None             # slot precedente (per calcolare overlap griglia)
         for idx, (s, txt, ch) in enumerate(script):
             print(f"[SYNTH] turno {idx}/{len(script)} ch={ch} '{txt[:50]}'", flush=True)
             try:
@@ -290,16 +299,22 @@ def main():
             import torch as _t
             _t.cuda.empty_cache()
             dur = len(wav) / SR
-            # start: posizione reale dello slot nella partitura
-            start = s["start"]
-            # se il wav precedente sta ancora suonando, calcola overlap della
-            # griglia: overlap_grq = durata sovrapposizione tra slot i-1 e i
-            # (da griglia reale). Il nuovo turno parte al suo start slot, che
-            # può essere < end del precedente -> overlap fisico nel mix.
-            if prev_end_wav > start and (idx > 0):
-                pass  # overlap reale: il turno parte comunque allo start slot
+            other = 1 - ch
+            # overlap nella griglia tra questo slot e il precedente (canali diversi)
+            overlap_gr = 0.0
+            if last_slot is not None and last_slot["ch"] != ch:
+                overlap_gr = max(0.0, min(s["end"], last_slot["end"]) - max(s["start"], last_slot["start"]))
+            # 1) sequenziale sul proprio canale
+            start = max(s["start"], end_ch[ch])
+            # 2) overlap con l'altro canale SOLO se la griglia lo dichiara
+            if overlap_gr > 0.15 and end_ch[other] > start:
+                avail = min(dur, end_ch[other] - start)   # quanto può sovrapporsi
+                ov = min(overlap_gr, avail)
+                start = end_ch[other] - ov                 # arretra fino a ov
+                start = max(start, end_ch[ch])             # mai prima del proprio canale
             (ch0 if ch == 0 else ch1).append((start, wav))
-            prev_end_wav = max(prev_end_wav, start + dur)
+            end_ch[ch] = max(end_ch[ch], start + dur)
+            last_slot = {"ch": ch, "start": s["start"], "end": s["end"]}
 
         if not ch0 and not ch1:
             continue
