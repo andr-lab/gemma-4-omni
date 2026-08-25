@@ -168,6 +168,7 @@ def main():
             x_vector_only_mode=True,
             non_streaming_mode=True,
             do_sample=True, temperature=0.9, top_k=50, top_p=0.9,
+            max_new_tokens=700,   # ~56s audio max per turno (evita runaway 8192)
         )
         wav = np.asarray(out[0], dtype=np.float32)
         if sr != SR:
