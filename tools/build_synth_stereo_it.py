@@ -109,6 +109,7 @@ def main():
     ap.add_argument("--scores-dir", default="/workspace/data/smoothconv_json")
     ap.add_argument("--out", default="/workspace/data/synth_it/out")
     ap.add_argument("--n", type=int, default=10)
+    ap.add_argument("--start-idx", type=int, default=0, help="primo dialogo da processare")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--max-turns", type=int, default=24)
     ap.add_argument("--ref-user", default="/workspace/_rankfix_verify/eval_temporal2_gt_ref_a.wav",
@@ -177,7 +178,12 @@ def main():
         return wav
 
     done = 0
-    for d_idx in range(min(args.n, len(multi))):
+    for d_idx in range(args.start_idx, min(args.start_idx + args.n, len(multi))):
+        base = os.path.join(args.out, f"synth_{d_idx:04d}")
+        if os.path.isfile(base + "_mix.wav"):
+            print(f"[SYNTH] skip {d_idx} (gia' fatto)", flush=True)
+            done += 1
+            continue
         row = multi.iloc[d_idx]
         msgs = row["messages"]
         sc = scores[d_idx % len(scores)]
@@ -229,7 +235,6 @@ def main():
             gt.append({"t": round(t0, 3), "user": int(u), "agent": int(a),
                        "event": "overlap" if (u and a) else "none"})
 
-        base = os.path.join(args.out, f"synth_{d_idx:04d}")
         sf.write(base + "_mix.wav", mix, SR)
         sf.write(base + "_ch0.wav", mix[:, 0], SR)
         sf.write(base + "_ch1.wav", mix[:, 1], SR)
