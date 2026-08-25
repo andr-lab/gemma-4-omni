@@ -175,7 +175,7 @@ def free_run(model, h_seq, cb0_in_gt, K, V, temperature=1.0, top_k=50):
     start = max(T - K, 1)
     confs = []
     for i in range(start, T):
-        logits = model(h_seq, seq[:, :i])[0, -1].float() / max(temperature, 1e-5)
+        logits = model(h_seq[:, :i, :], seq[:, :i])[0, -1].float() / max(temperature, 1e-5)
         if top_k and 0 < top_k < logits.numel():
             v, _ = torch.topk(logits, top_k)
             logits[logits < v[-1]] = -float("inf")
