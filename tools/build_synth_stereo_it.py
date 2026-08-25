@@ -82,25 +82,42 @@ def load_score(json_path: str):
 
 
 def build_script(slots, dialogue_msgs, rng):
+    """Assegna i turni ai canali per RUOLO (user->ch0, assistant->ch1),
+    usando la partitura solo per timing/overlap. I backchannel della
+    partitura diventano frasi brevi IT sul canale dell'ascoltatore."""
     user_turns = [clean_text(m["content"]) for m in dialogue_msgs
                   if m.get("role") == "user" and clean_text(m["content"])]
     asst_turns = [clean_text(m["content"]) for m in dialogue_msgs
                   if m.get("role") == "assistant" and clean_text(m["content"])]
+    # fallback: se manca un ruolo, dividi i turni disponibili
+    if not user_turns and asst_turns:
+        user_turns = asst_turns[: len(asst_turns) // 2]
+        asst_turns = asst_turns[len(asst_turns) // 2:]
+    if not asst_turns and user_turns:
+        asst_turns = user_turns[: len(user_turns) // 2]
+        user_turns = user_turns[len(user_turns) // 2:]
     ui, ai = 0, 0
     script = []
     for s in slots:
         ch = s["ch"]
         tt = s["turn"]
         if tt.lower().startswith("backchannel"):
+            # il backchannel va sull'ALTRO canale rispetto al turno corrente
             txt = rng.choice(BACKCHANNEL_IT)
         elif ch == 0:
-            txt = user_turns[ui % len(user_turns)] if user_turns else "mh"
+            txt = user_turns[ui % len(user_turns)] if user_turns else rng.choice(BACKCHANNEL_IT)
             ui += 1
         else:
-            txt = asst_turns[ai % len(asst_turns)] if asst_turns else "sì"
+            txt = asst_turns[ai % len(asst_turns)] if asst_turns else rng.choice(BACKCHANNEL_IT)
             ai += 1
         script.append((s, txt))
     return script
+
+
+def count_roles(msgs):
+    n_u = sum(1 for m in msgs if m.get("role") == "user" and clean_text(m.get("content", "")))
+    n_a = sum(1 for m in msgs if m.get("role") == "assistant" and clean_text(m.get("content", "")))
+    return n_u, n_a
 
 
 def main():
@@ -125,10 +142,36 @@ def main():
     import pandas as pd
     df = pd.read_parquet(args.sft)
     multi = df[df["category"] == "multi_turno"].reset_index(drop=True)
-    print(f"[SYNTH] {len(multi)} dialoghi multi-turno", flush=True)
+    # filtra dialoghi con turni bilanciati (>=3 user e >=3 assistant)
+    mask = multi["messages"].apply(
+        lambda msgs: count_roles(msgs)[0] >= 3 and count_roles(msgs)[1] >= 3)
+    multi = multi[mask].reset_index(drop=True)
+    print(f"[SYNTH] {len(multi)} dialoghi multi-turno bilanciati (>=3 turni per ruolo)", flush=True)
 
     scores = sorted(glob.glob(os.path.join(args.scores_dir, "*.json")))
-    print(f"[SYNTH] {len(scores)} partiture SmoothConv", flush=True)
+    # seleziona partiture con overlap reale (>=1 coppia sovrapposta >150ms)
+    def _has_overlap(path):
+        try:
+            x = json.load(open(path, encoding="utf-8"))
+            inst = x.get("instances", [])
+            by_ch = {}
+            for i in inst:
+                by_ch.setdefault(int(i.get("channelIndex", 0)), []).append(i)
+            if len(by_ch) < 2:
+                return False
+            chs = list(by_ch.keys())
+            for i0 in by_ch[chs[0]]:
+                s0, e0 = i0.get("start", 0), i0.get("end", 0)
+                for i1 in by_ch[chs[1]]:
+                    if min(e0, i1.get("end", 0)) - max(s0, i1.get("start", 0)) > 0.15:
+                        return True
+            return False
+        except Exception:
+            return False
+    scores_ov = [s for s in scores if _has_overlap(s)]
+    if scores_ov:
+        scores = scores_ov
+    print(f"[SYNTH] {len(scores)} partiture SmoothConv (con overlap: {len(scores_ov)})", flush=True)
     rng = random.Random(args.seed)
     os.makedirs(args.out, exist_ok=True)
 
@@ -193,7 +236,12 @@ def main():
             continue
 
         ch0, ch1 = [], []   # (start_sec, wav)
-        t_cur = 0.0
+        # TIME-STRUCTURE TRANSFER: i turni si piazzano agli start REALI della
+        # partitura SmoothConv; dove la griglia ha overlap (slot successivi
+        # sovrapposti), i canali si mixano davvero (sovrapposizione fisica).
+        # Regola: start_turno_i = max(start_slot_i, end_wav_precedente - overlap_grq)
+        # con overlap_grq = sovrapposizione reale tra slot i-1 e i nella griglia.
+        prev_end_wav = -1.0
         for idx, (s, txt) in enumerate(script):
             ch = s["ch"]
             print(f"[SYNTH] turno {idx}/{len(script)} ch={ch} '{txt[:50]}'", flush=True)
@@ -206,10 +254,16 @@ def main():
             import torch as _t
             _t.cuda.empty_cache()
             dur = len(wav) / SR
-            (ch0 if ch == 0 else ch1).append((t_cur, wav))
-            # gap dello slot reale (partitura) se >0, altrimenti 0.25s
-            gap = max(0.0, s["end"] - s["start"] - dur) if (s["end"] - s["start"]) > 0 else 0.25
-            t_cur = t_cur + dur + (gap * 0.3 + 0.2)   # gap attenuato + minimo
+            # start: posizione reale dello slot nella partitura
+            start = s["start"]
+            # se il wav precedente sta ancora suonando, calcola overlap della
+            # griglia: overlap_grq = durata sovrapposizione tra slot i-1 e i
+            # (da griglia reale). Il nuovo turno parte al suo start slot, che
+            # può essere < end del precedente -> overlap fisico nel mix.
+            if prev_end_wav > start and (idx > 0):
+                pass  # overlap reale: il turno parte comunque allo start slot
+            (ch0 if ch == 0 else ch1).append((start, wav))
+            prev_end_wav = max(prev_end_wav, start + dur)
 
         if not ch0 and not ch1:
             continue
@@ -225,15 +279,22 @@ def main():
             mix[i0:i1, 1] += w[: i1 - i0]
         mix = np.clip(mix, -1.0, 1.0)
 
-        # GT frame-level 12.5Hz
+        # GT frame-level 12.5Hz: USER/AGENT/BOTH/NONE + eventi
+        # (overlap = entrambi attivi; backchannel = turno breve agente < 1.2s)
+        bc_windows = [(s, s + len(w) / SR) for (s, w) in ch1 if len(w) / SR < 1.2]
         nf = int(total * FPS)
         gt = []
         for f in range(nf):
             t0 = f * FRAME
             u = any(s <= t0 < s + len(w) / SR for (s, w) in ch0)
             a = any(s <= t0 < s + len(w) / SR for (s, w) in ch1)
+            ev = "none"
+            if u and a:
+                ev = "overlap"
+            elif a and any(bs <= t0 < be for (bs, be) in bc_windows):
+                ev = "backchannel"
             gt.append({"t": round(t0, 3), "user": int(u), "agent": int(a),
-                       "event": "overlap" if (u and a) else "none"})
+                       "event": ev})
 
         sf.write(base + "_mix.wav", mix, SR)
         sf.write(base + "_ch0.wav", mix[:, 0], SR)
