@@ -74,36 +74,43 @@ TEXT_BLOCK_LEN = KP.TEXT_BLOCK_LEN
 
 
 @torch.inference_mode()
-def extract(ds, limit, subsample=1):
+def extract(ds, limit, subsample=1, batch_size=16):
+    """Estrazione BATCHED: le finestre hanno lunghezza fissa (TEXT_BLOCK_LEN +
+    n_audio_feat costanti) -> batch senza padding, ~16x piu' veloce."""
     raw, sub, htx, cs = [], [], [], []
-    for i in range(min(limit, len(ds))):
-        if i % subsample != 0:
-            continue
-        item = ds[i]
-        T = item["audio_targets"].shape[0]
-        inp = {"input_ids": item["input_ids"].unsqueeze(0).to(device),
-               "attention_mask": item["attention_mask"].unsqueeze(0).to(device),
-               "input_features": item["input_features"].unsqueeze(0).to(device),
-               "input_features_mask": item["input_features_mask"].unsqueeze(0).to(device)}
+    idxs = [i for i in range(min(limit, len(ds))) if i % subsample == 0]
+    for b0 in range(0, len(idxs), batch_size):
+        bidx = idxs[b0: b0 + batch_size]
+        items = [ds[i] for i in bidx]
+        B = len(items)
+        T = items[0]["audio_targets"].shape[0]
+        # stack (tutte le finestre hanno stessa lunghezza)
+        inp = {
+            "input_ids": torch.stack([it["input_ids"] for it in items]).to(device),
+            "attention_mask": torch.stack([it["attention_mask"] for it in items]).to(device),
+            "input_features": torch.stack([it["input_features"] for it in items]).to(device),
+            "input_features_mask": torch.stack([it["input_features_mask"] for it in items]).to(device),
+        }
         go = duplex_model.base_model(**inp, output_hidden_states=True, return_dict=True)
-        lh = go.hidden_states[-1]                              # (1, L, 1536)
-        # blocco testo: posizioni [1, 1+TEXT_BLOCK_LEN) (dopo [bos], prima di [boa])
-        tblock = lh[:, 1:1+TEXT_BLOCK_LEN, :]                  # (1, 48, 1536)
-        # maschera: token non-pad del testo (input_ids != pad id 0?) -> mean pooling
-        tid = inp["input_ids"][0, 1:1+TEXT_BLOCK_LEN]
-        m = (tid != 0).unsqueeze(-1).float()                   # (48,1)
-        denom = m.sum().clamp(min=1.0)
-        htx.append((tblock.squeeze(0) * m).sum(0) / denom)     # (1536,)
+        lh = go.hidden_states[-1]                              # (B, L, 1536)
+        # blocco testo: posizioni [1, 1+TEXT_BLOCK_LEN) -> mean pooling per batch
+        tblock = lh[:, 1:1+TEXT_BLOCK_LEN, :]                  # (B, 48, 1536)
+        tid = inp["input_ids"][:, 1:1+TEXT_BLOCK_LEN]
+        m = (tid != 0).unsqueeze(-1).float()                   # (B,48,1)
+        denom = m.sum(1).clamp(min=1.0)                        # (B,1)
+        htx_b = (tblock * m).sum(1) / denom                    # (B,1536)
         # posizioni audio: [afs, afs+fpf*T) step fpf
-        ah = lh[:, afs: afs + fpf*T: fpf, :].float()           # (1, T, 1536)
+        ah = lh[:, afs: afs + fpf*T: fpf, :].float()           # (B, T, 1536)
         ad = duplex_model._apply_causal_conv(
             ah.to(next(duplex_model.causal_conv.parameters()).dtype)).float()
-        raw.append(ad.squeeze(0).cpu())
         h_s = duplex_model.ht_adapter(
             ad.to(next(duplex_model.ht_adapter.parameters()).dtype)).float()
-        sub.append(h_s.squeeze(0).cpu())
-        cs.append(item["audio_targets"][:, 0].clone())
-        if (len(raw) > 0) and (len(raw) % 200 == 0):
+        for j in range(B):
+            raw.append(ad[j].cpu())
+            sub.append(h_s[j].cpu())
+            htx.append(htx_b[j].cpu())
+            cs.append(items[j]["audio_targets"][:, 0].clone())
+        if len(raw) % 200 < batch_size:
             print(f"[CACHE2]   ... {len(raw)} finestre estratte", flush=True)
     return raw, sub, htx, cs
 
