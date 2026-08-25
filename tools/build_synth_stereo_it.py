@@ -306,7 +306,7 @@ def main():
             #    ~N(0.5, 0.2) clamp [0.25, 0.9]s -> target ~5% del tempo
             #    (statistica reale SmoothConv 5.9%). La griglia dà il timing
             #    dei turni; l'overlap si inietta come da letteratura.
-            if (idx > 0 and end_ch[other] > start and rng.random() < 0.35):
+            if (idx > 0 and end_ch[other] > start and rng.random() < 0.5):
                 ov = float(np.clip(rng.gauss(0.5, 0.2), 0.25, 0.9))
                 start = max(start, end_ch[other] - ov)
             else:
