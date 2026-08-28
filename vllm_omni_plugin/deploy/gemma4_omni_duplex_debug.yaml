@@ -3,7 +3,8 @@
 # capture → startup ~1-2 min (vs ~8 min). SOLO PER DEBUG: la produzione usa
 # gemma4_omni_duplex.yaml (compile + cudagraph attivi).
 # Riferimento: vllm_omni/deploy/qwen3_tts.yaml (pattern ufficiale streaming).
-async_chunk: false
+async_chunk: true
+session_mode: duplex
 
 connectors:
   connector_of_shared_memory:

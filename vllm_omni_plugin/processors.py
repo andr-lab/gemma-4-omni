@@ -157,6 +157,52 @@ def _estimate_qwen3tts_prompt_len(additional_information: dict[str, Any], task_t
 
 
 # ---------------------------------------------------------------------------
+# Patch prewarm async: la lunghezza del placeholder del talker nel prewarm usa
+# compute_talker_prompt_ids_length (conteggio token Qwen-specific) che sul
+# prompt Gemma restituisce 0 → il talker riceve prompt_len=1 → prefill troncato
+# → rumore. La patch restituisce una stima generosa (placeholder KV).
+# ---------------------------------------------------------------------------
+_PREWARM_PATCHED = False
+
+
+def install_async_prewarm_patch() -> None:
+    """Patch di compute_talker_prompt_ids_length nel namespace orchestrator.
+
+    Il prewarm (orchestrator._prewarm_async_chunk_stages) crea il request del
+    talker con prompt_token_ids=[0]*next_prompt_len dove next_prompt_len deriva
+    da questa funzione. La nostra versione restituisce una stima generosa:
+    il talker farà lo slice del prompt reale (estimate+18) e padding con
+    tts_pad (neutro), e il decode partirà dopo il prefill completo.
+    """
+    global _PREWARM_PATCHED
+    if _PREWARM_PATCHED:
+        return
+    try:
+        from vllm_omni_plugin.models.talker_v9 import V9_EXTRA_FRAMES
+
+        def _duplex_talker_prompt_ids_length(prompt_token_ids) -> int:
+            n = len(prompt_token_ids) if prompt_token_ids else 0
+            out = max(1, min(512, int(n * 1.5) + 32) + V9_EXTRA_FRAMES)
+            import os as _os
+
+            if _os.environ.get("DEBUG_REGISTRY"):
+                print(f"[prewarm-patch] n={n} -> {out}", flush=True)
+            return out
+
+        # Patch nel modulo adapter: il prewarm fa un import LOCALE
+        # ``from vllm_omni.distributed.omni_connectors.adapter import
+        # compute_talker_prompt_ids_length`` dentro _prewarm_async_chunk_stages,
+        # quindi l'attributo da sostituire è quello del modulo adapter.
+        import vllm_omni.distributed.omni_connectors.adapter as _adapter
+
+        _adapter.compute_talker_prompt_ids_length = _duplex_talker_prompt_ids_length
+        _PREWARM_PATCHED = True
+        print("[vllm_omni_plugin] async prewarm patch installata", flush=True)
+    except Exception as exc:  # fail-soft
+        print(f"[vllm_omni_plugin] async prewarm patch fallita: {exc}", flush=True)
+
+
+# ---------------------------------------------------------------------------
 # 1. Sync processor (stage 1 talker) — firma orchestrator
 # ---------------------------------------------------------------------------
 def thinker2talker_v9_token_only(

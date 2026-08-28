@@ -11,6 +11,7 @@
 # stage_sends_async_output / save-loop del transfer adapter).
 # Riferimento: vllm_omni/deploy/qwen3_tts.yaml (pattern ufficiale streaming).
 async_chunk: false
+session_mode: duplex
 
 connectors:
   connector_of_shared_memory:

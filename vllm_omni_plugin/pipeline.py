@@ -33,6 +33,10 @@ GEMMA4_OMNI_DUPLEX_PIPELINE = PipelineConfig(
     # Default di pipeline = architettura dello stage 0 (thinker nativo vLLM).
     model_arch="Gemma4ForConditionalGeneration",
     hf_architectures=("Gemma4ForConditionalGeneration",),
+    # Full-duplex /v1/realtime: extension + adapter (livello 1: chat fallback).
+    duplex_runtime_extension="vllm_omni_plugin.duplex_extension.Gemma4OmniDuplexRuntimeExtension",
+    duplex_serving_adapter="vllm_omni_plugin.duplex_adapter.Gemma4OmniServingRuntimeAdapter",
+    duplex_control_enabled=True,
     stages=(
         # ----------------------------------------------------------------
         # Stage 0: Thinker — Gemma 4 E2B (vLLM nativo, testo + hidden latenti)

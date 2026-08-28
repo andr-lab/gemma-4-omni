@@ -190,6 +190,20 @@ class Gemma4OmniV9TalkerForConditionalGeneration(Qwen3TTSTalkerForConditionalGen
     def preprocess(self, input_ids: torch.Tensor, input_embeds: torch.Tensor | None, **info_dict: Any):
         # Text conditioning mancante? Nel flusso async_chunk il testo viaggia
         # come token ids Gemma (ids.output) e va ricostruito qui.
+        import os as _os
+
+        if _os.environ.get("DEBUG_REGISTRY"):
+            try:
+                _plen = info_dict.get("_omni_prompt_len")
+                _nct = info_dict.get("_omni_num_computed_tokens")
+                _isp = info_dict.get("_omni_is_prefill")
+                print(
+                    f"[V9-talker] preprocess span={int(input_ids.shape[0])} "
+                    f"prompt_len={_plen} computed={_nct} is_prefill={_isp}",
+                    flush=True,
+                )
+            except Exception:
+                pass
         merged = dict(info_dict)
         additional_information = merged.get("additional_information")
         if isinstance(additional_information, dict):
@@ -219,11 +233,6 @@ class Gemma4OmniV9TalkerForConditionalGeneration(Qwen3TTSTalkerForConditionalGen
                 merged["additional_information"] = additional_information
         if not _has_tts_text_conditioning(merged, merged.get("hidden_states")):
             text = self._recover_text_from_info(merged)
-            print(
-                f"[V9-talker] preprocess: text_missing=True keys={sorted(merged.keys())} "
-                f"ids={type(merged.get('ids')).__name__} recovered={bool(text)}",
-                flush=True,
-            )
             text = self._recover_text_from_info(merged)
             if text:
                 if isinstance(additional_information, dict):
