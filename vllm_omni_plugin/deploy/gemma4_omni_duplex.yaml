@@ -1,0 +1,106 @@
+# vLLM-Omni Gemma-4-Omni Duplex deploy: thinker (Gemma4) → talker (Qwen3-TTS + V9) → code2wav.
+# 1x RTX 3090 (24GB).
+# vLLM-Omni Gemma-4-Omni Duplex deploy: thinker (Gemma4) → talker (Qwen3-TTS + V9) → code2wav.
+# 1x RTX 3090 (24GB).
+#
+# ⚠️ STATO 2026-08-28: async_chunk=false = MODALITÀ VALIDATA (audio completo
+# in risposta, V9 attivo, ASR 100%). Lo streaming incrementale (async_chunk=true)
+# è IN LAVORO: il percorso è implementato (thinker2talker_v9_async_chunk con
+# OmniPayloadStruct + replace_streaming_prompt + text recovery worker-side) ma il
+# sender di stage 0 non emette chunk al connector (da debuggare: la catena
+# stage_sends_async_output / save-loop del transfer adapter).
+# Riferimento: vllm_omni/deploy/qwen3_tts.yaml (pattern ufficiale streaming).
+async_chunk: false
+
+connectors:
+  connector_of_shared_memory:
+    name: SharedMemoryConnector
+    extra:
+      codec_streaming: true
+      connector_get_sleep_s: 0.01
+      connector_get_max_wait_first_chunk: 3000
+      connector_get_max_wait: 300
+      # Finestra sliding del decoder code2wav.
+      codec_chunk_frames: 25
+      codec_left_context_frames: 72
+      # Emette subito il primo chunk audio (TTFA bassa), poi ritmo stabile.
+      initial_codec_chunk_frames: 1
+      decode_batch_max_size: 4
+
+stages:
+  # ------------------------------------------------------------------
+  # Stage 0: Thinker Gemma 4 E2B (bf16, ~5-6GB VRAM)
+  # ------------------------------------------------------------------
+  - stage_id: 0
+    max_num_seqs: 8
+    gpu_memory_utilization: 0.38
+    trust_remote_code: true
+    enable_prefix_caching: false
+    async_scheduling: true
+    max_num_batched_tokens: 4096
+    max_model_len: 1024
+    devices: "0"
+    output_connectors:
+      to_stage_1: connector_of_shared_memory
+    default_sampling_params:
+      temperature: 0.7
+      top_p: 0.9
+      max_tokens: 128
+      repetition_penalty: 1.0
+
+  # ------------------------------------------------------------------
+  # Stage 1: Talker Qwen3-TTS + Prefix V9 (bf16 ~6-7GB VRAM)
+  #   CB0:        T=0.6, top_k=20, repetition_penalty=1.0  (ADR-023: MAI
+  #               penalizzare i token audio recenti)
+  #   SubTalker:  top_k=20, top_p=0.90, T=0.80 (MAI greedy — ADR-023)
+  # ------------------------------------------------------------------
+  - stage_id: 1
+    max_num_seqs: 16
+    gpu_memory_utilization: 0.28
+    trust_remote_code: true
+    enable_prefix_caching: false
+    async_scheduling: true
+    max_num_batched_tokens: 16384
+    max_model_len: 4096
+    devices: "0"
+    input_connectors:
+      from_stage_0: connector_of_shared_memory
+    output_connectors:
+      to_stage_2: connector_of_shared_memory
+    default_sampling_params:
+      temperature: 0.6
+      top_k: 20
+      top_p: 1.0
+      max_tokens: 512
+      min_tokens: 2
+      repetition_penalty: 1.0
+    silence_ban_frames: 0
+    subtalker_sampling_params:
+      do_sample: true
+      temperature: 0.80
+      top_k: 20
+      # Il code predictor nativo vLLM non implementa top_p (NotImplementedError
+      # se != 1.0): con top_k=20 il supporto di campionamento è già troncato.
+      top_p: 1.0
+
+  # ------------------------------------------------------------------
+  # Stage 2: Code2Wav vocoder 24kHz (~3-4GB VRAM)
+  # ------------------------------------------------------------------
+  - stage_id: 2
+    max_num_seqs: 4
+    gpu_memory_utilization: 0.28
+    enforce_eager: false
+    trust_remote_code: true
+    enable_prefix_caching: false
+    async_scheduling: true
+    max_num_batched_tokens: 16384
+    max_model_len: 8192
+    devices: "0"
+    input_connectors:
+      from_stage_1: connector_of_shared_memory
+    default_sampling_params:
+      temperature: 0.0
+      top_p: 1.0
+      top_k: -1
+      max_tokens: 65536
+      repetition_penalty: 1.0

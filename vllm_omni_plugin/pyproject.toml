@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vllm-omni-plugin-gemma4-duplex"
+version = "1.0.0"
+description = "Gemma-4-Omni Full-Duplex serving plugin for vLLM-Omni (V9 prefix conditioning)"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.setuptools]
+packages = ["vllm_omni_plugin", "vllm_omni_plugin.models"]
+
+[tool.setuptools.package-dir]
+"vllm_omni_plugin" = "."
+
+[project.entry-points."vllm_omni.general_plugins"]
+gemma4_omni_duplex = "vllm_omni_plugin:register"
+
+# Gruppo vllm.general_plugins (stesso canale di vllm-omni e vllm-bnb-plugin,
+# caricato garantitamente in ogni processo engine core): il prefisso "zzz"
+# garantisce che venga eseguito DOPO register_omni_models_to_vllm.
+[project.entry-points."vllm.general_plugins"]
+zzz_gemma4_omni_duplex = "vllm_omni_plugin:register"
