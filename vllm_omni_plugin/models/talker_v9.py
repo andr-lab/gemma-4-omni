@@ -195,6 +195,28 @@ class Gemma4OmniV9TalkerForConditionalGeneration(Qwen3TTSTalkerForConditionalGen
         if isinstance(additional_information, dict):
             for k, v in additional_information.items():
                 merged.setdefault(k, v)
+        # Il task Base implica codec_streaming=True nel preprocess nativo
+        # (streaming del codec RVQ), incompatibile con il nostro deploy
+        # full-payload: forziamo False per un decode one-shot coerente.
+        meta = merged.get("meta")
+        if isinstance(meta, dict):
+            meta = dict(meta)
+            meta["codec_streaming"] = False
+            merged["meta"] = meta
+        elif meta is None:
+            merged["meta"] = {"codec_streaming": False}
+        # Nel flusso async il payload connector (OmniPayloadStruct) non può
+        # trasportare task_type/language: il default nativo (CustomVoice)
+        # richiederebbe uno speaker non disponibile. Forziamo VoiceDesign
+        # (replica del prefill addestrato) quando il task non è specificato.
+        if not merged.get("task_type"):
+            merged.setdefault("task_type", ["VoiceDesign"])
+            merged.setdefault("language", ["Italian"])
+            if isinstance(additional_information, dict):
+                additional_information = dict(additional_information)
+                additional_information.setdefault("task_type", ["VoiceDesign"])
+                additional_information.setdefault("language", ["Italian"])
+                merged["additional_information"] = additional_information
         if not _has_tts_text_conditioning(merged, merged.get("hidden_states")):
             text = self._recover_text_from_info(merged)
             print(
@@ -220,6 +242,17 @@ class Gemma4OmniV9TalkerForConditionalGeneration(Qwen3TTSTalkerForConditionalGen
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
+
+        # Profili voce di default (voci registrate come custom_voice_dir):
+        # il loader nativo gira DENTRO super().__init__, quindi impostiamo il
+        # campo config e ricarichiamo qui per le voci della nostra dir.
+        voices_dir = os.environ.get("GEMMA4_OMNI_CUSTOM_VOICE_DIR")
+        if voices_dir and os.path.isdir(voices_dir):
+            try:
+                self.config.custom_voice_dir = voices_dir
+                self._load_custom_voice_profiles()
+            except Exception as exc:  # fail-soft
+                logger.warning("[V9] Caricamento profili voce fallito (%s).", exc)
 
         # I moduli V9 vengono costruiti qui ma i pesi caricati in load_weights()
         # (il tracker vLLM esige che ogni parametro provenga dal flusso di load).

@@ -20,12 +20,13 @@ Flusso:
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 import torch
 
 from vllm_omni_plugin.models.talker_v9 import V9_EXTRA_FRAMES, V9_HIDDEN_KEY
+from vllm_omni_plugin.voices import resolve_voice_conditioning
 
 # Default voce/lingua per il talker (overridabili dal prompt originale).
 DEFAULT_LANGUAGE = "Italian"
@@ -71,6 +72,37 @@ def _extract_voice_and_language(prompt: Any, index: int = 0) -> tuple[str | None
         if isinstance(lang, str) and lang.strip():
             language = lang.strip()
     return voice, language
+
+
+def _extract_voice_request_fields(prompt: Any, index: int = 0) -> dict[str, Any]:
+    """Estrae i campi voce dal prompt client (voice/voice_style/ref_audio/ref_text).
+
+    Il client può passare, oltre ai messaggi standard:
+      - voice: nome di un profilo registrato (voci di default)
+      - voice_style: descrizione dello stile vocale (VoiceDesign instructions)
+      - ref_audio: base64 WAV per il cloning a 3s (task Base)
+      - ref_text: trascrizione del ref_audio
+    """
+    out: dict[str, Any] = {}
+    if prompt is None:
+        return out
+    if isinstance(prompt, list):
+        prompt = prompt[index] if index < len(prompt) else None
+    if prompt is None:
+        return out
+    for container_name in ("multi_modal_data", "additional_information"):
+        container = getattr(prompt, container_name, None)
+        if isinstance(container, dict):
+            for k in ("voice", "voice_style", "instructions", "ref_audio", "ref_text"):
+                v = container.get(k)
+                if v is not None and k not in out:
+                    out[k] = v
+    if isinstance(prompt, dict):
+        for k in ("voice", "voice_style", "instructions", "ref_audio", "ref_text"):
+            v = prompt.get(k)
+            if v is not None and k not in out:
+                out[k] = v
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -155,17 +187,25 @@ def thinker2talker_v9_token_only(
             continue
 
         voice, language = _extract_voice_and_language(prompt, index=i)
+        req_fields = _extract_voice_request_fields(prompt, index=i)
         additional_information: dict[str, Any] = {
             "text": [reply_text],
-            # VoiceDesign: unico task che replica il prefill del sistema
-            # addestrato (interactive_gemma4_omni_live.py): tag think + lingua,
-            # NESSUN speaker embedding (il modello 12Hz Base non ha spk_id
-            # CustomVoice registrati).
-            "task_type": ["VoiceDesign"],
             "language": [language],
             "non_streaming_mode": [True],
         }
-        if voice:
+        # Conditioning voce (voci di default / voice_style / ref_audio):
+        # VoiceDesign è il default quando non c'è nulla di esplicito.
+        voice_cond = resolve_voice_conditioning(
+            voice=voice or req_fields.get("voice"),
+            voice_style=req_fields.get("voice_style") or req_fields.get("instructions"),
+            ref_audio_b64=req_fields.get("ref_audio"),
+            ref_text=req_fields.get("ref_text"),
+        )
+        if voice_cond:
+            additional_information.update(voice_cond)
+        else:
+            additional_information["task_type"] = ["VoiceDesign"]
+        if voice and "speaker" not in additional_information:
             additional_information["speaker"] = [voice]
 
         ph_len = _estimate_qwen3tts_prompt_len(additional_information) + V9_EXTRA_FRAMES
@@ -237,6 +277,7 @@ def thinker2talker_v9_async_chunk(
     multimodal_output: dict[str, Any] | None,
     request: Any,
     is_finished: bool = False,
+    new_token_ids: Iterable[int] | None = None,
 ):
     """Accumula hidden states del thinker per chunk; emette il payload alla fine.
 
@@ -250,23 +291,53 @@ def thinker2talker_v9_async_chunk(
 
     rid = getattr(request, "external_req_id", None) or getattr(request, "request_id", None)
     finished = bool(is_finished or request.is_finished())
+    import os as _os
+
+    print(
+        f"[V9-proc] async_chunk CALLED rid={rid} finished={finished} "
+        f"has_mm={isinstance(multimodal_output, Mapping)} pid={_os.getpid()}",
+        flush=True,
+    )
     if isinstance(multimodal_output, Mapping):
-        hs = multimodal_output.get("hidden_states")
+        # Il payload inter-stage del pooler usa la chiave "hidden" (hidden states
+        # dello span schedulato); "hidden_states" è il formato dello snapshot
+        # async. Supportiamo entrambi.
+        hs = multimodal_output.get("hidden")
+        if not isinstance(hs, torch.Tensor):
+            hs = multimodal_output.get("hidden_states")
         if isinstance(hs, torch.Tensor) and hs.numel() > 0:
             buf = transfer_manager.request_payload.setdefault(rid, [])
             buf.append(hs.detach().cpu())
+    # Accumula i token generati a questo step (canale new_token_ids del
+    # sender; all_token_ids del request NON è affidabile in modalità async).
+    if new_token_ids:
+        id_buf = transfer_manager.request_payload.setdefault(rid + "__ids", [])
+        id_buf.extend(int(t) for t in new_token_ids)
     if not finished:
         return None
 
     chunks = transfer_manager.request_payload.pop(rid, [])
     if not chunks:
+        print(f"[V9-proc] finish: chunks VUOTI (no hidden accumulati)", flush=True)
         return None
     full = torch.cat(chunks, dim=0) if len(chunks) > 1 else chunks[0]
-    prompt_len = len(_ensure_list(getattr(request, "prompt_token_ids", None)))
-    generated = full[prompt_len:].contiguous() if full.shape[0] > prompt_len else full.contiguous()
-    gen_ids = _ensure_list(getattr(request, "all_token_ids", None))[prompt_len:]
+    all_ids = _ensure_list(getattr(request, "all_token_ids", None))
+    prompt_ids = _ensure_list(getattr(request, "prompt_token_ids", None))
+    prompt_len = len(prompt_ids)
+    # Token generati: canale new_token_ids accumulato (affidabile) con
+    # fallback su all_token_ids[prompt_len:].
+    gen_ids = transfer_manager.request_payload.pop(rid + "__ids", None) or []
+    if not gen_ids:
+        gen_ids = all_ids[prompt_len:]
+    print(
+        f"[V9-proc] finish: hidden={tuple(full.shape)} all_ids={len(all_ids)} "
+        f"prompt_ids={len(prompt_ids)} gen_ids={len(gen_ids)}",
+        flush=True,
+    )
     if not gen_ids:
         return None
+
+    generated = full[prompt_len:].contiguous() if full.shape[0] > prompt_len else full.contiguous()
 
     # Detokenizzazione (tokenizer Gemma lazy, una volta per processo) per la
     # stima ESATTA del placeholder e per la text conditioning worker-side.

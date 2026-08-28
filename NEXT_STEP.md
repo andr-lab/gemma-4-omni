@@ -1,50 +1,48 @@
-# NEXT_STEP — Gemma 4 Full-Duplex Omni Pipeline (28 Agosto 2026)
+# NEXT_STEP — Gemma 4 Full-Duplex Omni Pipeline (28 Agosto 2026, sera)
 
-## 1. ✅ LINEA PROJECTOR CONSOLIDATA & VALIDATA (Invariato)
-- **Projector V9 Deep Causal Transformer (211.83M parametri)**: `v9_prefix_step10000.pt` (Val CB0 Loss `2.294`, Top-1 Acc `40.8%`).
-- **Inference Engine Real-Time**: CUDA Graph Sub-Talker, RTF 0.7541, qualità 100% bit-pari.
+## 1. ✅ LINEA PROJECTOR CONSOLIDATA & VALIDATA
+- **Projector V9** (211.83M): `v9_prefix_step10000.pt` (Val CB0 2.294, Acc 40.8%).
+- **Inference Real-Time**: CUDA Graph Sub-Talker, RTF 0.7541.
 - Causal Conv 1D addestrata (7.08M, Task 11i SOTA, `custom_duplex_heads.pt`).
 
-## 2. ✅ TURNDETECTORHEAD IMPLEMENTATA E VALIDATA E2E (ADR-027, Invariato)
-- `turn_detector_head.py`: 5 classi, <0.45ms/frame, StreamingDuplexController con Zero-Reset KV-Cache.
+## 2. ✅ TURNDETECTORHEAD (ADR-027)
+- `turn_detector_head.py`: 5 classi, <0.45ms/frame, StreamingDuplexController.
 
-## 3. ✅ SERVING vLLM-OMNI: PIPELINE 3 STADI FUNZIONANTE CON PROJECTOR V9 (ADR-028)
+## 3. ✅ SERVING vLLM-Omni CON PROJECTOR V9 (ADR-028) — VALIDATO full-payload
 
-**STATO: FUNZIONANTE E VALIDATO in full-payload mode (async_chunk=false).**
+### Pipeline (RTX 3090, porta 8091)
+- Stage 0: Gemma4ForConditionalGeneration (unsloth bnb-4bit, nf4 via vllm-bnb-plugin, ~7.3GB)
+- Stage 1: Gemma4OmniV9TalkerForConditionalGeneration (Qwen3-TTS 1.7B + Prefix KV-Cache V9, ~3.9GB)
+- Stage 2: Qwen3TTSCode2Wav 24kHz (~0.5GB)
 
-### Cosa funziona (validato su RTX 3090)
-- **Pipeline disaggregata 3 stadi** registrata out-of-tree:
-  - Stage 0 (thinker): `Gemma4ForConditionalGeneration` (unsloth bnb-4bit, inferenza nf4 via `vllm-bnb-plugin` 0.0.3, ~7.3GB VRAM).
-  - Stage 1 (talker): `Gemma4OmniV9TalkerForConditionalGeneration` = Qwen3-TTS 1.7B + **Prefix KV-Cache V9** (projector 211.83M + causal conv, pesi dai checkpoint addestrati, ~3.9GB).
-  - Stage 2 (code2wav): `Qwen3TTSCode2Wav` 24kHz (~0.5GB).
-- **Endpoint OpenAI**: `POST /v1/chat/completions` con `modalities: ["text", "audio"]` → choice[0]=testo, choice[1]=audio WAV base64. `GET /v1/models`, `/health`.
-- **Condizionamento V9 ATTIVO**: la risposta del thinker → hidden states last-layer → h_tx (mean) + h_raw_style (interp 16 + causal conv) → proj → prefisso `[ICL | h_pfx | BOS]` nel talker (ricetta esatta di `interactive_gemma4_omni_live.py`).
-- **Qualità validata** (frase lunga, 15.6s, trimmed): ASR Whisper **100% fedeltà lessicale**, Crest Factor **4.63** (rif. live 4.72), HNR **+3.06 dB** (target >3), THD+N **33.1%** (rif. 28.6%).
-  - A/B: V9 OFF → audio sano ma senza condizionamento; V9 ON con placeholder corto → silenzio (fix: off-by-one BOS, `V9_EXTRA_FRAMES = 16+2`).
-- **Artefatti**: `samples/vllm_omni_serving/vllm_omni_serving_v9_duplex_trimmed.wav` (frase lunga V9), `vllm_omni_serving_v9_ciao.wav`, `vllm_omni_serving_textonly_ciao.wav`.
-- **Avvio**: `start_vllm_omni_server.sh` (container `gemma4_omni_server`, porta 8091, ~8 min warmup).
+### 4 CAPABILITY VOCE (tutte VALIDATE in full-payload, async_chunk=false)
+1. ✅ **System prompt LLM**: standard nei messaggi chat (testato: risposta conforme).
+2. ✅ **Voice style (VoiceDesign + instruct)**: `voice_style` nel request → il talker usa il task VoiceDesign con le istruzioni. Audio pulito (HNR 3.06 dB, THD 33%).
+3. ✅ **Ref audio cloning (Base)**: `ref_audio` (base64 WAV) + `ref_text` → task Base con cloning a 3s dal report Qwen3-TTS (arXiv:2601.15621). ASR 100% intelligibile.
+4. ✅ **Voci di default**: `voice="gemma"|"leonardo"` → profili x-vector registrati (custom_voice_dir). Generati con `tools/build_voice_profiles.py` (mel slaney esatta + speaker encoder) dai sample validati. ASR 100% intelligibile; qualità acustica leggermente inferiore al default (voce diversa).
+- Default (nessun parametro voce): VoiceDesign puro = voce V9 addestrata (la migliore qualità).
 
-### Cosa NON funziona ancora
-- **Streaming audio incrementale (async_chunk=true)**: il percorso è implementato (`thinker2talker_v9_async_chunk` → OmniPayloadStruct con `ids.output` + `hidden_states.output` + `meta.replace_streaming_prompt`) e il talker recupera il testo dai token ids Gemma worker-side, MA **il sender di stage 0 non emette chunk al connector** → il talker riceve solo il prewarm → errore. Da debuggare: catena `stage_sends_async_output` / save-loop del transfer adapter (il role "sender" di stage 0 sembra configurato da `get_connectors_config_for_stage`, ma il save-loop non parte).
-- **Duplex runtime extension / TurnDetectorHead nel serving**: NON implementata contro l'interfaccia reale (`DuplexRuntimeExtension` con `configure_sampling_params`/`plan_append`/`decide_output`). `duplex_control_enabled=false` di default.
-- **WebSocket `/v1/realtime`**: non testato.
-- **`--served-model-name`**: usare un nome pulito (`gemma-4-omni-duplex`) invece del path del checkpoint.
-- **`--generation-config vllm`**: il `generation_config.json` di Gemma sovrascrive i sampling params del thinker (temperature 1.0/0.95/64) — aggiungere il flag per usare i parametri del deploy.
+### Debug veloce (SDD: docs.vllm.cc configuration/optimization)
+- **`GEMMA4_OMNI_MODE=debug`** (default): deploy `gemma4_omni_duplex_debug.yaml` con `enforce_eager` su tutti gli stage + `kv_cache_memory` fisso → **startup 4.5 min** (vs 8 min).
+- **Volume cache vLLM persistente**: `/home/administrator/.cache/vllm:/root/.cache/vllm` → il 2° boot in modalità prod è molto più veloce (compile cache).
+- `GEMMA4_OMNI_MODE=prod`: deploy completo (torch.compile + CUDA graphs).
+
+### NON funzionante (da investigare con il ciclo rapido)
+- ⚠️ **Streaming audio incrementale (async_chunk=true)**: il sender di stage 0 ora emette chunk (`thinker2talker_v9_async_chunk` chiamato, hidden "hidden" key fix, `new_token_ids` accumulati, testo recuperato worker-side), MA il talker produce rumore/512 frame in modalità async (probabile: codec_streaming/placeholder in async + EOS non campionato). Il deploy resta su async_chunk=false (stato validato).
+- ⚠️ **Duplex runtime extension** (TurnDetectorHead su interfaccia reale) + WebSocket `/v1/realtime`: da implementare/testare.
+- Nota: il trim energetico e la peak-normalizzazione (post-processing del ground truth) NON sono applicati dal serving — i client devono tagliare la coda di silenzio.
 
 ### Note tecniche chiave (lezione appresa)
-1. **Registrazione modello**: il ModelConfig di vLLM-Omni risolve via `OmniModelRegistry` (snapshot separato!) — registrare in ENTRAMBI (`ModelRegistry` + `OmniModelRegistry`).
-2. **Entry point**: registrare in `vllm.general_plugins` (prefisso `zzz_` per ordine) E `vllm_omni.general_plugins` — caricati in tutti i processi.
-3. **Pesi extra (V9/causal_conv)**: caricarli DENTRO `load_weights()` con `assign=True` e dichiarare i nomi nel set di ritorno (tracker vLLM).
-4. **Buffer non-persistenti RoPE**: `assign=True` NON li sposta → `.to(device)` esplicito nel forward.
-5. **Placeholder talker**: `ph_len = estimate + V9_EXTRA_FRAMES (16+2)` — corto di 1 frame = BOS troncato = silenzio.
-6. **task_type VoiceDesign**: replica il prefill addestrato (tag think + lingua, nessun speaker — il modello 12Hz Base ha `spk_id: {}`).
-7. **SubTalker**: il code predictor nativo vLLM NON supporta top_p<1.0 → `top_p: 1.0` (con top_k=20 il campionamento resta troncato).
-8. **bnb**: plugin ufficiale `vllm-bnb-plugin` (non supportato in-tree da vLLM 0.28); serve shim `WeightsMapper.get_rename_mapper/_map_name`; NESSUN flag `--quantization` globale (si inferisce dal config.json per stage).
+1. Registrare in `ModelRegistry` E `OmniModelRegistry`; entry point in `vllm.general_plugins` (zzz_) e `vllm_omni.general_plugins`.
+2. Pesi extra in `load_weights()` (assign=True) + dichiarati al tracker; buffer non-persistenti RoPE → .to(device).
+3. Placeholder talker: `ph_len = estimate + V9_EXTRA_FRAMES(18)`; task VoiceDesign default; subtalker top_p=1.0.
+4. **async_chunk=true cambia TUTTO il flusso** (payload struct via connector, prewarm, replace_streaming_prompt): il percorso async va validato SEPARATAMENTE — non mischiare con le fix full-payload.
+5. Profili voce: formato ufficiale (manifest + safetensors speaker_embedding 2048D); estrazione x-vector con la mel slaney ESATTA del builder (torchaudio melscale_fbanks) — una mel diversa degrada la voce.
+6. Debug rapido: enforce_eager + kv_cache_memory + cache compile persistente.
 
 ---
 
 ## 4. PROSSIMI PASSI (in ordine)
-1. **Debug async_chunk** (streaming audio): capire perché il sender di stage 0 non emette chunk (save-loop / role). Ipotesi: il save-loop richiede `_should_use_async_omni_output` (async scheduling + `use_async_omni_output` sul model_config) oppure la partition dei pooler output; verificare con log del transfer adapter.
-2. **Duplex runtime extension** (TurnDetectorHead) contro l'interfaccia reale `vllm_omni.experimental.fullduplex.engine.contracts` e WebSocket `/v1/realtime` E2E.
-3. **`--served-model-name gemma-4-omni-duplex`** + `--generation-config vllm`.
-4. **Benchmark finale**: 50 domande conversazionali, WER/Crest/HNR/THD/TTFA.
+1. **Debug async_chunk** (streaming audio) con il ciclo rapido: il talker in async produce rumore (codec_streaming / placeholder / EOS). Dopo il fix: `/v1/realtime` per il duplex vero.
+2. **Duplex runtime extension** (TurnDetectorHead) contro `vllm_omni.experimental.fullduplex.engine.contracts` + WebSocket E2E.
+3. **Benchmark finale**: 50 domande conversazionali (WER/Crest/HNR/THD/TTFA), confronto con/senza profili voce.

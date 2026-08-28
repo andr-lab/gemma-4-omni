@@ -1,0 +1,96 @@
+# vLLM-Omni Gemma-4-Omni Duplex deploy — MODALITÀ DEBUG (enforce_eager)
+# enforce_eager: true su TUTTI gli stage = niente torch.compile né CUDA graph
+# capture → startup ~1-2 min (vs ~8 min). SOLO PER DEBUG: la produzione usa
+# gemma4_omni_duplex.yaml (compile + cudagraph attivi).
+# Riferimento: vllm_omni/deploy/qwen3_tts.yaml (pattern ufficiale streaming).
+async_chunk: false
+
+connectors:
+  connector_of_shared_memory:
+    name: SharedMemoryConnector
+    extra:
+      codec_streaming: true
+      connector_get_sleep_s: 0.01
+      connector_get_max_wait_first_chunk: 3000
+      connector_get_max_wait: 300
+      codec_chunk_frames: 25
+      codec_left_context_frames: 72
+      initial_codec_chunk_frames: 1
+      decode_batch_max_size: 4
+
+stages:
+  # ------------------------------------------------------------------
+  # Stage 0: Thinker Gemma 4 E2B
+  # ------------------------------------------------------------------
+  - stage_id: 0
+    max_num_seqs: 8
+    gpu_memory_utilization: 0.38
+    kv_cache_memory: 877546578
+    trust_remote_code: true
+    enforce_eager: true
+    enable_prefix_caching: false
+    async_scheduling: true
+    max_num_batched_tokens: 4096
+    max_model_len: 1024
+    devices: "0"
+    output_connectors:
+      to_stage_1: connector_of_shared_memory
+    default_sampling_params:
+      temperature: 0.7
+      top_p: 0.9
+      max_tokens: 128
+      repetition_penalty: 1.0
+
+  # ------------------------------------------------------------------
+  # Stage 1: Talker Qwen3-TTS + Prefix V9
+  # ------------------------------------------------------------------
+  - stage_id: 1
+    max_num_seqs: 16
+    gpu_memory_utilization: 0.28
+    kv_cache_memory: 1708478956
+    trust_remote_code: true
+    enforce_eager: true
+    enable_prefix_caching: false
+    async_scheduling: true
+    max_num_batched_tokens: 16384
+    max_model_len: 4096
+    devices: "0"
+    input_connectors:
+      from_stage_0: connector_of_shared_memory
+    output_connectors:
+      to_stage_2: connector_of_shared_memory
+    default_sampling_params:
+      temperature: 0.6
+      top_k: 20
+      top_p: 1.0
+      max_tokens: 512
+      min_tokens: 2
+      repetition_penalty: 1.0
+    silence_ban_frames: 0
+    subtalker_sampling_params:
+      do_sample: true
+      temperature: 0.80
+      top_k: 20
+      top_p: 1.0
+
+  # ------------------------------------------------------------------
+  # Stage 2: Code2Wav vocoder 24kHz
+  # ------------------------------------------------------------------
+  - stage_id: 2
+    max_num_seqs: 4
+    gpu_memory_utilization: 0.28
+    enforce_eager: true
+    trust_remote_code: true
+    enable_prefix_caching: false
+    async_scheduling: true
+    max_num_batched_tokens: 16384
+    max_model_len: 8192
+    devices: "0"
+    input_connectors:
+      from_stage_1: connector_of_shared_memory
+    default_sampling_params:
+      temperature: 0.0
+      top_p: 1.0
+      top_k: -1
+      max_tokens: 65536
+      repetition_penalty: 1.0
