@@ -8,6 +8,8 @@ __pycache__/
 # Heavy Model Weights & Checkpoints
 *.safetensors
 *.pt
+*.pth
+*.gguf
 *.bin
 *.onnx
 *.ckpt
@@ -21,6 +23,8 @@ checkpoints/
 data/*.parquet
 data/*.npy
 data/*.npz
+**/.cache/
+.cache/
 
 # Audio files & Sample Outputs
 *.wav
