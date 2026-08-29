@@ -72,6 +72,10 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
         tools = request.get("tools") or sess.tools
         if tools:
             clean.insert(0, {"role": "system", "content": tool_system_prompt(tools)})
+        generation_id = request.get("_generation_id")
+        if generation_id is not None and not sess.is_generation_current(generation_id=generation_id):
+            sess.stale_session_mutations += 1
+            return {"text": "", "tool_calls": [], "wav": None, "elapsed": 0.0, "cancelled": True}
         # La sessione è la proprietaria del rolling context: il prompt non
         # cresce senza limite e non dipende da una lista globale del server.
         sess.thinker_ctx.system_prompt = sess.instructions
@@ -86,14 +90,15 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
             request.get("ref_audio"), request.get("ref_text"),
         )
         streamed_audio: list[np.ndarray] = []
-        generation_id = request.get("_generation_id")
         stream_requested = callable(request.get("_on_audio_chunk")) and not tools
         def render_text_chunk(chunk_text: str, chunk_hidden: Any, chunk_prompt_len: int) -> None:
             if not chunk_text or not stream_requested:
                 return
             chunk_h = engine.v9_prefix(chunk_hidden, chunk_prompt_len)
-            if sess.turn_policy is not None:
+            if sess.turn_policy is not None and (generation_id is None or sess.is_generation_current(generation_id=generation_id)):
                 sess.turn_policy.update_hidden(chunk_h)
+            elif generation_id is not None:
+                sess.stale_session_mutations += 1
             chunk_wav = engine.talk(chunk_text, chunk_h, n_words=max(1, len(chunk_text.split())),
                                     voice_conditioning=cond, stop_check=request.get("_stop_check"),
                                     state=sess, on_audio_chunk=request.get("_on_audio_chunk"), min_frames=8,
@@ -111,8 +116,10 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
             return {"text": "", "tool_calls": calls, "wav": None, "elapsed": 0.0}
         text = think["text"]
         h_pfx = engine.v9_prefix(think["hidden"], think["prompt_len"])
-        if sess.turn_policy is not None:
+        if sess.turn_policy is not None and (generation_id is None or sess.is_generation_current(generation_id=generation_id)):
             sess.turn_policy.update_hidden(h_pfx)
+        elif generation_id is not None:
+            sess.stale_session_mutations += 1
         wav = None
         if "audio" in (request.get("modalities") or ["text"]):
             if stream_requested and streamed_audio:
