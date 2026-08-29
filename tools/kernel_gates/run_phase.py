@@ -52,7 +52,7 @@ def set_global_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def metadata(seed: int, manifest_path: Path) -> dict[str, Any]:
+def metadata(seed: int, manifest_path: Path, git_sha_override: str | None = None, git_dirty_override: bool | None = None) -> dict[str, Any]:
     import torch
     try:
         import transformers
@@ -61,8 +61,8 @@ def metadata(seed: int, manifest_path: Path) -> dict[str, Any]:
         transformers_version = "unknown"
     gpu = command("nvidia-smi", "--query-gpu=name,uuid,driver_version", "--format=csv,noheader")
     gpu_name, gpu_uuid, driver = (gpu.split(", ", 2) + ["unknown"] * 3)[:3] if gpu != "unknown" else ("unknown", "unknown", "unknown")
-    sha = command("git", "rev-parse", "HEAD")
-    dirty = bool(command("git", "status", "--porcelain"))
+    sha = git_sha_override or command("git", "rev-parse", "HEAD")
+    dirty = git_dirty_override if git_dirty_override is not None else bool(command("git", "status", "--porcelain"))
     return {
         "schema_version": 1,
         "phase": "P0",
@@ -79,6 +79,7 @@ def metadata(seed: int, manifest_path: Path) -> dict[str, Any]:
         "transformers_version": transformers_version,
         "python_version": platform.python_version(),
         "seed": seed,
+        "rng_seed_applied": True,
         "input_manifest_sha256": sha256(manifest_path),
     }
 
@@ -129,6 +130,7 @@ def run_p0(manifest_path: Path, raw_path: Path, workspace: Path, seed: int) -> d
                 "nan_count": 0,
                 "inf_count": 0,
                 "empty_audio": False,
+                "rng_seed": seed + index,
             }
             started = time.perf_counter()
             try:
@@ -226,11 +228,14 @@ def main() -> int:
     ap.add_argument("--manifest", type=Path, required=True)
     ap.add_argument("--out-root", type=Path, default=ROOT / "artifacts" / "kernel_gates")
     ap.add_argument("--run-id", default="run1", help="identificatore della ripetizione, ad esempio run1/run2")
+    ap.add_argument("--git-sha", default=None, help="SHA del checkout host quando il container non contiene .git")
+    ap.add_argument("--git-dirty", choices=["true", "false"], default=None)
     args = ap.parse_args()
     manifest_path = args.manifest if args.manifest.is_absolute() else ROOT / args.manifest
     seed = int(json.loads(manifest_path.read_text(encoding="utf-8")).get("seed", 1234))
     set_global_seed(seed)
-    meta = metadata(seed, manifest_path)
+    dirty_override = None if args.git_dirty is None else args.git_dirty == "true"
+    meta = metadata(seed, manifest_path, args.git_sha, dirty_override)
     artifact_dir = args.out_root / meta["git_sha"] / args.phase / args.run_id
     artifact_dir.mkdir(parents=True, exist_ok=True)
     raw_path = artifact_dir / "raw_trace.jsonl"
@@ -241,7 +246,7 @@ def main() -> int:
     cpu = run_cpu_contract()
     print("CPU contract exit_code=", cpu["exit_code"], flush=True)
     with raw_path.open("w", encoding="utf-8") as f:
-        f.write(json.dumps({"event": "phase_metadata", "cpu_contract": cpu}, ensure_ascii=False, sort_keys=True) + "\n")
+        f.write(json.dumps({"event": "phase_metadata", "seed": seed, "rng_seed_applied": True, "cpu_contract": cpu}, ensure_ascii=False, sort_keys=True) + "\n")
     metrics = run_p0(manifest_path, raw_path, args.workspace, seed)
     metrics["cpu_contract"] = cpu
     thresholds = {

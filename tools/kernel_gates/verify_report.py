@@ -110,6 +110,12 @@ def verify_one(report_path: Path) -> tuple[dict[str, Any], list[str]]:
 
     request_events = [e for e in events if e.get("event") == "p0_request"]
     phase_metadata = next((e for e in events if e.get("event") == "phase_metadata"), {})
+    if phase_metadata.get("seed") != report.get("seed") or phase_metadata.get("rng_seed_applied") is not True:
+        fail(errors, "RNG seed non attestato nel raw trace")
+    expected_seeds = [int(report.get("seed", 0)) + i for i in range(len(request_events))]
+    actual_seeds = [e.get("rng_seed") for e in request_events]
+    if actual_seeds != expected_seeds:
+        fail(errors, "sequenza RNG per richiesta non coincide col seed dichiarato")
     if len(request_events) != len(json.loads(manifest.read_text(encoding="utf-8")).get("inputs", [])) if manifest.is_file() else False:
         fail(errors, "numero richieste nel raw trace diverso dal manifest")
     if events:
