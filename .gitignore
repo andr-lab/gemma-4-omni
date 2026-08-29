@@ -9,6 +9,7 @@ __pycache__/
 *.safetensors
 *.pt
 *.pth
+/artifacts/kernel_gates/
 *.gguf
 *.bin
 *.onnx

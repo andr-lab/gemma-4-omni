@@ -11,6 +11,7 @@ import hashlib
 import json
 import math
 import os
+import random
 import platform
 import socket
 import statistics
@@ -38,6 +39,17 @@ def command(*args: str) -> str:
         return subprocess.check_output(args, text=True, stderr=subprocess.STDOUT).strip()
     except Exception:
         return "unknown"
+
+
+def set_global_seed(seed: int) -> None:
+    """Imposta esplicitamente tutte le sorgenti RNG usate dal benchmark."""
+    import numpy as np
+    import torch
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def metadata(seed: int, manifest_path: Path) -> dict[str, Any]:
@@ -88,7 +100,7 @@ def run_cpu_contract() -> dict[str, Any]:
     }
 
 
-def run_p0(manifest_path: Path, raw_path: Path, workspace: Path) -> dict[str, Any]:
+def run_p0(manifest_path: Path, raw_path: Path, workspace: Path, seed: int) -> dict[str, Any]:
     sys.path.insert(0, str(workspace))
     sys.path.insert(0, str(workspace / "qwen3tts_src"))
     import numpy as np
@@ -106,6 +118,7 @@ def run_p0(manifest_path: Path, raw_path: Path, workspace: Path) -> dict[str, An
         if not loaded:
             raise RuntimeError("PipelineEngine.load() ha restituito False")
         for index, item in enumerate(inputs):
+            set_global_seed(seed + index)
             event: dict[str, Any] = {
                 "event": "p0_request",
                 "index": index,
@@ -139,8 +152,10 @@ def run_p0(manifest_path: Path, raw_path: Path, workspace: Path) -> dict[str, An
                     event["nan_count"] += int(np.isnan(array).sum())
                     event["inf_count"] += int(np.isinf(array).sum())
                 text = str(think["text"])
+                talk_metrics: dict[str, Any] = {}
                 wav = engine.talk(
-                    text, h_pfx, n_words=max(1, len(text.split())), on_audio_chunk=on_audio_chunk
+                    text, h_pfx, n_words=max(1, len(text.split())), on_audio_chunk=on_audio_chunk,
+                    metrics=talk_metrics,
                 )
                 t3 = time.perf_counter()
                 wav = np.asarray(wav, dtype=np.float32)
@@ -154,9 +169,11 @@ def run_p0(manifest_path: Path, raw_path: Path, workspace: Path) -> dict[str, An
                     "talker_time_ms": (t3 - t2) * 1000.0,
                     "total_time_ms": (t3 - started) * 1000.0,
                     "ttfa_ms": first_audio[0] if first_audio else None,
-                    "generated_cb0_frames": int(round(len(wav) / (24000 / 12.5))),
+                    "generated_cb0_frames": int(talk_metrics.get("generated_cb0_frames", 0)),
                     "generated_pcm_samples": int(len(wav)),
                     "audio_duration_ms": len(wav) / 24.0,
+                    "e2e_rtf": ((t3 - started) * 1000.0) / max(len(wav) / 24.0, 1.0),
+                    "speaker_rtf": ((t3 - t2) * 1000.0) / max(len(wav) / 24.0, 1.0),
                     "empty_audio": len(wav) == 0,
                 })
             except Exception as exc:
@@ -193,8 +210,8 @@ def run_p0(manifest_path: Path, raw_path: Path, workspace: Path) -> dict[str, An
         "v9_time_ms": {"p50": percentile(vals("v9_time_ms"), 50), "p95": percentile(vals("v9_time_ms"), 95)},
         "talker_time_ms": {"p50": percentile(vals("talker_time_ms"), 50), "p95": percentile(vals("talker_time_ms"), 95)},
         "ttfa_ms": {"p50": percentile(vals("ttfa_ms"), 50), "p95": percentile(vals("ttfa_ms"), 95)},
-        "speaker_rtf": {"p50": percentile([float(e["total_time_ms"]) / max(float(e["audio_duration_ms"]), 1.0) for e in success], 50),
-                        "p95": percentile([float(e["total_time_ms"]) / max(float(e["audio_duration_ms"]), 1.0) for e in success], 95)},
+        "e2e_rtf": {"p50": percentile(vals("e2e_rtf"), 50), "p95": percentile(vals("e2e_rtf"), 95)},
+        "speaker_rtf": {"p50": percentile(vals("speaker_rtf"), 50), "p95": percentile(vals("speaker_rtf"), 95)},
         "generated_cb0_frames": sum(int(e.get("generated_cb0_frames", 0)) for e in events),
         "generated_pcm_samples": sum(int(e.get("generated_pcm_samples", 0)) for e in events),
         "cuda_peak_allocated_bytes": max((int(e.get("cuda_peak_allocated_bytes", 0)) for e in events), default=0),
@@ -211,7 +228,9 @@ def main() -> int:
     ap.add_argument("--run-id", default="run1", help="identificatore della ripetizione, ad esempio run1/run2")
     args = ap.parse_args()
     manifest_path = args.manifest if args.manifest.is_absolute() else ROOT / args.manifest
-    meta = metadata(int(json.loads(manifest_path.read_text(encoding="utf-8")).get("seed", 1234)), manifest_path)
+    seed = int(json.loads(manifest_path.read_text(encoding="utf-8")).get("seed", 1234))
+    set_global_seed(seed)
+    meta = metadata(seed, manifest_path)
     artifact_dir = args.out_root / meta["git_sha"] / args.phase / args.run_id
     artifact_dir.mkdir(parents=True, exist_ok=True)
     raw_path = artifact_dir / "raw_trace.jsonl"
@@ -221,7 +240,9 @@ def main() -> int:
         raw_path.unlink()
     cpu = run_cpu_contract()
     print("CPU contract exit_code=", cpu["exit_code"], flush=True)
-    metrics = run_p0(manifest_path, raw_path, args.workspace)
+    with raw_path.open("w", encoding="utf-8") as f:
+        f.write(json.dumps({"event": "phase_metadata", "cpu_contract": cpu}, ensure_ascii=False, sort_keys=True) + "\n")
+    metrics = run_p0(manifest_path, raw_path, args.workspace, seed)
     metrics["cpu_contract"] = cpu
     thresholds = {
         "cpu_contract_exit_code": 0,

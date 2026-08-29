@@ -206,7 +206,8 @@ class PipelineEngine:
     def talk(self, text: str, h_pfx: torch.Tensor, *, n_words: int,
              voice_conditioning: dict[str, Any] | None = None,
              stop_check: Any | None = None, state: Any | None = None,
-             on_audio_chunk: Any | None = None, min_frames: int = 48) -> np.ndarray:
+             on_audio_chunk: Any | None = None, min_frames: int = 48,
+             metrics: dict[str, Any] | None = None) -> np.ndarray:
         self._stop_event = False
         if voice_conditioning is not None:
             # Il builder nativo può consumare questo payload; lo manteniamo sul
@@ -277,6 +278,8 @@ class PipelineEngine:
             last_h = out_step.last_hidden_state[:, -1:, :]
 
         if not codes:
+            if metrics is not None:
+                metrics.update({"generated_cb0_frames": 0, "generated_pcm_samples": 0})
             return np.zeros(0, dtype=np.float32)
         if on_audio_chunk is not None and len(codes) % 8:
             chunk_codes = torch.tensor(codes[-(len(codes) % 8):], device=self.device, dtype=torch.long).unsqueeze(0)
@@ -292,7 +295,10 @@ class PipelineEngine:
             wav = self.talker.decode(t_gen).numpy().astype(np.float32)
         if not np.isfinite(wav).all():
             raise RuntimeError("Code2Wav ha prodotto audio non finito")
-        return self._postprocess(wav)
+        output = self._postprocess(wav)
+        if metrics is not None:
+            metrics.update({"generated_cb0_frames": len(codes), "generated_pcm_samples": int(len(output))})
+        return output
 
     @staticmethod
     def _postprocess(wav: np.ndarray) -> np.ndarray:
