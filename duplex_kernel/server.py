@@ -39,15 +39,10 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
             if TURNHEAD_CKPT and head.load(TURNHEAD_CKPT):
                 sess.turnhead = head
 
-    def _feed_mel(sess: DuplexSession, pcm: np.ndarray) -> None:
-        if sess.turnhead is None or len(pcm) < 160:
-            return
-        # Fallback dependency-free: 10ms log spectral bands, pooled to 128 bins.
-        frame = 320; hop = 160; rows = []
-        for start in range(0, len(pcm) - frame + 1, hop):
-            spec = np.abs(np.fft.rfft(pcm[start:start + frame] * np.hanning(frame)))
-            rows.append(np.log1p(spec[:128] ** 2).astype(np.float32))
-        if rows: sess.turnhead.feed_user_mel(np.asarray(rows))
+    def _feed_mel(sess: DuplexSession, pcm: np.ndarray) -> int:
+        if sess.turnhead is None:
+            return 0
+        return sess.turnhead.feed_pcm(pcm)
 
     def get_session(request: dict[str, Any]) -> tuple[DuplexSession, bool]:
         sid = request.get("session_id")
@@ -90,6 +85,8 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
             if not chunk_text or not stream_requested:
                 return
             chunk_h = engine.v9_prefix(chunk_hidden, chunk_prompt_len)
+            if sess.turnhead is not None:
+                sess.turnhead.set_thinker_hidden(chunk_h)
             chunk_wav = engine.talk(chunk_text, chunk_h, n_words=max(1, len(chunk_text.split())),
                                     voice_conditioning=cond, stop_check=request.get("_stop_check"),
                                     state=sess, on_audio_chunk=request.get("_on_audio_chunk"), min_frames=8)
@@ -200,6 +197,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
             response_id = "resp_" + uuid.uuid4().hex[:12]
             started = time.perf_counter()
             sess.stop_requested = False
+            sess.response_cancel_notified = False
             sess.active_response = True
             logger.info("[realtime %s] start %s audio_samples=%d auto=%s", sess.session_id[:8], response_id, committed_audio.size, sess.auto_response)
             try:
@@ -248,7 +246,8 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     streamed_chunks += 1
                     await ws.send_json({"type": "response.audio.delta", "delta": _wav_b64(chunk_wav)})
                 if result.get("cancelled"):
-                    await ws.send_json({"type": "response.cancelled", "reason": "cooperative_stop"})
+                    if not sess.response_cancel_notified:
+                        await ws.send_json({"type": "response.cancelled", "reason": "cooperative_stop", "response_id": response_id})
                     return
                 if result["tool_calls"]:
                     for call in result["tool_calls"]:
@@ -320,18 +319,19 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     if sess.pending_audio.size + pcm.size > USER_SAMPLE_RATE * 30:
                         await ws.send_json({"type": "error", "error": {"code": "AUDIO_LIMIT", "message": "massimo 30 secondi per turno"}}); continue
                     sess.touch(); sess.pending_audio = np.concatenate((sess.pending_audio, pcm))
-                    if sess.turnhead:
-                        _feed_mel(sess, pcm)
-                    if sess.active_response and sess.turnhead:
+                    new_mel_frames = _feed_mel(sess, pcm)
+                    if sess.active_response and sess.turnhead and new_mel_frames >= 1:
                         action = sess.turnhead.decide()
-                        if action["pred_name"] == "BARGE_IN":
+                        logger.info("[realtime %s] turnhead action=%s probs=%s active=%s", sess.session_id[:8], action.get("pred_name"), [round(p, 3) for p in action.get("probs", [])], sess.active_response)
+                        if action["pred_name"] == "BARGE_IN" and not sess.stop_requested:
                             sess.stop_requested = True
+                            sess.response_cancel_notified = True
                             if hasattr(engine, "stop_generation"):
                                 engine.stop_generation()
-                            if response_task:
-                                response_task.cancel()
-                                try: await response_task
-                                except asyncio.CancelledError: pass
+                            # Non cancellare il task asyncio: il future executor
+                            # deve terminare cooperativamente prima del prossimo
+                            # decode, altrimenti lo stato della sessione può
+                            # essere scritto da due inferenze contemporanee.
                             await ws.send_json({"type": "response.cancelled", "reason": "user_barge_in"})
                     if sess.auto_response and not sess.active_response:
                         await schedule_auto_response()

@@ -57,6 +57,7 @@ class DuplexSession:
     last_activity: float = field(default_factory=time.time)
     active_response: bool = False
     stop_requested: bool = False
+    response_cancel_notified: bool = False
     voice: str = "gemma"
     voice_style: str | None = None
     ref_audio: np.ndarray | None = None

@@ -31,6 +31,31 @@ logger = logging.getLogger("duplex_kernel.turnhead")
 
 MEL_FRAMES_PER_TURN = 8  # 8 frame mel (10ms) per frame di turno (12.5Hz)
 MEL_BINS = 128
+MEL_FRAME = 320
+MEL_HOP = 160
+_MEL_FILTERS: np.ndarray | None = None
+
+
+def _mel_filters() -> np.ndarray:
+    """Bank HTK 128-bin identica al Gemma4AudioFeatureExtractor."""
+    global _MEL_FILTERS
+    if _MEL_FILTERS is not None:
+        return _MEL_FILTERS
+    hz_to_mel = lambda f: 2595.0 * np.log10(1.0 + f / 700.0)
+    mel_to_hz = lambda m: 700.0 * (np.power(10.0, m / 2595.0) - 1.0)
+    freqs = mel_to_hz(np.linspace(hz_to_mel(0.0), hz_to_mel(8000.0), MEL_BINS + 2))
+    fft_freqs = np.linspace(0.0, 8000.0, 257)
+    slopes = freqs[None, :] - fft_freqs[:, None]
+    down = -slopes[:, :-2] / np.diff(freqs)[:-1]
+    up = slopes[:, 2:] / np.diff(freqs)[1:]
+    _MEL_FILTERS = np.maximum(0.0, np.minimum(down, up)).astype(np.float32)
+    return _MEL_FILTERS
+
+
+def _gemma_mel(frame: np.ndarray) -> np.ndarray:
+    window = 0.5 - 0.5 * np.cos(2.0 * np.pi * np.arange(MEL_FRAME) / MEL_FRAME)
+    magnitude = np.abs(np.fft.rfft(frame * window, n=512))
+    return np.log(magnitude @ _mel_filters() + 1e-3).astype(np.float32)
 
 
 class TurnDetectorHead(nn.Module):
@@ -145,6 +170,8 @@ class TurnHeadRuntime:
         self.controller = StreamingDuplexController()
         self._loaded = False
         self._mel_buffer: np.ndarray = np.empty((0, MEL_BINS), dtype=np.float32)
+        self._pcm_buffer: np.ndarray = np.empty(0, dtype=np.float32)
+        self._next_mel_frame = 0
         self._h_t_last: torch.Tensor | None = None
 
     # ------------------------------------------------------------------
@@ -173,6 +200,32 @@ class TurnHeadRuntime:
         self._mel_buffer = np.concatenate([self._mel_buffer, np.asarray(mel_chunk, dtype=np.float32)])
         if len(self._mel_buffer) > MEL_FRAMES_PER_TURN * 2:
             self._mel_buffer = self._mel_buffer[-MEL_FRAMES_PER_TURN * 2:]
+
+    def feed_pcm(self, pcm_chunk: np.ndarray) -> int:
+        """Estrae mel Gemma causalmente dai PCM incrementali.
+
+        Il vecchio fallback FFT passava 128 bin lineari, mentre il checkpoint
+        TurnHead è stato addestrato sui 128 bin HTK log-mel di Gemma4. Qui si
+        mantengono i frame già emessi e si produce solo ciò che è completo;
+        il primo frame usa il padding sinistro semicausale ufficiale.
+        """
+        pcm = np.asarray(pcm_chunk, dtype=np.float32).reshape(-1)
+        if not pcm.size:
+            return 0
+        self._pcm_buffer = np.concatenate((self._pcm_buffer, pcm))
+        rows = []
+        while len(self._pcm_buffer) >= self._next_mel_frame * MEL_HOP + MEL_HOP:
+            start = self._next_mel_frame * MEL_HOP - MEL_HOP
+            frame = np.zeros(MEL_FRAME, dtype=np.float32)
+            src_start = max(0, start)
+            src_end = min(len(self._pcm_buffer), start + MEL_FRAME)
+            if src_end > src_start:
+                frame[src_start - start:src_end - start] = self._pcm_buffer[src_start:src_end]
+            rows.append(_gemma_mel(frame))
+            self._next_mel_frame += 1
+        if rows:
+            self.feed_user_mel(np.asarray(rows, dtype=np.float32))
+        return len(rows)
 
     def set_thinker_hidden(self, h_pfx: torch.Tensor) -> None:
         """h_t dal V9: h_pfx (1, 16, 2048) → media sui frame → (1, 2048)."""
@@ -224,6 +277,8 @@ class TurnHeadRuntime:
     def reset(self) -> None:
         self.controller.reset()
         self._mel_buffer = np.empty((0, MEL_BINS), dtype=np.float32)
+        self._pcm_buffer = np.empty(0, dtype=np.float32)
+        self._next_mel_frame = 0
         self._h_t_last = None
 
 

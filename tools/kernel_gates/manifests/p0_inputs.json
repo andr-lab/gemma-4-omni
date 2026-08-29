@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "phase": "P0",
+  "seed": 1234,
+  "inputs": [
+    {"id": "p0-00", "prompt": "Quali sono i colori primari? Rispondi in una sola breve frase."},
+    {"id": "p0-01", "prompt": "Chi è Leonardo da Vinci? Rispondi in una sola breve frase."},
+    {"id": "p0-02", "prompt": "Cosa fa la fotosintesi clorofilliana? Rispondi in una sola breve frase."},
+    {"id": "p0-03", "prompt": "Qual è la capitale della Francia? Rispondi in una sola breve frase."},
+    {"id": "p0-04", "prompt": "Spiega cos'è l'energia solare in una sola breve frase."},
+    {"id": "p0-05", "prompt": "Perché il cielo appare blu di giorno? Rispondi in una sola breve frase."},
+    {"id": "p0-06", "prompt": "Che differenza c'è tra caldo e temperatura? Rispondi in una sola breve frase."},
+    {"id": "p0-07", "prompt": "Come funziona una bicicletta? Rispondi in una sola breve frase."},
+    {"id": "p0-08", "prompt": "Qual è il pianeta più vicino al Sole? Rispondi in una sola breve frase."},
+    {"id": "p0-09", "prompt": "Che cos'è la gravità? Rispondi in una sola breve frase."},
+    {"id": "p0-10", "prompt": "Perché è importante bere acqua? Rispondi in una sola breve frase."},
+    {"id": "p0-11", "prompt": "Descrivi il ciclo dell'acqua in una sola breve frase."},
+    {"id": "p0-12", "prompt": "Che cosa misura un termometro? Rispondi in una sola breve frase."},
+    {"id": "p0-13", "prompt": "Qual è la funzione delle radici di una pianta? Rispondi in una sola breve frase."},
+    {"id": "p0-14", "prompt": "Che cos'è un algoritmo? Rispondi in una sola breve frase."},
+    {"id": "p0-15", "prompt": "Perché il sonno è importante? Rispondi in una sola breve frase."},
+    {"id": "p0-16", "prompt": "Come si forma la pioggia? Rispondi in una sola breve frase."},
+    {"id": "p0-17", "prompt": "Che cosa studia la biologia? Rispondi in una sola breve frase."},
+    {"id": "p0-18", "prompt": "Qual è la differenza tra una stella e un pianeta? Rispondi in una sola breve frase."},
+    {"id": "p0-19", "prompt": "Spiega cos'è una rete neurale in una sola breve frase."}
+  ]
+}

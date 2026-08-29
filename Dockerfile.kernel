@@ -44,6 +44,7 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
         fastapi \
         uvicorn \
         websockets \
+        pytest \
         pybase64
 
 USER appuser
