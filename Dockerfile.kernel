@@ -1,0 +1,54 @@
+# Dockerfile.kernel — Immagine dedicata al Custom Duplex Kernel (ADR-029).
+#
+# Runtime narrow ispirato a DwarfStar (antirez/ds4): niente vLLM, niente
+# Unsloth. Carica i checkpoint addestrati (Gemma 4 E2B bf16, Qwen3-TTS,
+# Projector V9, TurnDetectorHead) e orchestra la pipeline full-duplex in un
+# processo singolo con CUDA graphs e KV persistente per sessione.
+#
+# Build:
+#   docker build -f Dockerfile.kernel -t gemma4-omni-kernel:latest .
+#
+# Run (vedi start_duplex_kernel.sh):
+#   docker run --gpus all --ipc=host -v /home/administrator/gemma-4-omni:/workspace \
+#     -p 8092:8092 -w /workspace gemma4-omni-kernel:latest \
+#     python3 /workspace/duplex_kernel/launch.py --workspace /workspace --port 8092
+
+FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV PIPELINE_ENV=local3090
+ENV LC_ALL=C.UTF-8
+ENV LANG=C.UTF-8
+
+# --- System deps (audio I/O) ---
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git ffmpeg libsndfile1 curl build-essential ca-certificates procps \
+    && rm -rf /var/lib/apt/lists/*
+
+# --- Non-root user (sicurezza volume /workspace) ---
+ARG USER_ID=1000
+ARG GROUP_ID=1000
+RUN groupadd -g ${GROUP_ID} appuser && \
+    useradd -m -u ${USER_ID} -g appuser -s /bin/bash appuser
+
+# --- Python deps kernel ---
+# transformers 5.x: classe nativa Gemma4ForConditionalGeneration (bf16, niente
+# unsloth). qwen_tts è incluso come sorgente in /workspace/qwen3tts_src.
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    pip install --no-cache-dir \
+        transformers==5.5.0 \
+        numpy \
+        safetensors \
+        soundfile \
+        fastapi \
+        uvicorn \
+        websockets \
+        pybase64
+
+USER appuser
+WORKDIR /workspace
+
+# Il volume /workspace (repo host) fornisce: checkpoint, .hf_cache, qwen3tts_src.
+# Il kernel è in /workspace/duplex_kernel/.
+CMD ["python3", "/workspace/duplex_kernel/launch.py", "--workspace", "/workspace", "--port", "8092"]

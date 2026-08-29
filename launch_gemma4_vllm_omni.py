@@ -64,6 +64,18 @@ def main() -> None:
         "--trust-remote-code",
         "--dtype",
         "bfloat16",
+        "--served-model-name",
+        os.environ.get("GEMMA4_OMNI_MODEL_NAME", "gemma-4-omni-duplex"),
+        # Tool calling (function calling) su Gemma 4: parser nativo gemma4 +
+        # auto tool choice. Richiesto per /v1/chat/completions con tools.
+        "--enable-auto-tool-choice",
+        "--tool-call-parser",
+        "gemma4",
+        # Il generation_config.json di Gemma (unsloth) sovrascrive i sampling
+        # del deploy per-stage (temperature 0.7 ecc.); con vllm si usano i
+        # sampling params del deploy (ADR-028 §3.5).
+        "--generation-config",
+        "vllm",
         "--deploy-config",
         deploy_config,
         # NESSUN --quantization globale: vLLM inferisce il metodo dal config.json

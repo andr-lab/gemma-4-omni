@@ -3,17 +3,48 @@
 .venv/
 __pycache__/
 *.pyc
+*.pyo
 
-# Heavy Run Outputs & Local Artifacts
+# Heavy Model Weights & Checkpoints
+*.safetensors
+*.pt
+*.bin
+*.onnx
+*.ckpt
+checkpoints/
+
+# Datasets, Caches & Heavy Data
+*.parquet
+*.npy
+*.npz
+*.arrow
+data/*.parquet
+data/*.npy
+data/*.npz
+
+# Audio files & Sample Outputs
+*.wav
+*.mp3
+*.flac
+samples/
+samples_*/
+eval_syntest_v3_out/
+
+# Kaggle / Training Run Outputs & Heavy Archives
+_archive/pre_11ibis/
 _archive/eval_outputs/
 _archive/run_outputs/
 _archive_20260817/
 eval_r*/
-eval_syntest*/
-*.zip
-*.log
-
-# output run Kaggle (checkpoint pesanti, non versionati)
+eval_*/
+turnhead_*_out/
 *_r1_out/
 *_r2_out/
 *_out/
+
+# Archives & Logs
+*.zip
+*.tar
+*.tar.gz
+*.log
+

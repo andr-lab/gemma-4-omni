@@ -1,0 +1,66 @@
+{
+  "results": [
+    {
+      "q": "Quali sono i colori primari? Rispondi in una sola breve frase.",
+      "testo": "I colori primari sono il rosso, il giallo e il blu.",
+      "n_words": 11,
+      "durata_audio_s": 3.6,
+      "e2e_s": 4.32,
+      "think_s": 1.09,
+      "v9_s": 0.08,
+      "talk_s": 3.15,
+      "rtf": 1.199,
+      "crest_factor": 4.26,
+      "hnr_db": 1.98,
+      "thd_n_pct": 38.8,
+      "clipping_pct": 0.15,
+      "peak": 1.0,
+      "rms": 0.2348,
+      "wav": "/workspace/samples_kernel_final/kernel_bench_00.wav"
+    },
+    {
+      "q": "Chi è Leonardo da Vinci? Rispondi in una sola breve frase.",
+      "testo": "Leonardo da Vinci fu un poliedrico genio rinascimentale, artista, scienziato e inventore.",
+      "n_words": 12,
+      "durata_audio_s": 5.44,
+      "e2e_s": 5.02,
+      "think_s": 1.68,
+      "v9_s": 0.0,
+      "talk_s": 3.34,
+      "rtf": 0.923,
+      "crest_factor": 4.34,
+      "hnr_db": 0.83,
+      "thd_n_pct": 45.22,
+      "clipping_pct": 0.18,
+      "peak": 1.0,
+      "rms": 0.2307,
+      "wav": "/workspace/samples_kernel_final/kernel_bench_01.wav"
+    },
+    {
+      "q": "Cosa fa la fotosintesi clorofilliana? Rispondi in una sola breve frase.",
+      "testo": "La fotosintesi clorofilliana è il processo attraverso il quale le piante utilizzano l'energia luminosa per convertire anidride carbonica e acqua in glucosio (zucchero) e ossigeno.",
+      "n_words": 25,
+      "durata_audio_s": 10.56,
+      "e2e_s": 9.35,
+      "think_s": 2.96,
+      "v9_s": 0.0,
+      "talk_s": 6.38,
+      "rtf": 0.885,
+      "crest_factor": 4.96,
+      "hnr_db": 2.95,
+      "thd_n_pct": 33.62,
+      "clipping_pct": 0.213,
+      "peak": 1.0,
+      "rms": 0.2017,
+      "wav": "/workspace/samples_kernel_final/kernel_bench_02.wav"
+    }
+  ],
+  "avg": {
+    "e2e_s": 6.23,
+    "rtf": 1.002,
+    "crest_factor": 4.52,
+    "hnr_db": 1.92,
+    "thd_n_pct": 39.21,
+    "clipping_pct": 0.181
+  }
+}

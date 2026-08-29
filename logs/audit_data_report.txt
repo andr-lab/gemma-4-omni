@@ -1,0 +1,68 @@
+======================================================================
+=== AUDIT STATISTICO RIGOROSO: DATI DI PARTENZA & CACHE ===
+======================================================================
+
+Caricato tokenizer Gemma da: /workspace/.hf_cache/models--unsloth--gemma-4-e2b-it-unsloth-bnb-4bit/snapshots/0ae102ac289cc3f17500a607ad817849778b8ba7
+[1/4] Caricamento e Audit Parquet Dati...
+  * Totale frame caricati: 1,834,067 (~40.76 ore audio a 12.5Hz)
+  * Formato agent_codes: (16, 1834067) (N_codebooks=16)
+  * Frame validi di parlato: 1,834,067 (100.0%)
+  * Frame di padding: 0 (0.0%)
+
+  [Analisi CB0 (Semantica / Fonetica, Vocab=4096)]
+    - Token unici attivi: 2041 / 4096 (49.8%)
+    - Range valori: [0, 2047]
+    - Entropia di Shannon: 6.571 / 8.318 (Uniforme=8.318)
+    ⚠️ ALLERTA CRITICA: CB0 ha valore massimo 2047 invece di 4095!
+       I codici sono stati estratti con vocab_size 2048 o modulo 2048.
+
+  [Analisi Codebook Residui CB1..CB15 (Acustica, Vocab=2048)]
+    - CB01: unici=1995/2048 (97.4%) | Range=[0, 2047] | Entropia=6.43/7.62
+    - CB03: unici=2048/2048 (100.0%) | Range=[0, 2047] | Entropia=7.11/7.62
+    - CB07: unici=2048/2048 (100.0%) | Range=[0, 2047] | Entropia=7.13/7.62
+    - CB15: unici=2048/2048 (100.0%) | Range=[0, 2047] | Entropia=7.13/7.62
+
+[2/4] Audit Mel Spectrogram (User & Agent)...
+  * Mel Agente (campione 100k frame): Mean=-3.3267, Std=2.2385, Range=[-6.91, 4.05]
+  * Rapporto di frame costanti: 10.99%
+
+[3/4] Audit Trascrizioni Testuali (tbw: Gemma vs Qwen Tokenizer)...
+  * Totale finestre con testo: 28,658
+  * Finestre con token non-vuoti: 28,658 / 28,658
+  * Range token ID in tbw (primi 1000 campioni): [495, 239344]
+
+  [Confronto Decodifica sulle prime 5 frasi]
+  --- Frase #00 (17 token) ---
+    • Decodifica con Qwen Tokenizer : 'NSInteger impupported testollection\toperatororr诧 else Clin cell,,,Th_con Tr'
+    • Decodifica con Gemma Tokenizer: 'Ma ti pare che non posso prendermi neanche due giorni di riposo.'
+  --- Frase #01 (17 token) ---
+    • Decodifica con Qwen Tokenizer : 'NSInteger impupported testollection\toperatororr诧 else Clin cell,,,Th_con Tr'
+    • Decodifica con Gemma Tokenizer: 'Ma ti pare che non posso prendermi neanche due giorni di riposo.'
+  --- Frase #02 (19 token) ---
+    • Decodifica con Qwen Tokenizer : 'returnsessage loop impamiiginศาล.an ();\n diagram possphscripts/*\nศาลach.nnase'
+    • Decodifica con Gemma Tokenizer: 'Ed intanto ti aggiri intorno alla sua casa come la mosca intorno al miele.'
+  --- Frase #03 (24 token) ---
+    • Decodifica con Qwen Tokenizer : 'setARE assoga Pull íRE_host Manufacturing imposingkeyTh噗Tacionsome sponge le holempty'
+    • Decodifica con Gemma Tokenizer: 'Sconvolto, Susumu fugge, lui stesso incapace di riconoscersi colpevole o innocente.'
+  --- Frase #04 (24 token) ---
+    • Decodifica con Qwen Tokenizer : 'setARE assoga Pull íRE_host Manufacturing imposingkeyTh噗Tacionsome sponge le holempty'
+    • Decodifica con Gemma Tokenizer: 'Sconvolto, Susumu fugge, lui stesso incapace di riconoscersi colpevole o innocente.'
+
+[4/4] Audit Cache Pre-Estratta (cache_ars_full_v2.pt)...
+  * Chiavi presenti in cache: ['tr_raw', 'tr_sub', 'tr_htx', 'tr_c', 'va_raw', 'va_sub', 'va_htx', 'va_c']
+  * tr_raw count: 25791, item shape: (64, 1536)
+  * va_raw count: 100, item shape: (64, 1536)
+    - h_raw (Conformer audio): Norm media=60.78, Std=1.5943, NaN/Inf=False
+  * tr_htx count: 25791, item shape: (1536,)
+    - h_tx (Gemma LM text): Norm media=84.90, NaN/Inf=False
+    - Cosine Sim tra frasi diverse: sample_0 vs sample_1 = 1.0000, sample_0 vs sample_2 = 0.7965
+  * tr_sub count: 25791, item shape: (64, 2048)
+    - tr_sub norm: 45.25
+
+======================================================================
+=== RIEPILOGO CRITICO AUDIT ===
+1. Tokenizer Mismatch: tbw è codificato con Gemma Tokenizer (non Qwen).
+2. CB0 Vocab: CB0 in parquet ha range [0, 2047] (max 2047).
+3. h_raw & h_tx in cache: SANISSIMI (Norm raw=60.78, Norm htx=84.90, cos diversificati).
+4. Distillazione tr_sub: NON usare (teste non caricate).
+======================================================================

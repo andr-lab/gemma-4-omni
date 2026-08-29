@@ -1,0 +1,19 @@
+﻿ARG BASE_IMAGE=vllm/vllm-openai:latest
+FROM ${BASE_IMAGE}
+
+ARG COMMON_WORKDIR=/app
+WORKDIR ${COMMON_WORKDIR}
+
+RUN apt-get update && \
+    apt-get install -y git jq && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p ${COMMON_WORKDIR}/vllm-omni
+COPY . ${COMMON_WORKDIR}/vllm-omni
+RUN uv pip install --python "$(python3 -c 'import sys; print(sys.executable)')" --no-cache-dir vllm==0.28.0
+RUN cd ${COMMON_WORKDIR}/vllm-omni && uv pip install --python "$(python3 -c 'import sys; print(sys.executable)')" --no-cache-dir "."
+RUN uv pip install --python "$(python3 -c 'import sys; print(sys.executable)')" --no-cache-dir transformers==5.14.1 soundfile safetensors einops
+
+RUN ln -sf /usr/bin/python3 /usr/bin/python
+ENTRYPOINT []

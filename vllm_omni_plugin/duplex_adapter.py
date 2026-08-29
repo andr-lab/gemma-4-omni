@@ -31,43 +31,49 @@ from vllm_omni.experimental.fullduplex.openai.runtime_adapter import (
     ServingRuntimeSessionState,
 )
 
+from vllm_omni_plugin.input import Gemma4OmniPcmAppendBuffer as _L2PcmAppendBuffer
+
 
 class Gemma4OmniPcmAppendBuffer(PcmAppendBuffer):
-    """Buffer PCM 24kHz monofonico per le sessioni duplex (fallback chat)."""
+    """Buffer PCM 24kHz monofonico per le sessioni duplex (fallback chat).
+
+    Delegato al buffer L2 (vllm_omni_plugin.input): accumula i chunk
+    ``input_audio_buffer.append`` e alla commit produce un payload ``audio_url``
+    con WAV valido per il media connector (STT upstream Thinker nativo).
+    """
 
     def __init__(self) -> None:
-        self._pending: bytearray = bytearray()
-        self._reserved: bytearray = bytearray()
+        self._delegate = _L2PcmAppendBuffer()
 
     def pending_byte_count(self) -> int:
-        return len(self._pending)
+        return self._delegate.pending_byte_count
 
     def clear(self) -> None:
-        self._pending.clear()
+        self._delegate.clear()
 
     def clear_force_listen(self) -> None:
-        self._pending.clear()
+        self._delegate.clear_force_listen()
 
     def has_pending(self) -> bool:
-        return len(self._pending) > 0
+        return self._delegate.has_pending()
 
     def has_reserved(self) -> bool:
-        return len(self._reserved) > 0
+        return self._delegate.has_reserved()
 
-    def prepare_append(self, *, chunk: bytes, client_audio_sr: int, is_final: bool) -> Any:
-        return None
+    def prepare_append(self, payload: Any = None, **kwargs: Any) -> Any:
+        # Firma compat con il session_runner (payload posizionale + opzionali).
+        return self._delegate.prepare_append(
+            payload if isinstance(payload, dict) else (kwargs.get("payload") or {}),
+            operation_id=kwargs.get("operation_id", ""),
+            chunk_period_ms=kwargs.get("chunk_period_ms", 1000),
+            allow_emit=kwargs.get("allow_emit", True),
+        )
 
-    def prepare_commit(self, *, chunk_period_ms: int) -> tuple[bytes, dict[str, object] | None]:
-        data = bytes(self._pending)
-        self._pending.clear()
-        return data, {"pcm": data, "sample_rate": 24000}
+    def prepare_commit(self, *, chunk_period_ms: int = 1000, operation_id: str | None = None, **kwargs: Any) -> Any:
+        return self._delegate.prepare_commit(operation_id=operation_id or "", chunk_period_ms=chunk_period_ms)
 
     def flush(self, *, chunk_period_ms: int) -> dict[str, object] | None:
-        if not self._pending:
-            return None
-        data = bytes(self._pending)
-        self._pending.clear()
-        return {"pcm": data, "sample_rate": 24000}
+        return self._delegate.flush(chunk_period_ms=chunk_period_ms)
 
 
 class Gemma4OmniSessionState(ServingRuntimeSessionState):
@@ -163,13 +169,20 @@ class Gemma4OmniServingRuntimeAdapter(ServingRuntimeAdapter):
         return True
 
     def capabilities(self, *, max_sessions: int) -> object:
+        # Livello 2 (porting data plane audio-native): l'input audio del
+        # client viene accettato (supports_input_append), bufferizzato e
+        # committato al Thinker per lo STT upstream (encoder audio nativo
+        # Gemma4). Il barge-in è client-side via epoch (zero-reset KV).
         return DuplexCapabilities(
             supports_model_native_turn_policy=False,
-            supports_input_append=False,
+            supports_input_append=True,
             supports_replace_latest_chunk=True,
             supports_reencode_context=True,
             supports_turn_commit_only=True,
+            supports_barge_in=True,
             supports_kv_lease=False,
+            chunk_period_ms=100,
+            input_modes=["append_audio_chunk", "turn_commit_only"],
         )
 
     def validate_client_extra_body(self, extra_body: object) -> None:

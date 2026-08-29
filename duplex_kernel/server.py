@@ -1,0 +1,262 @@
+"""OpenAI-compatible HTTP/SSE and realtime duplex WebSocket server."""
+from __future__ import annotations
+import asyncio, base64, io, json, logging, threading, time, uuid
+from typing import Any
+import numpy as np
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse, StreamingResponse
+from duplex_kernel.config import CODEC_SAMPLE_RATE, USER_SAMPLE_RATE, TURNHEAD_CKPT
+from duplex_kernel.turnhead import TurnHeadRuntime
+from duplex_kernel.session import SessionManager, DuplexSession
+from duplex_kernel.tool_parser import extract_tool_calls, tool_system_prompt
+from duplex_kernel.voices import resolve_voice_conditioning
+
+logger = logging.getLogger("duplex_kernel.server")
+MODEL_ID = "gemma-4-omni-duplex"
+
+
+def _wav_b64(wav: np.ndarray, sr: int = CODEC_SAMPLE_RATE) -> str:
+    import soundfile as sf
+    buf = io.BytesIO(); sf.write(buf, np.asarray(wav, dtype=np.float32), sr, format="WAV")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _message_text(content: Any) -> str:
+    if isinstance(content, str): return content
+    if isinstance(content, list):
+        return " ".join(str(x.get("text", "")) for x in content if isinstance(x, dict)).strip()
+    return ""
+
+
+def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAPI:
+    app = FastAPI(title="Gemma-4-Omni Duplex Kernel", version="0.3.0")
+    sessions = session_mgr or SessionManager()
+    inference_lock = threading.Lock()  # GPU model is single-stream by design.
+
+    def _ensure_turnhead(sess: DuplexSession) -> None:
+        if sess.turnhead is None:
+            head = TurnHeadRuntime(device=getattr(engine, "device", "cuda"))
+            if TURNHEAD_CKPT and head.load(TURNHEAD_CKPT):
+                sess.turnhead = head
+
+    def _feed_mel(sess: DuplexSession, pcm: np.ndarray) -> None:
+        if sess.turnhead is None or len(pcm) < 160:
+            return
+        # Fallback dependency-free: 10ms log spectral bands, pooled to 128 bins.
+        frame = 320; hop = 160; rows = []
+        for start in range(0, len(pcm) - frame + 1, hop):
+            spec = np.abs(np.fft.rfft(pcm[start:start + frame] * np.hanning(frame)))
+            rows.append(np.log1p(spec[:128] ** 2).astype(np.float32))
+        if rows: sess.turnhead.feed_user_mel(np.asarray(rows))
+
+    def get_session(request: dict[str, Any]) -> tuple[DuplexSession, bool]:
+        sid = request.get("session_id")
+        if sid:
+            sess = sessions.get(str(sid))
+            if sess is None: raise ValueError("session_id non valido o scaduto")
+            _ensure_turnhead(sess)
+            return sess, False
+        sess = sessions.create_session(
+            instructions=str(request.get("instructions", "")),
+            voice=str(request.get("voice", "gemma")),
+            language=str(request.get("language", "Italian")),
+        )
+        _ensure_turnhead(sess)
+        return sess, True
+
+    def run_response(sess: DuplexSession, messages: list[dict[str, Any]], request: dict[str, Any]) -> dict[str, Any]:
+        clean = [m for m in messages if isinstance(m, dict) and m.get("role") in {"system", "user", "assistant", "tool"}]
+        if sess.instructions and not any(m.get("role") == "system" for m in clean):
+            clean.insert(0, {"role": "system", "content": sess.instructions})
+        tools = request.get("tools") or sess.tools
+        if tools:
+            clean.insert(0, {"role": "system", "content": tool_system_prompt(tools)})
+        prompt = _message_text(clean[-1].get("content", "")) if clean else ""
+        chat = engine.tokenizer.apply_chat_template(clean, tokenize=False, add_generation_prompt=True)
+        ids = engine.tokenizer(chat, return_tensors="pt")["input_ids"][0].tolist()
+        think = engine.think(ids, max_new_tokens=int(request.get("max_tokens", 64)),
+                             temperature=float(request.get("temperature", 0.7)), top_p=float(request.get("top_p", 0.9)))
+        calls = extract_tool_calls(think["text"], tools) if tools else []
+        if calls:
+            return {"text": "", "tool_calls": calls, "wav": None, "elapsed": 0.0}
+        text = think["text"]
+        h_pfx = engine.v9_prefix(think["hidden"], think["prompt_len"])
+        if sess.turnhead is not None:
+            sess.turnhead.set_thinker_hidden(h_pfx)
+        cond = resolve_voice_conditioning(
+            request.get("voice") or request.get("speaker") or sess.voice,
+            request.get("voice_style") or request.get("instructions") or sess.voice_style,
+            request.get("ref_audio"), request.get("ref_text"),
+        )
+        wav = None
+        if "audio" in (request.get("modalities") or ["text"]):
+            wav = engine.talk(text, h_pfx, n_words=max(1, len(text.split())), voice_conditioning=cond,
+                               stop_check=lambda: sess.stop_requested)
+        sess.history = clean[-16:] + [{"role": "assistant", "content": text}]
+        return {"text": text, "wav": wav, "tool_calls": [], "elapsed": 0.0}
+
+    def sse_event(payload: dict[str, Any]) -> str:
+        return "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
+
+    @app.get("/health")
+    async def health() -> dict[str, Any]:
+        return {"status": "ok", "engine_loaded": bool(getattr(engine, "loaded", False)), "model": MODEL_ID}
+
+    @app.get("/v1/models")
+    async def models() -> dict[str, Any]:
+        return {"object": "list", "data": [{"id": MODEL_ID, "object": "model", "owned_by": "duplex_kernel"}]}
+
+    @app.post("/v1/chat/completions")
+    async def chat_completions(request: dict[str, Any]):
+        if not getattr(engine, "loaded", False):
+            return JSONResponse({"error": {"code": "ENGINE_NOT_READY", "message": "engine non caricato"}}, status_code=503)
+        messages = request.get("messages")
+        try:
+            max_tokens = int(request.get("max_tokens", 64)); temperature = float(request.get("temperature", 0.7)); top_p = float(request.get("top_p", 0.9))
+            if max_tokens < 1 or not 0.0 < temperature or not 0.0 < top_p <= 1.0:
+                raise ValueError
+        except (TypeError, ValueError):
+            return JSONResponse({"error": {"code": "VALIDATION_ERROR", "message": "max_tokens/temperature/top_p non validi"}}, status_code=422)
+        if not isinstance(messages, list) or not messages:
+            return JSONResponse({"error": {"code": "VALIDATION_ERROR", "message": "messages deve essere una lista non vuota"}}, status_code=422)
+        try: sess, ephemeral = get_session(request)
+        except (ValueError, RuntimeError) as exc:
+            return JSONResponse({"error": {"code": "SESSION_ERROR", "message": str(exc)}}, status_code=422)
+        sess.tools = request.get("tools") or sess.tools
+        sess.voice = str(request.get("voice") or request.get("speaker") or sess.voice)
+        sess.voice_style = request.get("voice_style") or sess.voice_style
+        sess.ref_text = request.get("ref_text") or sess.ref_text
+        loop = asyncio.get_running_loop()
+        context_messages = (sess.history + messages) if request.get("session_id") else messages
+        def infer():
+            with inference_lock: return run_response(sess, context_messages, request)
+        try: result = await loop.run_in_executor(None, infer)
+        except Exception:
+            if ephemeral: sessions.close(sess.session_id)
+            logger.exception("richiesta fallita")
+            return JSONResponse({"error": {"code": "INFERENCE_ERROR", "message": "inferenza fallita"}}, status_code=500)
+        if ephemeral: result["session_id"] = sess.session_id
+        if result["tool_calls"]:
+            msg = {"role": "assistant", "content": None, "tool_calls": result["tool_calls"]}
+            body = {"id": "chatcmpl_" + uuid.uuid4().hex, "object": "chat.completion", "choices": [{"index": 0, "message": msg, "finish_reason": "tool_calls"}], "session_id": sess.session_id}
+            return JSONResponse(body)
+        if not request.get("stream"):
+            msg = {"role": "assistant", "content": result["text"]}
+            if result["wav"] is not None: msg["audio"] = {"data": _wav_b64(result["wav"]), "expires_at": int(time.time()) + 86400}
+            body = {"id": "chatcmpl_" + uuid.uuid4().hex, "object": "chat.completion", "choices": [{"index": 0, "message": msg, "finish_reason": "stop"}]}
+            if ephemeral: body["session_id"] = sess.session_id
+            return JSONResponse(body)
+
+        def generate():
+            if result["tool_calls"]:
+                for index, call in enumerate(result["tool_calls"]):
+                    yield sse_event({"choices": [{"index": 0, "delta": {"tool_calls": [{"index": index, **call}]}}]})
+                yield sse_event({"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]})
+                yield "data: [DONE]\n\n"; return
+            words = result["text"].split(" ")
+            for i, word in enumerate(words):
+                yield sse_event({"choices": [{"index": 0, "delta": {"content": word + (" " if i + 1 < len(words) else "")}}]})
+            wav = result["wav"]
+            if wav is not None:
+                chunk = int(CODEC_SAMPLE_RATE * 0.640)
+                for start in range(0, len(wav), chunk):
+                    yield sse_event({"choices": [{"index": 0, "delta": {"audio": {"chunk": _wav_b64(wav[start:start + chunk])}}}]})
+            yield sse_event({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(generate(), media_type="text/event-stream")
+
+    @app.websocket("/v1/realtime")
+    async def realtime(ws: WebSocket, duplex: int = 0):
+        if not duplex:
+            await ws.close(code=1008, reason="usa /v1/realtime?duplex=1"); return
+        await ws.accept(); sess = sessions.create_session(); _ensure_turnhead(sess); response_task: asyncio.Task | None = None
+        try:
+            await ws.send_json({"type": "session.created", "session_id": sess.session_id})
+            while True:
+                try:
+                    ev = json.loads(await ws.receive_text())
+                    if not isinstance(ev, dict): raise ValueError("evento deve essere un oggetto JSON")
+                except (json.JSONDecodeError, ValueError) as exc:
+                    await ws.send_json({"type": "error", "error": {"code": "INVALID_EVENT", "message": str(exc)}})
+                    continue
+                et = ev.get("type")
+                if et == "session.update":
+                    cfg = ev.get("session", {}); sess.instructions = str(cfg.get("instructions", sess.instructions)); sess.voice = str(cfg.get("voice", sess.voice)); sess.tools = cfg.get("tools", sess.tools) or []
+                    await ws.send_json({"type": "session.updated", "session_id": sess.session_id})
+                elif et == "conversation.item.create":
+                    item = ev.get("item", {}); sess.history.append({"role": item.get("role", "user"), "content": _message_text(item.get("content", ""))}); await ws.send_json({"type": "conversation.item.created"})
+                elif et == "input_audio_buffer.append":
+                    try:
+                        raw = base64.b64decode(ev.get("audio", ""), validate=True)
+                        if not raw or len(raw) % 2:
+                            raise ValueError("audio PCM16 vuoto o con lunghezza dispari")
+                        pcm = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+                    except (ValueError, TypeError) as exc:
+                        await ws.send_json({"type": "error", "error": {"code": "INVALID_AUDIO", "message": str(exc)}})
+                        continue
+                    if sess.pending_audio.size + pcm.size > USER_SAMPLE_RATE * 30:
+                        await ws.send_json({"type": "error", "error": {"code": "AUDIO_LIMIT", "message": "massimo 30 secondi per turno"}}); continue
+                    sess.touch(); sess.pending_audio = np.concatenate((sess.pending_audio, pcm))
+                    if sess.turnhead:
+                        _feed_mel(sess, pcm)
+                    if sess.active_response and sess.turnhead:
+                        action = sess.turnhead.decide()
+                        if action["pred_name"] == "BARGE_IN":
+                            sess.stop_requested = True
+                            if response_task:
+                                response_task.cancel()
+                                try: await response_task
+                                except asyncio.CancelledError: pass
+                            await ws.send_json({"type": "response.cancelled", "reason": "user_barge_in"})
+                elif et in {"input_audio_buffer.commit", "response.create"}:
+                    if response_task and not response_task.done():
+                        await ws.send_json({"type": "error", "error": {"code": "RESPONSE_ACTIVE", "message": "response già attiva"}})
+                        continue
+                    async def produce():
+                        sess.stop_requested = False
+                        sess.active_response = True
+                        try:
+                            await ws.send_json({"type": "response.created"})
+                            def infer_ws():
+                                with inference_lock:
+                                    history = list(sess.history)
+                                    if sess.pending_audio.size and hasattr(engine, "transcribe_audio"):
+                                        audio_text = engine.transcribe_audio(sess.pending_audio)["text"]
+                                        if audio_text:
+                                            history.append({"role": "user", "content": audio_text})
+                                    return run_response(sess, history or [{"role": "user", "content": "Ciao!"}], {"modalities": ["text", "audio"], "tools": sess.tools, "voice": sess.voice, "voice_style": sess.voice_style, "ref_text": sess.ref_text})
+                            result = await asyncio.get_running_loop().run_in_executor(None, infer_ws)
+                            if result["tool_calls"]:
+                                for call in result["tool_calls"]:
+                                    fn = call["function"]
+                                    await ws.send_json({"type": "response.function_call_arguments.done", "call_id": call["id"], "name": fn["name"], "arguments": fn["arguments"]})
+                                return
+                            await ws.send_json({"type": "response.output_text.delta", "delta": result["text"]})
+                            if result["wav"] is not None:
+                                chunk = int(CODEC_SAMPLE_RATE * .640)
+                                for start in range(0, len(result["wav"]), chunk):
+                                    await ws.send_json({"type": "response.audio.delta", "delta": _wav_b64(result["wav"][start:start + chunk])})
+                            await ws.send_json({"type": "response.done"})
+                            sess.reset_turn()
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as exc:
+                            logger.exception("realtime response failed")
+                            await ws.send_json({"type": "error", "error": {"code": "INFERENCE_ERROR", "message": str(exc)[:240]}})
+                        finally:
+                            sess.active_response = False
+                    # Non-blocking: the receive loop remains alive for barge-in.
+                    response_task = asyncio.create_task(produce())
+                elif et == "session.close": break
+        except (WebSocketDisconnect, asyncio.CancelledError): pass
+        finally:
+            if response_task and not response_task.done(): response_task.cancel()
+            sessions.close(sess.session_id)
+    return app
+
+
+def run(engine: Any, *, host: str = "0.0.0.0", port: int = 8092) -> None:
+    import uvicorn
+    uvicorn.run(create_app(engine), host=host, port=port, log_level="info")
+
+__all__ = ["create_app", "run"]

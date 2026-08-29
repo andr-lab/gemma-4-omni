@@ -41,6 +41,10 @@ def register() -> None:
 
     # Shim vllm-bnb-plugin 0.0.3 ⇄ WeightsMapper vLLM 0.28 (vedi bnb_compat.py).
     apply_bnb_compat()
+    from vllm_omni_plugin.input import install_audio_media_shim
+
+    # Porting L2: shim media connector raw-PCM → WAV (STT upstream Thinker).
+    install_audio_media_shim()
     from vllm_omni_plugin.processors import install_async_prewarm_patch
 
     install_async_prewarm_patch()

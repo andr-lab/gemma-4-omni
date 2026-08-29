@@ -1,0 +1,681 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gemma 4 Omni — Full-Duplex Voice & Chat Console</title>
+    <style>
+        :root {
+            --bg-primary: #0a0e17;
+            --bg-card: #131b2e;
+            --border-color: #243452;
+            --accent-cyan: #00f2fe;
+            --accent-blue: #4facfe;
+            --accent-purple: #9b51e0;
+            --accent-green: #00e676;
+            --accent-orange: #ff9100;
+            --text-primary: #f0f4f8;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+        }
+
+        body {
+            background-color: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        header {
+            background: linear-gradient(90deg, rgba(19, 27, 46, 0.95), rgba(10, 14, 23, 0.95));
+            border-bottom: 1px solid var(--border-color);
+            padding: 16px 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            backdrop-filter: blur(10px);
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .logo-badge {
+            background: linear-gradient(135deg, var(--accent-cyan), var(--accent-blue));
+            color: #000;
+            font-weight: 900;
+            padding: 6px 12px;
+            border-radius: 8px;
+            font-size: 14px;
+            letter-spacing: 1px;
+        }
+
+        .title-group h1 {
+            font-size: 18px;
+            font-weight: 700;
+            color: var(--text-primary);
+        }
+
+        .title-group p {
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+
+        .status-badge {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: rgba(0, 230, 118, 0.1);
+            border: 1px solid rgba(0, 230, 118, 0.3);
+            color: var(--accent-green);
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            background-color: var(--accent-green);
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(0.95); opacity: 0.8; }
+            50% { transform: scale(1.2); opacity: 1; filter: drop-shadow(0 0 6px var(--accent-green)); }
+            100% { transform: scale(0.95); opacity: 0.8; }
+        }
+
+        .main-container {
+            display: grid;
+            grid-template-columns: 1fr 340px;
+            gap: 20px;
+            padding: 20px;
+            flex: 1;
+            max-width: 1400px;
+            margin: 0 auto;
+            width: 100%;
+        }
+
+        .chat-section {
+            display: flex;
+            flex-direction: column;
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            overflow: hidden;
+        }
+
+        .chat-toolbar {
+            padding: 12px 20px;
+            background: rgba(255, 255, 255, 0.02);
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .mode-selector {
+            display: flex;
+            gap: 8px;
+            background: rgba(0, 0, 0, 0.2);
+            padding: 4px;
+            border-radius: 10px;
+        }
+
+        .mode-btn {
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            padding: 6px 14px;
+            border-radius: 8px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .mode-btn.active {
+            background: var(--border-color);
+            color: var(--accent-cyan);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+        }
+
+        .chat-messages {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            min-height: 380px;
+            max-height: 520px;
+        }
+
+        .message {
+            display: flex;
+            flex-direction: column;
+            max-width: 80%;
+            padding: 12px 16px;
+            border-radius: 14px;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+
+        .message.user {
+            align-self: flex-end;
+            background: linear-gradient(135deg, #1e3c72, #2a5298);
+            color: #fff;
+            border-bottom-right-radius: 4px;
+        }
+
+        .message.agent {
+            align-self: flex-start;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            border-bottom-left-radius: 4px;
+        }
+
+        .message .meta {
+            font-size: 10px;
+            color: var(--text-muted);
+            margin-bottom: 4px;
+        }
+
+        .message .tool-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            background: rgba(155, 81, 224, 0.2);
+            border: 1px solid rgba(155, 81, 224, 0.4);
+            color: #c77dff;
+            padding: 4px 8px;
+            border-radius: 6px;
+            font-size: 11px;
+            margin-top: 8px;
+            font-family: monospace;
+        }
+
+        .visualizer-container {
+            padding: 16px 20px;
+            background: rgba(0, 0, 0, 0.3);
+            border-top: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 10px;
+        }
+
+        canvas#audioWave {
+            width: 100%;
+            height: 48px;
+            background: transparent;
+        }
+
+        .input-bar {
+            padding: 16px 20px;
+            background: rgba(255, 255, 255, 0.02);
+            border-top: 1px solid var(--border-color);
+            display: flex;
+            gap: 12px;
+            align-items: center;
+        }
+
+        .mic-btn {
+            width: 46px;
+            height: 46px;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .mic-btn.active {
+            background: #ff1744;
+            color: white;
+            border-color: #ff1744;
+            animation: pulse-red 1.5s infinite;
+        }
+
+        @keyframes pulse-red {
+            0% { box-shadow: 0 0 0 0 rgba(255, 23, 68, 0.7); }
+            70% { box-shadow: 0 0 0 12px rgba(255, 23, 68, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(255, 23, 68, 0); }
+        }
+
+        .text-input {
+            flex: 1;
+            background: rgba(0, 0, 0, 0.4);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 12px 16px;
+            color: white;
+            font-size: 14px;
+            outline: none;
+        }
+
+        .text-input:focus {
+            border-color: var(--accent-cyan);
+        }
+
+        .send-btn {
+            background: linear-gradient(135deg, var(--accent-cyan), var(--accent-blue));
+            border: none;
+            color: #000;
+            font-weight: 700;
+            padding: 0 20px;
+            height: 46px;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: opacity 0.2s;
+        }
+
+        .send-btn:hover {
+            opacity: 0.9;
+        }
+
+        .side-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .panel-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 16px;
+        }
+
+        .panel-card h3 {
+            font-size: 13px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: var(--text-secondary);
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .telemetry-row {
+            display: flex;
+            justify-content: space-between;
+            font-size: 13px;
+            padding: 6px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+        }
+
+        .telemetry-row .val {
+            font-weight: 600;
+            color: var(--accent-cyan);
+        }
+
+        .tool-log {
+            background: rgba(0, 0, 0, 0.4);
+            border-radius: 8px;
+            padding: 10px;
+            font-family: monospace;
+            font-size: 11px;
+            color: #a5d8ff;
+            max-height: 200px;
+            overflow-y: auto;
+            line-height: 1.4;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="brand">
+            <div class="logo-badge">GEMMA 4 OMNI</div>
+            <div class="title-group">
+                <h1>Full-Duplex Speech & Chat Console</h1>
+                <p>NVIDIA RTX 3090 (24GB) — OpenAI API & Realtime WebSocket</p>
+            </div>
+        </div>
+        <div class="status-badge">
+            <div class="status-dot"></div>
+            <span>LIVE RT-3090</span>
+        </div>
+    </header>
+
+    <div class="main-container">
+        <div class="chat-section">
+            <div class="chat-toolbar">
+                <div class="mode-selector">
+                    <button class="mode-btn active" onclick="setMode('duplex')">🎙️ Realtime Full-Duplex</button>
+                    <button class="mode-btn" onclick="setMode('text_audio')">🔊 Chat + Voce (Qwen)</button>
+                    <button class="mode-btn" onclick="setMode('text_only')">💬 Chat Statica</button>
+                </div>
+                <div style="font-size: 12px; color: var(--text-secondary);">
+                    Voce: <select id="voiceSelect" style="background:none; color:var(--accent-cyan); border:none; outline:none; font-weight:600;">
+                        <option value="Vivian">Vivian (Femminile)</option>
+                        <option value="Ryan">Ryan (Maschile)</option>
+                        <option value="Serena">Serena (Calma)</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="chat-messages" id="chatMessages">
+                <div class="message agent">
+                    <div class="meta">Gemma 4 Omni • Assistente</div>
+                    <div>Ciao! Sono pronta a conversare con te in Full-Duplex o via chat testuale. Puoi parlare al microfono, scrivermi, o chiedermi di usare uno strumento (es. <em>"Che tempo fa a Milano?"</em> o <em>"Verifica la telemetria della GPU"</em>).</div>
+                </div>
+            </div>
+
+            <div class="visualizer-container">
+                <canvas id="audioWave"></canvas>
+                <div id="duplexStateBadge" style="font-size: 11px; color: var(--accent-cyan); font-weight: 600;">
+                    STATO TURNO: IDLE / ASCOLTO
+                </div>
+            </div>
+
+            <div class="input-bar">
+                <button class="mic-btn" id="micBtn" onclick="toggleMicrophone()" title="Attiva/Disattiva Microfono Full-Duplex">
+                    🎤
+                </button>
+                <input type="text" class="text-input" id="textInput" placeholder="Scrivi un messaggio o parla al microfono..." onkeypress="handleKeyPress(event)" />
+                <button class="send-btn" onclick="sendMessage()">Invia</button>
+            </div>
+        </div>
+
+        <div class="side-panel">
+            <div class="panel-card">
+                <h3>📊 Telemetria Runtime</h3>
+                <div class="telemetry-row"><span>GPU Host</span><span class="val">RTX 3090 24GB</span></div>
+                <div class="telemetry-row"><span>Sample Rate</span><span class="val">24,000 Hz</span></div>
+                <div class="telemetry-row"><span>Duplex Frame</span><span class="val">12.5 Hz (80ms)</span></div>
+                <div class="telemetry-row"><span>Zero-Reset Barge-In</span><span class="val" style="color:var(--accent-green);">ATTIVO</span></div>
+                <div class="telemetry-row"><span>Projector V9</span><span class="val">211.83M (Prefix KV)</span></div>
+            </div>
+
+            <div class="panel-card">
+                <h3>⚡ Tool / Function Calling</h3>
+                <div class="tool-log" id="toolLog">
+                    [System] In attesa di chiamate a funzione...
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentMode = 'duplex';
+        let isMicActive = false;
+        let ws = null;
+        let audioCtx = null;
+        let micStream = null;
+        let currentAgentMsgDiv = null;
+        let currentAgentTextSpan = null;
+
+        // Visualizer wave simulation
+        const canvas = document.getElementById('audioWave');
+        const ctx = canvas.getContext('2d');
+        function drawWave() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.strokeStyle = isMicActive ? '#00f2fe' : '#243452';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            const slice = canvas.width / 40;
+            for (let i = 0; i < 40; i++) {
+                const h = isMicActive ? (Math.sin(i * 0.5 + Date.now() * 0.01) * 12 + canvas.height / 2) : canvas.height / 2;
+                if (i === 0) ctx.moveTo(0, h);
+                else ctx.lineTo(i * slice, h);
+            }
+            ctx.stroke();
+            requestAnimationFrame(drawWave);
+        }
+        drawWave();
+
+        function ensureWebSocket() {
+            if (ws && ws.readyState === WebSocket.OPEN) return Promise.resolve(ws);
+            return new Promise((resolve, reject) => {
+                const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const wsUrl = `${proto}//${window.location.host}/v1/realtime`;
+                ws = new WebSocket(wsUrl);
+
+                ws.onopen = () => {
+                    appendLog("🔌 WebSocket Realtime Connesso.");
+                    const voice = document.getElementById('voiceSelect').value;
+                    ws.send(JSON.stringify({
+                        type: "session.update",
+                        session: { voice: voice, tools: getToolsDefinition() }
+                    }));
+                    resolve(ws);
+                };
+
+                ws.onmessage = async (evt) => {
+                    try {
+                        const data = JSON.parse(evt.data);
+                        handleWebSocketEvent(data);
+                    } catch (e) {
+                        console.error("WS Parse Error:", e);
+                    }
+                };
+
+                ws.onerror = (err) => {
+                    appendLog("❌ Errore WebSocket.");
+                    reject(err);
+                };
+
+                ws.onclose = () => {
+                    appendLog("⚠️ WebSocket Disconnesso.");
+                    ws = null;
+                };
+            });
+        }
+
+        async function handleWebSocketEvent(data) {
+            const badge = document.getElementById('duplexStateBadge');
+            if (data.type === 'response.created') {
+                badge.innerText = "STATO TURNO: GEMMA PARLA (Streaming 24kHz)";
+                // Prepara contenitore messaggio per streaming incrementale
+                const container = document.getElementById('chatMessages');
+                currentAgentMsgDiv = document.createElement('div');
+                currentAgentMsgDiv.className = 'message agent';
+                currentAgentMsgDiv.innerHTML = `<div class="meta">Gemma 4 Omni • Assistente</div><div class="content-text"></div>`;
+                container.appendChild(currentAgentMsgDiv);
+                currentAgentTextSpan = currentAgentMsgDiv.querySelector('.content-text');
+                container.scrollTop = container.scrollHeight;
+            } else if (data.type === 'response.audio_transcript.delta') {
+                if (currentAgentTextSpan) {
+                    currentAgentTextSpan.innerText += data.delta;
+                    const container = document.getElementById('chatMessages');
+                    container.scrollTop = container.scrollHeight;
+                }
+            } else if (data.type === 'response.function_call_arguments.done') {
+                appendLog(`⚙️ Tool Call WS: ${data.name}(${data.arguments})`);
+                const fnArgs = JSON.parse(data.arguments || "{}");
+                const res = await handleLocalTools({ name: data.name, args: fnArgs });
+                if (currentAgentMsgDiv) {
+                    const badgeElem = document.createElement('div');
+                    badgeElem.className = 'tool-badge';
+                    badgeElem.innerText = `⚙️ Tool Eseguito: ${data.name}(${JSON.stringify(fnArgs)}) ➔ ${res}`;
+                    currentAgentMsgDiv.appendChild(badgeElem);
+                }
+            } else if (data.type === 'audio.cancelled') {
+                badge.innerText = "STATO TURNO: BARGE-IN INTERROTTO (Zero-Reset)";
+                appendLog(`🛑 Barge-In Rilevato (Epoch ${data.epoch}) - Risposta interrotta.`);
+            } else if (data.type === 'response.done') {
+                badge.innerText = isMicActive ? "STATO TURNO: IN ASCOLTO (12.5Hz)" : "STATO TURNO: IDLE / ASCOLTO";
+            }
+        }
+
+        function getToolsDefinition() {
+            return [
+                {
+                    type: "function",
+                    function: {
+                        name: "get_current_weather",
+                        description: "Ottiene il meteo in tempo reale.",
+                        parameters: {
+                            type: "object",
+                            properties: { location: { type: "string" } },
+                            required: ["location"]
+                        }
+                    }
+                },
+                {
+                    type: "function",
+                    function: {
+                        name: "get_device_telemetry",
+                        description: "Legge telemetria GPU e sensori.",
+                        parameters: {
+                            type: "object",
+                            properties: { device_id: { type: "string" } }
+                        }
+                    }
+                }
+            ];
+        }
+
+        function setMode(mode) {
+            currentMode = mode;
+            document.querySelectorAll('.mode-btn').forEach(btn => btn.classList.remove('active'));
+            event.target.classList.add('active');
+            appendLog(`[Modalità] Impostata su: ${mode}`);
+            if (mode === 'duplex') ensureWebSocket();
+        }
+
+        function appendLog(msg) {
+            const log = document.getElementById('toolLog');
+            const ts = new Date().toLocaleTimeString();
+            log.innerHTML += `\n[${ts}] ${msg}`;
+            log.scrollTop = log.scrollHeight;
+        }
+
+        function appendMessage(role, text, toolCall = null) {
+            const container = document.getElementById('chatMessages');
+            const msgDiv = document.createElement('div');
+            msgDiv.className = `message ${role}`;
+            
+            let html = `<div class="meta">${role === 'user' ? 'Tu' : 'Gemma 4 Omni'}</div><div>${text}</div>`;
+            if (toolCall) {
+                html += `<div class="tool-badge">⚙️ Tool Eseguito: ${toolCall.name}(${JSON.stringify(toolCall.args)}) ➔ ${toolCall.result}</div>`;
+            }
+            msgDiv.innerHTML = html;
+            container.appendChild(msgDiv);
+            container.scrollTop = container.scrollHeight;
+        }
+
+        async function handleLocalTools(toolCall) {
+            appendLog(`⚡ Esecuzione Tool: ${toolCall.name}`);
+            let result = "OK";
+            if (toolCall.name === 'get_current_weather') {
+                result = "24°C, Soleggiato con brezza leggera";
+            } else if (toolCall.name === 'get_device_telemetry') {
+                result = "VRAM: 15.8GB / 24GB, Temp: 48°C, Power: 110W";
+            }
+            appendLog(`✓ Risultato: ${result}`);
+            return result;
+        }
+
+        async function sendMessage() {
+            const input = document.getElementById('textInput');
+            const text = input.value.trim();
+            if (!text) return;
+            input.value = '';
+
+            appendMessage('user', text);
+
+            if (currentMode === 'duplex') {
+                try {
+                    const socket = await ensureWebSocket();
+                    socket.send(JSON.stringify({
+                        type: "conversation.item.create",
+                        item: {
+                            type: "message",
+                            role: "user",
+                            content: [{ type: "input_text", text: text }]
+                        }
+                    }));
+                    socket.send(JSON.stringify({ type: "response.create" }));
+                    return;
+                } catch (e) {
+                    appendLog(`⚠️ Fallback a REST: ${e.message}`);
+                }
+            }
+
+            const modalities = currentMode === 'text_audio' ? ['text', 'audio'] : ['text'];
+            const voice = document.getElementById('voiceSelect').value;
+
+            try {
+                const resp = await fetch('/v1/chat/completions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        model: "gemma-4-omni-duplex",
+                        messages: [{ role: "user", content: text }],
+                        tools: getToolsDefinition(),
+                        modalities: modalities,
+                        voice: voice
+                    })
+                });
+
+                const data = await resp.json();
+                const choice = data.choices[0];
+                const msg = choice.message;
+
+                let toolInfo = null;
+                if (msg.tool_calls && msg.tool_calls.length > 0) {
+                    const tc = msg.tool_calls[0];
+                    const fnArgs = JSON.parse(tc.function.arguments || "{}");
+                    const res = await handleLocalTools({ name: tc.function.name, args: fnArgs });
+                    toolInfo = { name: tc.function.name, args: fnArgs, result: res };
+                }
+
+                appendMessage('agent', msg.content || "Elaborazione completata.", toolInfo);
+
+                // Riproduzione audio se presente
+                if (msg.audio && msg.audio.data) {
+                    playBase64Audio(msg.audio.data);
+                }
+            } catch (err) {
+                appendMessage('agent', `[Errore] Connessione al runtime: ${err.message}`);
+            }
+        }
+
+        function playBase64Audio(b64) {
+            const audio = new Audio("data:audio/wav;base64," + b64);
+            audio.play();
+        }
+
+        function handleKeyPress(e) {
+            if (e.key === 'Enter') sendMessage();
+        }
+
+        async function toggleMicrophone() {
+            isMicActive = !isMicActive;
+            const btn = document.getElementById('micBtn');
+            const badge = document.getElementById('duplexStateBadge');
+            if (isMicActive) {
+                btn.classList.add('active');
+                badge.innerText = "STATO TURNO: IN ASCOLTO STREAMING (12.5Hz)";
+                appendLog("🎙️ Microfono Full-Duplex attivato.");
+                ensureWebSocket();
+            } else {
+                btn.classList.remove('active');
+                badge.innerText = "STATO TURNO: IDLE / PAUSA";
+                appendLog("Microfono disattivato.");
+            }
+        }
+    </script>
+</body>
+</html>

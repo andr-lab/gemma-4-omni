@@ -149,6 +149,55 @@ class Gemma4OmniV9TalkerForConditionalGeneration(Qwen3TTSTalkerForConditionalGen
     v9_ready: bool = False
     _gemma_tok_cache: dict[str, Any] = {}
 
+    # ------------------------------------------------------------------
+    # ARIA Streaming Pacing (ADR-023): 4.8 frame/parola + 12 di overhead.
+    # Il budget di generazione acustica per-request viene calcolato dal
+    # testo della risposta (worker-side, dove il testo è noto a runtime) e
+    # applicato in compute_logits forzando il token EOS del talker (2150)
+    # quando il contatore dei frame generati raggiunge il budget.
+    # Reference: tools/interactive_gemma4_omni_live.py (T_gen_frames).
+    # ------------------------------------------------------------------
+    ARIA_FRAMES_PER_WORD = 4.8
+    ARIA_OVERHEAD_FRAMES = 12
+    ARIA_MIN_FRAMES = 48
+    ARIA_MAX_FRAMES = 140
+
+    # Token EOS del Talker Qwen3-TTS (stop_token_ids nel pipeline config).
+    TALKER_EOS_TOKEN_ID = 2150
+
+    def _aria_budget_for_text(self, text: str) -> int:
+        """Budget di frame acustici ARIA per un testo di risposta.
+
+        T_gen = max(48, min(140, n_words*4.8 + 12)) — stessa formula del
+        reference locale (interactive_gemma4_omni_live.py). Il tetto a 140
+        frame (11.2s) evita code di silenzio/rumore per risposte lunghe;
+        il pavimento a 48 garantisce frasi brevi complete.
+        """
+        n_words = max(1, len(str(text).split()))
+        budget = int(n_words * self.ARIA_FRAMES_PER_WORD) + self.ARIA_OVERHEAD_FRAMES
+        return max(self.ARIA_MIN_FRAMES, min(self.ARIA_MAX_FRAMES, budget))
+
+    def _aria_budget_for_info(self, info_dict: dict[str, Any]) -> int | None:
+        """Budget ARIA dal testo presente nell'info payload del talker.
+
+        Il testo arriva da additional_information.text (flusso sync) o dai
+        token ids Gemma ids.output (flusso async_chunk). Ritorna None se
+        nessun testo è recuperabile (fail-soft: nessun pacing forzato).
+        """
+        text = None
+        additional = info_dict.get("additional_information")
+        if isinstance(additional, dict):
+            raw = additional.get("text")
+            if isinstance(raw, list) and raw and isinstance(raw[0], str):
+                text = raw[0].strip()
+            elif isinstance(raw, str) and raw.strip():
+                text = raw.strip()
+        if not text:
+            text = self._recover_text_from_info(info_dict)
+        if not text:
+            return None
+        return self._aria_budget_for_text(text)
+
     def _gemma_tokenizer(self):
         """Tokenizer Gemma per recuperare il testo della risposta dai token ids.
 
@@ -188,8 +237,6 @@ class Gemma4OmniV9TalkerForConditionalGeneration(Qwen3TTSTalkerForConditionalGen
             return None
 
     def preprocess(self, input_ids: torch.Tensor, input_embeds: torch.Tensor | None, **info_dict: Any):
-        # Text conditioning mancante? Nel flusso async_chunk il testo viaggia
-        # come token ids Gemma (ids.output) e va ricostruito qui.
         import os as _os
 
         if _os.environ.get("DEBUG_REGISTRY"):
@@ -247,10 +294,27 @@ class Gemma4OmniV9TalkerForConditionalGeneration(Qwen3TTSTalkerForConditionalGen
                     "[V9] Text conditioning assente e nessun ids.output nel payload; "
                     "il talker non può sintetizzare."
                 )
+        # ARIA pacing: registra il budget per-request DAL TEXTO ricostruito
+        # qui (il flusso async arriva con request_id nei req_infos).
+        try:
+            rid = merged.get("request_id") or merged.get("_omni_request_id")
+            if rid:
+                budget = self._aria_budget_for_info(merged)
+                if budget is not None:
+                    self._req_aria_budget[str(rid)] = budget
+                    if _os.environ.get("DEBUG_REGISTRY"):
+                        print(f"[V9-ARIA] rid={rid} budget={budget}", flush=True)
+        except Exception:  # fail-soft: il pacing non deve mai rompere il talker
+            pass
         return super().preprocess(input_ids, input_embeds, **merged)
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
+
+        # Budget ARIA per-request: request_id -> frame di generazione massimi.
+        # Popolato in preprocess_batch (testo noto worker-side), consumato in
+        # compute_logits (forcing EOS quando il contatore raggiunge il budget).
+        self._req_aria_budget: dict[str, int] = {}
 
         # Profili voce di default (voci registrate come custom_voice_dir):
         # il loader nativo gira DENTRO super().__init__, quindi impostiamo il
@@ -273,6 +337,83 @@ class Gemma4OmniV9TalkerForConditionalGeneration(Qwen3TTSTalkerForConditionalGen
 
         # Sostituisce il prompt builder con il wrapper che inietta il prefisso.
         self._prompt_builder = _V9PromptEmbedsBuilderWrapper(self, self._prompt_builder)
+
+    # ------------------------------------------------------------------
+    # ARIA pacing: override di preprocess_batch (budget) e compute_logits
+    # (forcing EOS). Il talker genera un token RVQ per frame (12.5 Hz): il
+    # contatore len(output_token_ids[i]) è il numero di frame già emessi.
+    # ------------------------------------------------------------------
+    def preprocess_batch(
+        self,
+        *,
+        req_ids: list[str],
+        model_intermediate_buffer: dict[str, dict[str, Any]],
+        device: torch.device,
+    ) -> None:
+        """Calcola il budget ARIA per-request dal testo della risposta.
+
+        Fallback su richiesta per-request: il testo arriva via
+        additional_information.text (flusso sync) o recuperato dai token ids
+        Gemma ids.output (flusso async_chunk). Il budget è il numero MASSIMO
+        di frame acustici che il talker può emettere; oltre, compute_logits
+        forza il token EOS (2150).
+        """
+        for req_id in req_ids:
+            info_dict = model_intermediate_buffer.get(req_id)
+            if isinstance(info_dict, dict):
+                budget = self._aria_budget_for_info(info_dict)
+                if budget is not None:
+                    self._req_aria_budget[req_id] = budget
+        return super().preprocess_batch(
+            req_ids=req_ids,
+            model_intermediate_buffer=model_intermediate_buffer,
+            device=device,
+        )
+
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor | Any,
+        sampling_metadata: Any = None,
+    ) -> torch.Tensor | None:
+        """Forza EOS quando il frame corrente supera il budget ARIA.
+
+        Il pacing è per-request: ogni risposta ha un budget proporzionale al
+        numero di parole del testo (4.8 frame/parola + 12). Senza questo, le
+        risposte brevi con EOS ritardato generano code di silenzio/rumore
+        (NEXT_STEP §3.2). Fail-soft: se il budget non è noto, nessun forcing.
+        """
+        logits = super().compute_logits(hidden_states, sampling_metadata)
+        if logits is None or not self._req_aria_budget:
+            return logits
+        output_token_ids = getattr(sampling_metadata, "output_token_ids", None)
+        if output_token_ids is None or len(output_token_ids) != logits.shape[0]:
+            return logits
+        batch_req_ids = self._batch_req_ids
+        if len(batch_req_ids) != logits.shape[0]:
+            return logits
+        eos_id = self.TALKER_EOS_TOKEN_ID
+        force = False
+        import os as _os
+        for i, rid in enumerate(batch_req_ids):
+            budget = self._req_aria_budget.get(rid)
+            if budget is None:
+                continue
+            generated = len(output_token_ids[i])
+            if _os.environ.get("DEBUG_REGISTRY") and generated in (1, 5, 6, 47, 48, 49):
+                logger.warning("[V9-ARIA] rid=%s generated=%d budget=%s out_token_sample=%s",
+                               rid, generated, budget, list(output_token_ids[i][-3:]))
+            # >=: al frame budget-1 non forziamo ancora (lasciamo l'ultimo
+            # frame naturale); al frame budget EOS è forzato.
+            if generated >= budget:
+                logits[i, eos_id] = float("inf")
+                force = True
+        if force:
+            logger.info("[V9-ARIA] pacing EOS forzato su %d request (budget attivi=%d).",
+                        sum(1 for i in range(len(batch_req_ids))
+                            if self._req_aria_budget.get(batch_req_ids[i]) is not None
+                            and len(output_token_ids[i]) >= self._req_aria_budget[batch_req_ids[i]]),
+                        len(self._req_aria_budget))
+        return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Carica i pesi nativi del talker + i moduli V9 dai checkpoint addestrati."""
