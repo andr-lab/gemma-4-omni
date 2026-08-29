@@ -41,6 +41,11 @@ class DuplexSession:
     thinker_ctx: ThinkerContext = field(default_factory=ThinkerContext)
     talker_prefix: TalkerPrefixKV = field(default_factory=TalkerPrefixKV)
     turn_kv: TurnKVState = field(default_factory=TurnKVState)
+    talker_prefix_text: str | None = None
+    talker_prefix_h: np.ndarray | None = None
+    thinker_kv: Any | None = None
+    thinker_cache_ids: list[int] = field(default_factory=list)
+    thinker_hidden: Any | None = None
     # Turndynamics
     turnhead: TurnHeadRuntime | None = None
     # Stato conversazione
@@ -58,6 +63,7 @@ class DuplexSession:
     ref_text: str | None = None
     language: str = "Italian"
     tools: list[dict[str, Any]] = field(default_factory=list)
+    auto_response: bool = False
 
     def touch(self) -> None:
         self.last_activity = time.time()

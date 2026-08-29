@@ -1,6 +1,6 @@
 """OpenAI-compatible HTTP/SSE and realtime duplex WebSocket server."""
 from __future__ import annotations
-import asyncio, base64, io, json, logging, threading, time, uuid
+import asyncio, base64, io, json, logging, queue, threading, time, uuid
 from typing import Any
 import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -71,11 +71,35 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
         tools = request.get("tools") or sess.tools
         if tools:
             clean.insert(0, {"role": "system", "content": tool_system_prompt(tools)})
+        # La sessione è la proprietaria del rolling context: il prompt non
+        # cresce senza limite e non dipende da una lista globale del server.
+        sess.thinker_ctx.system_prompt = sess.instructions
+        sess.thinker_ctx.set_messages(clean)
+        clean = sess.thinker_ctx.messages()
         prompt = _message_text(clean[-1].get("content", "")) if clean else ""
         chat = engine.tokenizer.apply_chat_template(clean, tokenize=False, add_generation_prompt=True)
         ids = engine.tokenizer(chat, return_tensors="pt")["input_ids"][0].tolist()
+        cond = resolve_voice_conditioning(
+            request.get("voice") or request.get("speaker") or sess.voice,
+            request.get("voice_style") or request.get("instructions") or sess.voice_style,
+            request.get("ref_audio"), request.get("ref_text"),
+        )
+        streamed_audio: list[np.ndarray] = []
+        stream_requested = callable(request.get("_on_audio_chunk")) and not tools
+        def render_text_chunk(chunk_text: str, chunk_hidden: Any, chunk_prompt_len: int) -> None:
+            if not chunk_text or not stream_requested:
+                return
+            chunk_h = engine.v9_prefix(chunk_hidden, chunk_prompt_len)
+            chunk_wav = engine.talk(chunk_text, chunk_h, n_words=max(1, len(chunk_text.split())),
+                                    voice_conditioning=cond, stop_check=request.get("_stop_check"),
+                                    state=sess, on_audio_chunk=request.get("_on_audio_chunk"), min_frames=8)
+            streamed_audio.append(chunk_wav)
         think = engine.think(ids, max_new_tokens=int(request.get("max_tokens", 64)),
-                             temperature=float(request.get("temperature", 0.7)), top_p=float(request.get("top_p", 0.9)))
+                             temperature=float(request.get("temperature", 0.7)), top_p=float(request.get("top_p", 0.9)),
+                             stop_check=request.get("_stop_check"), state=sess,
+                             on_text_chunk=render_text_chunk if stream_requested else None)
+        if request.get("_stop_check") and request["_stop_check"]():
+            return {"text": "", "tool_calls": [], "wav": None, "elapsed": 0.0, "cancelled": True}
         calls = extract_tool_calls(think["text"], tools) if tools else []
         if calls:
             return {"text": "", "tool_calls": calls, "wav": None, "elapsed": 0.0}
@@ -83,15 +107,14 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
         h_pfx = engine.v9_prefix(think["hidden"], think["prompt_len"])
         if sess.turnhead is not None:
             sess.turnhead.set_thinker_hidden(h_pfx)
-        cond = resolve_voice_conditioning(
-            request.get("voice") or request.get("speaker") or sess.voice,
-            request.get("voice_style") or request.get("instructions") or sess.voice_style,
-            request.get("ref_audio"), request.get("ref_text"),
-        )
         wav = None
         if "audio" in (request.get("modalities") or ["text"]):
-            wav = engine.talk(text, h_pfx, n_words=max(1, len(text.split())), voice_conditioning=cond,
-                               stop_check=lambda: sess.stop_requested)
+            if stream_requested and streamed_audio:
+                wav = np.concatenate(streamed_audio)
+            else:
+                wav = engine.talk(text, h_pfx, n_words=max(1, len(text.split())), voice_conditioning=cond,
+                                   stop_check=lambda: sess.stop_requested, state=sess,
+                                   on_audio_chunk=request.get("_on_audio_chunk"))
         sess.history = clean[-16:] + [{"role": "assistant", "content": text}]
         return {"text": text, "wav": wav, "tool_calls": [], "elapsed": 0.0}
 
@@ -170,6 +193,105 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
         if not duplex:
             await ws.close(code=1008, reason="usa /v1/realtime?duplex=1"); return
         await ws.accept(); sess = sessions.create_session(); _ensure_turnhead(sess); response_task: asyncio.Task | None = None
+        auto_task: asyncio.Task | None = None
+
+        async def produce_response(committed_audio: np.ndarray) -> None:
+            nonlocal response_task
+            response_id = "resp_" + uuid.uuid4().hex[:12]
+            started = time.perf_counter()
+            sess.stop_requested = False
+            sess.active_response = True
+            logger.info("[realtime %s] start %s audio_samples=%d auto=%s", sess.session_id[:8], response_id, committed_audio.size, sess.auto_response)
+            try:
+                await ws.send_json({"type": "response.created", "response_id": response_id})
+                audio_queue: queue.Queue[np.ndarray] = queue.Queue()
+                streamed_chunks = 0
+                def on_audio_chunk(chunk: np.ndarray) -> None:
+                    audio_queue.put(np.asarray(chunk, dtype=np.float32))
+                def infer_ws():
+                    with inference_lock:
+                        history = list(sess.history)
+                        if committed_audio.size and hasattr(engine, "transcribe_audio"):
+                            logger.info("[realtime %s %s] ASR start samples=%d", sess.session_id[:8], response_id, committed_audio.size)
+                            audio_text = engine.transcribe_audio(committed_audio)["text"]
+                            logger.info("[realtime %s %s] ASR done text_chars=%d elapsed=%.2fs", sess.session_id[:8], response_id, len(audio_text), time.perf_counter() - started)
+                            if audio_text:
+                                history.append({"role": "user", "content": audio_text})
+                        logger.info("[realtime %s %s] Thinker/Talker start", sess.session_id[:8], response_id)
+                        result = run_response(sess, history or [{"role": "user", "content": "Ciao!"}], {"modalities": ["text", "audio"], "tools": sess.tools, "voice": sess.voice, "voice_style": sess.voice_style, "ref_text": sess.ref_text, "_stop_check": lambda: sess.stop_requested, "_on_audio_chunk": on_audio_chunk})
+                        logger.info("[realtime %s %s] Thinker/Talker done elapsed=%.2fs", sess.session_id[:8], response_id, time.perf_counter() - started)
+                        return result
+                loop = asyncio.get_running_loop()
+                future = loop.run_in_executor(None, infer_ws)
+                deadline = loop.time() + 180.0
+                while not future.done():
+                    if loop.time() >= deadline:
+                        sess.stop_requested = True
+                        if hasattr(engine, "stop_generation"):
+                            engine.stop_generation()
+                        logger.error("[realtime %s %s] timeout dopo %.1fs", sess.session_id[:8], response_id, time.perf_counter() - started)
+                        await ws.send_json({"type": "error", "error": {"code": "INFERENCE_TIMEOUT", "message": "risposta oltre 180 secondi"}, "response_id": response_id})
+                        return
+                    try:
+                        chunk_wav = audio_queue.get_nowait()
+                    except queue.Empty:
+                        await asyncio.sleep(0.005)
+                    else:
+                        streamed_chunks += 1
+                        await ws.send_json({"type": "response.audio.delta", "delta": _wav_b64(chunk_wav)})
+                result = await future
+                while True:
+                    try:
+                        chunk_wav = audio_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    streamed_chunks += 1
+                    await ws.send_json({"type": "response.audio.delta", "delta": _wav_b64(chunk_wav)})
+                if result.get("cancelled"):
+                    await ws.send_json({"type": "response.cancelled", "reason": "cooperative_stop"})
+                    return
+                if result["tool_calls"]:
+                    for call in result["tool_calls"]:
+                        fn = call["function"]
+                        await ws.send_json({"type": "response.function_call_arguments.done", "call_id": call["id"], "name": fn["name"], "arguments": fn["arguments"]})
+                    return
+                await ws.send_json({"type": "response.output_text.delta", "delta": result["text"]})
+                if result["wav"] is not None and streamed_chunks == 0:
+                    chunk = int(CODEC_SAMPLE_RATE * .640)
+                    for start in range(0, len(result["wav"]), chunk):
+                        await ws.send_json({"type": "response.audio.delta", "delta": _wav_b64(result["wav"][start:start + chunk])})
+                await ws.send_json({"type": "response.done", "response_id": response_id})
+                logger.info("[realtime %s %s] done total=%.2fs audio_chunks=%d", sess.session_id[:8], response_id, time.perf_counter() - started, streamed_chunks)
+                queued_audio = sess.pending_audio.copy()
+                sess.reset_turn()
+                sess.pending_audio = queued_audio
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.exception("realtime response failed")
+                await ws.send_json({"type": "error", "error": {"code": "INFERENCE_ERROR", "message": str(exc)[:240]}})
+            finally:
+                sess.active_response = False
+                if sess.auto_response and sess.pending_audio.size:
+                    await schedule_auto_response()
+
+        auto_generation = 0
+        async def schedule_auto_response() -> None:
+            nonlocal auto_task, response_task, auto_generation
+            auto_generation += 1
+            generation = auto_generation
+            if auto_task and not auto_task.done():
+                auto_task.cancel()
+            async def delayed() -> None:
+                nonlocal response_task
+                await asyncio.sleep(0.35)
+                if generation != auto_generation or sess.active_response or not sess.pending_audio.size:
+                    return
+                committed = sess.pending_audio.copy()
+                sess.pending_audio = np.empty(0, dtype=np.float32)
+                response_task = asyncio.create_task(produce_response(committed))
+            auto_task = asyncio.create_task(delayed())
+
         try:
             await ws.send_json({"type": "session.created", "session_id": sess.session_id})
             while True:
@@ -182,6 +304,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                 et = ev.get("type")
                 if et == "session.update":
                     cfg = ev.get("session", {}); sess.instructions = str(cfg.get("instructions", sess.instructions)); sess.voice = str(cfg.get("voice", sess.voice)); sess.tools = cfg.get("tools", sess.tools) or []
+                    extra = cfg.get("extra_body", {}) or {}; sess.auto_response = bool(cfg.get("auto_response", extra.get("auto_response", sess.auto_response)))
                     await ws.send_json({"type": "session.updated", "session_id": sess.session_id})
                 elif et == "conversation.item.create":
                     item = ev.get("item", {}); sess.history.append({"role": item.get("role", "user"), "content": _message_text(item.get("content", ""))}); await ws.send_json({"type": "conversation.item.created"})
@@ -203,53 +326,33 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                         action = sess.turnhead.decide()
                         if action["pred_name"] == "BARGE_IN":
                             sess.stop_requested = True
+                            if hasattr(engine, "stop_generation"):
+                                engine.stop_generation()
                             if response_task:
                                 response_task.cancel()
                                 try: await response_task
                                 except asyncio.CancelledError: pass
                             await ws.send_json({"type": "response.cancelled", "reason": "user_barge_in"})
+                    if sess.auto_response and not sess.active_response:
+                        await schedule_auto_response()
                 elif et in {"input_audio_buffer.commit", "response.create"}:
                     if response_task and not response_task.done():
                         await ws.send_json({"type": "error", "error": {"code": "RESPONSE_ACTIVE", "message": "response già attiva"}})
                         continue
-                    async def produce():
-                        sess.stop_requested = False
-                        sess.active_response = True
-                        try:
-                            await ws.send_json({"type": "response.created"})
-                            def infer_ws():
-                                with inference_lock:
-                                    history = list(sess.history)
-                                    if sess.pending_audio.size and hasattr(engine, "transcribe_audio"):
-                                        audio_text = engine.transcribe_audio(sess.pending_audio)["text"]
-                                        if audio_text:
-                                            history.append({"role": "user", "content": audio_text})
-                                    return run_response(sess, history or [{"role": "user", "content": "Ciao!"}], {"modalities": ["text", "audio"], "tools": sess.tools, "voice": sess.voice, "voice_style": sess.voice_style, "ref_text": sess.ref_text})
-                            result = await asyncio.get_running_loop().run_in_executor(None, infer_ws)
-                            if result["tool_calls"]:
-                                for call in result["tool_calls"]:
-                                    fn = call["function"]
-                                    await ws.send_json({"type": "response.function_call_arguments.done", "call_id": call["id"], "name": fn["name"], "arguments": fn["arguments"]})
-                                return
-                            await ws.send_json({"type": "response.output_text.delta", "delta": result["text"]})
-                            if result["wav"] is not None:
-                                chunk = int(CODEC_SAMPLE_RATE * .640)
-                                for start in range(0, len(result["wav"]), chunk):
-                                    await ws.send_json({"type": "response.audio.delta", "delta": _wav_b64(result["wav"][start:start + chunk])})
-                            await ws.send_json({"type": "response.done"})
-                            sess.reset_turn()
-                        except asyncio.CancelledError:
-                            raise
-                        except Exception as exc:
-                            logger.exception("realtime response failed")
-                            await ws.send_json({"type": "error", "error": {"code": "INFERENCE_ERROR", "message": str(exc)[:240]}})
-                        finally:
-                            sess.active_response = False
-                    # Non-blocking: the receive loop remains alive for barge-in.
-                    response_task = asyncio.create_task(produce())
+                    if auto_task and not auto_task.done():
+                        auto_task.cancel()
+                    auto_generation += 1
+                    # Congela il micro-turn per il worker: l'audio che arriva
+                    # mentre la risposta parla appartiene già al turno successivo.
+                    committed_audio = sess.pending_audio.copy()
+                    sess.pending_audio = np.empty(0, dtype=np.float32)
+                    # Non-blocking: the receive loop resta vivo durante
+                    # Thinker/V9/Talker e può ricevere barge-in.
+                    response_task = asyncio.create_task(produce_response(committed_audio))
                 elif et == "session.close": break
         except (WebSocketDisconnect, asyncio.CancelledError): pass
         finally:
+            if auto_task and not auto_task.done(): auto_task.cancel()
             if response_task and not response_task.done(): response_task.cancel()
             sessions.close(sess.session_id)
     return app

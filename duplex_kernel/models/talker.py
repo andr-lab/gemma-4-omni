@@ -65,8 +65,8 @@ class TalkerModel:
         self.tcfg = tcfg
         self.device = device
 
-    def build_prefill_embeddings(self, text: str) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Embedding del prefill ufficiale [ICL_text] (+ BOS separato)."""
+    def build_prefill_parts(self, text: str) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Restituisce prefisso stabile, parte dinamica, BOS e TTS-PAD."""
         t = self.talker
         cfg, tcfg = self.cfg, self.tcfg
         raw_ids = self.proc(text=text, return_tensors="pt")["input_ids"].to(self.device)
@@ -95,6 +95,11 @@ class TalkerModel:
         bos_part = pad_e + t.get_input_embeddings()(
             torch.tensor([[tcfg.codec_bos_id]], device=self.device, dtype=raw_ids.dtype)
         )
+        return icl_part, text_part, bos_part, pad_e
+
+    def build_prefill_embeddings(self, text: str) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Compatibilità: embedding completo del prefill ufficiale."""
+        icl_part, text_part, bos_part, pad_e = self.build_prefill_parts(text)
         return torch.cat([icl_part, text_part], dim=1), bos_part, pad_e
 
     def decode(self, codes: torch.Tensor) -> torch.Tensor:

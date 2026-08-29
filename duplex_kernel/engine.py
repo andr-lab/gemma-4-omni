@@ -91,24 +91,75 @@ class PipelineEngine:
     # ------------------------------------------------------------------
     @torch.inference_mode()
     def think(self, prompt_token_ids: list[int], *, max_new_tokens: int = 64,
-              temperature: float = 0.7, top_p: float = 0.9) -> dict[str, Any]:
-        input_ids = torch.tensor([prompt_token_ids], device=self.device)
-        out = self.thinker.generate(
-            input_ids, max_new_tokens=max_new_tokens, do_sample=True,
-            temperature=temperature, top_p=top_p
-        )
-        gen_ids = out[0, input_ids.shape[1]:].cpu().tolist()
-        text = self.tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
-        if not gen_ids:
-            raise RuntimeError("Thinker ha prodotto una risposta vuota")
-        # hidden states: il wrapper ThinkerModel espone hidden_states(input_ids)
-        if isinstance(self.thinker, torch.nn.Module):
-            with torch.no_grad():
-                full = self.thinker(out, output_hidden_states=True, return_dict=True)
-                hidden = full.hidden_states[-1]
+              temperature: float = 0.7, top_p: float = 0.9, stop_check: Any | None = None,
+              state: Any | None = None, on_text_chunk: Any | None = None) -> dict[str, Any]:
+        """Decode Thinker controllato dal kernel con riuso opportunistico della KV."""
+        cached_ids = list(getattr(state, "thinker_cache_ids", [])) if state is not None else []
+        use_cached = bool(cached_ids and len(prompt_token_ids) > len(cached_ids)
+                          and prompt_token_ids[:len(cached_ids)] == cached_ids
+                          and getattr(state, "thinker_kv", None) is not None
+                          and getattr(state, "thinker_hidden", None) is not None)
+        if use_cached:
+            suffix = prompt_token_ids[len(cached_ids):]
+            ids = torch.tensor([suffix], device=self.device)
+            mask = torch.ones((1, len(cached_ids) + len(suffix)), device=self.device, dtype=torch.long)
+            out = self.thinker(input_ids=ids, attention_mask=mask, past_key_values=state.thinker_kv,
+                               use_cache=True, output_hidden_states=True, return_dict=True)
+            hidden_parts = [state.thinker_hidden, out.hidden_states[-1]]
         else:
-            hidden = self.thinker.hidden_states(out)
-        return {"text": text, "gen_ids": gen_ids, "hidden": hidden, "prompt_len": int(input_ids.shape[1])}
+            ids = torch.tensor([prompt_token_ids], device=self.device)
+            mask = torch.ones_like(ids)
+            out = self.thinker(input_ids=ids, attention_mask=mask, use_cache=True,
+                               output_hidden_states=True, return_dict=True)
+            hidden_parts = [out.hidden_states[-1]]
+        past = out.past_key_values
+        logits = out.logits[:, -1, :]
+        generated: list[int] = []
+        pending_chunk: list[int] = []
+        eos = {x for x in (self.tokenizer.eos_token_id, getattr(self.tokenizer, "eot_id", None)) if x is not None}
+        for _ in range(max_new_tokens):
+            if stop_check is not None and stop_check():
+                break
+            if temperature <= 1e-5:
+                token = logits.argmax(dim=-1, keepdim=True)
+            else:
+                probs = torch.softmax(logits / temperature, dim=-1)
+                if 0.0 < top_p < 1.0:
+                    vals, idx = torch.sort(probs, descending=True)
+                    keep = torch.cumsum(vals, dim=-1) <= top_p
+                    keep[..., 0] = True
+                    probs = torch.zeros_like(probs).scatter(-1, idx, vals * keep)
+                    probs = probs / probs.sum(dim=-1, keepdim=True)
+                token = torch.multinomial(probs, 1)
+            value = int(token.item())
+            if value in eos:
+                break
+            generated.append(value)
+            pending_chunk.append(value)
+            mask = torch.cat([mask, torch.ones((1, 1), device=self.device, dtype=mask.dtype)], dim=1)
+            out = self.thinker(input_ids=token, attention_mask=mask, past_key_values=past,
+                               use_cache=True, output_hidden_states=True, return_dict=True)
+            past = out.past_key_values
+            hidden_parts.append(out.hidden_states[-1])
+            logits = out.logits[:, -1, :]
+            if on_text_chunk is not None:
+                piece = self.tokenizer.decode(pending_chunk, skip_special_tokens=True).strip()
+                if piece and (len(pending_chunk) >= 8 or piece.endswith((".", "!", "?", ":", ";"))):
+                    on_text_chunk(piece, torch.cat(hidden_parts, dim=1), len(prompt_token_ids))
+                    pending_chunk.clear()
+        if on_text_chunk is not None and pending_chunk:
+            piece = self.tokenizer.decode(pending_chunk, skip_special_tokens=True).strip()
+            if piece:
+                on_text_chunk(piece, torch.cat(hidden_parts, dim=1), len(prompt_token_ids))
+        if not generated:
+            raise RuntimeError("Thinker ha prodotto una risposta vuota")
+        hidden = torch.cat(hidden_parts, dim=1)
+        if state is not None:
+            state.thinker_kv = past
+            state.thinker_cache_ids = list(prompt_token_ids) + generated
+            state.thinker_hidden = hidden.detach()
+        return {"text": self.tokenizer.decode(generated, skip_special_tokens=True).strip(),
+                "gen_ids": generated, "hidden": hidden, "prompt_len": len(prompt_token_ids), "past_key_values": past}
 
     def transcribe_audio(self, pcm: np.ndarray, *, max_new_tokens: int = 64) -> dict[str, Any]:
         if self._thinker_wrapper is None:
@@ -127,7 +178,10 @@ class PipelineEngine:
         seq_trans = gen.transpose(1, 2)
         h_raw_style = F.interpolate(seq_trans, size=T_pfx, mode="linear", align_corners=False).transpose(1, 2)
         cc = self.causal_conv(h_raw_style.to(self.dtype))
-        return self.v9(cc, h_tx)  # (1, 16, 2048)
+        out = self.v9(cc, h_tx)  # (1, 16, 2048)
+        if not torch.isfinite(out).all():
+            raise RuntimeError("V9 ha prodotto h_pfx non finito")
+        return out
 
     # ------------------------------------------------------------------
     # Talker
@@ -151,7 +205,8 @@ class PipelineEngine:
     @torch.inference_mode()
     def talk(self, text: str, h_pfx: torch.Tensor, *, n_words: int,
              voice_conditioning: dict[str, Any] | None = None,
-             stop_check: Any | None = None) -> np.ndarray:
+             stop_check: Any | None = None, state: Any | None = None,
+             on_audio_chunk: Any | None = None, min_frames: int = 48) -> np.ndarray:
         self._stop_event = False
         if voice_conditioning is not None:
             # Il builder nativo può consumare questo payload; lo manteniamo sul
@@ -159,23 +214,57 @@ class PipelineEngine:
             self.talker.voice_conditioning = voice_conditioning
         t = self.talker.talker
         tcfg = self.talker.tcfg
-        T_gen = max(48, min(140, int(n_words * 4.8) + 12))
-        icl_part, bos_part, tts_pad_embed = self.talker.build_prefill_embeddings(text)
-        pfx = torch.cat([icl_part, h_pfx.to(self.dtype), bos_part], dim=1)
-        out_pfx = t.model(inputs_embeds=pfx, use_cache=True)
+        if on_audio_chunk is not None and min_frames < 48:
+            # Nei micro-turn causali la durata è bounded: il testo viene
+            # renderizzato di nuovo al chunk successivo, quindi non usare il
+            # margine fisso del percorso completo.
+            T_gen = max(min_frames, min(32, int(n_words * 2.0) + 4))
+        else:
+            T_gen = max(min_frames, min(140, int(n_words * 4.8) + 12))
+        static_part, text_part, bos_part, tts_pad_embed = self.talker.build_prefill_parts(text)
+        # Il solo blocco statico [assistant role + codec ICL] è riutilizzabile
+        # tra turni; testo e h_pfx restano nel prefill dinamico del turno.
+        if state is not None and state.talker_prefix.is_ready():
+            # DynamicCache viene aggiornata in-place da alcuni modelli Qwen:
+            # clona una volta per turno, mai una volta per frame.
+            import copy
+            prefix_kv = copy.deepcopy(state.talker_prefix.kv)
+        else:
+            out_static = t.model(inputs_embeds=static_part, use_cache=True)
+            prefix_kv = out_static.past_key_values
+            if state is not None:
+                state.talker_prefix.store(prefix_kv)
+                state.talker_prefix.last_hidden = out_static.last_hidden_state[:, -1:, :].detach()
+        dynamic = torch.cat([text_part, h_pfx.to(self.dtype), bos_part], dim=1)
+        out_pfx = t.model(inputs_embeds=dynamic, past_key_values=prefix_kv, use_cache=True)
         past_kv = out_pfx.past_key_values
         last_h = out_pfx.last_hidden_state[:, -1:, :]
+        if state is not None:
+            state.turn_kv.start_from_prefix(state.talker_prefix)
+            state.turn_kv.append(past_kv)
+        if not torch.isfinite(last_h).all():
+            raise RuntimeError("Talker prefill ha prodotto hidden non finito")
         codes: list[list[int]] = []
+        streamed_audio: list[np.ndarray] = []
         for _ in range(T_gen):
             if self._stop_event or (stop_check is not None and stop_check()):
                 break
             lg = t.codec_head(last_h)[:, -1, :]
+            if not torch.isfinite(lg).all():
+                raise RuntimeError(f"Talker codec_head non finito al frame {len(codes)}")
             c0 = self._cb0_sample(lg)
             # Sub-talker: CUDA graph (ADR-026, 15 residui in ~12ms) oppure
             # fallback eager bit-exact (stesso warper order di transformers).
             c0_embed = t.get_input_embeddings()(torch.tensor([[c0]], device=self.device))
             resid = self.subtalker_graph.generate(last_h, c0, c0_embed=c0_embed)
             codes.append([c0] + resid)
+            if on_audio_chunk is not None and len(codes) % 8 == 0:
+                chunk_codes = torch.tensor(codes[-8:], device=self.device, dtype=torch.long).unsqueeze(0)
+                chunk_wav = self.talker.decode(chunk_codes).numpy().astype(np.float32)
+                if not np.isfinite(chunk_wav).all():
+                    raise RuntimeError(f"Code2Wav non finito al chunk {len(codes) // 8}")
+                streamed_audio.append(chunk_wav)
+                on_audio_chunk(chunk_wav)
             if len(codes) >= T_gen:
                 break
             cur = torch.tensor(codes[-1], device=self.device)
@@ -189,8 +278,20 @@ class PipelineEngine:
 
         if not codes:
             return np.zeros(0, dtype=np.float32)
-        t_gen = torch.clamp(torch.tensor(codes, device=self.device, dtype=torch.long).unsqueeze(0), 0, 2047)
-        wav = self.talker.decode(t_gen).numpy().astype(np.float32)
+        if on_audio_chunk is not None and len(codes) % 8:
+            chunk_codes = torch.tensor(codes[-(len(codes) % 8):], device=self.device, dtype=torch.long).unsqueeze(0)
+            chunk_wav = self.talker.decode(chunk_codes).numpy().astype(np.float32)
+            if not np.isfinite(chunk_wav).all():
+                raise RuntimeError("Code2Wav non finito nel chunk finale")
+            streamed_audio.append(chunk_wav)
+            on_audio_chunk(chunk_wav)
+        if on_audio_chunk is not None:
+            wav = np.concatenate(streamed_audio) if streamed_audio else np.zeros(0, dtype=np.float32)
+        else:
+            t_gen = torch.clamp(torch.tensor(codes, device=self.device, dtype=torch.long).unsqueeze(0), 0, 2047)
+            wav = self.talker.decode(t_gen).numpy().astype(np.float32)
+        if not np.isfinite(wav).all():
+            raise RuntimeError("Code2Wav ha prodotto audio non finito")
         return self._postprocess(wav)
 
     @staticmethod

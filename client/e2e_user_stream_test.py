@@ -17,9 +17,10 @@ def metrics(x: np.ndarray, sr: int) -> dict:
             "finite": bool(np.isfinite(x).all())}
 
 
-async def stream(host: str, port: int, pcm: np.ndarray, *, chunk_ms: int = 640) -> tuple[list[np.ndarray], list[dict]]:
+async def stream(host: str, port: int, pcm: np.ndarray, *, chunk_ms: int = 640, barge_in: bool = False) -> tuple[list[np.ndarray], list[dict]]:
     import aiohttp
     chunks, events = [], []
+    sent_barge = False
     async with aiohttp.ClientSession() as http:
       async with http.ws_connect(f"ws://{host}:{port}/v1/realtime?duplex=1", max_msg_size=50_000_000) as ws:
         await ws.receive()  # session.created
@@ -32,6 +33,10 @@ async def stream(host: str, port: int, pcm: np.ndarray, *, chunk_ms: int = 640) 
         await ws.send_str(json.dumps({"type": "input_audio_buffer.commit"}))
         while True:
             msg = await ws.receive(); ev = json.loads(msg.data); events.append(ev)
+            if barge_in and not sent_barge and ev.get("type") == "response.created":
+                raw = (np.clip(pcm[-int(16000 * chunk_ms / 1000):], -1, 1) * 32767).astype("<i2").tobytes()
+                await ws.send_str(json.dumps({"type": "input_audio_buffer.append", "audio": base64.b64encode(raw).decode()}))
+                sent_barge = True
             if ev.get("type") == "response.audio.delta":
                 data, _ = sf.read(io.BytesIO(base64.b64decode(ev["delta"])), dtype="float32")
                 chunks.append(np.asarray(data))
@@ -49,7 +54,7 @@ def run_asr(pcm: np.ndarray) -> str:
 def main() -> None:
     ap = argparse.ArgumentParser(); ap.add_argument("wav"); ap.add_argument("--channel", type=int, default=0)
     ap.add_argument("--host", default="127.0.0.1"); ap.add_argument("--port", type=int, default=8092)
-    ap.add_argument("--output", default="e2e_user_stream_response.wav"); ap.add_argument("--asr", action="store_true")
+    ap.add_argument("--output", default="e2e_user_stream_response.wav"); ap.add_argument("--asr", action="store_true"); ap.add_argument("--barge-in", action="store_true")
     a = ap.parse_args()
     x, sr = sf.read(a.wav, always_2d=True, dtype="float32")
     pcm = x[:, a.channel]
@@ -58,10 +63,12 @@ def main() -> None:
         pcm = resample_poly(pcm, 16000, sr).astype("float32"); sr = 16000
     # Gemma4AudioFeatureExtractor ha limite nativo di 30s per chiamata.
     pcm = pcm[:16000 * 30]
-    chunks, events = asyncio.run(stream(a.host, a.port, pcm))
+    chunks, events = asyncio.run(stream(a.host, a.port, pcm, barge_in=a.barge_in))
     response = np.concatenate(chunks) if chunks else np.empty(0, dtype="float32")
     if response.size: sf.write(a.output, response, 24000)
     result = {"input": metrics(pcm, sr), "response": metrics(response, 24000),
+              "response_text": "".join(e.get("delta", "") for e in events if e.get("type") == "response.output_text.delta"),
+              "errors": [e.get("error") for e in events if e.get("type") == "error"],
               "event_types": [e.get("type") for e in events], "audio_chunks": len(chunks), "output": a.output}
     if a.asr: result["asr_input_it"] = run_asr(pcm)
     print(json.dumps(result, ensure_ascii=False, indent=2))

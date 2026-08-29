@@ -117,7 +117,12 @@ def main() -> int:
         t_think = time.time() - t0
         h_pfx = engine.v9_prefix(think["hidden"], think["prompt_len"])
         t_v9 = time.time() - t0
-        wav = engine.talk(think["text"], h_pfx, n_words=max(1, len(think["text"].split())))
+        first_audio: list[float] = []
+        def on_audio_chunk(_chunk: np.ndarray) -> None:
+            if not first_audio:
+                first_audio.append(time.time() - t0)
+        wav = engine.talk(think["text"], h_pfx, n_words=max(1, len(think["text"].split())),
+                          on_audio_chunk=on_audio_chunk)
         t_end = time.time() - t0
         dur = len(wav) / 24000
         metrics = compute_physical_metrics(wav)
@@ -134,6 +139,7 @@ def main() -> int:
             "think_s": round(t_think, 2),
             "v9_s": round(t_v9 - t_think, 2),
             "talk_s": round(t_end - t_v9, 2),
+            "ttfa_s": round(first_audio[0], 3) if first_audio else None,
             "rtf": round(t_end / dur, 3),
             **metrics,
             "wav": out,
@@ -148,6 +154,7 @@ def main() -> int:
     report = {"results": results}
     avg = {
         "e2e_s": round(float(np.mean([r["e2e_s"] for r in results])), 2),
+        "ttfa_s": round(float(np.mean([r["ttfa_s"] for r in results if r["ttfa_s"] is not None])), 3),
         "rtf": round(float(np.mean([r["rtf"] for r in results])), 3),
         "crest_factor": round(float(np.mean([r["crest_factor"] for r in results])), 2),
         "hnr_db": round(float(np.mean([r["hnr_db"] for r in results])), 2),
@@ -155,6 +162,13 @@ def main() -> int:
         "clipping_pct": round(float(np.mean([r["clipping_pct"] for r in results])), 3),
     }
     report["avg"] = avg
+    for key in ("e2e_s", "rtf", "ttfa_s"):
+        values = [r[key] for r in results if r.get(key) is not None]
+        if values:
+            report.setdefault("percentiles", {})[key] = {
+                "p50": round(float(np.percentile(values, 50)), 3),
+                "p95": round(float(np.percentile(values, 95)), 3),
+            }
     rp = os.path.join(args.out, "kernel_benchmark_report.json")
     with open(rp, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
