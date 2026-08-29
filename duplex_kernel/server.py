@@ -6,7 +6,8 @@ import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, StreamingResponse
 from duplex_kernel.config import CODEC_SAMPLE_RATE, USER_SAMPLE_RATE, TURNHEAD_CKPT
-from duplex_kernel.turnhead import TurnHeadRuntime
+from duplex_kernel.turn_policy import ControlAction, NoOpPolicy, PolicyInput, ScriptedPolicy, SpeakerGate
+from duplex_kernel.turnhead_adapter import TurnHeadPolicy
 from duplex_kernel.session import SessionManager, DuplexSession
 from duplex_kernel.tool_parser import extract_tool_calls, tool_system_prompt
 from duplex_kernel.voices import resolve_voice_conditioning
@@ -33,30 +34,35 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
     sessions = session_mgr or SessionManager()
     inference_lock = threading.Lock()  # GPU model is single-stream by design.
 
-    def _ensure_turnhead(sess: DuplexSession) -> None:
-        if sess.turnhead is None:
-            head = TurnHeadRuntime(device=getattr(engine, "device", "cuda"))
-            if TURNHEAD_CKPT and head.load(TURNHEAD_CKPT):
-                sess.turnhead = head
+    speaker_gate = SpeakerGate()
 
-    def _feed_mel(sess: DuplexSession, pcm: np.ndarray) -> int:
-        if sess.turnhead is None:
-            return 0
-        return sess.turnhead.feed_pcm(pcm)
+    def _make_policy(name: str, cfg: dict[str, Any] | None = None) -> Any:
+        cfg = cfg or {}
+        if name == "none":
+            return NoOpPolicy()
+        if name == "scripted":
+            return ScriptedPolicy(cfg.get("scripted_actions", [ControlAction.LISTEN.value]))
+        if name != "turnhead":
+            raise ValueError(f"turn_policy non valida: {name}")
+        return TurnHeadPolicy(device=getattr(engine, "device", "cuda"), checkpoint=TURNHEAD_CKPT)
+
+    def _ensure_policy(sess: DuplexSession) -> None:
+        if sess.turn_policy is None:
+            sess.turn_policy = _make_policy("turnhead")
 
     def get_session(request: dict[str, Any]) -> tuple[DuplexSession, bool]:
         sid = request.get("session_id")
         if sid:
             sess = sessions.get(str(sid))
             if sess is None: raise ValueError("session_id non valido o scaduto")
-            _ensure_turnhead(sess)
+            _ensure_policy(sess)
             return sess, False
         sess = sessions.create_session(
             instructions=str(request.get("instructions", "")),
             voice=str(request.get("voice", "gemma")),
             language=str(request.get("language", "Italian")),
         )
-        _ensure_turnhead(sess)
+        _ensure_policy(sess)
         return sess, True
 
     def run_response(sess: DuplexSession, messages: list[dict[str, Any]], request: dict[str, Any]) -> dict[str, Any]:
@@ -80,20 +86,23 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
             request.get("ref_audio"), request.get("ref_text"),
         )
         streamed_audio: list[np.ndarray] = []
+        generation_id = request.get("_generation_id")
         stream_requested = callable(request.get("_on_audio_chunk")) and not tools
         def render_text_chunk(chunk_text: str, chunk_hidden: Any, chunk_prompt_len: int) -> None:
             if not chunk_text or not stream_requested:
                 return
             chunk_h = engine.v9_prefix(chunk_hidden, chunk_prompt_len)
-            if sess.turnhead is not None:
-                sess.turnhead.set_thinker_hidden(chunk_h)
+            if sess.turn_policy is not None:
+                sess.turn_policy.update_hidden(chunk_h)
             chunk_wav = engine.talk(chunk_text, chunk_h, n_words=max(1, len(chunk_text.split())),
                                     voice_conditioning=cond, stop_check=request.get("_stop_check"),
-                                    state=sess, on_audio_chunk=request.get("_on_audio_chunk"), min_frames=8)
+                                    state=sess, on_audio_chunk=request.get("_on_audio_chunk"), min_frames=8,
+                                    generation_id=generation_id)
             streamed_audio.append(chunk_wav)
         think = engine.think(ids, max_new_tokens=int(request.get("max_tokens", 64)),
                              temperature=float(request.get("temperature", 0.7)), top_p=float(request.get("top_p", 0.9)),
                              stop_check=request.get("_stop_check"), state=sess,
+                             generation_id=generation_id,
                              on_text_chunk=render_text_chunk if stream_requested else None)
         if request.get("_stop_check") and request["_stop_check"]():
             return {"text": "", "tool_calls": [], "wav": None, "elapsed": 0.0, "cancelled": True}
@@ -102,8 +111,8 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
             return {"text": "", "tool_calls": calls, "wav": None, "elapsed": 0.0}
         text = think["text"]
         h_pfx = engine.v9_prefix(think["hidden"], think["prompt_len"])
-        if sess.turnhead is not None:
-            sess.turnhead.set_thinker_hidden(h_pfx)
+        if sess.turn_policy is not None:
+            sess.turn_policy.update_hidden(h_pfx)
         wav = None
         if "audio" in (request.get("modalities") or ["text"]):
             if stream_requested and streamed_audio:
@@ -111,9 +120,15 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
             else:
                 wav = engine.talk(text, h_pfx, n_words=max(1, len(text.split())), voice_conditioning=cond,
                                    stop_check=lambda: sess.stop_requested, state=sess,
-                                   on_audio_chunk=request.get("_on_audio_chunk"))
-        sess.history = clean[-16:] + [{"role": "assistant", "content": text}]
-        return {"text": text, "wav": wav, "tool_calls": [], "elapsed": 0.0}
+                                   on_audio_chunk=request.get("_on_audio_chunk"), generation_id=generation_id)
+        if request.get("_defer_history"):
+            history_messages = clean[-16:]
+        elif generation_id is None or sess.is_generation_current(generation_id=generation_id):
+            sess.history = clean[-16:] + [{"role": "assistant", "content": text}]
+        else:
+            sess.stale_history_writes += 1
+        return {"text": text, "wav": wav, "tool_calls": [], "elapsed": 0.0,
+                "history_messages": clean[-16:]}
 
     def sse_event(payload: dict[str, Any]) -> str:
         return "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
@@ -189,15 +204,14 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
     async def realtime(ws: WebSocket, duplex: int = 0):
         if not duplex:
             await ws.close(code=1008, reason="usa /v1/realtime?duplex=1"); return
-        await ws.accept(); sess = sessions.create_session(); _ensure_turnhead(sess); response_task: asyncio.Task | None = None
+        await ws.accept(); sess = sessions.create_session(); _ensure_policy(sess); response_task: asyncio.Task | None = None
         auto_task: asyncio.Task | None = None
 
         async def produce_response(committed_audio: np.ndarray) -> None:
             nonlocal response_task
             response_id = "resp_" + uuid.uuid4().hex[:12]
             started = time.perf_counter()
-            sess.stop_requested = False
-            sess.response_cancel_notified = False
+            token = sess.begin_response(response_id)
             sess.active_response = True
             logger.info("[realtime %s] start %s audio_samples=%d auto=%s", sess.session_id[:8], response_id, committed_audio.size, sess.auto_response)
             try:
@@ -205,7 +219,10 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                 audio_queue: queue.Queue[np.ndarray] = queue.Queue()
                 streamed_chunks = 0
                 def on_audio_chunk(chunk: np.ndarray) -> None:
-                    audio_queue.put(np.asarray(chunk, dtype=np.float32))
+                    if sess.is_generation_current(token):
+                        audio_queue.put(np.asarray(chunk, dtype=np.float32))
+                    else:
+                        sess.stale_audio_events += 1
                 def infer_ws():
                     with inference_lock:
                         history = list(sess.history)
@@ -216,7 +233,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                             if audio_text:
                                 history.append({"role": "user", "content": audio_text})
                         logger.info("[realtime %s %s] Thinker/Talker start", sess.session_id[:8], response_id)
-                        result = run_response(sess, history or [{"role": "user", "content": "Ciao!"}], {"modalities": ["text", "audio"], "tools": sess.tools, "voice": sess.voice, "voice_style": sess.voice_style, "ref_text": sess.ref_text, "_stop_check": lambda: sess.stop_requested, "_on_audio_chunk": on_audio_chunk})
+                        result = run_response(sess, history or [{"role": "user", "content": "Ciao!"}], {"modalities": ["text", "audio"], "tools": sess.tools, "voice": sess.voice, "voice_style": sess.voice_style, "ref_text": sess.ref_text, "_generation_id": token.session_generation_id, "_defer_history": True, "_stop_check": lambda: sess.stop_requested, "_on_audio_chunk": on_audio_chunk})
                         logger.info("[realtime %s %s] Thinker/Talker done elapsed=%.2fs", sess.session_id[:8], response_id, time.perf_counter() - started)
                         return result
                 loop = asyncio.get_running_loop()
@@ -225,6 +242,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                 while not future.done():
                     if loop.time() >= deadline:
                         sess.stop_requested = True
+                        sess.invalidate_generation("realtime_timeout")
                         if hasattr(engine, "stop_generation"):
                             engine.stop_generation()
                         logger.error("[realtime %s %s] timeout dopo %.1fs", sess.session_id[:8], response_id, time.perf_counter() - started)
@@ -245,6 +263,8 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                         break
                     streamed_chunks += 1
                     await ws.send_json({"type": "response.audio.delta", "delta": _wav_b64(chunk_wav)})
+                if not sess.is_generation_current(token):
+                    return
                 if result.get("cancelled"):
                     if not sess.response_cancel_notified:
                         await ws.send_json({"type": "response.cancelled", "reason": "cooperative_stop", "response_id": response_id})
@@ -254,7 +274,8 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                         fn = call["function"]
                         await ws.send_json({"type": "response.function_call_arguments.done", "call_id": call["id"], "name": fn["name"], "arguments": fn["arguments"]})
                     return
-                await ws.send_json({"type": "response.output_text.delta", "delta": result["text"]})
+                await ws.send_json({"type": "response.output_text.delta", "delta": result["text"], "response_id": response_id})
+                sess.commit_history(token, result.get("history_messages", []), result["text"])
                 if result["wav"] is not None and streamed_chunks == 0:
                     chunk = int(CODEC_SAMPLE_RATE * .640)
                     for start in range(0, len(result["wav"]), chunk):
@@ -270,8 +291,8 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                 logger.exception("realtime response failed")
                 await ws.send_json({"type": "error", "error": {"code": "INFERENCE_ERROR", "message": str(exc)[:240]}})
             finally:
-                sess.active_response = False
-                if sess.auto_response and sess.pending_audio.size:
+                sess.end_response(token)
+                if sess.auto_response and sess.pending_audio.size and not sess.active_response:
                     await schedule_auto_response()
 
         auto_generation = 0
@@ -302,8 +323,12 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     continue
                 et = ev.get("type")
                 if et == "session.update":
-                    cfg = ev.get("session", {}); sess.instructions = str(cfg.get("instructions", sess.instructions)); sess.voice = str(cfg.get("voice", sess.voice)); sess.tools = cfg.get("tools", sess.tools) or []
+                    cfg = ev.get("session", {})
+                    sess.instructions = str(cfg.get("instructions", sess.instructions)); sess.voice = str(cfg.get("voice", sess.voice)); sess.tools = cfg.get("tools", sess.tools) or []
                     extra = cfg.get("extra_body", {}) or {}; sess.auto_response = bool(cfg.get("auto_response", extra.get("auto_response", sess.auto_response)))
+                    policy_name = cfg.get("turn_policy") or extra.get("turn_policy")
+                    if policy_name is not None:
+                        sess.turn_policy = _make_policy(str(policy_name), cfg)
                     await ws.send_json({"type": "session.updated", "session_id": sess.session_id})
                 elif et == "conversation.item.create":
                     item = ev.get("item", {}); sess.history.append({"role": item.get("role", "user"), "content": _message_text(item.get("content", ""))}); await ws.send_json({"type": "conversation.item.created"})
@@ -319,20 +344,23 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     if sess.pending_audio.size + pcm.size > USER_SAMPLE_RATE * 30:
                         await ws.send_json({"type": "error", "error": {"code": "AUDIO_LIMIT", "message": "massimo 30 secondi per turno"}}); continue
                     sess.touch(); sess.pending_audio = np.concatenate((sess.pending_audio, pcm))
-                    new_mel_frames = _feed_mel(sess, pcm)
-                    if sess.active_response and sess.turnhead and new_mel_frames >= 1:
-                        action = sess.turnhead.decide()
-                        logger.info("[realtime %s] turnhead action=%s probs=%s active=%s", sess.session_id[:8], action.get("pred_name"), [round(p, 3) for p in action.get("probs", [])], sess.active_response)
-                        if action["pred_name"] == "BARGE_IN" and not sess.stop_requested:
-                            sess.stop_requested = True
+                    frame_id = sess.next_frame()
+                    decision = sess.turn_policy.step(PolicyInput(
+                        session_id=sess.session_id,
+                        frame_id=frame_id,
+                        user_pcm=pcm,
+                        speaker_active=sess.active_response,
+                        generation_id=sess.session_generation_id,
+                        speaker_segment_id=sess.speaker_segment_id,
+                    ))
+                    gate = speaker_gate.apply(decision, sess)
+                    logger.info("[realtime %s] policy action=%s frame=%d active=%s", sess.session_id[:8], decision.action.value, frame_id, sess.active_response)
+                    if gate.stop_synthesis:
+                        if hasattr(engine, "stop_generation"):
+                            engine.stop_generation()
+                        if not sess.response_cancel_notified:
                             sess.response_cancel_notified = True
-                            if hasattr(engine, "stop_generation"):
-                                engine.stop_generation()
-                            # Non cancellare il task asyncio: il future executor
-                            # deve terminare cooperativamente prima del prossimo
-                            # decode, altrimenti lo stato della sessione può
-                            # essere scritto da due inferenze contemporanee.
-                            await ws.send_json({"type": "response.cancelled", "reason": "user_barge_in"})
+                            await ws.send_json({"type": "response.cancelled", "reason": gate.action.value.lower(), "response_id": sess.response_id})
                     if sess.auto_response and not sess.active_response:
                         await schedule_auto_response()
                 elif et in {"input_audio_buffer.commit", "response.create"}:

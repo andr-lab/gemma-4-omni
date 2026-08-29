@@ -74,13 +74,55 @@ def verify_metrics(report: dict[str, Any], request_events: list[dict[str, Any]],
         fail(errors, "cpu_contract non coincide col record phase_metadata del raw trace")
 
 
+def verify_p1(report_path: Path) -> tuple[dict[str, Any], list[str]]:
+    errors: list[str] = []
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    if report.get("schema_version") != 1 or report.get("phase") != "P1":
+        fail(errors, "report non valido per P1")
+    if report.get("git_dirty") is not False:
+        fail(errors, "git_dirty deve essere false")
+    raw = Path(report.get("raw_trace", ""))
+    if not raw.is_absolute():
+        raw = report_path.parent / raw
+    if not raw.is_file():
+        fail(errors, f"raw trace mancante: {raw}")
+        events = []
+    else:
+        if sha256(raw) != report.get("raw_trace_sha256"):
+            fail(errors, "hash raw trace non coincide")
+        events = [json.loads(line) for line in raw.read_text(encoding="utf-8").splitlines() if line.strip()]
+    metadata_event = next((e for e in events if e.get("event") == "phase_metadata"), None)
+    if metadata_event is None:
+        fail(errors, "phase_metadata mancante")
+    else:
+        if metadata_event.get("metrics") != report.get("metrics"):
+            fail(errors, "metriche P1 non coincidono col raw trace")
+        if metadata_event.get("seed") != report.get("seed") or metadata_event.get("rng_seed_applied") is not True:
+            fail(errors, "RNG seed P1 non attestato")
+    metrics = report.get("metrics", {})
+    thresholds = report.get("thresholds", {})
+    checks = {"cpu_contract_exit_code": metrics.get("cpu_contract", {}).get("exit_code"), **{
+        key: metrics.get(key) for key in thresholds if key != "cpu_contract_exit_code"
+    }}
+    for key, actual in checks.items():
+        expected = thresholds.get(key)
+        if actual != expected:
+            fail(errors, f"threshold P1 fallita: {key}={actual!r} != {expected!r}")
+    independently_passed = not errors
+    if report.get("passed") is not independently_passed:
+        fail(errors, f"passed non coincide col risultato indipendente: {report.get('passed')} != {independently_passed}")
+    return report, errors
+
+
 def verify_one(report_path: Path) -> tuple[dict[str, Any], list[str]]:
     errors: list[str] = []
     report = json.loads(report_path.read_text(encoding="utf-8"))
     if report.get("schema_version") != 1:
         fail(errors, "schema_version non supportata")
+    if report.get("phase") == "P1":
+        return verify_p1(report_path)
     if report.get("phase") != "P0":
-        fail(errors, "verify_report supporta attualmente solo P0")
+        fail(errors, "verify_report supporta P0 e P1")
     if report.get("git_dirty") is not False:
         fail(errors, "git_dirty deve essere false")
     raw = Path(report.get("raw_trace", ""))

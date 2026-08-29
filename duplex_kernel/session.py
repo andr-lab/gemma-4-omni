@@ -26,9 +26,15 @@ from typing import Any
 import numpy as np
 
 from duplex_kernel.kv_cache import TalkerPrefixKV, ThinkerContext, TurnKVState
-from duplex_kernel.turnhead import TurnHeadRuntime
 
 logger = logging.getLogger("duplex_kernel.session")
+
+
+@dataclass(frozen=True)
+class GenerationToken:
+    session_generation_id: int
+    response_id: str
+    speaker_segment_id: str
 
 
 @dataclass
@@ -46,8 +52,19 @@ class DuplexSession:
     thinker_kv: Any | None = None
     thinker_cache_ids: list[int] = field(default_factory=list)
     thinker_hidden: Any | None = None
-    # Turndynamics
-    turnhead: TurnHeadRuntime | None = None
+    # Control plane (TurnHead is only an adapter implementation).
+    turn_policy: Any | None = None
+    # Generation fencing
+    session_generation_id: int = 0
+    response_id: str | None = None
+    speaker_segment_id: str | None = None
+    frame_id: int = 0
+    response_cancel_notified: bool = False
+    stale_audio_events: int = 0
+    stale_text_events: int = 0
+    stale_history_writes: int = 0
+    stale_kv_writes: int = 0
+    _generation_lock: threading.RLock = field(default_factory=threading.RLock, repr=False, compare=False)
     # Stato conversazione
     history: list[dict[str, Any]] = field(default_factory=list)
     instructions: str = ""
@@ -57,7 +74,6 @@ class DuplexSession:
     last_activity: float = field(default_factory=time.time)
     active_response: bool = False
     stop_requested: bool = False
-    response_cancel_notified: bool = False
     voice: str = "gemma"
     voice_style: str | None = None
     ref_audio: np.ndarray | None = None
@@ -69,13 +85,63 @@ class DuplexSession:
     def touch(self) -> None:
         self.last_activity = time.time()
 
+    def begin_response(self, response_id: str) -> GenerationToken:
+        with self._generation_lock:
+            self.session_generation_id += 1
+            self.response_id = response_id
+            self.speaker_segment_id = f"seg_{uuid.uuid4().hex[:12]}"
+            self.frame_id = 0
+            self.stop_requested = False
+            self.response_cancel_notified = False
+            return GenerationToken(self.session_generation_id, response_id, self.speaker_segment_id)
+
+    def next_frame(self) -> int:
+        with self._generation_lock:
+            self.frame_id += 1
+            return self.frame_id
+
+    def end_response(self, token: GenerationToken) -> None:
+        with self._generation_lock:
+            # A stopped worker may be stale by generation, but it must not be
+            # allowed to clear a newer response's active flag.
+            if self.response_id == token.response_id:
+                self.active_response = False
+
+    def invalidate_generation(self, reason: str = "") -> int:
+        with self._generation_lock:
+            self.session_generation_id += 1
+            self.stop_requested = True
+            logger.debug("[session] generation invalidata %s: %s", self.session_id, reason)
+            return self.session_generation_id
+
+    def is_generation_current(self, token: GenerationToken | None = None, *, generation_id: int | None = None,
+                              response_id: str | None = None, speaker_segment_id: str | None = None) -> bool:
+        with self._generation_lock:
+            if token is not None:
+                generation_id = token.session_generation_id
+                response_id = token.response_id
+                speaker_segment_id = token.speaker_segment_id
+            return (
+                generation_id == self.session_generation_id
+                and (response_id is None or response_id == self.response_id)
+                and (speaker_segment_id is None or speaker_segment_id == self.speaker_segment_id)
+            )
+
+    def commit_history(self, token: GenerationToken, base_messages: list[dict[str, Any]], text: str) -> bool:
+        with self._generation_lock:
+            if not self.is_generation_current(token):
+                self.stale_history_writes += 1
+                return False
+            self.history = [dict(m) for m in base_messages[-16:]] + [{"role": "assistant", "content": text}]
+            return True
+
     def reset_turn(self) -> None:
         """Azzera il turno corrente (buffer audio, mel, KV turno)."""
         self.pending_audio = np.empty(0, dtype=np.float32)
         self.pending_mel = np.empty((0, 128), dtype=np.float32)
         self.turn_kv.clear()
-        if self.turnhead is not None:
-            self.turnhead.reset()
+        if self.turn_policy is not None and hasattr(self.turn_policy, "reset"):
+            self.turn_policy.reset()
 
 
 class SessionManager:
@@ -139,4 +205,4 @@ class SessionManager:
             return list(self.sessions.values())
 
 
-__all__ = ["DuplexSession", "SessionManager"]
+__all__ = ["DuplexSession", "GenerationToken", "SessionManager"]

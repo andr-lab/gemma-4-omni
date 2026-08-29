@@ -92,7 +92,8 @@ class PipelineEngine:
     @torch.inference_mode()
     def think(self, prompt_token_ids: list[int], *, max_new_tokens: int = 64,
               temperature: float = 0.7, top_p: float = 0.9, stop_check: Any | None = None,
-              state: Any | None = None, on_text_chunk: Any | None = None) -> dict[str, Any]:
+              state: Any | None = None, generation_id: int | None = None,
+              on_text_chunk: Any | None = None) -> dict[str, Any]:
         """Decode Thinker controllato dal kernel con riuso opportunistico della KV."""
         cached_ids = list(getattr(state, "thinker_cache_ids", [])) if state is not None else []
         use_cached = bool(cached_ids and len(prompt_token_ids) > len(cached_ids)
@@ -142,12 +143,12 @@ class PipelineEngine:
             past = out.past_key_values
             hidden_parts.append(out.hidden_states[-1])
             logits = out.logits[:, -1, :]
-            if on_text_chunk is not None:
+            if on_text_chunk is not None and (generation_id is None or state is None or state.is_generation_current(generation_id=generation_id)):
                 piece = self.tokenizer.decode(pending_chunk, skip_special_tokens=True).strip()
                 if piece and (len(pending_chunk) >= 8 or piece.endswith((".", "!", "?", ":", ";"))):
                     on_text_chunk(piece, torch.cat(hidden_parts, dim=1), len(prompt_token_ids))
                     pending_chunk.clear()
-        if on_text_chunk is not None and pending_chunk:
+        if on_text_chunk is not None and pending_chunk and (generation_id is None or state is None or state.is_generation_current(generation_id=generation_id)):
             piece = self.tokenizer.decode(pending_chunk, skip_special_tokens=True).strip()
             if piece:
                 on_text_chunk(piece, torch.cat(hidden_parts, dim=1), len(prompt_token_ids))
@@ -155,9 +156,12 @@ class PipelineEngine:
             raise RuntimeError("Thinker ha prodotto una risposta vuota")
         hidden = torch.cat(hidden_parts, dim=1)
         if state is not None:
-            state.thinker_kv = past
-            state.thinker_cache_ids = list(prompt_token_ids) + generated
-            state.thinker_hidden = hidden.detach()
+            if generation_id is None or state.is_generation_current(generation_id=generation_id):
+                state.thinker_kv = past
+                state.thinker_cache_ids = list(prompt_token_ids) + generated
+                state.thinker_hidden = hidden.detach()
+            else:
+                state.stale_kv_writes += 1
         return {"text": self.tokenizer.decode(generated, skip_special_tokens=True).strip(),
                 "gen_ids": generated, "hidden": hidden, "prompt_len": len(prompt_token_ids), "past_key_values": past}
 
@@ -207,12 +211,15 @@ class PipelineEngine:
              voice_conditioning: dict[str, Any] | None = None,
              stop_check: Any | None = None, state: Any | None = None,
              on_audio_chunk: Any | None = None, min_frames: int = 48,
-             metrics: dict[str, Any] | None = None) -> np.ndarray:
+             metrics: dict[str, Any] | None = None, generation_id: int | None = None) -> np.ndarray:
         self._stop_event = False
         if voice_conditioning is not None:
             # Il builder nativo può consumare questo payload; lo manteniamo sul
             # wrapper per non duplicare il protocollo Qwen nel loop caldo.
             self.talker.voice_conditioning = voice_conditioning
+        if state is not None and generation_id is not None and not state.is_generation_current(generation_id=generation_id):
+            state.stale_kv_writes += 1
+            return np.zeros(0, dtype=np.float32)
         t = self.talker.talker
         tcfg = self.talker.tcfg
         if on_audio_chunk is not None and min_frames < 48:
@@ -233,16 +240,20 @@ class PipelineEngine:
         else:
             out_static = t.model(inputs_embeds=static_part, use_cache=True)
             prefix_kv = out_static.past_key_values
-            if state is not None:
+            if state is not None and (generation_id is None or state.is_generation_current(generation_id=generation_id)):
                 state.talker_prefix.store(prefix_kv)
                 state.talker_prefix.last_hidden = out_static.last_hidden_state[:, -1:, :].detach()
+            elif state is not None:
+                state.stale_kv_writes += 1
         dynamic = torch.cat([text_part, h_pfx.to(self.dtype), bos_part], dim=1)
         out_pfx = t.model(inputs_embeds=dynamic, past_key_values=prefix_kv, use_cache=True)
         past_kv = out_pfx.past_key_values
         last_h = out_pfx.last_hidden_state[:, -1:, :]
-        if state is not None:
+        if state is not None and (generation_id is None or state.is_generation_current(generation_id=generation_id)):
             state.turn_kv.start_from_prefix(state.talker_prefix)
             state.turn_kv.append(past_kv)
+        elif state is not None:
+            state.stale_kv_writes += 1
         if not torch.isfinite(last_h).all():
             raise RuntimeError("Talker prefill ha prodotto hidden non finito")
         codes: list[list[int]] = []
@@ -259,6 +270,9 @@ class PipelineEngine:
             c0_embed = t.get_input_embeddings()(torch.tensor([[c0]], device=self.device))
             resid = self.subtalker_graph.generate(last_h, c0, c0_embed=c0_embed)
             codes.append([c0] + resid)
+            if state is not None and generation_id is not None and not state.is_generation_current(generation_id=generation_id):
+                state.stale_kv_writes += 1
+                break
             if on_audio_chunk is not None and len(codes) % 8 == 0:
                 chunk_codes = torch.tensor(codes[-8:], device=self.device, dtype=torch.long).unsqueeze(0)
                 chunk_wav = self.talker.decode(chunk_codes).numpy().astype(np.float32)
