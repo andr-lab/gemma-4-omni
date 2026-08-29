@@ -262,7 +262,7 @@ def main() -> int:
         metrics["nan_count"] == 0 and metrics["inf_count"] == 0 and
         metrics["empty_audio_responses"] == 0 and metrics["uncaught_exceptions"] == 0
     )
-    report = {**meta, "run_id": args.run_id, "input_manifest": str(artifact_manifest), "raw_trace": str(raw_path), "raw_trace_sha256": sha256(raw_path),
+    report = {**meta, "run_id": args.run_id, "input_manifest": artifact_manifest.name, "raw_trace": raw_path.name, "raw_trace_sha256": sha256(raw_path),
               "metrics": metrics, "thresholds": thresholds, "passed": passed}
     report_path = artifact_dir / "P0_report.json"
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
