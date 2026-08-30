@@ -262,19 +262,20 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                 listener_hidden = output.hidden_t
                 if v9_stream is not None:
                     import torch
-                    if sess.v9_state is None:
-                        sess.v9_state = v9_stream.new_state(
-                            batch_size=1,
-                            device=getattr(engine, "device", None),
-                            dtype=getattr(engine, "dtype", None),
-                            max_seq_len=v9_stream.max_seq_len,
-                        )
-                        sess.v9_text_anchor = torch.zeros(
-                            (1, v9_stream.raw_dim),
-                            device=sess.v9_state.device,
-                            dtype=sess.v9_state.dtype,
-                        )
-                    listener_hidden = v9_stream.step(output.hidden_t, sess.v9_text_anchor, sess.v9_state)
+                    with sess.v9_state_lock:
+                        if sess.v9_state is None:
+                            sess.v9_state = v9_stream.new_state(
+                                batch_size=1,
+                                device=getattr(engine, "device", None),
+                                dtype=getattr(engine, "dtype", None),
+                                max_seq_len=v9_stream.max_seq_len,
+                            )
+                            sess.v9_text_anchor = torch.zeros(
+                                (1, v9_stream.raw_dim),
+                                device=sess.v9_state.device,
+                                dtype=sess.v9_state.dtype,
+                            )
+                        listener_hidden = v9_stream.step(output.hidden_t, sess.v9_text_anchor, sess.v9_state)
             except Exception as exc:
                 logger.exception("[realtime %s] listener/V9 failed on frame %d", sess.session_id[:8], frame.frame_id)
                 scheduler_error(exc)

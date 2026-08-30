@@ -93,6 +93,21 @@ def test_p4_gate_helpers_verify_equivalence_and_future_prefix() -> None:
     assert len([event for event in equivalence_trace if event["event"] == "p4_equivalence_frame"]) == 15
 
 
+def test_session_v9_state_is_reset_and_released_with_session_lifecycle() -> None:
+    _, _, stream = _tiny_stream()
+    sessions = SessionManager()
+    session = sessions.create_session()
+    session.v9_state = stream.new_state(batch_size=1, device="cpu", dtype=torch.float32, max_seq_len=4)
+    session.v9_text_anchor = torch.ones(1, 8)
+    stream.step(torch.zeros(1, 8), session.v9_text_anchor, session.v9_state)
+    session.reset_turn()
+    assert session.v9_state.frames_processed == 0
+    assert session.v9_text_anchor is None
+    assert hasattr(session, "stale_session_mutations")
+    sessions.close(session.session_id)
+    assert session.v9_state is None
+
+
 def test_realtime_scheduler_routes_listener_hidden_through_incremental_v9() -> None:
     class _Backend:
         def encode(self, user_pcm, assistant_reference, state):

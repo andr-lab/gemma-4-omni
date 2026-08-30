@@ -131,14 +131,20 @@ def _run_future_prefix(
             if frame_id < prefix_len:
                 outputs_a.append(output_a)
                 outputs_b.append(output_b)
-        max_difference = float(torch.stack(outputs_a).sub(torch.stack(outputs_b)).abs().max().item())
+        step_difference = float(torch.stack(outputs_a).sub(torch.stack(outputs_b)).abs().max().item())
+        batch_a = stream.projector(stream.causal_conv(sequence_a.unsqueeze(0)), anchor).squeeze(0)[:prefix_len]
+        batch_b = stream.projector(stream.causal_conv(sequence_b.unsqueeze(0)), anchor).squeeze(0)[:prefix_len]
+        batch_difference = float(batch_a.float().sub(batch_b.float()).abs().max().item())
+        max_difference = max(step_difference, batch_difference)
         differences.append(max_difference)
         _append(trace, {
             "event": "p4_future_prefix_sequence",
             "sequence_id": sequence_id,
             "prefix_frames": prefix_len,
+            "step_max_difference": step_difference,
+            "batch_max_difference": batch_difference,
             "max_future_prefix_difference": max_difference,
-            "finite": _finite(max_difference),
+            "finite": all(_finite(value) for value in (step_difference, batch_difference, max_difference)),
         })
     return {
         "sequences": sequences,
@@ -244,7 +250,7 @@ def _qwen_logits(talker: Any, prefix: torch.Tensor, codes: torch.Tensor, *, caus
     causal = torch.triu(torch.ones((length, length), device=prefix.device, dtype=torch.bool), diagonal=1)
     attention_mask[:, 0].masked_fill_(causal, mask_value)
     if causal_prefix:
-        for audio_index in range(prefix_frames - 1):
+        for audio_index in range(prefix_frames):
             query = prefix_end + audio_index
             attention_mask[:, 0, query, prefix_start + audio_index + 1:prefix_end] = mask_value
     position_ids = torch.arange(length, device=prefix.device, dtype=torch.long).view(1, 1, length).expand(3, batch_size, length)
@@ -255,7 +261,9 @@ def _qwen_logits(talker: Any, prefix: torch.Tensor, codes: torch.Tensor, *, caus
             position_ids=position_ids,
             use_cache=False,
         ).last_hidden_state
-        audio_hidden = hidden[:, prefix_end - 1:prefix_end - 1 + prefix_frames - 1]
+        # prefix_end è l'indice del BOS: il BOS predice il primo CB0;
+        # seguono le T-1 audio input che predicono i frame successivi.
+        audio_hidden = hidden[:, prefix_end:prefix_end + prefix_frames]
         return talker_model.codec_head(audio_hidden)
 
 
@@ -290,7 +298,7 @@ def _run_qwen_ablation(
         code_batch = codes[start:end].to(device=device)
         full = _qwen_logits(talker, prefix, code_batch, causal_prefix=False)
         causal = _qwen_logits(talker, prefix, code_batch, causal_prefix=True)
-        target = code_batch[:, 1:, 0]
+        target = code_batch[:, :, 0]
         full_log_probs = F.log_softmax(full.float(), dim=-1)
         causal_log_probs = F.log_softmax(causal.float(), dim=-1)
         full_nll = -full_log_probs.gather(-1, target.unsqueeze(-1)).squeeze(-1)
@@ -403,7 +411,7 @@ def run_checks(
         "qwen_ablation": ablation,
         "passed": bool(
             equivalence["sequences"] >= MIN_SEQUENCES
-            and equivalence["frames"] >= MIN_SEQUENCES
+            and equivalence["frames"] >= MIN_FRAMES
             and equivalence["mae"] <= MAE_MAX
             and equivalence["cosine_min"] >= COSINE_MIN
             and future["sequences"] >= MIN_SEQUENCES

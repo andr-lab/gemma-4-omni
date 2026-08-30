@@ -411,4 +411,11 @@ def compute_v9_prefix(
     return h_pfx.contiguous()
 
 
-__all__ = ["CausalConv1D", "DeepCausalTransformerProjectorV9", "compute_v9_prefix", "load_v9_conditioning"]
+__all__ = [
+    "CausalConv1D",
+    "DeepCausalTransformerProjectorV9",
+    "IncrementalV9Projector",
+    "IncrementalV9State",
+    "compute_v9_prefix",
+    "load_v9_conditioning",
+]

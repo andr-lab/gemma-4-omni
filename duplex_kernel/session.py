@@ -79,6 +79,7 @@ class DuplexSession:
     stale_text_events: int = 0
     stale_history_writes: int = 0
     stale_kv_writes: int = 0
+    stale_session_mutations: int = 0
     stale_write_attempts: dict[str, int] = field(default_factory=dict)
     _generation_lock: threading.RLock = field(default_factory=threading.RLock, repr=False, compare=False)
     # Stato conversazione
@@ -96,6 +97,7 @@ class DuplexSession:
     last_listener_output: Any | None = field(default=None, repr=False, compare=False)
     v9_state: Any | None = field(default=None, repr=False, compare=False)
     v9_text_anchor: Any | None = field(default=None, repr=False, compare=False)
+    v9_state_lock: threading.RLock = field(default_factory=threading.RLock, repr=False, compare=False)
     assistant_reference_next_frame_id: int = 0
     last_listener_frame_id: int | None = field(default=None, repr=False)
     # Micro-turn in corso (compatibilità commit/ASR)
@@ -246,6 +248,10 @@ class DuplexSession:
         self.pending_audio = np.empty(0, dtype=np.float32)
         self.pending_mel = np.empty((0, 128), dtype=np.float32)
         self.turn_kv.clear()
+        with self.v9_state_lock:
+            if self.v9_state is not None:
+                self.v9_state.reset()
+            self.v9_text_anchor = None
         self.control_state = ControlState.LISTENING
         if self.turn_policy is not None and hasattr(self.turn_policy, "reset"):
             self.turn_policy.reset()
@@ -292,6 +298,9 @@ class SessionManager:
             sess.listener_state.close()
             sess.assistant_reference_buffer.clear()
             sess.audio_ingress.close()
+            with sess.v9_state_lock:
+                sess.v9_state = None
+                sess.v9_text_anchor = None
             logger.info("[session] chiusa %s", session_id)
 
     def _reap_idle(self) -> None:
@@ -308,6 +317,9 @@ class SessionManager:
             sess.listener_state.close()
             sess.assistant_reference_buffer.clear()
             sess.audio_ingress.close()
+            with sess.v9_state_lock:
+                sess.v9_state = None
+                sess.v9_text_anchor = None
             logger.info("[session] reap idle %s", sid)
 
     def decode_ready(self) -> list[DuplexSession]:

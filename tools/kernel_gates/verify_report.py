@@ -851,6 +851,10 @@ def verify_p4(report_path: Path) -> tuple[dict[str, Any], list[str]]:
         [event for event in events if event.get("event") == "p4_future_prefix_sequence"],
         key=lambda event: int(event["sequence_id"]),
     )
+    for event in future_events:
+        expected_max = max(float(event["step_max_difference"]), float(event["batch_max_difference"]))
+        if not _close(event.get("max_future_prefix_difference"), expected_max):
+            fail(errors, f"P4 future-prefix max non coincide nella sequenza {event.get('sequence_id')}")
     future_recomputed = {
         "sequences": len(future_events),
         "prefix_frames": int(future_events[0]["prefix_frames"]) if future_events else None,
@@ -880,6 +884,13 @@ def verify_p4(report_path: Path) -> tuple[dict[str, Any], list[str]]:
     }
 
     ablation_frames = [event for event in events if event.get("event") == "p4_qwen_ablation_frame"]
+    ablation_sequence_ids = sorted({event.get("sequence_id") for event in ablation_frames})
+    if ablation_sequence_ids != list(range(len(ablation_sequence_ids))):
+        fail(errors, "P4 Qwen sequence_id non contigui")
+    for sequence_id in ablation_sequence_ids:
+        frame_ids = sorted(event.get("frame_id") for event in ablation_frames if event.get("sequence_id") == sequence_id)
+        if frame_ids != list(range(len(frame_ids))):
+            fail(errors, f"P4 Qwen frame_id non contigui nella sequenza {sequence_id}")
     full_ce = [float(event["full_ce"]) for event in ablation_frames]
     causal_ce = [float(event["causal_ce"]) for event in ablation_frames]
     full_top1 = [bool(event["full_top1"]) for event in ablation_frames]
@@ -958,6 +969,8 @@ def verify_p4(report_path: Path) -> tuple[dict[str, Any], list[str]]:
     }
     if thresholds.get("qwen_ablation_required") is not True:
         fail(errors, "threshold P4 qwen_ablation_required mancante")
+    if not ablation_recomputed["passed"]:
+        fail(errors, "P4 Qwen ablation fallita: criteri di delta o finitezza non soddisfatti")
     minimums = {
         "equivalence_sequences_min": (lambda value, limit: value >= limit),
         "equivalence_frames_min": (lambda value, limit: value >= limit),
