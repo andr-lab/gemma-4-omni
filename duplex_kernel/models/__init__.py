@@ -16,6 +16,8 @@ from duplex_kernel.models.thinker import ThinkerModel, load_thinker
 from duplex_kernel.models.v9 import (
     CausalConv1D,
     DeepCausalTransformerProjectorV9,
+    IncrementalV9Projector,
+    IncrementalV9State,
     compute_v9_prefix,
     load_v9_conditioning,
 )
@@ -23,6 +25,8 @@ from duplex_kernel.models.v9 import (
 __all__ = [
     "CausalConv1D",
     "DeepCausalTransformerProjectorV9",
+    "IncrementalV9Projector",
+    "IncrementalV9State",
     "TalkerModel",
     "ThinkerModel",
     "compute_v9_prefix",

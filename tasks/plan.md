@@ -1,53 +1,72 @@
-# Implementation Plan: P2 — 80 ms DuplexScheduler e audio ingress indipendente
+# Implementation Plan: P4 — V9 realmente incrementale
 
 ## Overview
-Introdurre un clock duplex logico a 12,5 Hz (80 ms), frame PCM utente standard da 1280 sample a 16 kHz e una coda thread-safe con numerazione, contabilità e nessun drop silenzioso. Collegare l'ingress alla `DuplexSession`/WebSocket senza legarlo al ciclo request/response; il consumo da listener/speaker resta responsabilità delle fasi successive.
+Portare il Projector V9 dal solo forward batch a un percorso frame-by-frame
+causale, mantenendo stato della CausalConv, KV per ciascuno dei quattro layer,
+posizione RoPE e anchor testuale fissa. Il percorso batch resta invariato come
+reference fino alla verifica di equivalenza. P4-T4 è un gate separato e
+obbligatorio prima di QLoRA: se l'ablation causale Qwen fallisce, si interrompe
+senza cambiare soglie.
 
-## Decisioni architetturali
-- `DuplexScheduler` orchestra il clock e callback per tick, senza importare TurnHead o modelli.
-- `VirtualFrameClock` è deterministico e permette i gate 10 s/60 s senza wall-clock.
-- `MonotonicFrameClock` usa `time.monotonic_ns()` e deadline assolute, evitando drift cumulativo.
-- `AudioIngressQueue.append()` segmenta chunk PCM arbitrari in frame da 80 ms e conserva eventuali sample parziali; `put()` accetta soltanto frame completi.
-- La sessione possiede l'ingress queue; il server continua a mantenere il buffer di commit legacy per ASR, ma le decisioni di policy vengono alimentate solo da frame completi numerati.
+## Contratto
+
+```python
+stream = IncrementalV9(projector=v9, causal_conv=causal_conv)
+state = stream.new_state(batch_size=1, device="cuda", dtype=torch.bfloat16)
+h_pfx_t = stream.step(h_raw_t, h_tx_anchor, state)  # (B, 2048)
+```
+
+- `h_raw_t`: un frame `(B, 1536)`; nessun frame futuro letto.
+- `h_tx_anchor`: `(B, 1536)` fisso per la sequenza.
+- `state`: possiede ultime 2 raw frame della CausalConv, KV `K/V` per layer,
+  `rope_position`; ogni step commit una sola posizione.
+- Output deve coincidere con l'ultima posizione del forward batch causal,
+  entro le soglie BF16 (`MAE <= .01`, cosine min `>= .999`).
 
 ## Task ordinati
 
-### Task 1 — Contratto e unit test RED
-- [x] Definire API `AudioFrame`, `DuplexTick`, `FrameClock`, `AudioIngressQueue`, `DuplexScheduler` nei test.
-- [x] Testare segmentazione lossless di chunk arbitrari, numerazione e rifiuto esplicito di input non valido.
-- [x] Testare 125/750 tick con clock virtuale, ordine e timestamp.
-- [x] Testare callback durante speaking e statistiche zero-drop.
+### Slice 1 — Contratto stateful e test RED/GREEN
+- [ ] Definire `IncrementalV9State` e `IncrementalV9Projector` in `duplex_kernel/models/v9.py`.
+- [ ] Implementare CausalConv window `(t-2,t-1,t)` con zero-left-padding e KV append per layer.
+- [ ] Testare shape, posizione, reset, input invalidi e nessun futuro letto con tiny model.
+- [ ] Testare equivalenza batch-vs-step con 100 sequenze reali del cache `cache_ars_full_v2.pt` su RTX 3090.
 
-### Task 2 — Implementazione core
-- [x] Implementare `duplex_kernel/scheduler.py` con clock virtuale/reale, queue e scheduler.
-- [x] Eseguire test P2 unitari e test contrattuali esistenti.
+### Checkpoint 1
+- [ ] Suite locale verde.
+- [ ] Equivalence report indipendentemente verificabile.
+- [ ] Nessuna modifica al percorso batch o ai pesi V9.
 
-### Task 3 — Integrazione sessione/WebSocket
-- [x] Aggiungere `AudioIngressQueue` alla sessione e cleanup.
-- [x] Alimentare l'ingress su `input_audio_buffer.append`; policy per frame completo, non per chunk/request.
-- [x] Mantenere compatibilità del buffer commit e degli eventi esistenti.
-- [x] Aggiungere test di integrazione dell'ingress durante risposta attiva.
+### Slice 2 — Performance e integrazione runtime
+- [ ] Aggiungere `v9_step`/state ownership per sessione senza ricostruire sequenza.
+- [ ] Sostituire nel listener/TurnHead path il fallback hidden-sequence → interpolate → V9.
+- [ ] Misurare 10.000 step dopo warmup e gate p95 <= 10 ms.
+- [ ] Testare reset tra segmenti e anchor testuale fisso.
 
-### Task 4 — Gate P2 riproducibile
-- [x] Aggiungere gate P2 al runner con trace elementare e report JSON.
-- [x] Estendere verifier indipendente per ricomputare tick, trasporto, speaking overlap e clock reale.
-- [x] Eseguire smoke locale, poi gate real-clock 60 s e verificare soglie.
+### Checkpoint 2
+- [ ] 10.000 step GPU con p95 <= 10 ms.
+- [ ] Nessun forward V9 batch nel percorso realtime.
+- [ ] Suite e verifier P4 aggiornati.
 
-## Checkpoint
-- Dopo Task 2: unit test + contract test verdi.
-- Dopo Task 3: WebSocket regression e test ingresso durante output verdi.
-- Dopo Task 4: `verify_report.py` PASS sul report P2 e bundle/artifact tracciati.
+### Slice 3 — Causal-prefix ablation Qwen
+- [ ] Usare validation cache/data già presente sul 3090, almeno 100 sequenze e 5.000 frame.
+- [ ] Confrontare FULL (prefisso completo) vs CAUSAL (solo prefisso <=t) su CB0.
+- [ ] Ricomputare CE, top-1, top-5, KL per-frame e quartili temporali dal raw trace.
+- [ ] Se una soglia fallisce: STOP, documentare risultato e non iniziare QLoRA.
 
-## Acceptance criteria
-- 10 s virtuali → 125 tick; 60 s → 750 tick; nessun duplicate/missing/out-of-order.
-- Frame PCM 16 kHz/80 ms: `frame_id` monotono, contabilità sample lossless, zero drop/duplicate/out-of-order.
-- Audio ingress continua ad accettare frame mentre una risposta è attiva.
-- P2 report contiene raw trace, hash e metriche ricalcolate da verifier.
+### Checkpoint finale
+- [ ] T1 equivalence PASS.
+- [ ] T2 no-future PASS.
+- [ ] T3 p95 PASS.
+- [ ] T4 ablation PASS oppure STOP esplicito.
+- [ ] Verifier indipendente PASS e evidence pubblicata.
 
 ## Rischi e mitigazioni
+
 | Rischio | Mitigazione |
 |---|---|
-| Drift del clock reale | Deadline assolute monotonic + misurazione jitter p99 |
-| Chunk WebSocket non allineati a 80 ms | Buffer interno con timestamp e split lossless |
-| Backpressure | Coda bounded con `queue.Full` esplicita, mai drop silenzioso; default non bounded nel server finché P3 non consuma |
-| Regressione protocollo | Policy alimentata solo dai frame completi; commit buffer legacy invariato |
+| Drift numerico BF16 tra SDPA batch e single-query | usare stessa proiezione/RoPE, confronto FP32 diagnostico |
+| KV mutata dopo errore | step transazionale: commit stato solo dopo output valido |
+| Conv iniziale non allineata | due slot zero e confronto diretto col forward `CausalConv1D` |
+| Cache validation contiene raw già conv-processed | dichiarare esplicitamente il formato e testare anche raw pre-conv quando disponibile |
+| costo per-sessione GPU | stato per sessione, lock/ownership chiaro, benchmark 10k |
+| ablation Qwen non supportata dai dati disponibili | fermare T4 come BLOCKED, non inventare metriche o soglie |

@@ -18,6 +18,7 @@ Modulo autocontenuto del kernel (ADR-029): nessuna dipendenza dal plugin.
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from typing import Optional
 
 import torch
@@ -133,6 +134,186 @@ class CausalConv1D(nn.Module):
         hidden_conv = hidden_states.transpose(1, 2)
         hidden_padded = F.pad(hidden_conv, (2, 0))
         return self.conv(hidden_padded.to(self.conv.weight.dtype)).transpose(1, 2)
+
+
+@dataclass
+class IncrementalV9State:
+    """State preallocato per una sequenza V9 causale frame-by-frame."""
+
+    batch_size: int
+    max_seq_len: int
+    device: torch.device
+    dtype: torch.dtype
+    conv_history: torch.Tensor
+    key_cache: list[torch.Tensor]
+    value_cache: list[torch.Tensor]
+    rope_position: int = 0
+    frames_processed: int = 0
+    text_anchor: torch.Tensor | None = None
+
+    @torch.inference_mode()
+    def reset(self) -> None:
+        """Riporta la posizione a zero, mantenendo le allocazioni KV."""
+        self.conv_history.zero_()
+        self.rope_position = 0
+        self.frames_processed = 0
+        self.text_anchor = None
+
+
+class IncrementalV9Projector:
+    """Projector V9 stateful equivalente al forward batch causale.
+
+    Ogni ``step`` consuma esattamente una raw frame, aggiorna la finestra della
+    CausalConv e appende una sola K/V position per ciascun layer. Le KV sono
+    preallocate per evitare ``cat`` O(T^2) nel percorso realtime.
+    """
+
+    def __init__(
+        self,
+        projector: DeepCausalTransformerProjectorV9,
+        causal_conv: CausalConv1D,
+        *,
+        max_seq_len: int = 512,
+    ) -> None:
+        if max_seq_len <= 0:
+            raise ValueError("max_seq_len deve essere positivo")
+        raw_dim = int(projector.audio_in.in_features)
+        if int(causal_conv.conv.in_channels) != raw_dim or int(causal_conv.conv.out_channels) != raw_dim:
+            raise ValueError("CausalConv e projector devono condividere raw_dim")
+        if causal_conv.conv.kernel_size != (3,) or causal_conv.conv.stride != (1,):
+            raise ValueError("IncrementalV9 richiede CausalConv kernel=3/stride=1")
+        self.projector = projector.eval()
+        self.causal_conv = causal_conv.eval()
+        self.max_seq_len = int(max_seq_len)
+        self.raw_dim = raw_dim
+        self.hidden_dim = int(projector.audio_in.out_features)
+        self.num_layers = len(projector.layers)
+        self.num_heads = int(projector.layers[0].attn.num_heads)
+        if not self.num_layers:
+            raise ValueError("projector V9 deve avere almeno un layer")
+        if any(int(layer.attn.num_heads) != self.num_heads for layer in projector.layers):
+            raise ValueError("tutti i layer V9 devono avere lo stesso numero di head")
+        if self.hidden_dim % self.num_heads:
+            raise ValueError("hidden_dim deve essere divisibile per num_heads")
+        self.head_dim = self.hidden_dim // self.num_heads
+        self._parameter = next(self.projector.parameters())
+        if self._parameter.device != next(self.causal_conv.parameters()).device:
+            raise ValueError("projector e CausalConv devono stare sullo stesso device")
+        if self._parameter.dtype != next(self.causal_conv.parameters()).dtype:
+            raise ValueError("projector e CausalConv devono usare lo stesso dtype")
+
+    def new_state(
+        self,
+        *,
+        batch_size: int = 1,
+        device: str | torch.device | None = None,
+        dtype: torch.dtype | None = None,
+        max_seq_len: int | None = None,
+    ) -> IncrementalV9State:
+        if batch_size <= 0:
+            raise ValueError("batch_size deve essere positivo")
+        state_device = self._parameter.device if device is None else torch.device(device)
+        state_dtype = self._parameter.dtype if dtype is None else dtype
+        if state_device != self._parameter.device:
+            raise ValueError("state e projector devono stare sullo stesso device")
+        if state_dtype != self._parameter.dtype:
+            raise ValueError("state e projector devono usare lo stesso dtype")
+        length = self.max_seq_len if max_seq_len is None else int(max_seq_len)
+        if length <= 0 or length > self.max_seq_len:
+            raise ValueError(f"max_seq_len deve essere tra 1 e {self.max_seq_len}")
+        shape = (int(batch_size), 2, self.raw_dim)
+        conv_history = torch.zeros(shape, device=state_device, dtype=state_dtype)
+        key_cache = [
+            torch.zeros(
+                (int(batch_size), self.num_heads, length, self.head_dim),
+                device=state_device,
+                dtype=state_dtype,
+            )
+            for _ in range(self.num_layers)
+        ]
+        value_cache = [cache.clone() for cache in key_cache]
+        return IncrementalV9State(
+            batch_size=int(batch_size),
+            max_seq_len=length,
+            device=state_device,
+            dtype=state_dtype,
+            conv_history=conv_history,
+            key_cache=key_cache,
+            value_cache=value_cache,
+        )
+
+    def _step_tensor(self, value: torch.Tensor, *, name: str, batch_size: int) -> torch.Tensor:
+        if value.dim() == 1:
+            value = value.unsqueeze(0)
+        if value.dim() != 2 or value.shape != (batch_size, self.raw_dim):
+            raise ValueError(f"{name} deve avere shape ({batch_size}, {self.raw_dim}), got {tuple(value.shape)}")
+        return value.to(device=self._parameter.device, dtype=self._parameter.dtype)
+
+    @torch.inference_mode()
+    def step(
+        self,
+        h_raw_t: torch.Tensor,
+        h_tx_anchor: torch.Tensor,
+        state: IncrementalV9State,
+    ) -> torch.Tensor:
+        """Consuma una raw frame e restituisce ``h_pfx_t`` di shape ``(B, 2048)``."""
+        if not isinstance(state, IncrementalV9State):
+            raise TypeError("state deve essere IncrementalV9State")
+        if state.rope_position >= state.max_seq_len:
+            raise OverflowError("IncrementalV9 max_seq_len raggiunto")
+        if state.batch_size <= 0 or state.conv_history.shape != (state.batch_size, 2, self.raw_dim):
+            raise ValueError("state conv_history non compatibile con IncrementalV9")
+        raw = self._step_tensor(h_raw_t, name="h_raw_t", batch_size=state.batch_size)
+        anchor = self._step_tensor(h_tx_anchor, name="h_tx_anchor", batch_size=state.batch_size)
+        if state.text_anchor is not None and not torch.equal(state.text_anchor, anchor):
+            raise ValueError("h_tx_anchor deve restare fisso lungo la sequenza")
+        position = int(state.rope_position)
+
+        # La finestra [t-2, t-1, t] è la stessa del F.pad(left=2) batch.
+        window = torch.cat((state.conv_history, raw.unsqueeze(1)), dim=1)
+        conv_weight = self.causal_conv.conv.weight
+        conv_t = self.causal_conv.conv(window.transpose(1, 2).to(conv_weight.dtype))
+        x = self.projector.audio_in(conv_t[:, :, 0]) + self.projector.text_in(anchor)
+
+        written: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
+        try:
+            for index, layer in enumerate(self.projector.layers):
+                normalized = layer.norm1(x)
+                attention = layer.attn
+                q = attention.q_proj(normalized).view(state.batch_size, self.num_heads, self.head_dim).unsqueeze(2)
+                k = attention.k_proj(normalized).view(state.batch_size, self.num_heads, self.head_dim).unsqueeze(2)
+                v = attention.v_proj(normalized).view(state.batch_size, self.num_heads, self.head_dim).unsqueeze(2)
+                cos = attention.rotary.cos_cached[position:position + 1].to(device=x.device, dtype=x.dtype)
+                sin = attention.rotary.sin_cached[position:position + 1].to(device=x.device, dtype=x.dtype)
+                q, k = apply_rotary_pos_emb(q, k, cos, sin)
+
+                key_slot = state.key_cache[index][:, :, position:position + 1, :]
+                value_slot = state.value_cache[index][:, :, position:position + 1, :]
+                written.append((key_slot, value_slot, torch.cat((key_slot, value_slot), dim=-1).clone()))
+                key_slot.copy_(k)
+                value_slot.copy_(v)
+                keys = state.key_cache[index][:, :, :position + 1, :]
+                values = state.value_cache[index][:, :, :position + 1, :]
+                attended = F.scaled_dot_product_attention(q, keys, values, is_causal=False)
+                attended = attended.transpose(1, 2).contiguous().view(state.batch_size, self.hidden_dim)
+                x = x + attention.out_proj(attended)
+                x = x + layer.ffn(layer.norm2(x))
+            output = self.projector.final_norm(x)
+            if not torch.isfinite(output).all():
+                raise RuntimeError("IncrementalV9 ha prodotto output non finito")
+        except BaseException:
+            for key_slot, value_slot, old in written:
+                split = self.head_dim
+                key_slot.copy_(old[..., :split])
+                value_slot.copy_(old[..., split:])
+            raise
+
+        state.conv_history = window[:, 1:, :].detach()
+        if state.text_anchor is None:
+            state.text_anchor = anchor.detach().clone()
+        state.rope_position += 1
+        state.frames_processed += 1
+        return output.detach()
 
 
 def _resolve_ckpt_path(primary: str, fallbacks: tuple[str, ...]) -> str:
