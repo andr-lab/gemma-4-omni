@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   verify-kernel-gates:
-    name: Verify P0/P1/P2 reports
+    name: Verify P0/P1/P2/P3 reports
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -44,3 +44,9 @@ jobs:
           test -f "${root_p2}/P2/run1/P2_report.json"
           python tools/kernel_gates/verify_report.py \
             "${root_p2}/P2/run1/P2_report.json"
+
+          sha_p3="$(tr -d '\r\n' < validation/kernel_gates/P3_ACTIVE_SHA)"
+          root_p3="validation/kernel_gates/${sha_p3}"
+          test -f "${root_p3}/P3/run3/P3_report.json"
+          python tools/kernel_gates/verify_report.py \
+            "${root_p3}/P3/run3/P3_report.json"
