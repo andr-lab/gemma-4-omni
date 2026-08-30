@@ -53,3 +53,18 @@ P1 scrive eventi elementari nel raw trace: 10.000 sequenze FSM, 1.000 race
 integrate A→invalidate→B, tentativi stale per audio/testo/KV/history/final
 state, dipendenze e contratto PCM→mel con `Gemma4AudioFeatureExtractor`.
 Il verifier ricomputa le metriche dal trace senza fidarsi del summary.
+
+## P2
+
+```bash
+python tools/kernel_gates/run_phase.py --phase P2 --workspace . \
+  --source-attestation /tmp/gemma4_p2_source_attestation.json --run-id run1 \
+  --git-sha <git_sha> --git-dirty false --real-duration-s 60
+python tools/kernel_gates/verify_report.py \
+  artifacts/kernel_gates/<git_sha>/P2/run1/P2_report.json
+```
+
+P2 verifica 125 tick virtuali in 10 s, 750 tick virtuali in 60 s, ingress
+PCM lossless da 1280 sample, input durante speaker e 60 s di real clock.
+`P2_ACTIVE_SHA` identifica il bundle pubblico corrente; il verifier ricalcola
+tick, trasporto, jitter e deadline dal raw trace.

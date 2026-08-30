@@ -13,25 +13,25 @@ Introdurre un clock duplex logico a 12,5 Hz (80 ms), frame PCM utente standard d
 ## Task ordinati
 
 ### Task 1 — Contratto e unit test RED
-- [ ] Definire API `AudioFrame`, `DuplexTick`, `FrameClock`, `AudioIngressQueue`, `DuplexScheduler` nei test.
-- [ ] Testare segmentazione lossless di chunk arbitrari, numerazione e rifiuto esplicito di input non valido.
-- [ ] Testare 125/750 tick con clock virtuale, ordine e timestamp.
-- [ ] Testare callback durante speaking e statistiche zero-drop.
+- [x] Definire API `AudioFrame`, `DuplexTick`, `FrameClock`, `AudioIngressQueue`, `DuplexScheduler` nei test.
+- [x] Testare segmentazione lossless di chunk arbitrari, numerazione e rifiuto esplicito di input non valido.
+- [x] Testare 125/750 tick con clock virtuale, ordine e timestamp.
+- [x] Testare callback durante speaking e statistiche zero-drop.
 
 ### Task 2 — Implementazione core
-- [ ] Implementare `duplex_kernel/scheduler.py` con clock virtuale/reale, queue e scheduler.
-- [ ] Eseguire test P2 unitari e test contrattuali esistenti.
+- [x] Implementare `duplex_kernel/scheduler.py` con clock virtuale/reale, queue e scheduler.
+- [x] Eseguire test P2 unitari e test contrattuali esistenti.
 
 ### Task 3 — Integrazione sessione/WebSocket
-- [ ] Aggiungere `AudioIngressQueue` alla sessione e cleanup.
-- [ ] Alimentare l'ingress su `input_audio_buffer.append`; policy per frame completo, non per chunk/request.
-- [ ] Mantenere compatibilità del buffer commit e degli eventi esistenti.
-- [ ] Aggiungere test di integrazione dell'ingress durante risposta attiva.
+- [x] Aggiungere `AudioIngressQueue` alla sessione e cleanup.
+- [x] Alimentare l'ingress su `input_audio_buffer.append`; policy per frame completo, non per chunk/request.
+- [x] Mantenere compatibilità del buffer commit e degli eventi esistenti.
+- [x] Aggiungere test di integrazione dell'ingress durante risposta attiva.
 
 ### Task 4 — Gate P2 riproducibile
-- [ ] Aggiungere gate P2 al runner con trace elementare e report JSON.
-- [ ] Estendere verifier indipendente per ricomputare tick, trasporto, speaking overlap e clock reale.
-- [ ] Eseguire smoke locale, poi gate real-clock 60 s e verificare soglie.
+- [x] Aggiungere gate P2 al runner con trace elementare e report JSON.
+- [x] Estendere verifier indipendente per ricomputare tick, trasporto, speaking overlap e clock reale.
+- [x] Eseguire smoke locale, poi gate real-clock 60 s e verificare soglie.
 
 ## Checkpoint
 - Dopo Task 2: unit test + contract test verdi.

@@ -1,10 +1,10 @@
 # P2 checklist
 
-- [ ] Scheduler/queue contracts and RED tests
-- [ ] `duplex_kernel/scheduler.py`
-- [ ] `DuplexSession` ingress ownership and cleanup
-- [ ] WebSocket append → complete 80 ms frames
-- [ ] P2 gate runner/report/verifier
-- [ ] Unit + contract + real-clock 60 s verification
-- [ ] Public P2 evidence bundle and GitHub push
+- [x] Scheduler/queue contracts and RED tests
+- [x] `duplex_kernel/scheduler.py`
+- [x] `DuplexSession` ingress ownership and cleanup
+- [x] WebSocket append → complete 80 ms frames
+- [x] P2 gate runner/report/verifier
+- [x] Unit + contract + real-clock 60 s verification
+- [x] Public P2 evidence bundle and GitHub push
 - [ ] Email completion notification

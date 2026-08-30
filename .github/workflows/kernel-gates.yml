@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   verify-kernel-gates:
-    name: Verify P0/P1 reports
+    name: Verify P0/P1/P2 reports
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -28,13 +28,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sha="$(tr -d '\r\n' < validation/kernel_gates/ACTIVE_SHA)"
-          root="validation/kernel_gates/${sha}"
-          test -f "${root}/P0/run1/P0_report.json"
-          test -f "${root}/P0/run2/P0_report.json"
-          test -f "${root}/P1/run1/P1_report.json"
+          sha_p01="$(tr -d '\r\n' < validation/kernel_gates/ACTIVE_SHA)"
+          root_p01="validation/kernel_gates/${sha_p01}"
+          test -f "${root_p01}/P0/run1/P0_report.json"
+          test -f "${root_p01}/P0/run2/P0_report.json"
+          test -f "${root_p01}/P1/run1/P1_report.json"
           python tools/kernel_gates/verify_report.py \
-            "${root}/P0/run1/P0_report.json" \
-            --compare "${root}/P0/run2/P0_report.json"
+            "${root_p01}/P0/run1/P0_report.json" \
+            --compare "${root_p01}/P0/run2/P0_report.json"
           python tools/kernel_gates/verify_report.py \
-            "${root}/P1/run1/P1_report.json"
+            "${root_p01}/P1/run1/P1_report.json"
+
+          sha_p2="$(tr -d '\r\n' < validation/kernel_gates/P2_ACTIVE_SHA)"
+          root_p2="validation/kernel_gates/${sha_p2}"
+          test -f "${root_p2}/P2/run1/P2_report.json"
+          python tools/kernel_gates/verify_report.py \
+            "${root_p2}/P2/run1/P2_report.json"
