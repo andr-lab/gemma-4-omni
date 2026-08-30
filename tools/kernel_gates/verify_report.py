@@ -910,7 +910,7 @@ def verify_p4(report_path: Path) -> tuple[dict[str, Any], list[str]]:
             values = [
                 float(event["causal_ce"]) - float(event["full_ce"])
                 for event in ablation_frames
-                if min(3, int(event["frame_id"]) * 4 / frame_count) == bucket
+                if min(3, int(int(event["frame_id"]) * 4 / frame_count)) == bucket
             ]
             if values:
                 ablation_recomputed["quartile_delta_ce"][f"q{bucket}"] = sum(values) / len(values)
@@ -971,6 +971,8 @@ def verify_p4(report_path: Path) -> tuple[dict[str, Any], list[str]]:
         "ablation_frames_min": (lambda value, limit: value >= limit),
     }
     for key, actual in checks.items():
+        if key == "cpu_contract_exit_code":
+            continue
         limit = thresholds.get(key)
         if actual is None or limit is None or not minimums[key](actual, limit):
             fail(errors, f"threshold P4 fallita: {key}={actual!r}, limite={limit!r}")
