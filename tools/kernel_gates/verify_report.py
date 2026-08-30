@@ -60,8 +60,11 @@ def verify_source_attestation(report: dict[str, Any], report_path: Path, errors:
     try:
         head = subprocess.check_output(("git", "rev-parse", "HEAD"), cwd=repo, text=True, stderr=subprocess.STDOUT).strip()
         dirty = subprocess.check_output(("git", "status", "--porcelain"), cwd=repo, text=True, stderr=subprocess.STDOUT).strip()
-        if head != attestation.get("git_sha"):
-            fail(errors, "verifier checkout HEAD diverso dalla source attestation")
+        # A report may be verified from a later documentation/evidence commit;
+        # the attested commit must exist, while every attested worktree byte
+        # below must still match it.
+        subprocess.check_output(("git", "cat-file", "-e", f"{attestation['git_sha']}^{{commit}}"),
+                                 cwd=repo, stderr=subprocess.STDOUT)
         if dirty:
             fail(errors, "verifier checkout Git dirty")
     except Exception as exc:
