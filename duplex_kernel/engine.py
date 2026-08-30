@@ -27,7 +27,7 @@ import torch.nn.functional as F
 
 from duplex_kernel.models.talker import load_talker
 from duplex_kernel.models.thinker import load_thinker
-from duplex_kernel.models.v9 import load_v9_conditioning
+from duplex_kernel.models.v9 import IncrementalV9Projector, load_v9_conditioning
 
 logger = logging.getLogger("duplex_kernel.engine")
 
@@ -44,6 +44,7 @@ class PipelineEngine:
         self.talker = None
         self.v9 = None
         self.causal_conv = None
+        self.v9_stream: IncrementalV9Projector | None = None
         self.subtalker_graph: Any | None = None
         self.residual_sampler: Any | None = None
         self.listener: Any | None = None
@@ -71,7 +72,8 @@ class PipelineEngine:
             logger.info("[engine] talker+code2wav in %.1fs", time.time() - t0)
 
             self.v9, self.causal_conv = load_v9_conditioning(device=self.device, dtype=self.dtype)
-            logger.info("[engine] V9 in %.1fs", time.time() - t0)
+            self.v9_stream = IncrementalV9Projector(self.v9, self.causal_conv, max_seq_len=16_384)
+            logger.info("[engine] V9 incremental stream in %.1fs", time.time() - t0)
 
             # CUDA graph sub-talker (ADR-026): prefill + 14 step autoregressivi
             # catturati in CUDA graph statici, sampling esterno bit-exact con RNG
@@ -347,6 +349,7 @@ class PipelineEngine:
         self.subtalker_graph = None
         self.listener = None
         self.thinker = self._thinker_wrapper = self.talker = self.v9 = self.causal_conv = None
+        self.v9_stream = None
         torch.cuda.empty_cache()
 
 

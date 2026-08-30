@@ -18,6 +18,7 @@ Modulo autocontenuto del kernel (ADR-029): nessuna dipendenza dal plugin.
 from __future__ import annotations
 
 import os
+import threading
 from dataclasses import dataclass
 from typing import Optional
 
@@ -34,14 +35,34 @@ class RotaryEmbedding(nn.Module):
         super().__init__()
         inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
         self.register_buffer("inv_freq", inv_freq)
-        t = torch.arange(max_seq_len).float()
-        freqs = torch.einsum("i,j->ij", t, inv_freq)
+        self.register_buffer("cos_cached", torch.empty(0), persistent=False)
+        self.register_buffer("sin_cached", torch.empty(0), persistent=False)
+        self.base = float(base)
+        self._cache(max_seq_len)
+
+    def _cache(self, seq_len: int) -> None:
+        t = torch.arange(seq_len, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
+        freqs = torch.einsum("i,j->ij", t, self.inv_freq)
         emb = torch.cat((freqs, freqs), dim=-1)
-        self.register_buffer("cos_cached", emb.cos(), persistent=False)
-        self.register_buffer("sin_cached", emb.sin(), persistent=False)
+        self.cos_cached = emb.cos()
+        self.sin_cached = emb.sin()
+
+    def _ensure_capacity(self, seq_len: int) -> None:
+        if seq_len > self.cos_cached.shape[0]:
+            self._cache(max(seq_len, self.cos_cached.shape[0] * 2))
 
     def forward(self, x: torch.Tensor, seq_len: int):
-        return self.cos_cached[:seq_len].to(dtype=x.dtype), self.sin_cached[:seq_len].to(dtype=x.dtype)
+        self._ensure_capacity(seq_len)
+        return self.cos_cached[:seq_len].to(device=x.device, dtype=x.dtype), self.sin_cached[:seq_len].to(device=x.device, dtype=x.dtype)
+
+    def at(self, x: torch.Tensor, position: int) -> tuple[torch.Tensor, torch.Tensor]:
+        if position < 0:
+            raise ValueError("RoPE position non può essere negativa")
+        self._ensure_capacity(position + 1)
+        return (
+            self.cos_cached[position:position + 1].to(device=x.device, dtype=x.dtype),
+            self.sin_cached[position:position + 1].to(device=x.device, dtype=x.dtype),
+        )
 
 
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -197,6 +218,7 @@ class IncrementalV9Projector:
             raise ValueError("hidden_dim deve essere divisibile per num_heads")
         self.head_dim = self.hidden_dim // self.num_heads
         self._parameter = next(self.projector.parameters())
+        self._lock = threading.Lock()
         if self._parameter.device != next(self.causal_conv.parameters()).device:
             raise ValueError("projector e CausalConv devono stare sullo stesso device")
         if self._parameter.dtype != next(self.causal_conv.parameters()).dtype:
@@ -256,6 +278,17 @@ class IncrementalV9Projector:
         h_tx_anchor: torch.Tensor,
         state: IncrementalV9State,
     ) -> torch.Tensor:
+        """Serializza l'accesso al modello condiviso tra sessioni scheduler."""
+        with self._lock:
+            return self._step_unlocked(h_raw_t, h_tx_anchor, state)
+
+    @torch.inference_mode()
+    def _step_unlocked(
+        self,
+        h_raw_t: torch.Tensor,
+        h_tx_anchor: torch.Tensor,
+        state: IncrementalV9State,
+    ) -> torch.Tensor:
         """Consuma una raw frame e restituisce ``h_pfx_t`` di shape ``(B, 2048)``."""
         if not isinstance(state, IncrementalV9State):
             raise TypeError("state deve essere IncrementalV9State")
@@ -283,8 +316,7 @@ class IncrementalV9Projector:
                 q = attention.q_proj(normalized).view(state.batch_size, self.num_heads, self.head_dim).unsqueeze(2)
                 k = attention.k_proj(normalized).view(state.batch_size, self.num_heads, self.head_dim).unsqueeze(2)
                 v = attention.v_proj(normalized).view(state.batch_size, self.num_heads, self.head_dim).unsqueeze(2)
-                cos = attention.rotary.cos_cached[position:position + 1].to(device=x.device, dtype=x.dtype)
-                sin = attention.rotary.sin_cached[position:position + 1].to(device=x.device, dtype=x.dtype)
+                cos, sin = attention.rotary.at(x, position)
                 q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
                 key_slot = state.key_cache[index][:, :, position:position + 1, :]

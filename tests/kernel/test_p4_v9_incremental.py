@@ -3,11 +3,14 @@ from __future__ import annotations
 import pytest
 import torch
 
+from duplex_kernel.listener import GemmaListener
 from duplex_kernel.models.v9 import (
     CausalConv1D,
     DeepCausalTransformerProjectorV9,
     IncrementalV9Projector,
 )
+from duplex_kernel.server import create_app
+from duplex_kernel.session import SessionManager
 
 
 def _tiny_stream() -> tuple[DeepCausalTransformerProjectorV9, CausalConv1D, IncrementalV9Projector]:
@@ -70,6 +73,51 @@ def test_incremental_v9_requires_a_fixed_text_anchor_and_supports_reset() -> Non
     assert state.rope_position == 0
     stream.step(raw, anchor, state)
     assert state.frames_processed == 1
+
+
+def test_realtime_scheduler_routes_listener_hidden_through_incremental_v9() -> None:
+    class _Backend:
+        def encode(self, user_pcm, assistant_reference, state):
+            del user_pcm, assistant_reference, state
+            return torch.ones(1, 8)
+
+    projector, causal_conv, stream = _tiny_stream()
+    listener = GemmaListener(backend=_Backend())
+
+    class _Tokenizer:
+        def apply_chat_template(self, messages, **_):
+            return messages[-1]["content"]
+
+        def __call__(self, text, **_):
+            return {"input_ids": torch.tensor([[1]])}
+
+    class _Engine:
+        loaded = True
+        device = "cpu"
+        dtype = torch.float32
+        tokenizer = _Tokenizer()
+        v9_stream = stream
+
+    engine = _Engine()
+    engine.listener = listener
+    sessions = SessionManager()
+    from fastapi.testclient import TestClient
+    import base64
+    import time
+
+    with TestClient(create_app(engine, sessions)).websocket_connect("/v1/realtime?duplex=1") as ws:
+        assert ws.receive_json()["type"] == "session.created"
+        session = sessions.all()[0]
+        pcm = torch.zeros(1280, dtype=torch.int16).numpy().tobytes()
+        ws.send_json({"type": "input_audio_buffer.append", "audio": base64.b64encode(pcm).decode("ascii")})
+        deadline = time.monotonic() + 1.0
+        while session.listener_state.listener_input_frames < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert session.listener_state.listener_input_frames == 1
+        assert session.v9_state is not None
+        assert session.v9_state.frames_processed == 1
+        assert tuple(session.listener_hidden.shape) == (1, 16)
+        ws.send_json({"type": "session.close"})
 
 
 def test_incremental_v9_rejects_bad_shapes_and_sequence_overrun() -> None:

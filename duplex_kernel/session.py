@@ -94,6 +94,8 @@ class DuplexSession:
     )
     listener_hidden: Any | None = field(default=None, repr=False, compare=False)
     last_listener_output: Any | None = field(default=None, repr=False, compare=False)
+    v9_state: Any | None = field(default=None, repr=False, compare=False)
+    v9_text_anchor: Any | None = field(default=None, repr=False, compare=False)
     assistant_reference_next_frame_id: int = 0
     last_listener_frame_id: int | None = field(default=None, repr=False)
     # Micro-turn in corso (compatibilità commit/ASR)
