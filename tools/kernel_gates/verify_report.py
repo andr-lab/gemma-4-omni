@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import json
 import math
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,68 @@ def sha256(path: Path) -> str:
 
 def fail(errors: list[str], message: str) -> None:
     errors.append(message)
+
+
+def verify_source_attestation(report: dict[str, Any], report_path: Path, errors: list[str]) -> None:
+    """Recompute the attestation against the current clean Git checkout."""
+    relative = report.get("source_attestation")
+    if not relative:
+        fail(errors, "source_attestation mancante")
+        return
+    path = Path(relative)
+    if not path.is_absolute():
+        path = report_path.parent / path
+    if not path.is_file():
+        fail(errors, f"source attestation mancante: {path}")
+        return
+    if sha256(path) != report.get("source_attestation_sha256"):
+        fail(errors, "hash source attestation non coincide")
+        return
+    try:
+        attestation = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        fail(errors, f"source attestation JSON invalido: {exc}")
+        return
+    if attestation.get("schema_version") != 1 or attestation.get("attestation_type") != "git-clean-worktree-content-addressed":
+        fail(errors, "tipo/schema source attestation non valido")
+    if attestation.get("git_dirty") is not False:
+        fail(errors, "source attestation dichiara un checkout dirty")
+    if attestation.get("git_sha") != report.get("git_sha"):
+        fail(errors, "git_sha source attestation diverso dal report")
+    repo = Path(__file__).resolve().parents[2]
+    try:
+        head = subprocess.check_output(("git", "rev-parse", "HEAD"), cwd=repo, text=True, stderr=subprocess.STDOUT).strip()
+        dirty = subprocess.check_output(("git", "status", "--porcelain"), cwd=repo, text=True, stderr=subprocess.STDOUT).strip()
+        if head != attestation.get("git_sha"):
+            fail(errors, "verifier checkout HEAD diverso dalla source attestation")
+        if dirty:
+            fail(errors, "verifier checkout Git dirty")
+    except Exception as exc:
+        fail(errors, f"impossibile verificare checkout Git: {exc}")
+        return
+    entries = attestation.get("files")
+    if not isinstance(entries, dict) or not entries:
+        fail(errors, "source attestation senza file")
+        return
+    for relative_name, expected in entries.items():
+        candidate = (repo / relative_name).resolve()
+        if repo not in candidate.parents or not candidate.is_file():
+            fail(errors, f"file attestato mancante/fuori repo: {relative_name}")
+            continue
+        data = candidate.read_bytes()
+        if expected.get("bytes") != len(data):
+            fail(errors, f"size attestata diversa: {relative_name}")
+        if expected.get("sha256") != hashlib.sha256(data).hexdigest():
+            fail(errors, f"sha256 worktree diversa: {relative_name}")
+        blob = hashlib.sha1(f"blob {len(data)}".encode("ascii") + b"\x00" + data).hexdigest()
+        if expected.get("git_blob_sha1") != blob:
+            fail(errors, f"Git blob diversa: {relative_name}")
+        try:
+            git_data = subprocess.check_output(("git", "show", f"{attestation['git_sha']}:{relative_name}"), cwd=repo)
+            if git_data != data or expected.get("git_show_sha256") != hashlib.sha256(git_data).hexdigest():
+                fail(errors, f"git show non coincide: {relative_name}")
+        except Exception as exc:
+            fail(errors, f"impossibile leggere blob Git {relative_name}: {exc}")
 
 
 def pstats(events: list[dict[str, Any]], key: str) -> dict[str, float | None]:
@@ -74,38 +137,144 @@ def verify_metrics(report: dict[str, Any], request_events: list[dict[str, Any]],
         fail(errors, "cpu_contract non coincide col record phase_metadata del raw trace")
 
 
+P1_FSM_ACCEPTED = {
+    "LISTENING": {"LISTEN", "SPEAK", "BACKCHANNEL", "HARD_STOP"},
+    "SPEAKING": {"CONTINUE", "LISTEN", "YIELD", "REPLAN", "HARD_STOP"},
+    "BACKCHANNELING": {"CONTINUE", "LISTEN", "YIELD", "REPLAN", "HARD_STOP"},
+    "STOPPING": {"LISTEN"},
+}
+P1_FSM_NEXT = {
+    "LISTENING": {"LISTEN": "LISTENING", "SPEAK": "SPEAKING", "BACKCHANNEL": "BACKCHANNELING", "HARD_STOP": "LISTENING"},
+    "SPEAKING": {"CONTINUE": "SPEAKING", "LISTEN": "STOPPING", "YIELD": "STOPPING", "REPLAN": "STOPPING", "HARD_STOP": "STOPPING"},
+    "BACKCHANNELING": {"CONTINUE": "BACKCHANNELING", "LISTEN": "LISTENING", "YIELD": "STOPPING", "REPLAN": "STOPPING", "HARD_STOP": "STOPPING"},
+    "STOPPING": {"LISTEN": "LISTENING"},
+}
+
+
 def verify_p1(report_path: Path) -> tuple[dict[str, Any], list[str]]:
+    """Verify P1 from elemental events only; runner summaries are untrusted."""
     errors: list[str] = []
     report = json.loads(report_path.read_text(encoding="utf-8"))
     if report.get("schema_version") != 1 or report.get("phase") != "P1":
         fail(errors, "report non valido per P1")
     if report.get("git_dirty") is not False:
         fail(errors, "git_dirty deve essere false")
+    verify_source_attestation(report, report_path, errors)
     raw = Path(report.get("raw_trace", ""))
     if not raw.is_absolute():
         raw = report_path.parent / raw
+    events: list[dict[str, Any]] = []
     if not raw.is_file():
         fail(errors, f"raw trace mancante: {raw}")
-        events = []
     else:
         if sha256(raw) != report.get("raw_trace_sha256"):
             fail(errors, "hash raw trace non coincide")
-        events = [json.loads(line) for line in raw.read_text(encoding="utf-8").splitlines() if line.strip()]
-    metadata_event = next((e for e in events if e.get("event") == "phase_metadata"), None)
-    if metadata_event is None:
-        fail(errors, "phase_metadata mancante")
-    else:
-        if metadata_event.get("metrics") != report.get("metrics"):
-            fail(errors, "metriche P1 non coincidono col raw trace")
-        if metadata_event.get("seed") != report.get("seed") or metadata_event.get("rng_seed_applied") is not True:
-            fail(errors, "RNG seed P1 non attestato")
+        for line_no, line in enumerate(raw.read_text(encoding="utf-8").splitlines(), 1):
+            try:
+                event = json.loads(line)
+                if not isinstance(event, dict):
+                    raise ValueError("non-object")
+                events.append(event)
+            except Exception as exc:
+                fail(errors, f"raw trace line {line_no} invalida: {exc}")
+
+    metadata_events = [e for e in events if e.get("event") == "phase_metadata"]
+    if len(metadata_events) != 1:
+        fail(errors, f"phase_metadata count={len(metadata_events)}")
+    metadata_event = metadata_events[0] if metadata_events else {}
+    if metadata_event.get("seed") != report.get("seed") or metadata_event.get("rng_seed_applied") is not True:
+        fail(errors, "RNG seed P1 non attestato")
+
+    cpu_events = [e for e in events if e.get("event") == "cpu_contract_result"]
+    if len(cpu_events) != 1:
+        fail(errors, f"cpu_contract_result count={len(cpu_events)}")
+    cpu_event = cpu_events[0] if cpu_events else {}
+    recomputed_cpu = {k: cpu_event.get(k) for k in ("command", "exit_code", "elapsed_s", "stdout_tail", "stderr_tail")}
+
+    dependency = next((e for e in events if e.get("event") == "dependency_scan_result"), {})
+    fsm = [e for e in events if e.get("event") == "fsm_transition_event"]
+    fsm_sequences = [e for e in events if e.get("event") == "fsm_sequence_result"]
+    unexpected_accepted = 0
+    unexpected_rejected = 0
+    for event in fsm:
+        state = event.get("previous_state")
+        action = event.get("action")
+        expected = action in P1_FSM_ACCEPTED.get(state, set())
+        expected_next = P1_FSM_NEXT.get(state, {}).get(action, state)
+        actual = bool(event.get("accepted"))
+        if actual != expected:
+            if actual:
+                unexpected_accepted += 1
+            else:
+                unexpected_rejected += 1
+        if event.get("next_state") != expected_next:
+            unexpected_accepted += 1
+        if event.get("expected_accepted") != expected or event.get("expected_next_state") != expected_next:
+            fail(errors, f"FSM event {event.get('sequence_id')} contiene aspettativa non indipendente")
+
+    race_results = [e for e in events if e.get("event") == "race_result"]
+    race_starts = {e.get("race_id") for e in events if e.get("event") == "race_start"}
+    race_invalidations = {e.get("race_id") for e in events if e.get("event") == "race_invalidate"}
+    race_b_starts = {e.get("race_id") for e in events if e.get("event") == "race_B_start"}
+    stale_attempts = [e for e in events if e.get("event") == "stale_write_attempt" and e.get("actor") == "A"]
+    stale_blocked = [e for e in events if e.get("event") == "stale_write_blocked" and e.get("actor") == "A"]
+    stale_accepted = sum(bool(e.get("accepted")) for e in stale_attempts)
+    stale_attempt_keys = {(e.get("race_id"), e.get("kind")) for e in stale_attempts}
+    blocked_keys = {(e.get("race_id"), e.get("kind")) for e in stale_blocked}
+    if stale_attempt_keys != blocked_keys:
+        fail(errors, "non tutti i tentativi stale risultano bloccati nel trace")
+    history_events = [e for e in events if e.get("event") == "history_commit"]
+    history_emits = {(e.get("race_id"), e.get("actor")) for e in events if e.get("event") == "history_emit"}
+    history_non_emitted_accepted = sum(
+        bool(e.get("accepted")) and (e.get("race_id"), e.get("actor")) not in history_emits
+        for e in history_events
+    )
+    policy_events = [e for e in events if e.get("event") == "policy_swap_check"]
+    uncaught = len([e for e in events if e.get("event") == "fsm_exception"])
+    recomputed = {
+        "seed": metadata_event.get("seed"),
+        "fsm_sequences": len({e.get("sequence_id") for e in fsm_sequences}),
+        "unexpected_accepted_transitions": unexpected_accepted,
+        "unexpected_rejected_transitions": unexpected_rejected,
+        "illegal_state_transitions": unexpected_accepted + unexpected_rejected,
+        "uncaught_exceptions": uncaught,
+        "cancellation_races": len(race_results),
+        "stale_write_attempts_blocked": len(stale_blocked),
+        "stale_audio_events_emitted": stale_accepted,
+        "stale_text_events_emitted": stale_accepted,
+        "stale_history_writes": stale_accepted,
+        "stale_kv_writes": stale_accepted,
+        "stale_session_mutations": stale_accepted,
+        "history_non_emitted_accepted": history_non_emitted_accepted,
+        "direct_turnhead_imports": dependency.get("direct_turnhead_imports"),
+        "direct_barge_in_server_branches": dependency.get("direct_barge_in_server_branches"),
+        "policy_swap_checks": sum(bool(e.get("passed")) for e in policy_events),
+        "cpu_contract": recomputed_cpu,
+    }
+    if not (race_starts == race_invalidations == race_b_starts == {e.get("race_id") for e in race_results}):
+        fail(errors, "sequenza race A→invalidate→B incompleta")
+    if any(not e.get("passed") for e in race_results):
+        fail(errors, "race integration con risultato fallito")
+    if len(stale_attempts) != len(stale_blocked) or stale_accepted:
+        fail(errors, f"stale writes non completamente bloccati: attempts={len(stale_attempts)} blocked={len(stale_blocked)} accepted={stale_accepted}")
+    if recomputed["fsm_sequences"] != 10_000 or recomputed["cancellation_races"] != 1_000:
+        fail(errors, "conteggio FSM/race non conforme al gate P1")
+    if len(fsm) < 10_000 or len(events) < 30_000:
+        fail(errors, "raw trace P1 non granulare o incompleto")
+
     metrics = report.get("metrics", {})
+    for key, expected in recomputed.items():
+        if key == "cpu_contract":
+            if metrics.get(key) != expected:
+                fail(errors, "cpu_contract report non coincide col raw trace")
+        elif metrics.get(key) != expected:
+            fail(errors, f"metrica P1 {key} non coincide col raw trace: {metrics.get(key)!r} != {expected!r}")
     thresholds = report.get("thresholds", {})
-    checks = {"cpu_contract_exit_code": metrics.get("cpu_contract", {}).get("exit_code"), **{
-        key: metrics.get(key) for key in thresholds if key != "cpu_contract_exit_code"
+    threshold_values = {"cpu_contract_exit_code": recomputed_cpu.get("exit_code"), **{
+        key: recomputed.get(key) for key in thresholds if key != "cpu_contract_exit_code"
     }}
-    for key, actual in checks.items():
-        expected = thresholds.get(key)
+    for key, expected in thresholds.items():
+        actual = threshold_values.get(key)
         if actual != expected:
             fail(errors, f"threshold P1 fallita: {key}={actual!r} != {expected!r}")
     independently_passed = not errors
@@ -119,6 +288,7 @@ def verify_one(report_path: Path) -> tuple[dict[str, Any], list[str]]:
     report = json.loads(report_path.read_text(encoding="utf-8"))
     if report.get("schema_version") != 1:
         fail(errors, "schema_version non supportata")
+    verify_source_attestation(report, report_path, errors)
     if report.get("phase") == "P1":
         return verify_p1(report_path)
     if report.get("phase") != "P0":

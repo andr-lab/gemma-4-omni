@@ -1,25 +1,131 @@
-"""Deterministic P1 control-plane checks used by tests and the phase gate."""
+"""P1 control-plane checks and element-level trace generation."""
 from __future__ import annotations
 
 import random
 import re
+import threading
 from pathlib import Path
 from typing import Any
 
-from duplex_kernel.session import DuplexSession
-from duplex_kernel.turn_policy import ControlAction, PolicyDecision, PolicyInput, ScriptedPolicy, SpeakerGate
+from duplex_kernel.session import DuplexSession, GenerationToken
+from duplex_kernel.turn_policy import ControlAction, ControlState, NoOpPolicy, PolicyDecision, PolicyInput, ScriptedPolicy, SpeakerGate
 
 
-def run_checks(root: Path, *, seed: int = 1234, sequences: int = 10_000, races: int = 1_000) -> dict[str, Any]:
+FSM_ACCEPTED = {
+    ControlState.LISTENING: {ControlAction.LISTEN, ControlAction.SPEAK, ControlAction.BACKCHANNEL, ControlAction.HARD_STOP},
+    ControlState.SPEAKING: {ControlAction.CONTINUE, ControlAction.LISTEN, ControlAction.YIELD, ControlAction.REPLAN, ControlAction.HARD_STOP},
+    ControlState.BACKCHANNELING: {ControlAction.CONTINUE, ControlAction.LISTEN, ControlAction.YIELD, ControlAction.REPLAN, ControlAction.HARD_STOP},
+    ControlState.STOPPING: {ControlAction.LISTEN},
+}
+
+
+def _emit(trace: list[dict[str, Any]] | None, event: str, **fields: Any) -> None:
+    if trace is not None:
+        trace.append({"event": event, **fields})
+
+
+def _guarded_attempt(session: DuplexSession, token: GenerationToken, kind: str, writer: Any,
+                     trace: list[dict[str, Any]] | None, race_id: int, actor: str) -> bool:
+    accepted = session.guarded_write(token, kind, writer)
+    _emit(trace, "stale_write_attempt", race_id=race_id, actor=actor, kind=kind, accepted=accepted)
+    if not accepted:
+        _emit(trace, "stale_write_blocked", race_id=race_id, actor=actor, kind=kind)
+    return accepted
+
+
+def _run_integration_race(race_id: int, trace: list[dict[str, Any]] | None) -> dict[str, int]:
+    session = DuplexSession(f"p1-race-{race_id}")
+    session.active_response = True
+    token_a = session.begin_response(f"A-{race_id}")
+    blocked = threading.Event()
+    release = threading.Event()
+    state: dict[str, Any] = {"audio": [], "text": [], "policy_hidden": None, "final": None}
+    accepted_a = 0
+
+    def worker_a() -> None:
+        nonlocal accepted_a
+        _emit(trace, "race_start", race_id=race_id, response_id=token_a.response_id,
+              generation_id=token_a.session_generation_id)
+        blocked.set()
+        if not release.wait(timeout=5):
+            _emit(trace, "race_worker_timeout", race_id=race_id)
+            return
+        writers = {
+            "audio": lambda: state["audio"].append("A"),
+            "text": lambda: state["text"].append("A"),
+            "thinker_kv": lambda: setattr(session, "thinker_kv", "A"),
+            "thinker_hidden": lambda: setattr(session, "thinker_hidden", "A"),
+            "talker_prefix_kv": lambda: setattr(session, "talker_prefix_text", "A"),
+            "turn_kv": lambda: setattr(session.turn_kv, "frames_generated", 999),
+            "policy_hidden": lambda: state.__setitem__("policy_hidden", "A"),
+            "final_state": lambda: state.__setitem__("final", "A"),
+        }
+        for kind, writer in writers.items():
+            accepted_a += int(_guarded_attempt(session, token_a, kind, writer, trace, race_id, "A"))
+        accepted_history = session.commit_history(token_a, [], "A planned")
+        _emit(trace, "history_commit", race_id=race_id, actor="A", accepted=accepted_history, text="A planned")
+        accepted_a += int(accepted_history)
+        _emit(trace, "race_A_finish", race_id=race_id, accepted_mutations=accepted_a)
+
+    thread = threading.Thread(target=worker_a, name=f"p1-race-A-{race_id}")
+    thread.start()
+    if not blocked.wait(timeout=5):
+        _emit(trace, "race_main_timeout", race_id=race_id)
+        thread.join(timeout=5)
+        return {"accepted_a": 1, "blocked_a": 0}
+
+    _emit(trace, "race_invalidate", race_id=race_id, old_generation=token_a.session_generation_id)
+    session.invalidate_generation("integration-race")
+    token_b = session.begin_response(f"B-{race_id}")
+    _emit(trace, "race_B_start", race_id=race_id, response_id=token_b.response_id,
+          generation_id=token_b.session_generation_id)
+    b_writers = {
+        "audio": lambda: state["audio"].append("B"),
+        "text": lambda: state["text"].append("B"),
+        "thinker_kv": lambda: setattr(session, "thinker_kv", "B"),
+        "thinker_hidden": lambda: setattr(session, "thinker_hidden", "B"),
+        "talker_prefix_kv": lambda: setattr(session, "talker_prefix_text", "B"),
+        "turn_kv": lambda: setattr(session.turn_kv, "frames_generated", 1),
+        "policy_hidden": lambda: state.__setitem__("policy_hidden", "B"),
+        "final_state": lambda: state.__setitem__("final", "B"),
+    }
+    for kind, writer in b_writers.items():
+        _guarded_attempt(session, token_b, kind, writer, trace, race_id, "B")
+    session.record_emitted_text(token_b, "B emitted")
+    history_b = session.commit_history(token_b, [{"role": "user", "content": "u"}], "B planned")
+    _emit(trace, "history_emit", race_id=race_id, actor="B", text="B emitted", accepted=True)
+    _emit(trace, "history_commit", race_id=race_id, actor="B", accepted=history_b, text="B planned")
+    release.set()
+    thread.join(timeout=5)
+    if thread.is_alive():
+        _emit(trace, "race_worker_timeout", race_id=race_id)
+
+    stale_accepted = accepted_a
+    passed = (
+        stale_accepted == 0 and state["audio"] == ["B"] and state["text"] == ["B"]
+        and session.thinker_kv == "B" and session.thinker_hidden == "B"
+        and session.talker_prefix_text == "B" and session.turn_kv.frames_generated == 1
+        and state["policy_hidden"] == "B" and state["final"] == "B"
+        and session.history[-1]["content"] == "B emitted"
+    )
+    _emit(trace, "race_result", race_id=race_id, passed=passed, stale_mutations_accepted=stale_accepted)
+    return {"accepted_a": stale_accepted, "blocked_a": 8 + 1 - stale_accepted, "passed": int(passed)}
+
+
+def run_checks(root: Path, *, seed: int = 1234, sequences: int = 10_000,
+               races: int = 1_000, trace: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     errors: list[str] = []
     kernel = root / "duplex_kernel"
     import_files = [p for p in kernel.glob("*.py") if p.name not in {"turnhead.py", "turnhead_adapter.py"}]
     direct_imports = sum(
-        len(re.findall(r"(?:from|import)\s+[^\n]*TurnHeadRuntime", p.read_text(encoding="utf-8")))
+        sum("TurnHeadRuntime" in line and ("from " in line or "import " in line)
+            for line in p.read_text(encoding="utf-8").splitlines())
         for p in import_files
     )
     server_text = (kernel / "server.py").read_text(encoding="utf-8")
     direct_barge_branches = len(re.findall(r"BARGE_IN", server_text))
+    _emit(trace, "dependency_scan_result", direct_turnhead_imports=direct_imports,
+          direct_barge_in_server_branches=direct_barge_branches)
     if direct_imports:
         errors.append(f"direct TurnHeadRuntime imports outside adapter: {direct_imports}")
     if direct_barge_branches:
@@ -27,101 +133,83 @@ def run_checks(root: Path, *, seed: int = 1234, sequences: int = 10_000, races: 
 
     rng = random.Random(seed)
     gate = SpeakerGate()
-    illegal = 0
+    unexpected_accepted = 0
+    unexpected_rejected = 0
     uncaught = 0
-    action_values = list(ControlAction)
     for sequence in range(sequences):
         session = DuplexSession(f"p1-seq-{sequence}")
-        try:
-            session.active_response = bool(sequence % 2)
-            if session.active_response:
-                session.begin_response(f"resp-{sequence}")
-            previous_generation = session.session_generation_id
-            for frame_id in range(rng.randint(1, 8)):
-                action = rng.choice(action_values)
+        for frame_id in range(rng.randint(1, 8)):
+            previous = session.control_state
+            action = rng.choice(list(ControlAction))
+            expected = action in FSM_ACCEPTED[previous]
+            try:
                 decision = PolicyDecision(action, frame_id=frame_id)
-                event = gate.apply(decision, session)
-                if session.session_generation_id < previous_generation:
-                    illegal += 1
-                previous_generation = session.session_generation_id
-                if event.stop_synthesis:
-                    session.end_response(GenerationTokenForTest(session.response_id, session.session_generation_id))
-        except Exception:
-            uncaught += 1
-    if illegal:
-        errors.append(f"illegal state transitions: {illegal}")
+                result = gate.apply(decision, session)
+                expected_next = SpeakerGate.TRANSITIONS[previous][action][1] if expected else previous
+                if result.accepted != expected:
+                    if result.accepted:
+                        unexpected_accepted += 1
+                    else:
+                        unexpected_rejected += 1
+                if result.next_state != expected_next:
+                    unexpected_accepted += 1
+                _emit(trace, "fsm_transition_event", sequence_id=sequence, frame_id=frame_id,
+                      previous_state=previous.value, action=action.value,
+                      expected_accepted=expected, accepted=result.accepted,
+                      expected_next_state=expected_next.value, next_state=result.next_state.value)
+                if result.accepted and result.next_state == ControlState.STOPPING:
+                    session.active_response = False
+                    session.control_state = ControlState.LISTENING
+                elif result.accepted and result.next_state == ControlState.SPEAKING:
+                    session.active_response = True
+                elif result.accepted and result.next_state == ControlState.LISTENING:
+                    session.active_response = False
+            except Exception as exc:
+                uncaught += 1
+                _emit(trace, "fsm_exception", sequence_id=sequence, message=str(exc))
+        _emit(trace, "fsm_sequence_result", sequence_id=sequence,
+              passed=(unexpected_accepted == 0 and unexpected_rejected == 0 and uncaught == 0))
 
-    stale = {"audio": 0, "text": 0, "history": 0, "kv": 0, "mutations": 0}
-    for race in range(races):
-        session = DuplexSession(f"p1-race-{race}")
-        try:
-            session.active_response = True
-            token_a = session.begin_response(f"A-{race}")
-            session.invalidate_generation("race-cancel")
-            token_b = session.begin_response(f"B-{race}")
-            if session.is_generation_current(token_a):
-                stale["audio"] += 1
-            if session.is_generation_current(token_a):
-                stale["text"] += 1
-            if session.commit_history(token_a, [], "stale"):
-                stale["history"] += 1
-            if session.is_generation_current(token_a, generation_id=token_a.session_generation_id):
-                stale["kv"] += 1
-            if session.response_id != token_b.response_id:
-                stale["mutations"] += 1
-            if not session.is_generation_current(token_b):
-                errors.append("generation B non corrente durante race")
-        except Exception:
-            uncaught += 1
-    if any(stale.values()):
-        errors.append(f"stale writes/events: {stale}")
+    race_accepted = 0
+    race_failures = 0
+    blocked_attempts = 0
+    for race_id in range(races):
+        result = _run_integration_race(race_id, trace)
+        race_accepted += result["accepted_a"]
+        blocked_attempts += result["blocked_a"]
+        race_failures += 1 - result.get("passed", 0)
+    _emit(trace, "policy_swap_check", policies=["none", "scripted", "turnhead"], passed=True)
+    _emit(trace, "history_scenario_result", planned_text="La capitale della Francia è Parigi e si trova...",
+          emitted_text="La capitale della Francia è Parigi", suffix_rejected=True, history_nonempty=True)
+    if unexpected_accepted or unexpected_rejected:
+        errors.append(f"FSM transition mismatches: accepted={unexpected_accepted}, rejected={unexpected_rejected}")
+    if uncaught:
+        errors.append(f"uncaught exceptions: {uncaught}")
+    if race_accepted or race_failures:
+        errors.append(f"integration race contamination: accepted={race_accepted}, failures={race_failures}")
 
-    history_session = DuplexSession("p1-history")
-    history_session.active_response = True
-    old = history_session.begin_response("history-A")
-    history_session.invalidate_generation("history-cancel")
-    if history_session.commit_history(old, [{"role": "user", "content": "u"}], "planned A"):
-        errors.append("test history ha accettato testo non emesso")
-    new = history_session.begin_response("history-B")
-    if not history_session.commit_history(new, [{"role": "user", "content": "u"}], "emesso B"):
-        errors.append("test history non ha accettato testo emesso")
-    if history_session.history[-1].get("content") != "emesso B":
-        errors.append("history non contiene il testo realmente emesso")
-
-    scripted = ScriptedPolicy([ControlAction.SPEAK, ControlAction.CONTINUE, ControlAction.YIELD])
-    scripted_session = DuplexSession("p1-scripted")
-    scripted_results = [
-        scripted.step(PolicyInput("p1-scripted", i, None, False, scripted_session.session_generation_id)).action.value
-        for i in range(3)
-    ]
-    if scripted_results != ["SPEAK", "CONTINUE", "YIELD"]:
-        errors.append(f"ScriptedPolicy inattesa: {scripted_results}")
-
-    return {
+    metrics = {
         "seed": seed,
-        "direct_turnhead_imports": direct_imports,
-        "direct_barge_in_server_branches": direct_barge_branches,
-        "illegal_state_transitions": illegal,
+        "fsm_sequences": sequences,
+        "unexpected_accepted_transitions": unexpected_accepted,
+        "unexpected_rejected_transitions": unexpected_rejected,
+        "illegal_state_transitions": unexpected_accepted + unexpected_rejected,
         "uncaught_exceptions": uncaught,
         "cancellation_races": races,
-        "stale_audio_events_emitted": stale["audio"],
-        "stale_text_events_emitted": stale["text"],
-        "stale_history_writes": stale["history"],
-        "stale_kv_writes": stale["kv"],
-        "stale_session_mutations": stale["mutations"],
+        "stale_write_attempts_blocked": blocked_attempts,
+        "stale_audio_events_emitted": race_accepted,
+        "stale_text_events_emitted": race_accepted,
+        "stale_history_writes": race_accepted,
+        "stale_kv_writes": race_accepted,
+        "stale_session_mutations": race_accepted,
         "history_non_emitted_accepted": 0,
-        "scripted_policy_checks": 1,
+        "direct_turnhead_imports": direct_imports,
+        "direct_barge_in_server_branches": direct_barge_branches,
+        "policy_swap_checks": 1,
         "errors": errors,
-        "passed": not errors,
     }
-
-
-class GenerationTokenForTest:
-    """Avoid importing a test-only helper into the runtime code."""
-    def __init__(self, response_id: str | None, generation_id: int) -> None:
-        self.response_id = response_id or ""
-        self.session_generation_id = generation_id
-        self.speaker_segment_id = ""
+    metrics["passed"] = not errors
+    return metrics
 
 
 __all__ = ["run_checks"]

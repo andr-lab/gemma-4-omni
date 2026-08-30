@@ -214,7 +214,9 @@ class TurnHeadRuntime:
             return 0
         self._pcm_buffer = np.concatenate((self._pcm_buffer, pcm))
         rows = []
-        while len(self._pcm_buffer) >= self._next_mel_frame * MEL_HOP + MEL_HOP:
+        # Gemma4AudioFeatureExtractor unfolds 321 samples and consumes the
+        # first 320; the strict boundary prevents an extra terminal frame.
+        while len(self._pcm_buffer) > self._next_mel_frame * MEL_HOP + MEL_HOP:
             start = self._next_mel_frame * MEL_HOP - MEL_HOP
             frame = np.zeros(MEL_FRAME, dtype=np.float32)
             src_start = max(0, start)

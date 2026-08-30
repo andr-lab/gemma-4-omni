@@ -99,6 +99,10 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                 sess.turn_policy.update_hidden(chunk_h)
             elif generation_id is not None:
                 sess.stale_session_mutations += 1
+            if request.get("_generation_token") is not None:
+                sess.record_synthesized_text(request["_generation_token"], chunk_text)
+            if callable(request.get("_on_text_chunk")):
+                request["_on_text_chunk"](chunk_text)
             chunk_wav = engine.talk(chunk_text, chunk_h, n_words=max(1, len(chunk_text.split())),
                                     voice_conditioning=cond, stop_check=request.get("_stop_check"),
                                     state=sess, on_audio_chunk=request.get("_on_audio_chunk"), min_frames=8,
@@ -115,6 +119,8 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
         if calls:
             return {"text": "", "tool_calls": calls, "wav": None, "elapsed": 0.0}
         text = think["text"]
+        if request.get("_generation_token") is not None:
+            sess.record_planned_text(request["_generation_token"], text)
         h_pfx = engine.v9_prefix(think["hidden"], think["prompt_len"])
         if sess.turn_policy is not None and (generation_id is None or sess.is_generation_current(generation_id=generation_id)):
             sess.turn_policy.update_hidden(h_pfx)
@@ -224,12 +230,14 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
             try:
                 await ws.send_json({"type": "response.created", "response_id": response_id})
                 audio_queue: queue.Queue[np.ndarray] = queue.Queue()
+                text_queue: queue.Queue[str] = queue.Queue()
                 streamed_chunks = 0
                 def on_audio_chunk(chunk: np.ndarray) -> None:
-                    if sess.is_generation_current(token):
-                        audio_queue.put(np.asarray(chunk, dtype=np.float32))
-                    else:
-                        sess.stale_audio_events += 1
+                    array = np.asarray(chunk, dtype=np.float32)
+                    sess.guarded_write(token, "audio", lambda: audio_queue.put(array))
+                def on_text_chunk(chunk: str) -> None:
+                    sess.guarded_write(token, "text", lambda: text_queue.put(str(chunk)))
+
                 def infer_ws():
                     with inference_lock:
                         history = list(sess.history)
@@ -240,7 +248,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                             if audio_text:
                                 history.append({"role": "user", "content": audio_text})
                         logger.info("[realtime %s %s] Thinker/Talker start", sess.session_id[:8], response_id)
-                        result = run_response(sess, history or [{"role": "user", "content": "Ciao!"}], {"modalities": ["text", "audio"], "tools": sess.tools, "voice": sess.voice, "voice_style": sess.voice_style, "ref_text": sess.ref_text, "_generation_id": token.session_generation_id, "_defer_history": True, "_stop_check": lambda: sess.stop_requested, "_on_audio_chunk": on_audio_chunk})
+                        result = run_response(sess, history or [{"role": "user", "content": "Ciao!"}], {"modalities": ["text", "audio"], "tools": sess.tools, "voice": sess.voice, "voice_style": sess.voice_style, "ref_text": sess.ref_text, "_generation_id": token.session_generation_id, "_generation_token": token, "_defer_history": True, "_stop_check": lambda: sess.stop_requested, "_on_audio_chunk": on_audio_chunk, "_on_text_chunk": on_text_chunk})
                         logger.info("[realtime %s %s] Thinker/Talker done elapsed=%.2fs", sess.session_id[:8], response_id, time.perf_counter() - started)
                         return result
                 loop = asyncio.get_running_loop()
@@ -261,7 +269,15 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                         await asyncio.sleep(0.005)
                     else:
                         streamed_chunks += 1
-                        await ws.send_json({"type": "response.audio.delta", "delta": _wav_b64(chunk_wav)})
+                        await ws.send_json({"type": "response.audio.delta", "delta": _wav_b64(chunk_wav), "response_id": response_id})
+                        sess.record_emitted_audio(token, 8)
+                    try:
+                        chunk_text = text_queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                    else:
+                        await ws.send_json({"type": "response.output_text.delta", "delta": chunk_text, "response_id": response_id})
+                        sess.record_emitted_text(token, chunk_text)
                 result = await future
                 while True:
                     try:
@@ -269,7 +285,15 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     except queue.Empty:
                         break
                     streamed_chunks += 1
-                    await ws.send_json({"type": "response.audio.delta", "delta": _wav_b64(chunk_wav)})
+                    await ws.send_json({"type": "response.audio.delta", "delta": _wav_b64(chunk_wav), "response_id": response_id})
+                    sess.record_emitted_audio(token, 8)
+                while True:
+                    try:
+                        chunk_text = text_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    await ws.send_json({"type": "response.output_text.delta", "delta": chunk_text, "response_id": response_id})
+                    sess.record_emitted_text(token, chunk_text)
                 if not sess.is_generation_current(token):
                     return
                 if result.get("cancelled"):
@@ -281,12 +305,16 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                         fn = call["function"]
                         await ws.send_json({"type": "response.function_call_arguments.done", "call_id": call["id"], "name": fn["name"], "arguments": fn["arguments"]})
                     return
-                await ws.send_json({"type": "response.output_text.delta", "delta": result["text"], "response_id": response_id})
+                if not sess.speaker_segment or not sess.speaker_segment.emitted_text:
+                    await ws.send_json({"type": "response.output_text.delta", "delta": result["text"], "response_id": response_id})
+                    sess.record_emitted_text(token, result["text"])
                 sess.commit_history(token, result.get("history_messages", []), result["text"])
                 if result["wav"] is not None and streamed_chunks == 0:
                     chunk = int(CODEC_SAMPLE_RATE * .640)
                     for start in range(0, len(result["wav"]), chunk):
-                        await ws.send_json({"type": "response.audio.delta", "delta": _wav_b64(result["wav"][start:start + chunk])})
+                        audio_chunk = result["wav"][start:start + chunk]
+                        await ws.send_json({"type": "response.audio.delta", "delta": _wav_b64(audio_chunk), "response_id": response_id})
+                        sess.record_emitted_audio(token, max(1, int(round(len(audio_chunk) / (CODEC_SAMPLE_RATE * .08)))))
                 await ws.send_json({"type": "response.done", "response_id": response_id})
                 logger.info("[realtime %s %s] done total=%.2fs audio_chunks=%d", sess.session_id[:8], response_id, time.perf_counter() - started, streamed_chunks)
                 queued_audio = sess.pending_audio.copy()

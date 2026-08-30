@@ -225,8 +225,10 @@ def run_p0(manifest_path: Path, raw_path: Path, workspace: Path, seed: int) -> d
 
 def run_p1(raw_path: Path, workspace: Path, seed: int) -> tuple[dict[str, Any], dict[str, Any]]:
     from tools.kernel_gates.p1_checks import run_checks
-    checks = run_checks(workspace, seed=seed, sequences=10_000, races=1_000)
+    events: list[dict[str, Any]] = [{"event": "phase_metadata", "seed": seed, "rng_seed_applied": True}]
+    checks = run_checks(workspace, seed=seed, sequences=10_000, races=1_000, trace=events)
     cpu = run_cpu_contract("tests/kernel/test_p1_control_plane.py")
+    events.append({"event": "cpu_contract_result", **cpu})
     metrics = {**checks, "cpu_contract": cpu}
     thresholds = {
         "cpu_contract_exit_code": 0,
@@ -242,9 +244,7 @@ def run_p1(raw_path: Path, workspace: Path, seed: int) -> tuple[dict[str, Any], 
         "history_non_emitted_accepted": 0,
     }
     metrics["passed"] = bool(checks["passed"] and cpu["exit_code"] == 0)
-    raw_path.write_text(json.dumps({"event": "phase_metadata", "seed": seed,
-                                    "rng_seed_applied": True, "metrics": metrics},
-                                   ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+    raw_path.write_text("".join(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n" for event in events), encoding="utf-8")
     return metrics, thresholds
 
 
@@ -257,6 +257,8 @@ def main() -> int:
     ap.add_argument("--run-id", default="run1", help="identificatore della ripetizione, ad esempio run1/run2")
     ap.add_argument("--git-sha", default=None, help="SHA del checkout host quando il container non contiene .git")
     ap.add_argument("--git-dirty", choices=["true", "false"], default=None)
+    ap.add_argument("--source-attestation", type=Path, required=True,
+                    help="attestation content-addressed del checkout Git pulito")
     args = ap.parse_args()
     manifest_path = args.manifest or (ROOT / "tools" / "kernel_gates" / "manifests" / "p0_inputs.json")
     if not manifest_path.is_absolute():
@@ -270,6 +272,8 @@ def main() -> int:
     raw_path = artifact_dir / "raw_trace.jsonl"
     artifact_manifest = artifact_dir / "input_manifest.json"
     shutil.copyfile(manifest_path, artifact_manifest)
+    source_attestation = artifact_dir / "source_attestation.json"
+    shutil.copyfile(args.source_attestation, source_attestation)
     if raw_path.exists():
         raw_path.unlink()
     if args.phase == "P1":
@@ -295,8 +299,10 @@ def main() -> int:
             metrics["nan_count"] == 0 and metrics["inf_count"] == 0 and
             metrics["empty_audio_responses"] == 0 and metrics["uncaught_exceptions"] == 0
         )
-    report = {**meta, "run_id": args.run_id, "input_manifest": artifact_manifest.name, "raw_trace": raw_path.name, "raw_trace_sha256": sha256(raw_path),
-              "metrics": metrics, "thresholds": thresholds, "passed": passed}
+    report = {**meta, "run_id": args.run_id, "input_manifest": artifact_manifest.name, "raw_trace": raw_path.name,
+              "raw_trace_sha256": sha256(raw_path), "source_attestation": source_attestation.name,
+              "source_attestation_sha256": sha256(source_attestation), "metrics": metrics,
+              "thresholds": thresholds, "passed": passed}
     report_path = artifact_dir / f"{args.phase}_report.json"
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"report={report_path} passed={passed}")

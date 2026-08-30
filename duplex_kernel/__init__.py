@@ -21,8 +21,5 @@ from duplex_kernel.kv_cache import (  # noqa: F401
 )
 from duplex_kernel.session import DuplexSession, SessionManager  # noqa: F401
 from duplex_kernel.voices import load_voice_profiles, resolve_voice_conditioning  # noqa: F401
-from duplex_kernel.turnhead import (  # noqa: F401
-    StreamingDuplexController,
-    TurnDetectorHead,
-    TurnHeadRuntime,
-)
+# TurnHead is intentionally not imported into the core package namespace.
+# Use duplex_kernel.turnhead_adapter for the TurnPolicy integration.

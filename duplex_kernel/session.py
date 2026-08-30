@@ -26,6 +26,7 @@ from typing import Any
 import numpy as np
 
 from duplex_kernel.kv_cache import TalkerPrefixKV, ThinkerContext, TurnKVState
+from duplex_kernel.turn_policy import ControlState
 
 logger = logging.getLogger("duplex_kernel.session")
 
@@ -35,6 +36,16 @@ class GenerationToken:
     session_generation_id: int
     response_id: str
     speaker_segment_id: str
+
+
+@dataclass
+class SpeakerSegmentState:
+    segment_id: str
+    generation_id: int
+    planned_text: str = ""
+    synthesized_text: str = ""
+    emitted_text: str = ""
+    emitted_audio_frames: int = 0
 
 
 @dataclass
@@ -54,16 +65,19 @@ class DuplexSession:
     thinker_hidden: Any | None = None
     # Control plane (TurnHead is only an adapter implementation).
     turn_policy: Any | None = None
+    control_state: ControlState = ControlState.LISTENING
     # Generation fencing
     session_generation_id: int = 0
     response_id: str | None = None
     speaker_segment_id: str | None = None
     frame_id: int = 0
     response_cancel_notified: bool = False
+    speaker_segment: SpeakerSegmentState | None = None
     stale_audio_events: int = 0
     stale_text_events: int = 0
     stale_history_writes: int = 0
     stale_kv_writes: int = 0
+    stale_write_attempts: dict[str, int] = field(default_factory=dict)
     _generation_lock: threading.RLock = field(default_factory=threading.RLock, repr=False, compare=False)
     # Stato conversazione
     history: list[dict[str, Any]] = field(default_factory=list)
@@ -93,6 +107,8 @@ class DuplexSession:
             self.frame_id = 0
             self.stop_requested = False
             self.response_cancel_notified = False
+            self.control_state = ControlState.SPEAKING
+            self.speaker_segment = SpeakerSegmentState(self.speaker_segment_id, self.session_generation_id)
             return GenerationToken(self.session_generation_id, response_id, self.speaker_segment_id)
 
     def next_frame(self) -> int:
@@ -106,6 +122,42 @@ class DuplexSession:
             # allowed to clear a newer response's active flag.
             if self.response_id == token.response_id:
                 self.active_response = False
+                self.control_state = ControlState.LISTENING
+
+    def _segment_current(self, token: GenerationToken) -> bool:
+        return self.is_generation_current(token) and self.speaker_segment is not None
+
+    def record_planned_text(self, token: GenerationToken, text: str) -> bool:
+        with self._generation_lock:
+            if not self._segment_current(token):
+                self.stale_write_attempts["text"] = self.stale_write_attempts.get("text", 0) + 1
+                return False
+            self.speaker_segment.planned_text = text
+            return True
+
+    def record_synthesized_text(self, token: GenerationToken, text: str) -> bool:
+        with self._generation_lock:
+            if not self._segment_current(token):
+                self.stale_write_attempts["text"] = self.stale_write_attempts.get("text", 0) + 1
+                return False
+            self.speaker_segment.synthesized_text += text
+            return True
+
+    def record_emitted_text(self, token: GenerationToken, text: str) -> bool:
+        with self._generation_lock:
+            if not self._segment_current(token):
+                self.stale_write_attempts["text"] = self.stale_write_attempts.get("text", 0) + 1
+                return False
+            self.speaker_segment.emitted_text += text
+            return True
+
+    def record_emitted_audio(self, token: GenerationToken, frames: int) -> bool:
+        with self._generation_lock:
+            if not self._segment_current(token):
+                self.stale_write_attempts["audio"] = self.stale_write_attempts.get("audio", 0) + 1
+                return False
+            self.speaker_segment.emitted_audio_frames += int(frames)
+            return True
 
     def invalidate_generation(self, reason: str = "") -> int:
         with self._generation_lock:
@@ -127,12 +179,24 @@ class DuplexSession:
                 and (speaker_segment_id is None or speaker_segment_id == self.speaker_segment_id)
             )
 
+    def guarded_write(self, token: GenerationToken, kind: str, writer: Any) -> bool:
+        """Esegue una mutazione solo se il generation token è ancora attivo."""
+        with self._generation_lock:
+            if not self.is_generation_current(token):
+                self.stale_write_attempts[kind] = self.stale_write_attempts.get(kind, 0) + 1
+                return False
+            writer()
+            return True
+
     def commit_history(self, token: GenerationToken, base_messages: list[dict[str, Any]], text: str) -> bool:
         with self._generation_lock:
             if not self.is_generation_current(token):
-                self.stale_history_writes += 1
+                self.stale_write_attempts["history"] = self.stale_write_attempts.get("history", 0) + 1
                 return False
-            self.history = [dict(m) for m in base_messages[-16:]] + [{"role": "assistant", "content": text}]
+            committed_text = self.speaker_segment.emitted_text if self.speaker_segment is not None else text
+            if not committed_text:
+                return False
+            self.history = [dict(m) for m in base_messages[-16:]] + [{"role": "assistant", "content": committed_text}]
             return True
 
     def reset_turn(self) -> None:
@@ -140,6 +204,7 @@ class DuplexSession:
         self.pending_audio = np.empty(0, dtype=np.float32)
         self.pending_mel = np.empty((0, 128), dtype=np.float32)
         self.turn_kv.clear()
+        self.control_state = ControlState.LISTENING
         if self.turn_policy is not None and hasattr(self.turn_policy, "reset"):
             self.turn_policy.reset()
 
@@ -205,4 +270,4 @@ class SessionManager:
             return list(self.sessions.values())
 
 
-__all__ = ["DuplexSession", "GenerationToken", "SessionManager"]
+__all__ = ["DuplexSession", "GenerationToken", "SessionManager", "SpeakerSegmentState"]

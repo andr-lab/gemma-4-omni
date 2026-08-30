@@ -13,6 +13,13 @@ from typing import Any, Callable, Iterable, Protocol
 import numpy as np
 
 
+class ControlState(str, Enum):
+    LISTENING = "LISTENING"
+    SPEAKING = "SPEAKING"
+    BACKCHANNELING = "BACKCHANNELING"
+    STOPPING = "STOPPING"
+
+
 class ControlAction(str, Enum):
     LISTEN = "LISTEN"
     SPEAK = "SPEAK"
@@ -46,6 +53,8 @@ class PolicyDecision:
 class GateEvent:
     action: ControlAction
     accepted: bool = True
+    previous_state: ControlState = ControlState.LISTENING
+    next_state: ControlState = ControlState.LISTENING
     stop_synthesis: bool = False
     flush_audio_buffer: bool = False
     trigger_backchannel: bool = False
@@ -125,32 +134,77 @@ class CallablePolicy:
 
 
 class SpeakerGate:
-    """Applies control actions while fencing stopped generations."""
+    """Explicit control-plane FSM plus generation invalidation."""
+
+    TRANSITIONS: dict[ControlState, dict[ControlAction, tuple[bool, ControlState]]] = {
+        ControlState.LISTENING: {
+            ControlAction.LISTEN: (True, ControlState.LISTENING),
+            ControlAction.SPEAK: (True, ControlState.SPEAKING),
+            ControlAction.BACKCHANNEL: (True, ControlState.BACKCHANNELING),
+            ControlAction.CONTINUE: (False, ControlState.LISTENING),
+            ControlAction.YIELD: (False, ControlState.LISTENING),
+            ControlAction.REPLAN: (False, ControlState.LISTENING),
+            ControlAction.HARD_STOP: (True, ControlState.LISTENING),
+        },
+        ControlState.SPEAKING: {
+            ControlAction.CONTINUE: (True, ControlState.SPEAKING),
+            ControlAction.LISTEN: (True, ControlState.STOPPING),
+            ControlAction.YIELD: (True, ControlState.STOPPING),
+            ControlAction.REPLAN: (True, ControlState.STOPPING),
+            ControlAction.HARD_STOP: (True, ControlState.STOPPING),
+            ControlAction.SPEAK: (False, ControlState.SPEAKING),
+            ControlAction.BACKCHANNEL: (False, ControlState.SPEAKING),
+        },
+        ControlState.BACKCHANNELING: {
+            ControlAction.CONTINUE: (True, ControlState.BACKCHANNELING),
+            ControlAction.LISTEN: (True, ControlState.LISTENING),
+            ControlAction.YIELD: (True, ControlState.STOPPING),
+            ControlAction.REPLAN: (True, ControlState.STOPPING),
+            ControlAction.HARD_STOP: (True, ControlState.STOPPING),
+            ControlAction.SPEAK: (False, ControlState.BACKCHANNELING),
+            ControlAction.BACKCHANNEL: (False, ControlState.BACKCHANNELING),
+        },
+        ControlState.STOPPING: {
+            ControlAction.LISTEN: (True, ControlState.LISTENING),
+            ControlAction.SPEAK: (False, ControlState.STOPPING),
+            ControlAction.CONTINUE: (False, ControlState.STOPPING),
+            ControlAction.YIELD: (False, ControlState.STOPPING),
+            ControlAction.BACKCHANNEL: (False, ControlState.STOPPING),
+            ControlAction.REPLAN: (False, ControlState.STOPPING),
+            ControlAction.HARD_STOP: (False, ControlState.STOPPING),
+        },
+    }
 
     def apply(self, decision: PolicyDecision, session: Any) -> GateEvent:
         action = decision.action
         if not isinstance(action, ControlAction):
             raise TypeError("SpeakerGate riceve solo ControlAction")
-        active = bool(getattr(session, "active_response", False))
-        if action in {ControlAction.LISTEN, ControlAction.YIELD, ControlAction.REPLAN, ControlAction.HARD_STOP}:
-            if not active:
-                return GateEvent(action=action, accepted=True, trigger_backchannel=False)
-            old_generation = int(getattr(session, "session_generation_id", 0))
+        previous = getattr(session, "control_state", ControlState.LISTENING)
+        if not isinstance(previous, ControlState):
+            previous = ControlState(str(previous))
+        accepted, next_state = self.TRANSITIONS[previous][action]
+        if not accepted:
+            return GateEvent(action=action, accepted=False, previous_state=previous, next_state=previous)
+        old_generation = int(getattr(session, "session_generation_id", 0))
+        session.control_state = next_state
+        stopping = next_state == ControlState.STOPPING
+        if stopping:
             session.stop_requested = True
             session.invalidate_generation(f"control:{action.value}")
-            return GateEvent(
-                action=action,
-                stop_synthesis=True,
-                flush_audio_buffer=action in {ControlAction.REPLAN, ControlAction.HARD_STOP},
-                state_changed=True,
-                stale_generation_id=old_generation,
-            )
-        if action == ControlAction.BACKCHANNEL:
-            return GateEvent(action=action, trigger_backchannel=True)
-        return GateEvent(action=action)
+        return GateEvent(
+            action=action,
+            accepted=True,
+            previous_state=previous,
+            next_state=next_state,
+            stop_synthesis=stopping,
+            flush_audio_buffer=stopping and action in {ControlAction.REPLAN, ControlAction.HARD_STOP},
+            trigger_backchannel=next_state == ControlState.BACKCHANNELING,
+            state_changed=previous != next_state,
+            stale_generation_id=old_generation if stopping else None,
+        )
 
 
 __all__ = [
-    "CallablePolicy", "ControlAction", "GateEvent", "NoOpPolicy", "PolicyDecision",
+    "CallablePolicy", "ControlAction", "ControlState", "GateEvent", "NoOpPolicy", "PolicyDecision",
     "PolicyInput", "ScriptedPolicy", "SpeakerGate", "TurnPolicy",
 ]
