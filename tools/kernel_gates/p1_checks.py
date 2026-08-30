@@ -64,6 +64,8 @@ def _run_integration_race(race_id: int, trace: list[dict[str, Any]] | None) -> d
             accepted_a += int(_guarded_attempt(session, token_a, kind, writer, trace, race_id, "A"))
         accepted_history = session.commit_history(token_a, [], "A planned")
         _emit(trace, "history_commit", race_id=race_id, actor="A", accepted=accepted_history, text="A planned")
+        if not accepted_history:
+            _emit(trace, "stale_write_blocked", race_id=race_id, actor="A", kind="history")
         accepted_a += int(accepted_history)
         _emit(trace, "race_A_finish", race_id=race_id, accepted_mutations=accepted_a)
 
