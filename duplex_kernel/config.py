@@ -76,8 +76,9 @@ TALKER_TRUNCATE_TO_PREFIX = True
 DEVICE = os.environ.get("GEMMA4_OMNI_DEVICE", "cuda:0")
 DTYPE = "bfloat16"
 
-# Sessione duplex: chunk audio utente (ms) → 100ms per la turnhead 12.5Hz.
-DUPLEX_CHUNK_PERIOD_MS = 100
+# Clock duplex P2: un tick ogni 80 ms, 1280 sample PCM a 16 kHz.
+DUPLEX_CHUNK_PERIOD_MS = 80
+DUPLEX_FRAME_SAMPLES = 1280
 USER_SAMPLE_RATE = 16000
 MEL_BINS = 128
 MEL_HOP = 160  # 10ms @ 16kHz

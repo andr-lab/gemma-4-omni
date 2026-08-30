@@ -26,6 +26,7 @@ from typing import Any
 import numpy as np
 
 from duplex_kernel.kv_cache import TalkerPrefixKV, ThinkerContext, TurnKVState
+from duplex_kernel.scheduler import AudioIngressQueue
 from duplex_kernel.turn_policy import ControlState
 
 logger = logging.getLogger("duplex_kernel.session")
@@ -82,7 +83,11 @@ class DuplexSession:
     # Stato conversazione
     history: list[dict[str, Any]] = field(default_factory=list)
     instructions: str = ""
-    # Micro-turn in corso
+    # Audio ingress indipendente dal ciclo request/response (P2). Il buffer
+    # pending_audio resta per il commit/ASR legacy finché P3 non collega il
+    # GemmaListener al consumo dei frame numerati.
+    audio_ingress: AudioIngressQueue = field(default_factory=AudioIngressQueue)
+    # Micro-turn in corso (compatibilità commit/ASR)
     pending_audio: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.float32))
     pending_mel: np.ndarray = field(default_factory=lambda: np.empty((0, 128), dtype=np.float32))
     last_activity: float = field(default_factory=time.time)
@@ -246,6 +251,7 @@ class SessionManager:
         if sess is not None:
             sess.turn_kv.clear()
             sess.talker_prefix.clear()
+            sess.audio_ingress.close()
             logger.info("[session] chiusa %s", session_id)
 
     def _reap_idle(self) -> None:
@@ -258,6 +264,7 @@ class SessionManager:
             sess = self.sessions.pop(sid)
             sess.turn_kv.clear()
             sess.talker_prefix.clear()
+            sess.audio_ingress.close()
             logger.info("[session] reap idle %s", sid)
 
     def decode_ready(self) -> list[DuplexSession]:

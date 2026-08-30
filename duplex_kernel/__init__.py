@@ -19,6 +19,15 @@ from duplex_kernel.kv_cache import (  # noqa: F401
     TurnKVState,
     kv_memory_bytes,
 )
+from duplex_kernel.scheduler import (  # noqa: F401
+    AudioFrame,
+    AudioIngressQueue,
+    DuplexScheduler,
+    DuplexTick,
+    FrameClock,
+    MonotonicFrameClock,
+    VirtualFrameClock,
+)
 from duplex_kernel.session import DuplexSession, SessionManager  # noqa: F401
 from duplex_kernel.voices import load_voice_profiles, resolve_voice_conditioning  # noqa: F401
 # TurnHead is intentionally not imported into the core package namespace.

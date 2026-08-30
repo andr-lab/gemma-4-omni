@@ -379,23 +379,27 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     if sess.pending_audio.size + pcm.size > USER_SAMPLE_RATE * 30:
                         await ws.send_json({"type": "error", "error": {"code": "AUDIO_LIMIT", "message": "massimo 30 secondi per turno"}}); continue
                     sess.touch(); sess.pending_audio = np.concatenate((sess.pending_audio, pcm))
-                    frame_id = sess.next_frame()
-                    decision = sess.turn_policy.step(PolicyInput(
-                        session_id=sess.session_id,
-                        frame_id=frame_id,
-                        user_pcm=pcm,
-                        speaker_active=sess.active_response,
-                        generation_id=sess.session_generation_id,
-                        speaker_segment_id=sess.speaker_segment_id,
-                    ))
-                    gate = speaker_gate.apply(decision, sess)
-                    logger.info("[realtime %s] policy action=%s frame=%d active=%s", sess.session_id[:8], decision.action.value, frame_id, sess.active_response)
-                    if gate.stop_synthesis:
-                        if hasattr(engine, "stop_generation"):
-                            engine.stop_generation()
-                        if not sess.response_cancel_notified:
-                            sess.response_cancel_notified = True
-                            await ws.send_json({"type": "response.cancelled", "reason": gate.action.value.lower(), "response_id": sess.response_id})
+                    # L'ingress è frame-based e indipendente dalla commit della
+                    # request: chunk WS arbitrari vengono segmentati senza perdita;
+                    # la policy vede solo tick completi da 80 ms.
+                    frames = sess.audio_ingress.append(pcm)
+                    for frame in frames:
+                        decision = sess.turn_policy.step(PolicyInput(
+                            session_id=sess.session_id,
+                            frame_id=frame.frame_id,
+                            user_pcm=frame.pcm,
+                            speaker_active=sess.active_response,
+                            generation_id=sess.session_generation_id,
+                            speaker_segment_id=sess.speaker_segment_id,
+                        ))
+                        gate = speaker_gate.apply(decision, sess)
+                        logger.info("[realtime %s] policy action=%s frame=%d active=%s", sess.session_id[:8], decision.action.value, frame.frame_id, sess.active_response)
+                        if gate.stop_synthesis:
+                            if hasattr(engine, "stop_generation"):
+                                engine.stop_generation()
+                            if not sess.response_cancel_notified:
+                                sess.response_cancel_notified = True
+                                await ws.send_json({"type": "response.cancelled", "reason": gate.action.value.lower(), "response_id": sess.response_id})
                     if sess.auto_response and not sess.active_response:
                         await schedule_auto_response()
                 elif et in {"input_audio_buffer.commit", "response.create"}:
