@@ -1,0 +1,249 @@
+{
+  "schema_version": 1,
+  "phase": "P2",
+  "git_sha": "5d8cdf700309a5013dbf4203908d9e08aa9a722a",
+  "git_dirty": false,
+  "timestamp_utc": "2026-08-30T11:20:25.356023+00:00",
+  "hostname": "DESKTOP-957",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "gpu_name": "unknown",
+  "gpu_uuid": "unknown",
+  "cuda_version": "none",
+  "driver_version": "unknown",
+  "torch_version": "2.13.0+cpu",
+  "transformers_version": "5.14.1",
+  "python_version": "3.13.9",
+  "seed": 1234,
+  "rng_seed_applied": true,
+  "input_manifest_sha256": "8ea715716534493a2aa570df946baa0d0c0452f448e5733baeb2df2a0faf21d1",
+  "run_id": "run1",
+  "input_manifest": "input_manifest.json",
+  "raw_trace": "raw_trace.jsonl",
+  "raw_trace_sha256": "29828464b321d02457fc07b37032c3cceebaea91dc31bc7d550eeb8327720a4c",
+  "source_attestation": "source_attestation.json",
+  "source_workspace_binding": {
+    "workspace": "C:\\Users\\andre\\Documents\\gemma-4-omni",
+    "attestation_git_sha": "5d8cdf700309a5013dbf4203908d9e08aa9a722a",
+    "files_verified": 23,
+    "passed": true,
+    "files": [
+      {
+        "path": "duplex_kernel/__init__.py",
+        "bytes": 1175,
+        "sha256": "9099f83a0a1b67067f98b28f80f938d23680c7f1de0ac19e17c5b184d205011a",
+        "git_blob_sha1": "dfa487f35c3c6a6a60e01c8f280d8aeabd8ddb3a"
+      },
+      {
+        "path": "duplex_kernel/config.py",
+        "bytes": 3439,
+        "sha256": "4db09e5b369c0f5d37cf0b75225b95c6e2ccadb3674c9ca8712b01cc71914774",
+        "git_blob_sha1": "984c677b5958f302511b08292fe31b285ae15324"
+      },
+      {
+        "path": "duplex_kernel/engine.py",
+        "bytes": 18585,
+        "sha256": "16026e8f7cb03f8b58de87e57f99d5add3aee0b2629fd88ce3fdd9837e9d894b",
+        "git_blob_sha1": "4468cf65709a10f7c960c47f0e9801a12cabc57b"
+      },
+      {
+        "path": "duplex_kernel/kv_cache.py",
+        "bytes": 8427,
+        "sha256": "6d91b01713520f0e3bff8eb0e6bb2f1f0bb98da138f06746c82220c235b2f651",
+        "git_blob_sha1": "c2288b9e3a30892389c590f98f76c15f50e7239c"
+      },
+      {
+        "path": "duplex_kernel/server.py",
+        "bytes": 28580,
+        "sha256": "f0526cc25e2ed7c8ff991222148143b77dafc7424442986749d09b91ab17301c",
+        "git_blob_sha1": "4f2f31aab9d205b2ea44faee175d9c79cbf0f3ec"
+      },
+      {
+        "path": "duplex_kernel/session.py",
+        "bytes": 12358,
+        "sha256": "235c5d5f9de124fc97115ce88fdefe0af9cd7f6794bd997e4da087e120fcc253",
+        "git_blob_sha1": "c73d78e7f353297da2140440489a4b365105326c"
+      },
+      {
+        "path": "duplex_kernel/scheduler.py",
+        "bytes": 19619,
+        "sha256": "2617ea88c4426e62d210211b062e04e2473c3b34e3ea428db0dd71857bd79ec9",
+        "git_blob_sha1": "17fb02f2cf277a2967ebd58ffee0b67fbb934e1e"
+      },
+      {
+        "path": "duplex_kernel/turn_policy.py",
+        "bytes": 7655,
+        "sha256": "54e0f77855f6760beefe8318cdf590166e603063fd72af02047f49c904002fc6",
+        "git_blob_sha1": "e275c7531f933a754893a5c075b3367fe599bb60"
+      },
+      {
+        "path": "duplex_kernel/turnhead.py",
+        "bytes": 12226,
+        "sha256": "857e486a309b3a6f54488e54ed70c217894c87f0831426bfe3f3dd1e06cdfb2c",
+        "git_blob_sha1": "a2d0053143661367ca85e5414edd33cffaf1dd9f"
+      },
+      {
+        "path": "duplex_kernel/turnhead_adapter.py",
+        "bytes": 2054,
+        "sha256": "207f1104ec6e4e8a21b9386c890bd2e9bad51d26df09f2ab3324a913c66bb5c5",
+        "git_blob_sha1": "2ab6ad497967ef919747bc7347c5efcf8dec33f8"
+      },
+      {
+        "path": "duplex_kernel/models/thinker.py",
+        "bytes": 6423,
+        "sha256": "9e1ea4f98ffce3bd8b2a177b83ea346fbbc35a7cc185a7aeb9d098f2e49b2f26",
+        "git_blob_sha1": "2cb68207e9e9bbe7f25d1bb6aab7a986c36d3a8f"
+      },
+      {
+        "path": "duplex_kernel/models/v9.py",
+        "bytes": 8588,
+        "sha256": "a0b630039c2091db7eccddeed389356c204403d48c9a20e2ed8042e719be7aac",
+        "git_blob_sha1": "5ee582f6f430c6b441ee63dd1d02f935ee495640"
+      },
+      {
+        "path": "duplex_kernel/models/talker.py",
+        "bytes": 6551,
+        "sha256": "2cb7b3c19d9f9973bcd1c1443a7ebce86f4c3c4fb01ff089d07c68a16bca660d",
+        "git_blob_sha1": "9e7bdeca5a2a6c265afb62e74c3aa296362d3c51"
+      },
+      {
+        "path": "tools/kernel_gates/build_manifest.py",
+        "bytes": 1430,
+        "sha256": "ab766cb46788a98c2722f426fc4ebec199421cdd8115b57f120fef652f468882",
+        "git_blob_sha1": "379a855207168075f1ccbad5a4f350fa33b875d9"
+      },
+      {
+        "path": "tools/kernel_gates/p1_checks.py",
+        "bytes": 13942,
+        "sha256": "0494372dc1a1d2e0d83461473409778a482d1b26af2157bb6716c17882b8310e",
+        "git_blob_sha1": "e500dc94a6112bab2c671bd783c6f5f914656685"
+      },
+      {
+        "path": "tools/kernel_gates/p2_checks.py",
+        "bytes": 13637,
+        "sha256": "0df1d774828b4012d7dc292daf8c487da6953b2348b1e0320ba2a6937481317b",
+        "git_blob_sha1": "2f822222bda40ec1f7f0111d659b14316f4917c2"
+      },
+      {
+        "path": "tools/kernel_gates/run_phase.py",
+        "bytes": 17218,
+        "sha256": "a3ee88220476b1d6650fc01ddc1fc8842c3244836d745ca7d8ce5480c0828752",
+        "git_blob_sha1": "b8496094b630af750e429581b0d8f99855f24e3a"
+      },
+      {
+        "path": "tools/kernel_gates/source_attestation.py",
+        "bytes": 5261,
+        "sha256": "3afc852d66be5ed386749cf7b6199894799126f8d33b362929f025f1e064f0ce",
+        "git_blob_sha1": "3b7eee8ebd0dd2279931618502b77531b39c4d2a"
+      },
+      {
+        "path": "tools/kernel_gates/verify_report.py",
+        "bytes": 37339,
+        "sha256": "9584719e3a9d4f1f1dee6beda465b6f58050846e6ccc27ef18fbfb1ab8d13bfa",
+        "git_blob_sha1": "f448eb3d6352b87ddecc1c93d59e8d1ced274e8d"
+      },
+      {
+        "path": "tests/test_duplex_kernel_contract.py",
+        "bytes": 1892,
+        "sha256": "3684523263a7c1567e5f57553f41a525c98f62e9133fca6669754db75c1c17de",
+        "git_blob_sha1": "f2ef50805b88923e3fcb496dcda256d06b060bbc"
+      },
+      {
+        "path": "tests/kernel/test_p1_control_plane.py",
+        "bytes": 532,
+        "sha256": "95ecbcab94013a592849848991772af28cb51aa9a00e04121ea5fe524e56d602",
+        "git_blob_sha1": "c5f0e064648f85c8b04123bb30186c172dd7620c"
+      },
+      {
+        "path": "tests/kernel/test_p2_scheduler.py",
+        "bytes": 8628,
+        "sha256": "d0bed6af966a26d145253d1cf934f48c46e31920126118fb562c62ba6f72fb1e",
+        "git_blob_sha1": "5a61ced357d08a3747320a45cfcc7d2f29cf295e"
+      },
+      {
+        "path": "tests/kernel/test_gemma_pcm_mel.py",
+        "bytes": 1291,
+        "sha256": "3b8362c75951ba9c93b215b8cbde20428341baa467c1462ce869277659afc3c9",
+        "git_blob_sha1": "78b0cc84d7b5004911129f31d74ecc20ce3487cc"
+      }
+    ]
+  },
+  "source_attestation_sha256": "9c228c34b850b22f53e076c12e048e7ae2676cc07ffc04eaf07e86fcbcbf1cfa",
+  "metrics": {
+    "cpu_contract": {
+      "command": "C:\\Users\\andre\\Documents\\gemma-4-omni\\.venv\\Scripts\\python.exe -m pytest tests/kernel/test_p2_scheduler.py tests/test_duplex_kernel_contract.py -q",
+      "exit_code": 0,
+      "elapsed_s": 4.715,
+      "stdout_tail": ".............                                                            [100%]\n13 passed in 3.99s\n",
+      "stderr_tail": ""
+    },
+    "direct_server_audio_ingress_consumers": 0,
+    "direct_ws_policy_calls": 0,
+    "scheduler_policy_binding": true,
+    "scheduler_start_binding": true,
+    "virtual_10_ticks": 125,
+    "virtual_10_missing_ticks": 0,
+    "virtual_10_duplicate_ticks": 0,
+    "virtual_10_out_of_order_ticks": 0,
+    "virtual_60_ticks": 750,
+    "virtual_60_missing_ticks": 0,
+    "virtual_60_duplicate_ticks": 0,
+    "virtual_60_out_of_order_ticks": 0,
+    "input_frames_received": 750,
+    "input_frames_enqueued": 750,
+    "input_frames_consumed": 750,
+    "input_samples_received": 960000,
+    "dropped_input_frames": 0,
+    "duplicate_input_frames": 0,
+    "out_of_order_input_frames": 0,
+    "input_frames_during_speaking": 750,
+    "concurrent_input_frames_received": 21,
+    "concurrent_input_frames_enqueued": 21,
+    "concurrent_input_frames_consumed": 21,
+    "concurrent_input_frames_during_speaking": 20,
+    "concurrent_dropped_input_frames": 0,
+    "concurrent_duplicate_input_frames": 0,
+    "concurrent_out_of_order_input_frames": 0,
+    "concurrent_speaker_frames": 21,
+    "real_ticks": 750,
+    "real_duration_s": 60.001,
+    "real_deadline_miss_rate": 0.0,
+    "real_tick_jitter_p99_ms": 0.925,
+    "passed": true
+  },
+  "thresholds": {
+    "cpu_contract_exit_code": 0,
+    "direct_server_audio_ingress_consumers": 0,
+    "direct_ws_policy_calls": 0,
+    "scheduler_policy_binding": true,
+    "scheduler_start_binding": true,
+    "virtual_10_ticks": 125,
+    "virtual_10_missing_ticks": 0,
+    "virtual_10_duplicate_ticks": 0,
+    "virtual_10_out_of_order_ticks": 0,
+    "virtual_60_ticks": 750,
+    "virtual_60_missing_ticks": 0,
+    "virtual_60_duplicate_ticks": 0,
+    "virtual_60_out_of_order_ticks": 0,
+    "input_frames_received": 750,
+    "input_frames_enqueued": 750,
+    "input_frames_consumed": 750,
+    "input_samples_received": 960000,
+    "dropped_input_frames": 0,
+    "duplicate_input_frames": 0,
+    "out_of_order_input_frames": 0,
+    "input_frames_during_speaking_min": 1,
+    "concurrent_input_frames_received": 21,
+    "concurrent_input_frames_enqueued": 21,
+    "concurrent_input_frames_consumed": 21,
+    "concurrent_input_frames_during_speaking_min": 1,
+    "concurrent_dropped_input_frames": 0,
+    "concurrent_duplicate_input_frames": 0,
+    "concurrent_out_of_order_input_frames": 0,
+    "concurrent_speaker_frames": 21,
+    "real_ticks": 750,
+    "real_duration_min_s": 60.0,
+    "real_deadline_miss_rate_max": 0.005,
+    "real_tick_jitter_p99_ms_max": 20.0
+  },
+  "passed": true
+}
