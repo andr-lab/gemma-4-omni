@@ -31,7 +31,12 @@ def fail(errors: list[str], message: str) -> None:
 
 
 def verify_source_attestation(report: dict[str, Any], report_path: Path, errors: list[str]) -> None:
-    """Recompute the attestation against the current clean Git checkout."""
+    """Recompute the attestation against its content-addressed Git commit.
+
+    Evidence from an earlier clean workspace remains verifiable after later
+    source commits; the attestation itself binds the executed bytes to the
+    recorded Git object.  The current checkout is still required to be clean.
+    """
     relative = report.get("source_attestation")
     if not relative:
         fail(errors, "source_attestation mancante")
@@ -75,24 +80,22 @@ def verify_source_attestation(report: dict[str, Any], report_path: Path, errors:
         fail(errors, "source attestation senza file")
         return
     for relative_name, expected in entries.items():
-        candidate = (repo / relative_name).resolve()
-        if repo not in candidate.parents or not candidate.is_file():
-            fail(errors, f"file attestato mancante/fuori repo: {relative_name}")
+        try:
+            # Validate the exact historical bytes that were executed, rather
+            # than assuming the current HEAD still contains that workspace.
+            data = subprocess.check_output(("git", "show", f"{attestation['git_sha']}:{relative_name}"), cwd=repo)
+        except Exception as exc:
+            fail(errors, f"impossibile leggere blob Git {relative_name}: {exc}")
             continue
-        data = candidate.read_bytes()
         if expected.get("bytes") != len(data):
             fail(errors, f"size attestata diversa: {relative_name}")
         if expected.get("sha256") != hashlib.sha256(data).hexdigest():
-            fail(errors, f"sha256 worktree diversa: {relative_name}")
+            fail(errors, f"sha256 Git diversa: {relative_name}")
         blob = hashlib.sha1(f"blob {len(data)}".encode("ascii") + b"\x00" + data).hexdigest()
         if expected.get("git_blob_sha1") != blob:
             fail(errors, f"Git blob diversa: {relative_name}")
-        try:
-            git_data = subprocess.check_output(("git", "show", f"{attestation['git_sha']}:{relative_name}"), cwd=repo)
-            if git_data != data or expected.get("git_show_sha256") != hashlib.sha256(git_data).hexdigest():
-                fail(errors, f"git show non coincide: {relative_name}")
-        except Exception as exc:
-            fail(errors, f"impossibile leggere blob Git {relative_name}: {exc}")
+        if expected.get("git_show_sha256") != hashlib.sha256(data).hexdigest():
+            fail(errors, f"git show non coincide: {relative_name}")
 
 
 def verify_workspace_binding(report: dict[str, Any], events: list[dict[str, Any]], report_path: Path,
