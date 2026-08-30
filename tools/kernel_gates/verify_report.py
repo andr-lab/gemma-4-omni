@@ -767,6 +767,221 @@ def verify_p3(report_path: Path) -> tuple[dict[str, Any], list[str]]:
     return report, errors
 
 
+def _close(actual: Any, expected: Any, tolerance: float = 1e-6) -> bool:
+    if isinstance(actual, (int, float)) and isinstance(expected, (int, float)):
+        return math.isfinite(float(actual)) and math.isfinite(float(expected)) and abs(float(actual) - float(expected)) <= tolerance
+    return actual == expected
+
+
+def verify_p4(report_path: Path) -> tuple[dict[str, Any], list[str]]:
+    """Verify P4 metrics from granular V9/Qwen frame events."""
+    errors: list[str] = []
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    if report.get("schema_version") != 1 or report.get("phase") != "P4":
+        fail(errors, "report non valido per P4")
+    if report.get("git_dirty") is not False:
+        fail(errors, "git_dirty deve essere false")
+    verify_source_attestation(report, report_path, errors)
+    raw = Path(report.get("raw_trace", ""))
+    if not raw.is_absolute():
+        raw = report_path.parent / raw
+    events: list[dict[str, Any]] = []
+    if not raw.is_file():
+        fail(errors, f"raw trace mancante: {raw}")
+    else:
+        if sha256(raw) != report.get("raw_trace_sha256"):
+            fail(errors, "hash raw trace non coincide")
+        for line_no, line in enumerate(raw.read_text(encoding="utf-8").splitlines(), 1):
+            try:
+                event = json.loads(line)
+                if not isinstance(event, dict):
+                    raise ValueError("non-object")
+                events.append(event)
+            except Exception as exc:
+                fail(errors, f"raw trace line {line_no} invalida: {exc}")
+    verify_workspace_binding(report, events, report_path, errors)
+    metadata_events = [event for event in events if event.get("event") == "phase_metadata"]
+    if len(metadata_events) != 1:
+        fail(errors, f"phase_metadata count={len(metadata_events)}")
+    metadata = metadata_events[0] if metadata_events else {}
+    if metadata.get("seed") != report.get("seed") or metadata.get("rng_seed_applied") is not True:
+        fail(errors, "RNG seed P4 non attestato")
+    if metadata.get("real_model_required") is not True or metadata.get("max_seq_len") != 16_384:
+        fail(errors, "contratto P4 modello reale/max_seq_len non attestato")
+    model_events = [event for event in events if event.get("event") == "p4_model_metadata"]
+    if len(model_events) != 1 or model_events[0].get("real_model") is not True:
+        fail(errors, "modello V9 reale P4 mancante")
+    elif model_events[0].get("future_prefix_dtype") != "float32":
+        fail(errors, "P4-T2 non attestato in FP32")
+    qwen_events = [event for event in events if event.get("event") == "p4_qwen_model_metadata"]
+    if len(qwen_events) != 1 or qwen_events[0].get("real_model") is not True:
+        fail(errors, "modello Qwen reale P4 mancante")
+    if any(event.get("event") == "p4_qwen_load_error" for event in events):
+        fail(errors, "caricamento Qwen P4 fallito")
+    cpu_events = [event for event in events if event.get("event") == "cpu_contract_result"]
+    if len(cpu_events) != 1:
+        fail(errors, f"cpu_contract_result count={len(cpu_events)}")
+    cpu = cpu_events[0] if cpu_events else {}
+    cpu_contract = {key: cpu.get(key) for key in ("command", "exit_code", "elapsed_s", "stdout_tail", "stderr_tail")}
+
+    equivalence_frames = [event for event in events if event.get("event") == "p4_equivalence_frame"]
+    equivalence_sequences = [event for event in events if event.get("event") == "p4_equivalence_sequence"]
+    sequence_ids = sorted({event.get("sequence_id") for event in equivalence_frames})
+    if sequence_ids != list(range(len(sequence_ids))):
+        fail(errors, "P4 equivalence sequence_id non contigui")
+    for sequence_id in sequence_ids:
+        frames = sorted(event.get("frame_id") for event in equivalence_frames if event.get("sequence_id") == sequence_id)
+        if frames != list(range(len(frames))):
+            fail(errors, f"P4 equivalence frame_id non contigui nella sequenza {sequence_id}")
+    if len(equivalence_sequences) != len(sequence_ids):
+        fail(errors, "P4 equivalence sequence/frame count incoerente")
+    eq_by_sequence = sorted(equivalence_sequences, key=lambda event: int(event["sequence_id"]))
+    eq_mae = [float(event["mae"]) for event in eq_by_sequence]
+    eq_cosine = [float(event["cosine_min"]) for event in eq_by_sequence]
+    eq_recomputed = {
+        "sequences": len(eq_by_sequence),
+        "frames": len(equivalence_frames),
+        "mae": sum(eq_mae) / len(eq_mae) if eq_mae else None,
+        "mae_max_sequence": max(eq_mae) if eq_mae else None,
+        "cosine_min": min(eq_cosine) if eq_cosine else None,
+        "finite": all(bool(event.get("finite")) for event in equivalence_frames + eq_by_sequence),
+    }
+
+    future_events = sorted(
+        [event for event in events if event.get("event") == "p4_future_prefix_sequence"],
+        key=lambda event: int(event["sequence_id"]),
+    )
+    future_recomputed = {
+        "sequences": len(future_events),
+        "prefix_frames": int(future_events[0]["prefix_frames"]) if future_events else None,
+        "max_difference": max((float(event["max_future_prefix_difference"]) for event in future_events), default=None),
+        "mean_difference": (
+            sum(float(event["max_future_prefix_difference"]) for event in future_events) / len(future_events)
+            if future_events else None
+        ),
+        "finite": all(bool(event.get("finite")) for event in future_events),
+    }
+
+    timing_events = sorted(
+        [event for event in events if event.get("event") == "p4_v9_step_timing"],
+        key=lambda event: int(event["step_id"]),
+    )
+    timing_ids = [event.get("step_id") for event in timing_events]
+    if timing_ids != list(range(len(timing_events))):
+        fail(errors, "P4 timing step_id mancanti/duplicati")
+    latencies = np.asarray([float(event["latency_ms"]) for event in timing_events], dtype=np.float64)
+    performance = {
+        "steps": len(timing_events),
+        "warmup_steps": int(metadata.get("warmup_steps", report.get("metrics", {}).get("performance", {}).get("warmup_steps", 100))),
+        "p50_ms": float(np.quantile(latencies, 0.50)) if len(latencies) else None,
+        "p95_ms": float(np.quantile(latencies, 0.95)) if len(latencies) else None,
+        "max_ms": float(latencies.max()) if len(latencies) else None,
+        "finite": bool(np.isfinite(latencies).all()) if len(latencies) else False,
+    }
+
+    ablation_frames = [event for event in events if event.get("event") == "p4_qwen_ablation_frame"]
+    full_ce = [float(event["full_ce"]) for event in ablation_frames]
+    causal_ce = [float(event["causal_ce"]) for event in ablation_frames]
+    full_top1 = [bool(event["full_top1"]) for event in ablation_frames]
+    causal_top1 = [bool(event["causal_top1"]) for event in ablation_frames]
+    full_top5 = [bool(event["full_top5"]) for event in ablation_frames]
+    causal_top5 = [bool(event["causal_top5"]) for event in ablation_frames]
+    kl = [float(event["kl_full_to_causal"]) for event in ablation_frames]
+    deltas = [float(event["max_logit_delta"]) for event in ablation_frames]
+    ablation_recomputed: dict[str, Any] = {
+        "sequences": len({event.get("sequence_id") for event in ablation_frames}),
+        "frames": len(ablation_frames),
+        "full_ce": sum(full_ce) / len(full_ce) if full_ce else None,
+        "causal_ce": sum(causal_ce) / len(causal_ce) if causal_ce else None,
+        "delta_ce": (sum(causal_ce) - sum(full_ce)) / len(full_ce) if full_ce else None,
+        "full_top1": sum(full_top1) / len(full_top1) if full_top1 else None,
+        "causal_top1": sum(causal_top1) / len(causal_top1) if causal_top1 else None,
+        "full_top5": sum(full_top5) / len(full_top5) if full_top5 else None,
+        "causal_top5": sum(causal_top5) / len(causal_top5) if causal_top5 else None,
+        "kl_full_to_causal": sum(kl) / len(kl) if kl else None,
+        "max_logit_delta": max(deltas) if deltas else None,
+        "quartile_delta_ce": {},
+        "finite": all(bool(_finite(value)) for values in (full_ce, causal_ce, kl, deltas) for value in values),
+        "mask_future_prefix": True,
+    }
+    if ablation_frames:
+        frame_count = max(int(event["frame_id"]) for event in ablation_frames) + 1
+        for bucket in range(4):
+            values = [
+                float(event["causal_ce"]) - float(event["full_ce"])
+                for event in ablation_frames
+                if min(3, int(event["frame_id"]) * 4 / frame_count) == bucket
+            ]
+            if values:
+                ablation_recomputed["quartile_delta_ce"][f"q{bucket}"] = sum(values) / len(values)
+    ablation_recomputed["passed"] = bool(
+        ablation_recomputed["frames"] >= 5_000
+        and ablation_recomputed["finite"]
+        and ablation_recomputed["mask_future_prefix"]
+        and (ablation_recomputed["max_logit_delta"] or 0.0) > 1e-6
+    )
+
+    metrics = report.get("metrics", {})
+    expected_sections = {
+        "equivalence": eq_recomputed,
+        "future_prefix": future_recomputed,
+        "performance": performance,
+        "qwen_ablation": ablation_recomputed,
+    }
+    for section, expected in expected_sections.items():
+        actual = metrics.get(section, {})
+        for key, value in expected.items():
+            if key == "passed":
+                continue
+            if key == "quartile_delta_ce":
+                actual_quartiles = actual.get(key, {})
+                for quartile, quartile_value in value.items():
+                    if not _close(actual_quartiles.get(quartile), quartile_value):
+                        fail(errors, f"metrica P4 {section}.{key}.{quartile} non coincide col raw trace")
+            elif not _close(actual.get(key), value):
+                fail(errors, f"metrica P4 {section}.{key} non coincide col raw trace: {actual.get(key)!r} != {value!r}")
+    if metrics.get("cpu_contract") != cpu_contract:
+        fail(errors, "cpu_contract P4 non coincide col raw trace")
+    thresholds = report.get("thresholds", {})
+    checks = {
+        "cpu_contract_exit_code": cpu.get("exit_code"),
+        "equivalence_sequences_min": eq_recomputed["sequences"],
+        "equivalence_frames_min": eq_recomputed["frames"],
+        "equivalence_mae_max": eq_recomputed["mae"],
+        "equivalence_cosine_min": eq_recomputed["cosine_min"],
+        "future_prefix_sequences_min": future_recomputed["sequences"],
+        "future_prefix_max_difference": future_recomputed["max_difference"],
+        "performance_steps_min": performance["steps"],
+        "v9_step_p95_ms_max": performance["p95_ms"],
+        "ablation_sequences_min": ablation_recomputed["sequences"],
+        "ablation_frames_min": ablation_recomputed["frames"],
+    }
+    if thresholds.get("qwen_ablation_required") is not True:
+        fail(errors, "threshold P4 qwen_ablation_required mancante")
+    minimums = {
+        "equivalence_sequences_min": (lambda value, limit: value >= limit),
+        "equivalence_frames_min": (lambda value, limit: value >= limit),
+        "equivalence_mae_max": (lambda value, limit: value <= limit),
+        "equivalence_cosine_min": (lambda value, limit: value >= limit),
+        "future_prefix_sequences_min": (lambda value, limit: value >= limit),
+        "future_prefix_max_difference": (lambda value, limit: value <= limit),
+        "performance_steps_min": (lambda value, limit: value >= limit),
+        "v9_step_p95_ms_max": (lambda value, limit: value <= limit),
+        "ablation_sequences_min": (lambda value, limit: value >= limit),
+        "ablation_frames_min": (lambda value, limit: value >= limit),
+    }
+    for key, actual in checks.items():
+        limit = thresholds.get(key)
+        if actual is None or limit is None or not minimums[key](actual, limit):
+            fail(errors, f"threshold P4 fallita: {key}={actual!r}, limite={limit!r}")
+    if thresholds.get("cpu_contract_exit_code") != checks["cpu_contract_exit_code"]:
+        fail(errors, "threshold P4 cpu_contract_exit_code fallita")
+    independently_passed = not errors
+    if report.get("passed") is not independently_passed:
+        fail(errors, f"passed non coincide col risultato indipendente: {report.get('passed')} != {independently_passed}")
+    return report, errors
+
+
 def verify_one(report_path: Path) -> tuple[dict[str, Any], list[str]]:
     errors: list[str] = []
     report = json.loads(report_path.read_text(encoding="utf-8"))
@@ -776,6 +991,8 @@ def verify_one(report_path: Path) -> tuple[dict[str, Any], list[str]]:
         return verify_p2(report_path)
     if report.get("phase") == "P3":
         return verify_p3(report_path)
+    if report.get("phase") == "P4":
+        return verify_p4(report_path)
     verify_source_attestation(report, report_path, errors)
     if report.get("phase") == "P1":
         return verify_p1(report_path)

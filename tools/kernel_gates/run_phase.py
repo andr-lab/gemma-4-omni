@@ -316,6 +316,85 @@ def run_p3(raw_path: Path, workspace: Path, seed: int, source_binding: dict[str,
     return metrics, thresholds
 
 
+def run_p4(
+    raw_path: Path,
+    workspace: Path,
+    seed: int,
+    source_binding: dict[str, Any],
+    cpu_contract: dict[str, Any],
+    cache_path: Path,
+    codes_path: Path | None,
+    codes_metadata_path: Path | None,
+    v9_ckpt: str | None,
+    heads_ckpt: str | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Run P4 on the real V9 and Qwen weights; no fake backend is accepted."""
+    import torch
+    from duplex_kernel.models.talker import load_talker
+    from duplex_kernel.models.v9 import IncrementalV9Projector, load_v9_conditioning
+    from tools.kernel_gates.p4_checks import run_checks
+
+    events: list[dict[str, Any]] = [
+        {
+            "event": "phase_metadata",
+            "seed": seed,
+            "rng_seed_applied": True,
+            "real_model_required": True,
+            "dtype": "bfloat16",
+            "max_seq_len": 16_384,
+        },
+        {"event": "source_workspace_binding", **source_binding},
+        *({"event": "source_workspace_file", **item} for item in source_binding["files"]),
+    ]
+    projector = causal_conv = fp32_projector = fp32_causal_conv = talker = None
+    try:
+        projector, causal_conv = load_v9_conditioning(
+            v9_ckpt=v9_ckpt, heads_ckpt=heads_ckpt, device="cuda", dtype=torch.bfloat16
+        )
+        stream = IncrementalV9Projector(projector, causal_conv, max_seq_len=16_384)
+        fp32_projector, fp32_causal_conv = load_v9_conditioning(
+            v9_ckpt=v9_ckpt, heads_ckpt=heads_ckpt, device="cuda", dtype=torch.float32
+        )
+        fp32_stream = IncrementalV9Projector(fp32_projector, fp32_causal_conv, max_seq_len=16_384)
+        events.append({
+            "event": "p4_model_metadata",
+            "real_model": True,
+            "backend": "IncrementalV9Projector",
+            "v9_parameters": sum(parameter.numel() for parameter in projector.parameters()),
+            "raw_dim": stream.raw_dim,
+            "hidden_dim": stream.hidden_dim,
+            "layers": stream.num_layers,
+            "max_seq_len": stream.max_seq_len,
+            "future_prefix_dtype": "float32",
+        })
+        if codes_path is not None and codes_path.is_file():
+            try:
+                talker = load_talker(str(workspace), device="cuda")
+                events.append({"event": "p4_qwen_model_metadata", "real_model": True, "backend": "Qwen3TTSTalkerModel"})
+            except Exception as exc:
+                events.append({"event": "p4_qwen_load_error", "error": f"{type(exc).__name__}: {exc}"})
+        metrics, thresholds = run_checks(
+            workspace,
+            cache_path=cache_path,
+            codes_path=codes_path,
+            codes_metadata_path=codes_metadata_path,
+            stream=stream,
+            future_stream=fp32_stream,
+            talker=talker,
+            trace=events,
+        )
+    finally:
+        del talker, projector, causal_conv, fp32_projector, fp32_causal_conv
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    metrics["cpu_contract"] = cpu_contract
+    thresholds["cpu_contract_exit_code"] = 0
+    metrics["passed"] = bool(metrics["passed"] and cpu_contract["exit_code"] == 0)
+    events.append({"event": "cpu_contract_result", **cpu_contract})
+    raw_path.write_bytes("".join(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n" for event in events).encode("utf-8"))
+    return metrics, thresholds
+
+
 def run_p2(raw_path: Path, workspace: Path, seed: int, source_binding: dict[str, Any],
             real_duration_s: float, cpu_contract: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     from tools.kernel_gates.p2_checks import run_checks
@@ -339,7 +418,7 @@ def run_p2(raw_path: Path, workspace: Path, seed: int, source_binding: dict[str,
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--phase", choices=["P0", "P1", "P2", "P3"], required=True)
+    ap.add_argument("--phase", choices=["P0", "P1", "P2", "P3", "P4"], required=True)
     ap.add_argument("--workspace", type=Path, default=ROOT)
     ap.add_argument("--manifest", type=Path, default=None)
     ap.add_argument("--out-root", type=Path, default=ROOT / "artifacts" / "kernel_gates")
@@ -352,6 +431,11 @@ def main() -> int:
                     help="durata real-clock P2; il gate completo richiede almeno 60 s")
     ap.add_argument("--listener-frames", type=int, default=10_000,
                     help="listener updates P3; il gate completo richiede almeno 10.000")
+    ap.add_argument("--v9-cache", type=Path, default=Path("/workspace/cache_ars_full_v2.pt"))
+    ap.add_argument("--codes", type=Path, default=Path("/workspace/data/train_tokens_cv26_it_40.8h_31916s_codes.parquet"))
+    ap.add_argument("--codes-metadata", type=Path, default=Path("/workspace/data/train_tokens_cv26_it_40.8h_31916s_hyperparams.json"))
+    ap.add_argument("--v9-ckpt", default=None)
+    ap.add_argument("--heads-ckpt", default=None)
     args = ap.parse_args()
     manifest_path = args.manifest or (ROOT / "tools" / "kernel_gates" / "manifests" / "p0_inputs.json")
     if not manifest_path.is_absolute():
@@ -394,6 +478,27 @@ def main() -> int:
         print("CPU contract exit_code=", cpu["exit_code"], flush=True)
         metrics, thresholds = run_p2(
             raw_path, args.workspace, seed, source_binding, args.real_duration_s, cpu,
+        )
+        passed = bool(metrics["passed"])
+    elif args.phase == "P4":
+        cpu = run_cpu_contract([
+            "tests/kernel/test_p4_v9_incremental.py",
+            "tests/kernel/test_p3_listener.py",
+            "tests/kernel/test_p2_scheduler.py",
+            "tests/test_duplex_kernel_contract.py",
+        ])
+        print("CPU contract exit_code=", cpu["exit_code"], flush=True)
+        metrics, thresholds = run_p4(
+            raw_path,
+            args.workspace,
+            seed,
+            source_binding,
+            cpu,
+            args.v9_cache,
+            args.codes,
+            args.codes_metadata,
+            args.v9_ckpt,
+            args.heads_ckpt,
         )
         passed = bool(metrics["passed"])
     else:

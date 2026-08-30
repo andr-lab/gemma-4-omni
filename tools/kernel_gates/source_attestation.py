@@ -27,12 +27,14 @@ DEFAULT_FILES = (
     "duplex_kernel/turnhead.py",
     "duplex_kernel/turnhead_adapter.py",
     "duplex_kernel/models/thinker.py",
+    "duplex_kernel/models/__init__.py",
     "duplex_kernel/models/v9.py",
     "duplex_kernel/models/talker.py",
     "tools/kernel_gates/build_manifest.py",
     "tools/kernel_gates/p1_checks.py",
     "tools/kernel_gates/p2_checks.py",
     "tools/kernel_gates/p3_checks.py",
+    "tools/kernel_gates/p4_checks.py",
     "tools/kernel_gates/run_phase.py",
     "tools/kernel_gates/source_attestation.py",
     "tools/kernel_gates/verify_report.py",
@@ -40,6 +42,7 @@ DEFAULT_FILES = (
     "tests/kernel/test_p1_control_plane.py",
     "tests/kernel/test_p2_scheduler.py",
     "tests/kernel/test_p3_listener.py",
+    "tests/kernel/test_p4_v9_incremental.py",
     "tests/kernel/test_gemma_pcm_mel.py",
 )
 
