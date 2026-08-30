@@ -118,16 +118,19 @@ def _run_future_prefix(
         prefix = raw[sequence_id, :prefix_len].to(
             device=stream.projector.audio_in.weight.device, dtype=stream.projector.audio_in.weight.dtype
         )
-        future_a = raw[sequence_id, prefix_len:].to(device=prefix.device, dtype=prefix.dtype)
-        future_b = torch.flip(future_a, dims=(0,))
+        sequence_a = raw[sequence_id].to(device=prefix.device, dtype=prefix.dtype)
+        sequence_b = torch.cat((prefix, torch.flip(sequence_a[prefix_len:], dims=(0,))), dim=0)
         anchor = anchors[sequence_id].to(device=prefix.device, dtype=prefix.dtype).unsqueeze(0)
         state_a = stream.new_state(batch_size=1, dtype=prefix.dtype, max_seq_len=raw.shape[1])
         state_b = stream.new_state(batch_size=1, dtype=prefix.dtype, max_seq_len=raw.shape[1])
         outputs_a = []
         outputs_b = []
-        for frame_id in range(prefix_len):
-            outputs_a.append(stream.step(prefix[frame_id], anchor, state_a).squeeze(0).float())
-            outputs_b.append(stream.step(prefix[frame_id], anchor, state_b).squeeze(0).float())
+        for frame_id in range(sequence_a.shape[0]):
+            output_a = stream.step(sequence_a[frame_id], anchor, state_a).squeeze(0).float()
+            output_b = stream.step(sequence_b[frame_id], anchor, state_b).squeeze(0).float()
+            if frame_id < prefix_len:
+                outputs_a.append(output_a)
+                outputs_b.append(output_b)
         max_difference = float(torch.stack(outputs_a).sub(torch.stack(outputs_b)).abs().max().item())
         differences.append(max_difference)
         _append(trace, {
