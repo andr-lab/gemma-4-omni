@@ -120,7 +120,10 @@ def main() -> int:
     if attestation["git_dirty"]:
         raise SystemExit("source attestation rifiutata: checkout Git dirty")
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(attestation, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    # write_bytes avoids Windows newline translation: this digest is part of
+    # the report contract and must be identical on Windows, Linux and CI.
+    payload = (json.dumps(attestation, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    args.output.write_bytes(payload)
     print(args.output)
     return 0
 
