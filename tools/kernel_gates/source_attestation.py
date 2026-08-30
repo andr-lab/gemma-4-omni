@@ -30,6 +30,7 @@ DEFAULT_FILES = (
     "duplex_kernel/models/__init__.py",
     "duplex_kernel/models/v9.py",
     "duplex_kernel/models/talker.py",
+    "duplex_kernel/playout.py",
     "tools/kernel_gates/build_manifest.py",
     "tools/kernel_gates/p1_checks.py",
     "tools/kernel_gates/p2_checks.py",
@@ -38,11 +39,14 @@ DEFAULT_FILES = (
     "tools/kernel_gates/run_phase.py",
     "tools/kernel_gates/source_attestation.py",
     "tools/kernel_gates/verify_report.py",
+    "tools/kernel_gates/p4d_checks.py",
+    "tools/kernel_gates/verify_p4d_report.py",
     "tests/test_duplex_kernel_contract.py",
     "tests/kernel/test_p1_control_plane.py",
     "tests/kernel/test_p2_scheduler.py",
     "tests/kernel/test_p3_listener.py",
     "tests/kernel/test_p4_v9_incremental.py",
+    "tests/kernel/test_p4d_playout.py",
     "tests/kernel/test_gemma_pcm_mel.py",
 )
 

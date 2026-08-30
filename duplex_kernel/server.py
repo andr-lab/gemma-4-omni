@@ -7,6 +7,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, StreamingResponse
 from duplex_kernel.config import CODEC_SAMPLE_RATE, USER_SAMPLE_RATE, TURNHEAD_CKPT
 from duplex_kernel.listener import GemmaListener
+from duplex_kernel.playout import SpeakerPlayoutBuffer
 from duplex_kernel.turn_policy import ControlAction, NoOpPolicy, PolicyInput, ScriptedPolicy, SpeakerGate
 from duplex_kernel.turnhead_adapter import TurnHeadPolicy
 from duplex_kernel.session import SessionManager, DuplexSession
@@ -64,11 +65,20 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     logger.warning("[listener] non disponibile: %s", exc)
         sess.listener = shared
 
+    def _configure_playout(sess: DuplexSession, value: Any | None) -> None:
+        if value is None:
+            return
+        delay = int(value)
+        if delay < 0 or delay > 64:
+            raise ValueError("playout_delay_frames deve essere compreso tra 0 e 64")
+        sess.speaker_playout_delay_frames = delay
+
     def get_session(request: dict[str, Any]) -> tuple[DuplexSession, bool]:
         sid = request.get("session_id")
         if sid:
             sess = sessions.get(str(sid))
             if sess is None: raise ValueError("session_id non valido o scaduto")
+            _configure_playout(sess, request.get("playout_delay_frames"))
             _ensure_policy(sess)
             _ensure_listener(sess)
             return sess, False
@@ -77,6 +87,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
             voice=str(request.get("voice", "gemma")),
             language=str(request.get("language", "Italian")),
         )
+        _configure_playout(sess, request.get("playout_delay_frames"))
         _ensure_policy(sess)
         _ensure_listener(sess)
         return sess, True
@@ -338,10 +349,20 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                 await ws.send_json({"type": "response.created", "response_id": response_id})
                 audio_queue: queue.Queue[np.ndarray] = queue.Queue()
                 text_queue: queue.Queue[str] = queue.Queue()
+                playout = SpeakerPlayoutBuffer(delay_frames=sess.speaker_playout_delay_frames)
+                next_generated_frame_id = 0
                 streamed_chunks = 0
                 def on_audio_chunk(chunk: np.ndarray) -> None:
+                    nonlocal next_generated_frame_id
                     array = np.asarray(chunk, dtype=np.float32)
-                    sess.guarded_write(token, "audio", lambda: audio_queue.put(array))
+                    def enqueue_ready() -> None:
+                        nonlocal next_generated_frame_id
+                        generated = playout.push_chunk(array, first_frame_id=next_generated_frame_id)
+                        next_generated_frame_id += len(generated)
+                        ready = playout.release_ready(conditioning_frame_id=generated[-1].frame_id)
+                        for frame in ready:
+                            audio_queue.put(frame.pcm)
+                    sess.guarded_write(token, "audio", enqueue_ready)
                 def on_text_chunk(chunk: str) -> None:
                     sess.guarded_write(token, "text", lambda: text_queue.put(str(chunk)))
 
@@ -391,10 +412,12 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     except queue.Empty:
                         await asyncio.sleep(0.005)
                     else:
+                        if not sess.is_generation_current(token):
+                            return
                         streamed_chunks += 1
                         await ws.send_json({"type": "response.audio.delta", "delta": _wav_b64(chunk_wav), "response_id": response_id})
                         record_emitted_reference(chunk_wav)
-                        sess.record_emitted_audio(token, 8)
+                        sess.record_emitted_audio(token, 1)
                     try:
                         chunk_text = text_queue.get_nowait()
                     except queue.Empty:
@@ -403,6 +426,10 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                         await ws.send_json({"type": "response.output_text.delta", "delta": chunk_text, "response_id": response_id})
                         sess.record_emitted_text(token, chunk_text)
                 result = await future
+                if not sess.is_generation_current(token):
+                    return
+                for frame in playout.flush():
+                    audio_queue.put(frame.pcm)
                 while True:
                     try:
                         chunk_wav = audio_queue.get_nowait()
@@ -411,7 +438,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     streamed_chunks += 1
                     await ws.send_json({"type": "response.audio.delta", "delta": _wav_b64(chunk_wav), "response_id": response_id})
                     record_emitted_reference(chunk_wav)
-                    sess.record_emitted_audio(token, 8)
+                    sess.record_emitted_audio(token, 1)
                 while True:
                     try:
                         chunk_text = text_queue.get_nowait()
@@ -487,6 +514,11 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     cfg = ev.get("session", {})
                     sess.instructions = str(cfg.get("instructions", sess.instructions)); sess.voice = str(cfg.get("voice", sess.voice)); sess.tools = cfg.get("tools", sess.tools) or []
                     extra = cfg.get("extra_body", {}) or {}; sess.auto_response = bool(cfg.get("auto_response", extra.get("auto_response", sess.auto_response)))
+                    try:
+                        _configure_playout(sess, cfg.get("playout_delay_frames", extra.get("playout_delay_frames")))
+                    except (TypeError, ValueError) as exc:
+                        await ws.send_json({"type": "error", "error": {"code": "INVALID_SESSION_UPDATE", "message": str(exc)}})
+                        continue
                     policy_name = cfg.get("turn_policy") or extra.get("turn_policy")
                     if policy_name is not None:
                         sess.turn_policy = _make_policy(str(policy_name), cfg)

@@ -57,6 +57,11 @@ TALKER_EOS_TOKEN_ID = 2150
 # Code2Wav: 24 kHz, chunk di 8 frame = 640ms (ADR-023).
 CODEC_SAMPLE_RATE = 24000
 CODEC_CHUNK_FRAMES = 8
+# P4D: opzionale ritardo speaker-only; zero conserva il comportamento storico.
+# L'abilitazione ha effetto solo sulla catena di playout, mai sul listener.
+FROZEN_QWEN_PLAYOUT_DELAY_FRAMES = int(os.environ.get("GEMMA4_OMNI_FROZEN_QWEN_PLAYOUT_DELAY_FRAMES", "0"))
+if FROZEN_QWEN_PLAYOUT_DELAY_FRAMES < 0:
+    raise ValueError("GEMMA4_OMNI_FROZEN_QWEN_PLAYOUT_DELAY_FRAMES non può essere negativo")
 
 # ---------------------------------------------------------------------------
 # Gestione KV cache (ADR-029 §KV)

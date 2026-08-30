@@ -234,7 +234,14 @@ def _aggregate_code_embeddings(model: Any, codes: torch.Tensor) -> torch.Tensor:
     return torch.cat(parts, dim=-2).sum(dim=-2)
 
 
-def _qwen_logits(talker: Any, prefix: torch.Tensor, codes: torch.Tensor, *, causal_prefix: bool) -> torch.Tensor:
+def _qwen_logits(
+    talker: Any,
+    prefix: torch.Tensor,
+    codes: torch.Tensor,
+    *,
+    causal_prefix: bool,
+    prefix_lookahead: int = 0,
+) -> torch.Tensor:
     talker_model = talker.talker
     model = talker_model.model
     batch_size, prefix_frames, _ = prefix.shape
@@ -253,9 +260,12 @@ def _qwen_logits(talker: Any, prefix: torch.Tensor, codes: torch.Tensor, *, caus
     causal = torch.triu(torch.ones((length, length), device=prefix.device, dtype=torch.bool), diagonal=1)
     attention_mask[:, 0].masked_fill_(causal, mask_value)
     if causal_prefix:
+        if prefix_lookahead < 0:
+            raise ValueError("prefix_lookahead non può essere negativo")
         for audio_index in range(prefix_frames):
             query = prefix_end + audio_index
-            attention_mask[:, 0, query, prefix_start + audio_index + 1:prefix_end] = mask_value
+            visible_until = min(prefix_frames - 1, audio_index + int(prefix_lookahead))
+            attention_mask[:, 0, query, prefix_start + visible_until + 1:prefix_end] = mask_value
     position_ids = torch.arange(length, device=prefix.device, dtype=torch.long).view(1, 1, length).expand(3, batch_size, length)
     with torch.inference_mode():
         hidden = model(
@@ -279,6 +289,8 @@ def _run_qwen_ablation(
     *,
     trace: list[dict[str, Any]],
     batch_size: int = 4,
+    prefix_lookahead: int = 0,
+    event_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     # The decoder model owns codec_head, while build_prefill_parts is exposed by TalkerModel.
     device = stream.projector.audio_in.weight.device
@@ -300,7 +312,13 @@ def _run_qwen_ablation(
         prefix = stream.projector(stream.causal_conv(raw_batch), anchor_batch)
         code_batch = codes[start:end].to(device=device)
         full = _qwen_logits(talker, prefix, code_batch, causal_prefix=False)
-        causal = _qwen_logits(talker, prefix, code_batch, causal_prefix=True)
+        causal = _qwen_logits(
+            talker,
+            prefix,
+            code_batch,
+            causal_prefix=True,
+            prefix_lookahead=prefix_lookahead,
+        )
         target = code_batch[:, :, 0]
         full_log_probs = F.log_softmax(full.float(), dim=-1)
         causal_log_probs = F.log_softmax(causal.float(), dim=-1)
@@ -318,6 +336,7 @@ def _run_qwen_ablation(
                 values = {
                     "event": "p4_qwen_ablation_frame",
                     "sequence_id": start + local_seq,
+                    "prefix_lookahead_frames": int(prefix_lookahead),
                     "frame_id": frame,
                     "full_ce": float(full_nll[local_seq, frame].item()),
                     "causal_ce": float(causal_nll[local_seq, frame].item()),
@@ -328,6 +347,8 @@ def _run_qwen_ablation(
                     "kl_full_to_causal": float(kl[local_seq, frame].item()),
                     "max_logit_delta": float(delta[local_seq, frame].item()),
                 }
+                if event_context:
+                    values.update(event_context)
                 _append(trace, values)
                 bucket = min(3, int(frame * 4 / target.shape[1]))
                 quartiles[f"q{bucket}"].append(values["causal_ce"] - values["full_ce"])
@@ -356,6 +377,7 @@ def _run_qwen_ablation(
         "quartile_delta_ce": quartile_delta,
         "finite": all(_finite(value) for value in full_losses + causal_losses + kl_values + logit_deltas),
         "mask_future_prefix": True,
+        "prefix_lookahead_frames": int(prefix_lookahead),
     }
 
 

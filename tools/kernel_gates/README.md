@@ -109,4 +109,33 @@ python tools/kernel_gates/verify_report.py \
 
 P4-T4 è obbligatorio: se l'ablation fallisce, QLoRA resta NO-GO. L'evidence
 pubblica va in `validation/kernel_gates/<git_sha>/P4/` solo dopo il PASS
-indipendente.
+indipendente. Le soglie sono `causal_CE <= full_CE*1.10`, top-1 drop <= 5 pp
+e top-5 drop <= 3 pp; non è sufficiente dimostrare che la maschera cambi i
+logit.
+
+## P4D — Frozen-Qwen Future Conditioning
+
+P4D misura il recupero con Qwen completamente frozen: il lookahead reale è
+simulato come ritardo esclusivo dello speaker/playout (`L * 80 ms`), mentre
+GemmaListener/V9 restano frame-realtime. Sono inoltre valutati anchor V9
+causali e fissi. Il runner non modifica Talker, SubTalker, Code2Wav o i loro
+pesi e attesta gli hash dei file `safetensors` Qwen.
+
+```bash
+python tools/kernel_gates/p4d_checks.py --workspace /workspace \
+  --cache /workspace/cache_ars_full_v2.pt \
+  --codes /workspace/data/train_tokens_cv26_it_40.8h_31916s_codes.parquet \
+  --codes-metadata /workspace/data/train_tokens_cv26_it_40.8h_31916s_hyperparams.json \
+  --output-dir /workspace/artifacts/kernel_gates/P4D/run1 \
+  --git-sha <git_sha> --source-attestation /workspace/p4d_source_attestation.json \
+  --lookaheads 0,1,2,4,5,6,7,8,12,16 \
+  --anchors zero,first_raw_frame
+python tools/kernel_gates/verify_p4d_report.py \
+  artifacts/kernel_gates/P4D/run1/P4D_report.json
+```
+
+`duplex_kernel/playout.py` fornisce il buffer speaker-only con frame ID,
+controllo gap e flush a fine segmento. Il delay runtime è 0 di default e può
+essere abilitato senza ritardare il listener. Un P4D PASS non autorizza ancora
+QLoRA: prima va integrato il conditioning frame-stateful nel percorso speaker,
+lasciando Qwen frozen.

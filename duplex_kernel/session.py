@@ -25,6 +25,7 @@ from typing import Any
 
 import numpy as np
 
+from duplex_kernel.config import FROZEN_QWEN_PLAYOUT_DELAY_FRAMES
 from duplex_kernel.kv_cache import TalkerPrefixKV, ThinkerContext, TurnKVState
 from duplex_kernel.listener import AssistantReferenceBuffer, GemmaListenerState
 from duplex_kernel.scheduler import AudioIngressQueue
@@ -113,6 +114,8 @@ class DuplexSession:
     language: str = "Italian"
     tools: list[dict[str, Any]] = field(default_factory=list)
     auto_response: bool = False
+    # Speaker-only P4D delay.  The scheduler/listener clock is independent.
+    speaker_playout_delay_frames: int = FROZEN_QWEN_PLAYOUT_DELAY_FRAMES
     scheduler: Any = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
