@@ -11,6 +11,7 @@ from duplex_kernel.models.v9 import (
 )
 from duplex_kernel.server import create_app
 from duplex_kernel.session import SessionManager
+from tools.kernel_gates.p4_checks import _run_equivalence, _run_future_prefix
 
 
 def _tiny_stream() -> tuple[DeepCausalTransformerProjectorV9, CausalConv1D, IncrementalV9Projector]:
@@ -75,6 +76,23 @@ def test_incremental_v9_requires_a_fixed_text_anchor_and_supports_reset() -> Non
     assert state.frames_processed == 1
 
 
+def test_p4_gate_helpers_verify_equivalence_and_future_prefix() -> None:
+    _, _, stream = _tiny_stream()
+    raw = torch.randn(3, 5, 8)
+    anchors = torch.randn(3, 8)
+    equivalence_trace = []
+    future_trace = []
+    equivalence = _run_equivalence(stream, raw, anchors, trace=equivalence_trace)
+    future = _run_future_prefix(stream, raw, anchors, trace=future_trace)
+    assert equivalence["sequences"] == 3
+    assert equivalence["frames"] == 15
+    assert equivalence["mae"] <= 1e-6
+    assert equivalence["cosine_min"] >= 0.999999
+    assert future["sequences"] == 3
+    assert future["max_difference"] == 0.0
+    assert len([event for event in equivalence_trace if event["event"] == "p4_equivalence_frame"]) == 15
+
+
 def test_realtime_scheduler_routes_listener_hidden_through_incremental_v9() -> None:
     class _Backend:
         def encode(self, user_pcm, assistant_reference, state):
@@ -111,7 +129,11 @@ def test_realtime_scheduler_routes_listener_hidden_through_incremental_v9() -> N
         pcm = torch.zeros(1280, dtype=torch.int16).numpy().tobytes()
         ws.send_json({"type": "input_audio_buffer.append", "audio": base64.b64encode(pcm).decode("ascii")})
         deadline = time.monotonic() + 1.0
-        while session.listener_state.listener_input_frames < 1 and time.monotonic() < deadline:
+        while (
+            session.listener_state.listener_input_frames < 1
+            or session.v9_state is None
+            or session.v9_state.frames_processed < 1
+        ) and time.monotonic() < deadline:
             time.sleep(0.01)
         assert session.listener_state.listener_input_frames == 1
         assert session.v9_state is not None
