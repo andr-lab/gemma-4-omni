@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import json
 import math
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -578,6 +579,194 @@ def verify_p2(report_path: Path) -> tuple[dict[str, Any], list[str]]:
     return report, errors
 
 
+def _p3_source_scan(report: dict[str, Any], report_path: Path, errors: list[str]) -> dict[str, Any]:
+    """Scan the attested historical source, not the verifier's current files."""
+    try:
+        attestation_path = Path(report["source_attestation"])
+        if not attestation_path.is_absolute():
+            attestation_path = report_path.parent / attestation_path
+        attestation = json.loads(attestation_path.read_text(encoding="utf-8"))
+        sha = attestation["git_sha"]
+        repo = Path(__file__).resolve().parents[2]
+        server = subprocess.check_output(("git", "show", f"{sha}:duplex_kernel/server.py"), cwd=repo, text=True)
+        listener = subprocess.check_output(("git", "show", f"{sha}:duplex_kernel/listener.py"), cwd=repo, text=True)
+    except Exception as exc:
+        fail(errors, f"impossibile scansionare source P3 attestato: {exc}")
+        return {}
+    return {
+        "event": "p3_dependency_scan",
+        "direct_realtime_asr_calls": len(re.findall(r"engine\.transcribe_audio\s*\(", server)),
+        "scheduler_listener_binding": "on_listener = scheduler_listener" in server,
+        "reference_buffer_binding": "assistant_reference_buffer.visible_for" in server,
+        "listener_step_binding": "sess.listener.step" in server,
+        "native_audio_tower_backend": "get_audio_features" in listener and "transcribe_audio" not in listener,
+        "assistant_reference_default_delay_frames": 1,
+    }
+
+
+def verify_p3(report_path: Path) -> tuple[dict[str, Any], list[str]]:
+    """Verify P3 from individual listener-frame events only."""
+    errors: list[str] = []
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    if report.get("schema_version") != 1 or report.get("phase") != "P3":
+        fail(errors, "report non valido per P3")
+    if report.get("git_dirty") is not False:
+        fail(errors, "git_dirty deve essere false")
+    verify_source_attestation(report, report_path, errors)
+    raw = Path(report.get("raw_trace", ""))
+    if not raw.is_absolute():
+        raw = report_path.parent / raw
+    events: list[dict[str, Any]] = []
+    if not raw.is_file():
+        fail(errors, f"raw trace mancante: {raw}")
+    else:
+        if sha256(raw) != report.get("raw_trace_sha256"):
+            fail(errors, "hash raw trace non coincide")
+        for line_no, line in enumerate(raw.read_text(encoding="utf-8").splitlines(), 1):
+            try:
+                event = json.loads(line)
+                if not isinstance(event, dict):
+                    raise ValueError("non-object")
+                events.append(event)
+            except Exception as exc:
+                fail(errors, f"raw trace line {line_no} invalida: {exc}")
+    verify_workspace_binding(report, events, report_path, errors)
+
+    metadata_events = [e for e in events if e.get("event") == "phase_metadata"]
+    if len(metadata_events) != 1:
+        fail(errors, f"phase_metadata count={len(metadata_events)}")
+    metadata = metadata_events[0] if metadata_events else {}
+    if metadata.get("seed") != report.get("seed") or metadata.get("rng_seed_applied") is not True:
+        fail(errors, "RNG seed P3 non attestato")
+    if metadata.get("sample_rate") != 16_000 or metadata.get("frame_duration_ms") != 80:
+        fail(errors, "contratto frame P3 non attestato")
+    if metadata.get("reference_delay_frames") != 1 or metadata.get("real_model_required") is not True:
+        fail(errors, "contratto self-reference/model reale P3 non attestato")
+
+    cpu_events = [e for e in events if e.get("event") == "cpu_contract_result"]
+    if len(cpu_events) != 1:
+        fail(errors, f"cpu_contract_result count={len(cpu_events)}")
+    cpu = cpu_events[0] if cpu_events else {}
+    cpu_contract = {key: cpu.get(key) for key in ("command", "exit_code", "elapsed_s", "stdout_tail", "stderr_tail")}
+
+    model_events = [e for e in events if e.get("event") == "p3_model_metadata"]
+    if len(model_events) != 1:
+        fail(errors, f"p3_model_metadata count={len(model_events)}")
+    model = model_events[0] if model_events else {}
+    if model.get("real_model") is not True or model.get("backend") != "GemmaAudioTowerBackend":
+        fail(errors, "P3 non attestata su GemmaAudioTowerBackend reale")
+
+    dependency_events = [e for e in events if e.get("event") == "p3_dependency_scan"]
+    if len(dependency_events) != 1:
+        fail(errors, f"p3_dependency_scan count={len(dependency_events)}")
+    dependency = dependency_events[0] if dependency_events else {}
+    expected_dependency = _p3_source_scan(report, report_path, errors)
+    for key, expected in expected_dependency.items():
+        if dependency.get(key) != expected:
+            fail(errors, f"dependency P3 {key} non indipendente: {dependency.get(key)!r} != {expected!r}")
+
+    frame_events = [e for e in events if e.get("event") == "p3_listener_frame"]
+    error_events = [e for e in events if e.get("event") == "p3_listener_error"]
+    attempts = sorted(frame_events + error_events, key=lambda event: int(event.get("frame_id", -1)))
+    attempt_ids = [e.get("frame_id") for e in attempts]
+    if attempt_ids != list(range(len(attempts))):
+        fail(errors, "P3 listener frame_id mancanti/duplicati/non ordinati")
+    if any(e.get("samples") != 1280 for e in attempts):
+        fail(errors, "P3 evento listener con sample count diverso da 1280")
+    if len(attempts) < 10_000:
+        fail(errors, f"P3 listener updates insufficienti: {len(attempts)}")
+
+    successful = frame_events
+    latencies = [float(e["listener_step_gpu_ms"]) for e in successful
+                 if e.get("listener_step_gpu_ms") is not None and math.isfinite(float(e["listener_step_gpu_ms"]))]
+    listener_pstats = {
+        "p50": round(float(np.percentile(latencies, 50)), 3) if latencies else None,
+        "p95": round(float(np.percentile(latencies, 95)), 3) if latencies else None,
+        "max": round(max(latencies), 3) if latencies else None,
+    }
+    speaking_expected = sum(bool(e.get("speaker_active")) for e in attempts)
+    speaking_updates = sum(bool(e.get("speaker_active")) for e in successful)
+    future_leaks = 0
+    wrong_references = 0
+    for event in successful:
+        frame_id = int(event["frame_id"])
+        expected_reference = frame_id - 1 if frame_id > 0 else None
+        actual_reference = event.get("reference_frame_id")
+        if isinstance(actual_reference, int) and actual_reference > frame_id - 1:
+            future_leaks += 1
+        if actual_reference != expected_reference:
+            wrong_references += 1
+        if event.get("expected_reference_frame_id") != expected_reference:
+            fail(errors, f"P3 aspettativa reference non causale al frame {frame_id}")
+    replay_frames = min(len(attempts), 3_750)
+    recomputed = {
+        "listener_input_frames": len(successful),
+        "samples_received": sum(int(e.get("samples", 0)) for e in successful),
+        "samples_accounted_for": len(successful) * 1280,
+        "dropped_listener_frames": len(error_events),
+        "replay_frames": replay_frames,
+        "replay_seconds": replay_frames * 80 / 1000.0,
+        "input_frames_while_speaking": speaking_expected,
+        "listener_updates_while_speaking": speaking_updates,
+        "listener_coverage_while_speaking": speaking_updates / speaking_expected if speaking_expected else 0.0,
+        "nonfinite_hidden_count": sum(not bool(e.get("finite")) for e in successful),
+        "empty_hidden_count": sum(int(e.get("hidden_numel", 0)) <= 0 for e in successful),
+        "future_reference_leaks": future_leaks,
+        "wrong_reference_frames": wrong_references,
+        "assistant_reference_delay_frames": dependency.get("assistant_reference_default_delay_frames"),
+        "listener_step_gpu_ms": listener_pstats,
+        "listener_errors": len(error_events),
+        "p3_dependency_scan": expected_dependency,
+        "cpu_contract": cpu_contract,
+    }
+    metrics = report.get("metrics", {})
+    for key, expected in recomputed.items():
+        if metrics.get(key) != expected:
+            fail(errors, f"metrica P3 {key} non coincide col raw trace: {metrics.get(key)!r} != {expected!r}")
+
+    thresholds = report.get("thresholds", {})
+    exact = {
+        "cpu_contract_exit_code": cpu.get("exit_code"),
+        "dropped_listener_frames": recomputed["dropped_listener_frames"],
+        "nonfinite_hidden_count": recomputed["nonfinite_hidden_count"],
+        "empty_hidden_count": recomputed["empty_hidden_count"],
+        "future_reference_leaks": recomputed["future_reference_leaks"],
+        "wrong_reference_frames": recomputed["wrong_reference_frames"],
+        "listener_errors": recomputed["listener_errors"],
+        "assistant_reference_delay_frames": recomputed["assistant_reference_delay_frames"],
+    }
+    for key, actual in exact.items():
+        if key not in thresholds:
+            fail(errors, f"threshold P3 mancante: {key}")
+        elif actual != thresholds[key]:
+            fail(errors, f"threshold P3 fallita: {key}={actual!r} != {thresholds[key]!r}")
+    for key, actual in {
+        "listener_input_frames_min": recomputed["listener_input_frames"],
+        "replay_frames_min": recomputed["replay_frames"],
+        "input_frames_while_speaking_min": recomputed["input_frames_while_speaking"],
+    }.items():
+        if actual < thresholds.get(key, float("inf")):
+            fail(errors, f"threshold P3 fallita: {key}={actual}")
+    if "samples_received_equals_accounted" not in thresholds or thresholds.get("samples_received_equals_accounted") is not True:
+        fail(errors, "threshold P3 mancante/non valida: samples_received_equals_accounted")
+    if recomputed["samples_received"] != recomputed["samples_accounted_for"]:
+        fail(errors, "threshold P3 fallita: samples non contabilizzati")
+    if recomputed["replay_seconds"] < thresholds.get("replay_seconds_min", float("inf")):
+        fail(errors, "threshold P3 fallita: replay sotto cinque minuti")
+    if recomputed["listener_coverage_while_speaking"] < thresholds.get("listener_coverage_while_speaking", float("inf")):
+        fail(errors, "threshold P3 fallita: coverage listener durante speaking")
+    p95 = recomputed["listener_step_gpu_ms"].get("p95")
+    if p95 is None or p95 > thresholds.get("listener_step_gpu_ms_p95_max", float("inf")):
+        fail(errors, "threshold P3 fallita: listener step p95")
+    if metrics.get("samples_received") != metrics.get("samples_accounted_for"):
+        fail(errors, "report P3 dichiara samples non contabilizzati")
+
+    independently_passed = not errors
+    if report.get("passed") is not independently_passed:
+        fail(errors, f"passed non coincide col risultato indipendente: {report.get('passed')} != {independently_passed}")
+    return report, errors
+
+
 def verify_one(report_path: Path) -> tuple[dict[str, Any], list[str]]:
     errors: list[str] = []
     report = json.loads(report_path.read_text(encoding="utf-8"))
@@ -585,11 +774,13 @@ def verify_one(report_path: Path) -> tuple[dict[str, Any], list[str]]:
         fail(errors, "schema_version non supportata")
     if report.get("phase") == "P2":
         return verify_p2(report_path)
+    if report.get("phase") == "P3":
+        return verify_p3(report_path)
     verify_source_attestation(report, report_path, errors)
     if report.get("phase") == "P1":
         return verify_p1(report_path)
     if report.get("phase") != "P0":
-        fail(errors, "verify_report supporta P0 e P1")
+        fail(errors, "verify_report supporta P0, P1, P2 e P3")
     if report.get("git_dirty") is not False:
         fail(errors, "git_dirty deve essere false")
     raw = Path(report.get("raw_trace", ""))

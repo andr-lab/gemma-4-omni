@@ -68,3 +68,22 @@ P2 verifica 125 tick virtuali in 10 s, 750 tick virtuali in 60 s, ingress
 PCM lossless da 1280 sample, input durante speaker e 60 s di real clock.
 `P2_ACTIVE_SHA` identifica il bundle pubblico corrente; il verifier ricalcola
 tick, trasporto, jitter e deadline dal raw trace.
+
+## P3
+
+P3 usa il solo audio tower nativo di Gemma (non ASR e non testo intermedio).
+Il gate reale va eseguito sull'host GPU con almeno 10.000 frame da 1280 sample;
+la prima porzione copre almeno cinque minuti logici e il replay mantiene un
+riferimento assistant esattamente a un frame di distanza:
+
+```bash
+python tools/kernel_gates/run_phase.py --phase P3 --workspace . \
+  --source-attestation /tmp/gemma4_p3_source_attestation.json \
+  --run-id run1 --git-sha <git_sha> --git-dirty false --listener-frames 10000
+python tools/kernel_gates/verify_report.py \
+  artifacts/kernel_gates/<git_sha>/P3/run1/P3_report.json
+```
+
+Il verifier ricalcola dal raw trace accounting PCM, coverage durante speaking,
+hidden health, causalità della reference e p95 della step. L'evidence pubblica
+va in `validation/kernel_gates/<git_sha>/P3/` solo dopo il PASS indipendente.

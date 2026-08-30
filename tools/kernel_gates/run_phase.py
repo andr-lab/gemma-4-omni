@@ -253,6 +253,69 @@ def run_p1(raw_path: Path, workspace: Path, seed: int, source_binding: dict[str,
     return metrics, thresholds
 
 
+def run_p3(raw_path: Path, workspace: Path, seed: int, source_binding: dict[str, Any],
+            cpu_contract: dict[str, Any], listener_frames: int) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Run the real Gemma audio-tower listener replay on the GPU host."""
+    import torch
+    from duplex_kernel.listener import GemmaListener, GemmaListenerState
+    from duplex_kernel.models.thinker import load_thinker
+    from tools.kernel_gates.p3_checks import run_checks
+
+    events: list[dict[str, Any]] = [
+        {
+            "event": "phase_metadata",
+            "seed": seed,
+            "rng_seed_applied": True,
+            "sample_rate": 16_000,
+            "frame_duration_ms": 80,
+            "reference_delay_frames": 1,
+            "real_model_required": True,
+        },
+        {"event": "source_workspace_binding", **source_binding},
+        *({"event": "source_workspace_file", **item} for item in source_binding["files"]),
+    ]
+    thinker = None
+    try:
+        thinker = load_thinker(str(workspace), device="cuda", dtype=torch.bfloat16)
+        listener = GemmaListener.from_thinker(thinker)
+        state = GemmaListenerState(context_frames=8)
+        metrics, thresholds = run_checks(
+            workspace,
+            listener=listener,
+            state=state,
+            seed=seed,
+            total_frames=listener_frames,
+            trace=events,
+        )
+    finally:
+        if thinker is not None:
+            del thinker
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    metrics["cpu_contract"] = cpu_contract
+    thresholds["cpu_contract_exit_code"] = 0
+    metrics["passed"] = bool(
+        cpu_contract["exit_code"] == 0
+        and metrics["samples_received"] == metrics["samples_accounted_for"]
+        and metrics["listener_input_frames"] >= thresholds["listener_input_frames_min"]
+        and metrics["replay_frames"] >= thresholds["replay_frames_min"]
+        and metrics["replay_seconds"] >= thresholds["replay_seconds_min"]
+        and metrics["listener_coverage_while_speaking"] >= thresholds["listener_coverage_while_speaking"]
+        and metrics["dropped_listener_frames"] == thresholds["dropped_listener_frames"]
+        and metrics["nonfinite_hidden_count"] == thresholds["nonfinite_hidden_count"]
+        and metrics["empty_hidden_count"] == thresholds["empty_hidden_count"]
+        and metrics["future_reference_leaks"] == thresholds["future_reference_leaks"]
+        and metrics["wrong_reference_frames"] == thresholds["wrong_reference_frames"]
+        and (metrics["listener_step_gpu_ms"]["p95"] is not None
+             and metrics["listener_step_gpu_ms"]["p95"] <= thresholds["listener_step_gpu_ms_p95_max"])
+        and metrics["listener_errors"] == thresholds["listener_errors"]
+        and metrics["assistant_reference_delay_frames"] == thresholds["assistant_reference_delay_frames"]
+    )
+    events.append({"event": "cpu_contract_result", **cpu_contract})
+    raw_path.write_bytes("".join(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\\n" for event in events).encode("utf-8"))
+    return metrics, thresholds
+
+
 def run_p2(raw_path: Path, workspace: Path, seed: int, source_binding: dict[str, Any],
             real_duration_s: float, cpu_contract: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     from tools.kernel_gates.p2_checks import run_checks
@@ -276,7 +339,7 @@ def run_p2(raw_path: Path, workspace: Path, seed: int, source_binding: dict[str,
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--phase", choices=["P0", "P1", "P2"], required=True)
+    ap.add_argument("--phase", choices=["P0", "P1", "P2", "P3"], required=True)
     ap.add_argument("--workspace", type=Path, default=ROOT)
     ap.add_argument("--manifest", type=Path, default=None)
     ap.add_argument("--out-root", type=Path, default=ROOT / "artifacts" / "kernel_gates")
@@ -287,6 +350,8 @@ def main() -> int:
                     help="attestation content-addressed del checkout Git pulito")
     ap.add_argument("--real-duration-s", type=float, default=60.0,
                     help="durata real-clock P2; il gate completo richiede almeno 60 s")
+    ap.add_argument("--listener-frames", type=int, default=10_000,
+                    help="listener updates P3; il gate completo richiede almeno 10.000")
     args = ap.parse_args()
     manifest_path = args.manifest or (ROOT / "tools" / "kernel_gates" / "manifests" / "p0_inputs.json")
     if not manifest_path.is_absolute():
@@ -312,6 +377,17 @@ def main() -> int:
         raw_path.unlink()
     if args.phase == "P1":
         metrics, thresholds = run_p1(raw_path, args.workspace, seed, source_binding)
+        passed = bool(metrics["passed"])
+    elif args.phase == "P3":
+        cpu = run_cpu_contract([
+            "tests/kernel/test_p3_listener.py",
+            "tests/kernel/test_p2_scheduler.py",
+            "tests/test_duplex_kernel_contract.py",
+        ])
+        print("CPU contract exit_code=", cpu["exit_code"], flush=True)
+        metrics, thresholds = run_p3(
+            raw_path, args.workspace, seed, source_binding, cpu, args.listener_frames,
+        )
         passed = bool(metrics["passed"])
     elif args.phase == "P2":
         cpu = run_cpu_contract(["tests/kernel/test_p2_scheduler.py", "tests/test_duplex_kernel_contract.py"])

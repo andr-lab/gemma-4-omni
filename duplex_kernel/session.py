@@ -26,6 +26,7 @@ from typing import Any
 import numpy as np
 
 from duplex_kernel.kv_cache import TalkerPrefixKV, ThinkerContext, TurnKVState
+from duplex_kernel.listener import AssistantReferenceBuffer, GemmaListenerState
 from duplex_kernel.scheduler import AudioIngressQueue
 from duplex_kernel.turn_policy import ControlState
 
@@ -83,10 +84,17 @@ class DuplexSession:
     # Stato conversazione
     history: list[dict[str, Any]] = field(default_factory=list)
     instructions: str = ""
-    # Audio ingress indipendente dal ciclo request/response (P2). Il buffer
-    # pending_audio resta per il commit/ASR legacy finché P3 non collega il
-    # GemmaListener al consumo dei frame numerati.
+    # Audio ingress indipendente dal ciclo request/response (P2). P3 collega
+    # questo flusso al listener: pending_audio resta solo per il commit API.
     audio_ingress: AudioIngressQueue = field(default_factory=AudioIngressQueue)
+    listener: Any | None = field(default=None, repr=False, compare=False)
+    listener_state: GemmaListenerState = field(default_factory=GemmaListenerState, repr=False)
+    assistant_reference_buffer: AssistantReferenceBuffer = field(
+        default_factory=AssistantReferenceBuffer, repr=False, compare=False
+    )
+    listener_hidden: Any | None = field(default=None, repr=False, compare=False)
+    last_listener_output: Any | None = field(default=None, repr=False, compare=False)
+    assistant_reference_next_frame_id: int = 0
     # Micro-turn in corso (compatibilità commit/ASR)
     pending_audio: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.float32))
     pending_mel: np.ndarray = field(default_factory=lambda: np.empty((0, 128), dtype=np.float32))
@@ -127,6 +135,15 @@ class DuplexSession:
         with self._generation_lock:
             self.frame_id += 1
             return self.frame_id
+
+    def reserve_assistant_reference_frames(self, count: int) -> int:
+        """Reserve contiguous listener-timeline ids for audio sent to client."""
+        if count <= 0:
+            raise ValueError("count deve essere positivo")
+        with self._generation_lock:
+            first = self.assistant_reference_next_frame_id
+            self.assistant_reference_next_frame_id += int(count)
+            return first
 
     def end_response(self, token: GenerationToken) -> None:
         with self._generation_lock:
@@ -259,6 +276,8 @@ class SessionManager:
             sess.scheduler.stop()
             sess.turn_kv.clear()
             sess.talker_prefix.clear()
+            sess.listener_state.close()
+            sess.assistant_reference_buffer.clear()
             sess.audio_ingress.close()
             logger.info("[session] chiusa %s", session_id)
 
@@ -273,6 +292,8 @@ class SessionManager:
             sess.scheduler.stop()
             sess.turn_kv.clear()
             sess.talker_prefix.clear()
+            sess.listener_state.close()
+            sess.assistant_reference_buffer.clear()
             sess.audio_ingress.close()
             logger.info("[session] reap idle %s", sid)
 

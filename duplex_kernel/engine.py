@@ -46,6 +46,7 @@ class PipelineEngine:
         self.causal_conv = None
         self.subtalker_graph: Any | None = None
         self.residual_sampler: Any | None = None
+        self.listener: Any | None = None
         self._mtp_ready = False  # MTP parallelo: disattivato (fallback generate HF bit-exact)
         self.loaded = False
         self._stop_event = False
@@ -62,7 +63,9 @@ class PipelineEngine:
             self._thinker_wrapper = th
             self.thinker = th.model
             self.tokenizer = th.tokenizer
-            logger.info("[engine] thinker in %.1fs", time.time() - t0)
+            from duplex_kernel.listener import GemmaListener
+            self.listener = GemmaListener.from_thinker(th)
+            logger.info("[engine] thinker + continuous listener in %.1fs", time.time() - t0)
 
             self.talker = load_talker(workspace, device=self.device)
             logger.info("[engine] talker+code2wav in %.1fs", time.time() - t0)
@@ -342,6 +345,7 @@ class PipelineEngine:
     def unload(self) -> None:
         self.loaded = False
         self.subtalker_graph = None
+        self.listener = None
         self.thinker = self._thinker_wrapper = self.talker = self.v9 = self.causal_conv = None
         torch.cuda.empty_cache()
 

@@ -19,6 +19,7 @@ DEFAULT_FILES = (
     "duplex_kernel/config.py",
     "duplex_kernel/engine.py",
     "duplex_kernel/kv_cache.py",
+    "duplex_kernel/listener.py",
     "duplex_kernel/server.py",
     "duplex_kernel/session.py",
     "duplex_kernel/scheduler.py",
@@ -31,12 +32,14 @@ DEFAULT_FILES = (
     "tools/kernel_gates/build_manifest.py",
     "tools/kernel_gates/p1_checks.py",
     "tools/kernel_gates/p2_checks.py",
+    "tools/kernel_gates/p3_checks.py",
     "tools/kernel_gates/run_phase.py",
     "tools/kernel_gates/source_attestation.py",
     "tools/kernel_gates/verify_report.py",
     "tests/test_duplex_kernel_contract.py",
     "tests/kernel/test_p1_control_plane.py",
     "tests/kernel/test_p2_scheduler.py",
+    "tests/kernel/test_p3_listener.py",
     "tests/kernel/test_gemma_pcm_mel.py",
 )
 

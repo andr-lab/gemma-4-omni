@@ -15,8 +15,13 @@ class TurnHeadPolicy:
         self.loaded = bool(checkpoint and self.runtime.load(checkpoint))
 
     def step(self, state: PolicyInput) -> PolicyDecision:
-        if state.listener_hidden is not None:
-            self.runtime.set_thinker_hidden(state.listener_hidden)
+        # P3 exposes native Gemma audio embeddings (1536D).  TurnHead v4
+        # consumes the post-V9 2048D representation; until P4 owns that
+        # projection, keep the policy alive without feeding it a wrong shape.
+        hidden = state.listener_hidden
+        hidden_dim = getattr(hidden, "shape", ())[-1] if hidden is not None else None
+        if hidden_dim == 2048:
+            self.runtime.set_thinker_hidden(hidden)
         if state.user_pcm is not None:
             self.runtime.feed_pcm(state.user_pcm)
         if not self.loaded:

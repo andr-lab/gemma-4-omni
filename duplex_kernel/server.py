@@ -6,6 +6,7 @@ import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, StreamingResponse
 from duplex_kernel.config import CODEC_SAMPLE_RATE, USER_SAMPLE_RATE, TURNHEAD_CKPT
+from duplex_kernel.listener import GemmaListener
 from duplex_kernel.turn_policy import ControlAction, NoOpPolicy, PolicyInput, ScriptedPolicy, SpeakerGate
 from duplex_kernel.turnhead_adapter import TurnHeadPolicy
 from duplex_kernel.session import SessionManager, DuplexSession
@@ -30,7 +31,7 @@ def _message_text(content: Any) -> str:
 
 
 def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAPI:
-    app = FastAPI(title="Gemma-4-Omni Duplex Kernel", version="0.3.0")
+    app = FastAPI(title="Gemma-4-Omni Duplex Kernel", version="0.4.0")
     sessions = session_mgr or SessionManager()
     inference_lock = threading.Lock()  # GPU model is single-stream by design.
 
@@ -50,12 +51,26 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
         if sess.turn_policy is None:
             sess.turn_policy = _make_policy("turnhead")
 
+    def _ensure_listener(sess: DuplexSession) -> None:
+        if sess.listener is not None:
+            return
+        shared = getattr(engine, "listener", None)
+        if shared is None:
+            wrapper = getattr(engine, "_thinker_wrapper", None)
+            if wrapper is not None:
+                try:
+                    shared = GemmaListener.from_thinker(wrapper)
+                except (TypeError, ValueError, RuntimeError) as exc:
+                    logger.warning("[listener] non disponibile: %s", exc)
+        sess.listener = shared
+
     def get_session(request: dict[str, Any]) -> tuple[DuplexSession, bool]:
         sid = request.get("session_id")
         if sid:
             sess = sessions.get(str(sid))
             if sess is None: raise ValueError("session_id non valido o scaduto")
             _ensure_policy(sess)
+            _ensure_listener(sess)
             return sess, False
         sess = sessions.create_session(
             instructions=str(request.get("instructions", "")),
@@ -63,6 +78,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
             language=str(request.get("language", "Italian")),
         )
         _ensure_policy(sess)
+        _ensure_listener(sess)
         return sess, True
 
     def run_response(sess: DuplexSession, messages: list[dict[str, Any]], request: dict[str, Any]) -> dict[str, Any]:
@@ -217,7 +233,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
     async def realtime(ws: WebSocket, duplex: int = 0):
         if not duplex:
             await ws.close(code=1008, reason="usa /v1/realtime?duplex=1"); return
-        await ws.accept(); sess = sessions.create_session(); _ensure_policy(sess); response_task: asyncio.Task | None = None
+        await ws.accept(); sess = sessions.create_session(); _ensure_policy(sess); _ensure_listener(sess); response_task: asyncio.Task | None = None
         auto_task: asyncio.Task | None = None
         loop = asyncio.get_running_loop()
         scheduler_events: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
@@ -231,6 +247,21 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     await ws.send_json(event)
                 except (WebSocketDisconnect, RuntimeError):
                     return
+
+        def scheduler_listener(frame: Any, tick: Any) -> None:
+            """Consume every complete mic frame before invoking the policy."""
+            del tick
+            if frame is None or sess.listener is None:
+                return
+            reference = sess.assistant_reference_buffer.visible_for(listener_frame_id=frame.frame_id)
+            try:
+                output = sess.listener.step(frame.pcm, reference, sess.listener_state)
+            except Exception as exc:
+                logger.exception("[realtime %s] listener failed on frame %d", sess.session_id[:8], frame.frame_id)
+                scheduler_error(exc)
+                return
+            sess.listener_hidden = output.hidden_t
+            sess.last_listener_output = output
 
         def scheduler_policy(frame: Any, tick: Any) -> None:
             """Policy callback invoked only by DuplexScheduler's tick thread."""
@@ -246,6 +277,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                 speaker_active=sess.active_response,
                 generation_id=sess.session_generation_id,
                 speaker_segment_id=sess.speaker_segment_id,
+                listener_hidden=sess.listener_hidden,
             ))
             gate = speaker_gate.apply(decision, sess)
             logger.info("[realtime %s] scheduler action=%s frame=%d active=%s", sess.session_id[:8], decision.action.value, frame.frame_id, sess.active_response)
@@ -268,6 +300,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
 
         # The scheduler is the sole consumer of audio_ingress and owns the
         # 80 ms cadence; the WebSocket path only validates and appends PCM.
+        sess.scheduler.on_listener = scheduler_listener
         sess.scheduler.on_policy = scheduler_policy
         sess.scheduler.on_error = scheduler_error
         sess.scheduler.start(name=f"duplex-scheduler-{sess.session_id[:8]}")
@@ -291,16 +324,32 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                 def on_text_chunk(chunk: str) -> None:
                     sess.guarded_write(token, "text", lambda: text_queue.put(str(chunk)))
 
+                def record_emitted_reference(chunk: np.ndarray) -> None:
+                    """Put only audio already sent to the client on self-listen."""
+                    array = np.asarray(chunk, dtype=np.float32).reshape(-1)
+                    normalized_samples = int(round(array.size * USER_SAMPLE_RATE / CODEC_SAMPLE_RATE))
+                    frame_samples = sess.assistant_reference_buffer.frame_samples
+                    if normalized_samples <= 0 or normalized_samples % frame_samples:
+                        logger.error("[realtime %s %s] emitted audio non allineato: %d samples", sess.session_id[:8], response_id, array.size)
+                        return
+                    count = normalized_samples // frame_samples
+                    first_id = sess.reserve_assistant_reference_frames(count)
+                    sess.assistant_reference_buffer.append_chunk(
+                        array,
+                        first_frame_id=first_id,
+                        emitted_at_ns=time.monotonic_ns(),
+                        sample_rate=CODEC_SAMPLE_RATE,
+                    )
+
                 def infer_ws():
                     with inference_lock:
                         history = list(sess.history)
-                        if committed_audio.size and hasattr(engine, "transcribe_audio"):
-                            logger.info("[realtime %s %s] ASR start samples=%d", sess.session_id[:8], response_id, committed_audio.size)
-                            audio_text = engine.transcribe_audio(committed_audio)["text"]
-                            logger.info("[realtime %s %s] ASR done text_chars=%d elapsed=%.2fs", sess.session_id[:8], response_id, len(audio_text), time.perf_counter() - started)
-                            if audio_text:
-                                history.append({"role": "user", "content": audio_text})
-                        logger.info("[realtime %s %s] Thinker/Talker start", sess.session_id[:8], response_id)
+                        # P3: il microfono è già stato consumato dal
+                        # GemmaListener frame-by-frame.  Il response worker non
+                        # può ricadere nel percorso sincrono ASR->testo->Thinker.
+                        if committed_audio.size and not history:
+                            history.append({"role": "user", "content": "[audio input ricevuto in streaming]"})
+                        logger.info("[realtime %s %s] Thinker/Talker start (listener già attivo)", sess.session_id[:8], response_id)
                         result = run_response(sess, history or [{"role": "user", "content": "Ciao!"}], {"modalities": ["text", "audio"], "tools": sess.tools, "voice": sess.voice, "voice_style": sess.voice_style, "ref_text": sess.ref_text, "_generation_id": token.session_generation_id, "_generation_token": token, "_defer_history": True, "_stop_check": lambda: sess.stop_requested, "_on_audio_chunk": on_audio_chunk, "_on_text_chunk": on_text_chunk})
                         logger.info("[realtime %s %s] Thinker/Talker done elapsed=%.2fs", sess.session_id[:8], response_id, time.perf_counter() - started)
                         return result
@@ -323,6 +372,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     else:
                         streamed_chunks += 1
                         await ws.send_json({"type": "response.audio.delta", "delta": _wav_b64(chunk_wav), "response_id": response_id})
+                        record_emitted_reference(chunk_wav)
                         sess.record_emitted_audio(token, 8)
                     try:
                         chunk_text = text_queue.get_nowait()
@@ -339,6 +389,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                         break
                     streamed_chunks += 1
                     await ws.send_json({"type": "response.audio.delta", "delta": _wav_b64(chunk_wav), "response_id": response_id})
+                    record_emitted_reference(chunk_wav)
                     sess.record_emitted_audio(token, 8)
                 while True:
                     try:
@@ -367,6 +418,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     for start in range(0, len(result["wav"]), chunk):
                         audio_chunk = result["wav"][start:start + chunk]
                         await ws.send_json({"type": "response.audio.delta", "delta": _wav_b64(audio_chunk), "response_id": response_id})
+                        record_emitted_reference(audio_chunk)
                         sess.record_emitted_audio(token, max(1, int(round(len(audio_chunk) / (CODEC_SAMPLE_RATE * .08)))))
                 await ws.send_json({"type": "response.done", "response_id": response_id})
                 logger.info("[realtime %s %s] done total=%.2fs audio_chunks=%d", sess.session_id[:8], response_id, time.perf_counter() - started, streamed_chunks)
