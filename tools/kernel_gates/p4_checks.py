@@ -19,6 +19,9 @@ MAE_MAX = 0.01
 COSINE_MIN = 0.999
 FUTURE_DIFF_MAX = 1e-5
 P95_MAX_MS = 10.0
+ABLATION_CE_RATIO_MAX = 1.10
+ABLATION_TOP1_DROP_MAX = 0.05
+ABLATION_TOP5_DROP_MAX = 0.03
 
 
 def _stack_cache(cache_path: Path) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
@@ -383,11 +386,17 @@ def run_checks(
     else:
         codes, codes_start = _load_codes(codes_path, codes_metadata_path, cache_codes)
         ablation = _run_qwen_ablation(talker, stream, raw, anchors, codes, trace=trace)
+        ablation["ce_ratio"] = ablation["causal_ce"] / max(ablation["full_ce"], 1e-12)
+        ablation["top1_drop"] = ablation["full_top1"] - ablation["causal_top1"]
+        ablation["top5_drop"] = ablation["full_top5"] - ablation["causal_top5"]
         ablation["passed"] = bool(
             ablation["frames"] >= MIN_FRAMES
             and ablation["finite"]
             and ablation["mask_future_prefix"]
             and ablation["max_logit_delta"] > 1e-6
+            and ablation["ce_ratio"] <= ABLATION_CE_RATIO_MAX
+            and ablation["top1_drop"] <= ABLATION_TOP1_DROP_MAX
+            and ablation["top5_drop"] <= ABLATION_TOP5_DROP_MAX
         )
         ablation["codes_validation_start"] = codes_start
     thresholds = {
@@ -401,6 +410,9 @@ def run_checks(
         "v9_step_p95_ms_max": P95_MAX_MS,
         "ablation_sequences_min": MIN_SEQUENCES,
         "ablation_frames_min": MIN_FRAMES,
+        "ablation_ce_ratio_max": ABLATION_CE_RATIO_MAX,
+        "ablation_top1_drop_max": ABLATION_TOP1_DROP_MAX,
+        "ablation_top5_drop_max": ABLATION_TOP5_DROP_MAX,
     }
     metrics = {
         "real_model_required": True,

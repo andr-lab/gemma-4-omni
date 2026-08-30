@@ -925,11 +925,26 @@ def verify_p4(report_path: Path) -> tuple[dict[str, Any], list[str]]:
             ]
             if values:
                 ablation_recomputed["quartile_delta_ce"][f"q{bucket}"] = sum(values) / len(values)
+    ablation_recomputed["ce_ratio"] = (
+        ablation_recomputed["causal_ce"] / max(ablation_recomputed["full_ce"], 1e-12)
+        if ablation_recomputed["full_ce"] is not None else None
+    )
+    ablation_recomputed["top1_drop"] = (
+        ablation_recomputed["full_top1"] - ablation_recomputed["causal_top1"]
+        if ablation_recomputed["full_top1"] is not None else None
+    )
+    ablation_recomputed["top5_drop"] = (
+        ablation_recomputed["full_top5"] - ablation_recomputed["causal_top5"]
+        if ablation_recomputed["full_top5"] is not None else None
+    )
     ablation_recomputed["passed"] = bool(
         ablation_recomputed["frames"] >= 5_000
         and ablation_recomputed["finite"]
         and ablation_recomputed["mask_future_prefix"]
         and (ablation_recomputed["max_logit_delta"] or 0.0) > 1e-6
+        and (ablation_recomputed["ce_ratio"] or float("inf")) <= 1.10
+        and (ablation_recomputed["top1_drop"] or float("inf")) <= 0.05
+        and (ablation_recomputed["top5_drop"] or float("inf")) <= 0.03
     )
 
     metrics = report.get("metrics", {})
@@ -966,6 +981,9 @@ def verify_p4(report_path: Path) -> tuple[dict[str, Any], list[str]]:
         "v9_step_p95_ms_max": performance["p95_ms"],
         "ablation_sequences_min": ablation_recomputed["sequences"],
         "ablation_frames_min": ablation_recomputed["frames"],
+        "ablation_ce_ratio_max": ablation_recomputed["ce_ratio"],
+        "ablation_top1_drop_max": ablation_recomputed["top1_drop"],
+        "ablation_top5_drop_max": ablation_recomputed["top5_drop"],
     }
     if thresholds.get("qwen_ablation_required") is not True:
         fail(errors, "threshold P4 qwen_ablation_required mancante")
@@ -982,6 +1000,9 @@ def verify_p4(report_path: Path) -> tuple[dict[str, Any], list[str]]:
         "v9_step_p95_ms_max": (lambda value, limit: value <= limit),
         "ablation_sequences_min": (lambda value, limit: value >= limit),
         "ablation_frames_min": (lambda value, limit: value >= limit),
+        "ablation_ce_ratio_max": (lambda value, limit: value <= limit),
+        "ablation_top1_drop_max": (lambda value, limit: value <= limit),
+        "ablation_top5_drop_max": (lambda value, limit: value <= limit),
     }
     for key, actual in checks.items():
         if key == "cpu_contract_exit_code":
