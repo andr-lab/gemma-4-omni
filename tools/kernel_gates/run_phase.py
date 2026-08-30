@@ -90,8 +90,9 @@ def percentile(values: list[float], q: float) -> float | None:
     return round(float(__import__("numpy").percentile(values, q)), 3) if values else None
 
 
-def run_cpu_contract(test_path: str) -> dict[str, Any]:
-    cmd = [sys.executable, "-m", "pytest", test_path, "-q"]
+def run_cpu_contract(test_path: str | list[str]) -> dict[str, Any]:
+    test_paths = [test_path] if isinstance(test_path, str) else test_path
+    cmd = [sys.executable, "-m", "pytest", *test_paths, "-q"]
     started = time.perf_counter()
     proc = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True)
     return {
@@ -227,7 +228,7 @@ def run_p1(raw_path: Path, workspace: Path, seed: int) -> tuple[dict[str, Any], 
     from tools.kernel_gates.p1_checks import run_checks
     events: list[dict[str, Any]] = [{"event": "phase_metadata", "seed": seed, "rng_seed_applied": True}]
     checks = run_checks(workspace, seed=seed, sequences=10_000, races=1_000, trace=events)
-    cpu = run_cpu_contract("tests/kernel/test_p1_control_plane.py")
+    cpu = run_cpu_contract(["tests/kernel/test_p1_control_plane.py", "tests/kernel/test_gemma_pcm_mel.py"])
     events.append({"event": "cpu_contract_result", **cpu})
     metrics = {**checks, "cpu_contract": cpu}
     thresholds = {
