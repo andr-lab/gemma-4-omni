@@ -108,6 +108,16 @@ def test_assistant_reference_buffer_resamples_emitted_24khz_frame_without_droppi
     np.testing.assert_allclose(stored.pcm[[0, -1]], source[[0, -1]], atol=1e-6)
 
 
+def test_emitted_reference_ids_follow_listener_timeline_after_midstream_start() -> None:
+    session = SessionManager().create_session()
+
+    assert session.reserve_assistant_reference_frames(2) == 0
+    session.mark_listener_frame(10)
+    assert session.reserve_assistant_reference_frames(1) == 10
+    session.mark_listener_frame(11)
+    assert session.reserve_assistant_reference_frames(1) == 11
+
+
 def test_listener_accounts_every_frame_and_increments_version_after_success() -> None:
     backend = _RecordingBackend()
     listener = GemmaListener(backend=backend)

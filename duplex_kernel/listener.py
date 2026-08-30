@@ -251,6 +251,12 @@ class GemmaListenerState:
     def processed_frames(self) -> int:
         return self.listener_input_frames
 
+    @property
+    def next_input_frame_id(self) -> int:
+        """ID that will be assigned to the next successful listener step."""
+        with self._lock:
+            return int(self.next_frame_id)
+
     def stats(self) -> dict[str, int | None]:
         with self._lock:
             return {

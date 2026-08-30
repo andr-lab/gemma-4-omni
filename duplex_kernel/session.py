@@ -95,6 +95,7 @@ class DuplexSession:
     listener_hidden: Any | None = field(default=None, repr=False, compare=False)
     last_listener_output: Any | None = field(default=None, repr=False, compare=False)
     assistant_reference_next_frame_id: int = 0
+    last_listener_frame_id: int | None = field(default=None, repr=False)
     # Micro-turn in corso (compatibilità commit/ASR)
     pending_audio: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.float32))
     pending_mel: np.ndarray = field(default_factory=lambda: np.empty((0, 128), dtype=np.float32))
@@ -136,13 +137,23 @@ class DuplexSession:
             self.frame_id += 1
             return self.frame_id
 
+    def mark_listener_frame(self, frame_id: int) -> None:
+        """Anchor emitted assistant references to the listener timeline."""
+        with self._generation_lock:
+            frame_id = int(frame_id)
+            if self.last_listener_frame_id is None or frame_id > self.last_listener_frame_id:
+                self.last_listener_frame_id = frame_id
+
     def reserve_assistant_reference_frames(self, count: int) -> int:
-        """Reserve contiguous listener-timeline ids for audio sent to client."""
+        """Reserve ids starting at the latest listener frame already consumed."""
         if count <= 0:
             raise ValueError("count deve essere positivo")
         with self._generation_lock:
+            anchor = self.last_listener_frame_id
             first = self.assistant_reference_next_frame_id
-            self.assistant_reference_next_frame_id += int(count)
+            if anchor is not None:
+                first = max(first, anchor)
+            self.assistant_reference_next_frame_id = first + int(count)
             return first
 
     def end_response(self, token: GenerationToken) -> None:

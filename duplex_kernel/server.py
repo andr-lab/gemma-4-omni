@@ -253,13 +253,16 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
             del tick
             if frame is None or sess.listener is None:
                 return
-            reference = sess.assistant_reference_buffer.visible_for(listener_frame_id=frame.frame_id)
+            reference = sess.assistant_reference_buffer.visible_for(
+                listener_frame_id=sess.listener_state.next_input_frame_id
+            )
             try:
                 output = sess.listener.step(frame.pcm, reference, sess.listener_state)
             except Exception as exc:
                 logger.exception("[realtime %s] listener failed on frame %d", sess.session_id[:8], frame.frame_id)
                 scheduler_error(exc)
                 return
+            sess.mark_listener_frame(output.frame_id)
             sess.listener_hidden = output.hidden_t
             sess.last_listener_output = output
 

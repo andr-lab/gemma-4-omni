@@ -14,8 +14,11 @@ text generation, V9, and Qwen are not prerequisites for this path.
 counters, the monotonic listener-state version, and the last hidden output.
 `AssistantReferenceBuffer` stores only audio that has already been sent to the
 client. Its default visibility rule is exact-frame `t - 1`: a missing frame is
-silence/absence, never a substitute from a later frame. Assistant output is
-normalized from Code2Wav's 24 kHz to listener 16 kHz before storage.
+silence/absence, never a substitute from a later frame. Emitted frame IDs are
+anchored to the latest listener-timeline frame consumed, so a response started
+mid-stream cannot accidentally expose its frame 0 to microphone frame 1.
+Assistant output is normalized from Code2Wav's 24 kHz to listener 16 kHz before
+storage.
 
 The listener returns the final valid Gemma audio-tower embedding (1536D in the
 canonical E2B checkpoint). It preserves that native dimension; the existing
