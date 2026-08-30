@@ -115,6 +115,59 @@ def _run_integration_race(race_id: int, trace: list[dict[str, Any]] | None) -> d
     return {"accepted_a": stale_accepted, "blocked_a": 8 + 1 - stale_accepted, "passed": int(passed)}
 
 
+def _run_history_partial_interruption(trace: list[dict[str, Any]] | None) -> bool:
+    """Exercise the real session history path with a partial response."""
+    session = DuplexSession("p1-history-runtime")
+    token = session.begin_response("history-runtime-response")
+    base = [{"role": "user", "content": "Qual è la capitale?"}]
+    planned = "La capitale della Francia è Parigi e si trova in Europa."
+    emitted = "La capitale della Francia è Parigi"
+    committed = threading.Event()
+    release_late = threading.Event()
+    result: dict[str, Any] = {"late_commit": None, "error": None}
+
+    def worker() -> None:
+        try:
+            session.record_planned_text(token, planned)
+            session.record_synthesized_text(token, planned)
+            session.record_emitted_text(token, emitted)
+            _emit(trace, "history_emit", actor="partial_runtime", text=emitted, accepted=True)
+            first_commit = session.commit_history(token, base, planned)
+            _emit(trace, "history_commit", actor="partial_runtime", accepted=first_commit,
+                  planned_text=planned, committed_text=session.history[-1]["content"] if first_commit else "")
+            committed.set()
+            if not release_late.wait(timeout=5):
+                raise TimeoutError("partial history worker release timeout")
+            late = session.commit_history(token, base, planned)
+            result["late_commit"] = late
+            _emit(trace, "history_commit", actor="partial_runtime", late=True,
+                  accepted=late, planned_text=planned, committed_text=planned)
+        except Exception as exc:
+            result["error"] = f"{type(exc).__name__}: {exc}"
+            _emit(trace, "history_runtime_exception", message=result["error"])
+            committed.set()
+
+    _emit(trace, "history_runtime_start", response_id=token.response_id)
+    thread = threading.Thread(target=worker, name="p1-history-runtime")
+    thread.start()
+    ready = committed.wait(timeout=5)
+    _emit(trace, "history_runtime_invalidate", response_id=token.response_id, performed=ready)
+    if ready:
+        session.invalidate_generation("partial-interruption")
+    release_late.set()
+    thread.join(timeout=5)
+    history_text = session.history[-1]["content"] if session.history else ""
+    passed = bool(
+        ready and not thread.is_alive() and result["error"] is None
+        and result["late_commit"] is False and history_text == emitted
+        and planned not in history_text
+    )
+    _emit(trace, "history_runtime_result", passed=passed, planned_text=planned,
+          emitted_text=emitted, history_text=history_text,
+          late_commit_accepted=result["late_commit"])
+    return passed
+
+
 def run_checks(root: Path, *, seed: int = 1234, sequences: int = 10_000,
                races: int = 1_000, trace: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     errors: list[str] = []
@@ -182,8 +235,9 @@ def run_checks(root: Path, *, seed: int = 1234, sequences: int = 10_000,
         blocked_attempts += result["blocked_a"]
         race_failures += 1 - result.get("passed", 0)
     _emit(trace, "policy_swap_check", policies=["none", "scripted", "turnhead"], passed=True)
-    _emit(trace, "history_scenario_result", planned_text="La capitale della Francia è Parigi e si trova...",
-          emitted_text="La capitale della Francia è Parigi", suffix_rejected=True, history_nonempty=True)
+    history_runtime_passed = _run_history_partial_interruption(trace)
+    if not history_runtime_passed:
+        errors.append("partial interruption history runtime test failed")
     if unexpected_accepted or unexpected_rejected:
         errors.append(f"FSM transition mismatches: accepted={unexpected_accepted}, rejected={unexpected_rejected}")
     if uncaught:
@@ -206,6 +260,8 @@ def run_checks(root: Path, *, seed: int = 1234, sequences: int = 10_000,
         "stale_kv_writes": race_accepted,
         "stale_session_mutations": race_accepted,
         "history_non_emitted_accepted": 0,
+        "history_runtime_partial_interruptions": 1,
+        "history_runtime_passed": history_runtime_passed,
         "direct_turnhead_imports": direct_imports,
         "direct_barge_in_server_branches": direct_barge_branches,
         "policy_swap_checks": 1,

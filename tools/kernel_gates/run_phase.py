@@ -224,9 +224,13 @@ def run_p0(manifest_path: Path, raw_path: Path, workspace: Path, seed: int) -> d
     }
 
 
-def run_p1(raw_path: Path, workspace: Path, seed: int) -> tuple[dict[str, Any], dict[str, Any]]:
+def run_p1(raw_path: Path, workspace: Path, seed: int, source_binding: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     from tools.kernel_gates.p1_checks import run_checks
-    events: list[dict[str, Any]] = [{"event": "phase_metadata", "seed": seed, "rng_seed_applied": True}]
+    events: list[dict[str, Any]] = [
+        {"event": "phase_metadata", "seed": seed, "rng_seed_applied": True},
+        {"event": "source_workspace_binding", **source_binding},
+        *({"event": "source_workspace_file", **item} for item in source_binding["files"]),
+    ]
     checks = run_checks(workspace, seed=seed, sequences=10_000, races=1_000, trace=events)
     cpu = run_cpu_contract(["tests/kernel/test_p1_control_plane.py", "tests/kernel/test_gemma_pcm_mel.py"])
     events.append({"event": "cpu_contract_result", **cpu})
@@ -267,6 +271,12 @@ def main() -> int:
     seed = int(json.loads(manifest_path.read_text(encoding="utf-8")).get("seed", 1234))
     set_global_seed(seed)
     dirty_override = None if args.git_dirty is None else args.git_dirty == "true"
+    from tools.kernel_gates.source_attestation import verify_workspace_attestation
+    try:
+        source_binding = verify_workspace_attestation(args.source_attestation, args.workspace)
+    except Exception as exc:
+        print(f"source workspace binding FAILED: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
     meta = metadata(args.phase, seed, manifest_path, args.git_sha, dirty_override)
     artifact_dir = args.out_root / meta["git_sha"] / args.phase / args.run_id
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -278,13 +288,18 @@ def main() -> int:
     if raw_path.exists():
         raw_path.unlink()
     if args.phase == "P1":
-        metrics, thresholds = run_p1(raw_path, args.workspace, seed)
+        metrics, thresholds = run_p1(raw_path, args.workspace, seed, source_binding)
         passed = bool(metrics["passed"])
     else:
         cpu = run_cpu_contract("tests/test_duplex_kernel_contract.py")
         print("CPU contract exit_code=", cpu["exit_code"], flush=True)
         with raw_path.open("w", encoding="utf-8") as f:
-            f.write(json.dumps({"event": "phase_metadata", "seed": seed, "rng_seed_applied": True, "cpu_contract": cpu}, ensure_ascii=False, sort_keys=True) + "\n")
+            initial_events = [
+                {"event": "phase_metadata", "seed": seed, "rng_seed_applied": True, "cpu_contract": cpu},
+                {"event": "source_workspace_binding", **source_binding},
+                *({"event": "source_workspace_file", **item} for item in source_binding["files"]),
+            ]
+            f.write("".join(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n" for event in initial_events))
         metrics = run_p0(manifest_path, raw_path, args.workspace, seed)
         metrics["cpu_contract"] = cpu
         thresholds = {
@@ -302,6 +317,7 @@ def main() -> int:
         )
     report = {**meta, "run_id": args.run_id, "input_manifest": artifact_manifest.name, "raw_trace": raw_path.name,
               "raw_trace_sha256": sha256(raw_path), "source_attestation": source_attestation.name,
+              "source_workspace_binding": source_binding,
               "source_attestation_sha256": sha256(source_attestation), "metrics": metrics,
               "thresholds": thresholds, "passed": passed}
     report_path = artifact_dir / f"{args.phase}_report.json"

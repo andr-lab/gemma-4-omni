@@ -92,6 +92,47 @@ def verify_source_attestation(report: dict[str, Any], report_path: Path, errors:
             fail(errors, f"impossibile leggere blob Git {relative_name}: {exc}")
 
 
+def verify_workspace_binding(report: dict[str, Any], events: list[dict[str, Any]], report_path: Path,
+                             errors: list[str]) -> None:
+    binding_events = [e for e in events if e.get("event") == "source_workspace_binding"]
+    file_events = [e for e in events if e.get("event") == "source_workspace_file"]
+    binding = report.get("source_workspace_binding")
+    if len(binding_events) != 1:
+        fail(errors, f"source_workspace_binding count={len(binding_events)}")
+        return
+    event = binding_events[0]
+    if binding != {k: event.get(k) for k in binding if k in event}:
+        fail(errors, "source workspace binding report/raw non coincide")
+    if event.get("passed") is not True or not event.get("workspace"):
+        fail(errors, "source workspace binding non attestato come PASS")
+    attestation_path = Path(report.get("source_attestation", ""))
+    if not attestation_path.is_absolute():
+        attestation_path = report_path.parent / attestation_path
+    try:
+        attestation = json.loads(attestation_path.read_text(encoding="utf-8"))
+        expected = attestation.get("files", {})
+    except Exception as exc:
+        fail(errors, f"impossibile leggere attestation per workspace binding: {exc}")
+        return
+    actual = {}
+    for item in file_events:
+        relative = item.get("path")
+        if relative in actual:
+            fail(errors, f"source workspace file duplicato: {relative}")
+        actual[relative] = {k: item.get(k) for k in ("path", "bytes", "sha256", "git_blob_sha1")}
+    expected_events = {
+        relative: {"path": relative, "bytes": value.get("bytes"), "sha256": value.get("sha256"),
+                   "git_blob_sha1": value.get("git_blob_sha1")}
+        for relative, value in expected.items()
+    }
+    if actual != expected_events:
+        fail(errors, "source workspace file digests non coincidono con attestation")
+    if event.get("files_verified") != len(expected) or len(file_events) != len(expected):
+        fail(errors, "conteggio file verificati workspace non coincide")
+    if event.get("attestation_git_sha") != attestation.get("git_sha"):
+        fail(errors, "workspace binding git_sha diverso dall'attestation")
+
+
 def pstats(events: list[dict[str, Any]], key: str) -> dict[str, float | None]:
     values = [float(e[key]) for e in events if e.get(key) is not None and math.isfinite(float(e[key]))]
     return {
@@ -177,6 +218,7 @@ def verify_p1(report_path: Path) -> tuple[dict[str, Any], list[str]]:
                 events.append(event)
             except Exception as exc:
                 fail(errors, f"raw trace line {line_no} invalida: {exc}")
+    verify_workspace_binding(report, events, report_path, errors)
 
     metadata_events = [e for e in events if e.get("event") == "phase_metadata"]
     if len(metadata_events) != 1:
@@ -230,7 +272,28 @@ def verify_p1(report_path: Path) -> tuple[dict[str, Any], list[str]]:
         for e in history_events
     )
     policy_events = [e for e in events if e.get("event") == "policy_swap_check"]
-    uncaught = len([e for e in events if e.get("event") == "fsm_exception"])
+    history_runtime_results = [e for e in events if e.get("event") == "history_runtime_result"]
+    history_runtime_emits = [e for e in events if e.get("event") == "history_emit" and e.get("actor") == "partial_runtime"]
+    history_runtime_commits = [e for e in events if e.get("event") == "history_commit" and e.get("actor") == "partial_runtime"]
+    if any(e.get("event") == "history_scenario_result" for e in events):
+        fail(errors, "history_scenario_result sintetico ancora presente")
+    if len(history_runtime_results) != 1 or not history_runtime_results[0].get("passed"):
+        fail(errors, "partial interruption history runtime result mancante/fallito")
+    if len(history_runtime_emits) != 1 or len(history_runtime_commits) != 2:
+        fail(errors, "trace history runtime parziale incompleto")
+    else:
+        runtime_emit = history_runtime_emits[0]
+        first_commit = next((e for e in history_runtime_commits if not e.get("late")), {})
+        late_commit = next((e for e in history_runtime_commits if e.get("late")), {})
+        if not first_commit.get("accepted") or late_commit.get("accepted"):
+            fail(errors, "commit emitted/late invalidate sequence non valida")
+        if first_commit.get("committed_text") != runtime_emit.get("text"):
+            fail(errors, "history runtime non coincide col testo emesso")
+        if runtime_emit.get("text") != history_runtime_results[0].get("history_text"):
+            fail(errors, "history runtime result non coincide con history effettiva")
+        if history_runtime_results[0].get("planned_text") in (history_runtime_results[0].get("history_text") or ""):
+            fail(errors, "planned non emesso presente nella history runtime")
+    uncaught = len([e for e in events if e.get("event") in {"fsm_exception", "history_runtime_exception"}])
     recomputed = {
         "seed": metadata_event.get("seed"),
         "fsm_sequences": len({e.get("sequence_id") for e in fsm_sequences}),
@@ -246,6 +309,8 @@ def verify_p1(report_path: Path) -> tuple[dict[str, Any], list[str]]:
         "stale_kv_writes": stale_accepted,
         "stale_session_mutations": stale_accepted,
         "history_non_emitted_accepted": history_non_emitted_accepted,
+        "history_runtime_partial_interruptions": len(history_runtime_results),
+        "history_runtime_passed": bool(history_runtime_results and history_runtime_results[0].get("passed")),
         "direct_turnhead_imports": dependency.get("direct_turnhead_imports"),
         "direct_barge_in_server_branches": dependency.get("direct_barge_in_server_branches"),
         "policy_swap_checks": sum(bool(e.get("passed")) for e in policy_events),
@@ -312,6 +377,7 @@ def verify_one(report_path: Path) -> tuple[dict[str, Any], list[str]]:
                 events.append(event)
             except Exception as exc:
                 fail(errors, f"raw trace line {line_no} invalida: {exc}")
+    verify_workspace_binding(report, events, report_path, errors)
     manifest = Path(report.get("input_manifest", ""))
     if not manifest.is_absolute():
         manifest = report_path.parent / manifest

@@ -9,3 +9,6 @@ def test_p1_control_plane_gates():
     assert result["cancellation_races"] == 1000
     assert result["illegal_state_transitions"] == 0
     assert result["uncaught_exceptions"] == 0
+    assert result["history_runtime_partial_interruptions"] == 1
+    assert result["history_runtime_passed"] is True
+    assert result["stale_write_attempts_blocked"] == 9000

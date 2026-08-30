@@ -30,6 +30,7 @@ DEFAULT_FILES = (
     "tools/kernel_gates/build_manifest.py",
     "tools/kernel_gates/p1_checks.py",
     "tools/kernel_gates/run_phase.py",
+    "tools/kernel_gates/source_attestation.py",
     "tools/kernel_gates/verify_report.py",
     "tests/test_duplex_kernel_contract.py",
     "tests/kernel/test_p1_control_plane.py",
@@ -48,6 +49,37 @@ def sha256_bytes(data: bytes) -> str:
 def git_blob_sha1(data: bytes) -> str:
     header = f"blob {len(data)}\0".encode("ascii")
     return hashlib.sha1(header + data).hexdigest()
+
+
+def verify_workspace_attestation(attestation_path: Path, workspace: Path) -> dict[str, Any]:
+    """Bind an attestation to the exact bytes in the runtime workspace."""
+    attestation = json.loads(attestation_path.read_text(encoding="utf-8"))
+    if attestation.get("schema_version") != 1 or attestation.get("git_dirty") is not False:
+        raise ValueError("source attestation non valida o dirty")
+    workspace = workspace.resolve()
+    verified_files = []
+    for relative, expected in attestation.get("files", {}).items():
+        path = (workspace / relative).resolve()
+        if workspace not in path.parents or not path.is_file():
+            raise FileNotFoundError(f"workspace file non attestato: {relative}")
+        data = path.read_bytes()
+        actual_sha256 = sha256_bytes(data)
+        actual_blob = git_blob_sha1(data)
+        if len(data) != expected.get("bytes") or actual_sha256 != expected.get("sha256"):
+            raise ValueError(f"byte workspace diversi da attestation: {relative}")
+        if actual_blob != expected.get("git_blob_sha1"):
+            raise ValueError(f"Git blob workspace diversa da attestation: {relative}")
+        verified_files.append({"path": relative, "bytes": len(data), "sha256": actual_sha256,
+                               "git_blob_sha1": actual_blob})
+    if not verified_files:
+        raise ValueError("source attestation senza file")
+    return {
+        "workspace": str(workspace),
+        "attestation_git_sha": attestation["git_sha"],
+        "files_verified": len(verified_files),
+        "passed": True,
+        "files": verified_files,
+    }
 
 
 def build_attestation(repo: Path, files: tuple[str, ...] = DEFAULT_FILES) -> dict[str, Any]:
