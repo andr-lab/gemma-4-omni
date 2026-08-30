@@ -1,0 +1,246 @@
+{
+  "schema_version": 1,
+  "phase": "P3",
+  "git_sha": "69cf811cf1d401400e598680de8b797eedae5ad6",
+  "git_dirty": false,
+  "timestamp_utc": "2026-08-30T13:44:47.714793+00:00",
+  "hostname": "47b59a441cd7",
+  "platform": "Linux-7.0.0-30-generic-x86_64-with-glibc2.35",
+  "gpu_name": "NVIDIA GeForce RTX 3090",
+  "gpu_uuid": "GPU-884906fa-1fb2-18cb-0c77-a339994aecf5",
+  "cuda_version": "13.0",
+  "driver_version": "595.84",
+  "torch_version": "2.12.1+cu130",
+  "transformers_version": "5.5.0",
+  "python_version": "3.11.9",
+  "seed": 1234,
+  "rng_seed_applied": true,
+  "input_manifest_sha256": "8ea715716534493a2aa570df946baa0d0c0452f448e5733baeb2df2a0faf21d1",
+  "run_id": "run2",
+  "input_manifest": "input_manifest.json",
+  "raw_trace": "raw_trace.jsonl",
+  "raw_trace_sha256": "57002ceb3058997ab11880fe56a418544b0f689bc1494cbcad42bc685b12e3c2",
+  "source_attestation": "source_attestation.json",
+  "source_workspace_binding": {
+    "workspace": "/workspace",
+    "attestation_git_sha": "69cf811cf1d401400e598680de8b797eedae5ad6",
+    "files_verified": 26,
+    "passed": true,
+    "files": [
+      {
+        "path": "duplex_kernel/__init__.py",
+        "bytes": 1378,
+        "sha256": "513779997d99b393da1f0dae68fa66e7ad312ef1c6037b44c0d82092013df727",
+        "git_blob_sha1": "025b1a99e677b971af433ae78ec77d066febcd79"
+      },
+      {
+        "path": "duplex_kernel/config.py",
+        "bytes": 3439,
+        "sha256": "4db09e5b369c0f5d37cf0b75225b95c6e2ccadb3674c9ca8712b01cc71914774",
+        "git_blob_sha1": "984c677b5958f302511b08292fe31b285ae15324"
+      },
+      {
+        "path": "duplex_kernel/engine.py",
+        "bytes": 18797,
+        "sha256": "0818678d6d981ab3758b2bef209423f8009c75b60228d400436084207f4dc462",
+        "git_blob_sha1": "ef5dac71e72fd128f4e03b3d9e92e92b2e6cf43f"
+      },
+      {
+        "path": "duplex_kernel/kv_cache.py",
+        "bytes": 8427,
+        "sha256": "6d91b01713520f0e3bff8eb0e6bb2f1f0bb98da138f06746c82220c235b2f651",
+        "git_blob_sha1": "c2288b9e3a30892389c590f98f76c15f50e7239c"
+      },
+      {
+        "path": "duplex_kernel/listener.py",
+        "bytes": 26276,
+        "sha256": "2c541cee0cc4a14786beea0b0e666fb8f28bb5fe93008567ff7487cd5b260dd8",
+        "git_blob_sha1": "b6806e09e1544817ac8c0e0a1c2b42bbb9611be2"
+      },
+      {
+        "path": "duplex_kernel/server.py",
+        "bytes": 31226,
+        "sha256": "6e38370640044a59cd222421666d7728a50217d398970987c2db2b4dc3e6d3e0",
+        "git_blob_sha1": "516ecce5e18abe6f1c649a1076ab19afb6be3ccb"
+      },
+      {
+        "path": "duplex_kernel/session.py",
+        "bytes": 13521,
+        "sha256": "4634df800100fb258a84e9ecd3a22882c80f452459352ef4abe18eca6b12137b",
+        "git_blob_sha1": "ed42795e8217eeb5205a1d24d9ccd39ca04c1c94"
+      },
+      {
+        "path": "duplex_kernel/scheduler.py",
+        "bytes": 19619,
+        "sha256": "2617ea88c4426e62d210211b062e04e2473c3b34e3ea428db0dd71857bd79ec9",
+        "git_blob_sha1": "17fb02f2cf277a2967ebd58ffee0b67fbb934e1e"
+      },
+      {
+        "path": "duplex_kernel/turn_policy.py",
+        "bytes": 7655,
+        "sha256": "54e0f77855f6760beefe8318cdf590166e603063fd72af02047f49c904002fc6",
+        "git_blob_sha1": "e275c7531f933a754893a5c075b3367fe599bb60"
+      },
+      {
+        "path": "duplex_kernel/turnhead.py",
+        "bytes": 12226,
+        "sha256": "857e486a309b3a6f54488e54ed70c217894c87f0831426bfe3f3dd1e06cdfb2c",
+        "git_blob_sha1": "a2d0053143661367ca85e5414edd33cffaf1dd9f"
+      },
+      {
+        "path": "duplex_kernel/turnhead_adapter.py",
+        "bytes": 2372,
+        "sha256": "03ef21782fb539ea080766a67e4938f932159e722d134f7cd19dfdf592f36242",
+        "git_blob_sha1": "73d747e3efc046d0de5c19429eb08b0755b5cf0c"
+      },
+      {
+        "path": "duplex_kernel/models/thinker.py",
+        "bytes": 6423,
+        "sha256": "9e1ea4f98ffce3bd8b2a177b83ea346fbbc35a7cc185a7aeb9d098f2e49b2f26",
+        "git_blob_sha1": "2cb68207e9e9bbe7f25d1bb6aab7a986c36d3a8f"
+      },
+      {
+        "path": "duplex_kernel/models/v9.py",
+        "bytes": 8588,
+        "sha256": "a0b630039c2091db7eccddeed389356c204403d48c9a20e2ed8042e719be7aac",
+        "git_blob_sha1": "5ee582f6f430c6b441ee63dd1d02f935ee495640"
+      },
+      {
+        "path": "duplex_kernel/models/talker.py",
+        "bytes": 6551,
+        "sha256": "2cb7b3c19d9f9973bcd1c1443a7ebce86f4c3c4fb01ff089d07c68a16bca660d",
+        "git_blob_sha1": "9e7bdeca5a2a6c265afb62e74c3aa296362d3c51"
+      },
+      {
+        "path": "tools/kernel_gates/build_manifest.py",
+        "bytes": 1430,
+        "sha256": "ab766cb46788a98c2722f426fc4ebec199421cdd8115b57f120fef652f468882",
+        "git_blob_sha1": "379a855207168075f1ccbad5a4f350fa33b875d9"
+      },
+      {
+        "path": "tools/kernel_gates/p1_checks.py",
+        "bytes": 13942,
+        "sha256": "0494372dc1a1d2e0d83461473409778a482d1b26af2157bb6716c17882b8310e",
+        "git_blob_sha1": "e500dc94a6112bab2c671bd783c6f5f914656685"
+      },
+      {
+        "path": "tools/kernel_gates/p2_checks.py",
+        "bytes": 13637,
+        "sha256": "0df1d774828b4012d7dc292daf8c487da6953b2348b1e0320ba2a6937481317b",
+        "git_blob_sha1": "2f822222bda40ec1f7f0111d659b14316f4917c2"
+      },
+      {
+        "path": "tools/kernel_gates/p3_checks.py",
+        "bytes": 8335,
+        "sha256": "f26d6ae1082c69d8db87a6e886d28c211f1ab0ca79b0bb949ea464b9fdd7ac1e",
+        "git_blob_sha1": "91fe3b9c467e1190691fc167b91ce934ca76e9a4"
+      },
+      {
+        "path": "tools/kernel_gates/run_phase.py",
+        "bytes": 20965,
+        "sha256": "919d83680c0bc77b08b9a3280d3f807a123d0e7c073a7f2313b6a0fb9d3cfb56",
+        "git_blob_sha1": "e5b4a0659e1749e8124fa326aab341400fb4c641"
+      },
+      {
+        "path": "tools/kernel_gates/source_attestation.py",
+        "bytes": 5373,
+        "sha256": "896daf4d367b4796bec8c90f43fd33124f45e619f847de4b754b0d0971b8528f",
+        "git_blob_sha1": "b82f94b2c6f0b0059b2342d52a15734b9079b52c"
+      },
+      {
+        "path": "tools/kernel_gates/verify_report.py",
+        "bytes": 49607,
+        "sha256": "d2a6883e6a69522b4c2b9639faa27783e28efe825a15f457ecd955b8119d0cb7",
+        "git_blob_sha1": "2c4fa7ffcccdf5230e0f83c7afb34111dbfc802d"
+      },
+      {
+        "path": "tests/test_duplex_kernel_contract.py",
+        "bytes": 1892,
+        "sha256": "3684523263a7c1567e5f57553f41a525c98f62e9133fca6669754db75c1c17de",
+        "git_blob_sha1": "f2ef50805b88923e3fcb496dcda256d06b060bbc"
+      },
+      {
+        "path": "tests/kernel/test_p1_control_plane.py",
+        "bytes": 532,
+        "sha256": "95ecbcab94013a592849848991772af28cb51aa9a00e04121ea5fe524e56d602",
+        "git_blob_sha1": "c5f0e064648f85c8b04123bb30186c172dd7620c"
+      },
+      {
+        "path": "tests/kernel/test_p2_scheduler.py",
+        "bytes": 8628,
+        "sha256": "d0bed6af966a26d145253d1cf934f48c46e31920126118fb562c62ba6f72fb1e",
+        "git_blob_sha1": "5a61ced357d08a3747320a45cfcc7d2f29cf295e"
+      },
+      {
+        "path": "tests/kernel/test_p3_listener.py",
+        "bytes": 8846,
+        "sha256": "0206004879d69bed5e20dde80868678fd72863d44182c50155bd6faa828311d8",
+        "git_blob_sha1": "3272c52b3263f1d3c336deaa60b8101990897dae"
+      },
+      {
+        "path": "tests/kernel/test_gemma_pcm_mel.py",
+        "bytes": 1291,
+        "sha256": "3b8362c75951ba9c93b215b8cbde20428341baa467c1462ce869277659afc3c9",
+        "git_blob_sha1": "78b0cc84d7b5004911129f31d74ecc20ce3487cc"
+      }
+    ]
+  },
+  "source_attestation_sha256": "81e1ab2308014242c4202e3cbd576208a1107de87515da563ebff39021f063c0",
+  "metrics": {
+    "listener_input_frames": 10000,
+    "samples_received": 12800000,
+    "samples_accounted_for": 12800000,
+    "dropped_listener_frames": 0,
+    "replay_frames": 3750,
+    "replay_seconds": 300.0,
+    "input_frames_while_speaking": 375,
+    "listener_updates_while_speaking": 375,
+    "listener_coverage_while_speaking": 1.0,
+    "nonfinite_hidden_count": 0,
+    "empty_hidden_count": 0,
+    "future_reference_leaks": 0,
+    "wrong_reference_frames": 0,
+    "assistant_reference_delay_frames": 1,
+    "listener_step_gpu_ms": {
+      "p50": 39.506,
+      "p95": 40.88,
+      "max": 750.443
+    },
+    "listener_errors": 0,
+    "p3_dependency_scan": {
+      "event": "p3_dependency_scan",
+      "direct_realtime_asr_calls": 0,
+      "scheduler_listener_binding": true,
+      "reference_buffer_binding": true,
+      "listener_step_binding": true,
+      "native_audio_tower_backend": true,
+      "assistant_reference_default_delay_frames": 1
+    },
+    "cpu_contract": {
+      "command": "/opt/conda/bin/python -m pytest tests/kernel/test_p3_listener.py tests/kernel/test_p2_scheduler.py tests/test_duplex_kernel_contract.py -q",
+      "exit_code": 0,
+      "elapsed_s": 9.28,
+      "stdout_tail": ".....................                                                    [100%]\n=============================== warnings summary ===============================\n../opt/conda/lib/python3.11/site-packages/fastapi/testclient.py:1\n  /opt/conda/lib/python3.11/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.\n    from starlette.testclient import TestClient as TestClient  # noqa\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n21 passed, 1 warning in 7.79s\n",
+      "stderr_tail": ""
+    },
+    "passed": true
+  },
+  "thresholds": {
+    "listener_input_frames_min": 10000,
+    "samples_received_equals_accounted": true,
+    "replay_frames_min": 3750,
+    "replay_seconds_min": 300.0,
+    "input_frames_while_speaking_min": 375,
+    "listener_coverage_while_speaking": 1.0,
+    "dropped_listener_frames": 0,
+    "nonfinite_hidden_count": 0,
+    "empty_hidden_count": 0,
+    "future_reference_leaks": 0,
+    "wrong_reference_frames": 0,
+    "listener_step_gpu_ms_p95_max": 80.0,
+    "listener_errors": 0,
+    "assistant_reference_delay_frames": 1,
+    "cpu_contract_exit_code": 0
+  },
+  "passed": true
+}
