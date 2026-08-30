@@ -94,7 +94,12 @@ def run_cpu_contract(test_path: str | list[str]) -> dict[str, Any]:
     test_paths = [test_path] if isinstance(test_path, str) else test_path
     cmd = [sys.executable, "-m", "pytest", *test_paths, "-q"]
     started = time.perf_counter()
-    proc = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True)
+    env = os.environ.copy()
+    # I contract CPU non devono ereditare il contesto CUDA inizializzato dal
+    # runner GPU: alcuni test V9 esercitano torch CPU ma l'import di torch
+    # eredita comunque la visibilità della GPU del processo padre.
+    env["CUDA_VISIBLE_DEVICES"] = ""
+    proc = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True, env=env)
     return {
         "command": " ".join(cmd),
         "exit_code": proc.returncode,
