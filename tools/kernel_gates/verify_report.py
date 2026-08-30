@@ -901,7 +901,7 @@ def verify_p4(report_path: Path) -> tuple[dict[str, Any], list[str]]:
         "kl_full_to_causal": sum(kl) / len(kl) if kl else None,
         "max_logit_delta": max(deltas) if deltas else None,
         "quartile_delta_ce": {},
-        "finite": all(bool(_finite(value)) for values in (full_ce, causal_ce, kl, deltas) for value in values),
+        "finite": all(math.isfinite(value) for values in (full_ce, causal_ce, kl, deltas) for value in values),
         "mask_future_prefix": True,
     }
     if ablation_frames:
