@@ -1,0 +1,129 @@
+{
+  "schema_version": 1,
+  "attestation_type": "git-clean-worktree-content-addressed",
+  "git_sha": "a360a736001ac8ac288f6b462835043ce03f268b",
+  "git_dirty": false,
+  "generated_at_utc": "2026-08-30T10:03:49.290956+00:00",
+  "files": {
+    "duplex_kernel/__init__.py": {
+      "bytes": 981,
+      "sha256": "0083757e975b1bd05dc2fb9232ac325237483d3a9017262d385eb2fea8eb797b",
+      "git_blob_sha1": "1df47cbf750ae17e0c27392899ddb5465cba0388",
+      "git_show_sha256": "0083757e975b1bd05dc2fb9232ac325237483d3a9017262d385eb2fea8eb797b"
+    },
+    "duplex_kernel/config.py": {
+      "bytes": 3424,
+      "sha256": "14b112dcc9c34a6033c34f648a9e31b4cb9d2b83d5eec009de02bfe35bb0cb08",
+      "git_blob_sha1": "3b6a74de22fd20b01c7ed71408d4e61ea8e60606",
+      "git_show_sha256": "14b112dcc9c34a6033c34f648a9e31b4cb9d2b83d5eec009de02bfe35bb0cb08"
+    },
+    "duplex_kernel/engine.py": {
+      "bytes": 18585,
+      "sha256": "16026e8f7cb03f8b58de87e57f99d5add3aee0b2629fd88ce3fdd9837e9d894b",
+      "git_blob_sha1": "4468cf65709a10f7c960c47f0e9801a12cabc57b",
+      "git_show_sha256": "16026e8f7cb03f8b58de87e57f99d5add3aee0b2629fd88ce3fdd9837e9d894b"
+    },
+    "duplex_kernel/kv_cache.py": {
+      "bytes": 8427,
+      "sha256": "6d91b01713520f0e3bff8eb0e6bb2f1f0bb98da138f06746c82220c235b2f651",
+      "git_blob_sha1": "c2288b9e3a30892389c590f98f76c15f50e7239c",
+      "git_show_sha256": "6d91b01713520f0e3bff8eb0e6bb2f1f0bb98da138f06746c82220c235b2f651"
+    },
+    "duplex_kernel/server.py": {
+      "bytes": 26759,
+      "sha256": "678de79d445b88b5f726087102afbcc8735c5b59d015b9ce58ac9d9cc18c1b1e",
+      "git_blob_sha1": "68d12501967f9149545bfff2d5198a161962e77b",
+      "git_show_sha256": "678de79d445b88b5f726087102afbcc8735c5b59d015b9ce58ac9d9cc18c1b1e"
+    },
+    "duplex_kernel/session.py": {
+      "bytes": 11471,
+      "sha256": "984e8d697ee3119a4d636553d90085f18d48e194b12ef3bde431c061925574e1",
+      "git_blob_sha1": "bff1410eb6f0ee9b21e0a5db8a1a221c1510bf77",
+      "git_show_sha256": "984e8d697ee3119a4d636553d90085f18d48e194b12ef3bde431c061925574e1"
+    },
+    "duplex_kernel/turn_policy.py": {
+      "bytes": 7655,
+      "sha256": "54e0f77855f6760beefe8318cdf590166e603063fd72af02047f49c904002fc6",
+      "git_blob_sha1": "e275c7531f933a754893a5c075b3367fe599bb60",
+      "git_show_sha256": "54e0f77855f6760beefe8318cdf590166e603063fd72af02047f49c904002fc6"
+    },
+    "duplex_kernel/turnhead.py": {
+      "bytes": 12226,
+      "sha256": "857e486a309b3a6f54488e54ed70c217894c87f0831426bfe3f3dd1e06cdfb2c",
+      "git_blob_sha1": "a2d0053143661367ca85e5414edd33cffaf1dd9f",
+      "git_show_sha256": "857e486a309b3a6f54488e54ed70c217894c87f0831426bfe3f3dd1e06cdfb2c"
+    },
+    "duplex_kernel/turnhead_adapter.py": {
+      "bytes": 2054,
+      "sha256": "207f1104ec6e4e8a21b9386c890bd2e9bad51d26df09f2ab3324a913c66bb5c5",
+      "git_blob_sha1": "2ab6ad497967ef919747bc7347c5efcf8dec33f8",
+      "git_show_sha256": "207f1104ec6e4e8a21b9386c890bd2e9bad51d26df09f2ab3324a913c66bb5c5"
+    },
+    "duplex_kernel/models/thinker.py": {
+      "bytes": 6423,
+      "sha256": "9e1ea4f98ffce3bd8b2a177b83ea346fbbc35a7cc185a7aeb9d098f2e49b2f26",
+      "git_blob_sha1": "2cb68207e9e9bbe7f25d1bb6aab7a986c36d3a8f",
+      "git_show_sha256": "9e1ea4f98ffce3bd8b2a177b83ea346fbbc35a7cc185a7aeb9d098f2e49b2f26"
+    },
+    "duplex_kernel/models/v9.py": {
+      "bytes": 8588,
+      "sha256": "a0b630039c2091db7eccddeed389356c204403d48c9a20e2ed8042e719be7aac",
+      "git_blob_sha1": "5ee582f6f430c6b441ee63dd1d02f935ee495640",
+      "git_show_sha256": "a0b630039c2091db7eccddeed389356c204403d48c9a20e2ed8042e719be7aac"
+    },
+    "duplex_kernel/models/talker.py": {
+      "bytes": 6551,
+      "sha256": "2cb7b3c19d9f9973bcd1c1443a7ebce86f4c3c4fb01ff089d07c68a16bca660d",
+      "git_blob_sha1": "9e7bdeca5a2a6c265afb62e74c3aa296362d3c51",
+      "git_show_sha256": "2cb7b3c19d9f9973bcd1c1443a7ebce86f4c3c4fb01ff089d07c68a16bca660d"
+    },
+    "tools/kernel_gates/build_manifest.py": {
+      "bytes": 1430,
+      "sha256": "ab766cb46788a98c2722f426fc4ebec199421cdd8115b57f120fef652f468882",
+      "git_blob_sha1": "379a855207168075f1ccbad5a4f350fa33b875d9",
+      "git_show_sha256": "ab766cb46788a98c2722f426fc4ebec199421cdd8115b57f120fef652f468882"
+    },
+    "tools/kernel_gates/p1_checks.py": {
+      "bytes": 13942,
+      "sha256": "0494372dc1a1d2e0d83461473409778a482d1b26af2157bb6716c17882b8310e",
+      "git_blob_sha1": "e500dc94a6112bab2c671bd783c6f5f914656685",
+      "git_show_sha256": "0494372dc1a1d2e0d83461473409778a482d1b26af2157bb6716c17882b8310e"
+    },
+    "tools/kernel_gates/run_phase.py": {
+      "bytes": 15780,
+      "sha256": "45477e36dc6ee5883c74abf00d8fcdd76616d74e19fe7cd7582fbf0675ef8044",
+      "git_blob_sha1": "4697892fa425c4ad9328d0ed61a28f86bd596c50",
+      "git_show_sha256": "45477e36dc6ee5883c74abf00d8fcdd76616d74e19fe7cd7582fbf0675ef8044"
+    },
+    "tools/kernel_gates/source_attestation.py": {
+      "bytes": 4986,
+      "sha256": "93a1d4339f727ea2e5e04651ab9a4a4d191127d1c14f02d5465c15988efb62ea",
+      "git_blob_sha1": "efcf9211bafef0c21665381de1e3f76c34d28741",
+      "git_show_sha256": "93a1d4339f727ea2e5e04651ab9a4a4d191127d1c14f02d5465c15988efb62ea"
+    },
+    "tools/kernel_gates/verify_report.py": {
+      "bytes": 24260,
+      "sha256": "d3cbec57693f6fe9c594c1d9d6f991fa5312bdd9555bff5e0a5bc9c2160375d9",
+      "git_blob_sha1": "9a9b5587496a94c8e57f13c175e4222082a52b45",
+      "git_show_sha256": "d3cbec57693f6fe9c594c1d9d6f991fa5312bdd9555bff5e0a5bc9c2160375d9"
+    },
+    "tests/test_duplex_kernel_contract.py": {
+      "bytes": 1892,
+      "sha256": "3684523263a7c1567e5f57553f41a525c98f62e9133fca6669754db75c1c17de",
+      "git_blob_sha1": "f2ef50805b88923e3fcb496dcda256d06b060bbc",
+      "git_show_sha256": "3684523263a7c1567e5f57553f41a525c98f62e9133fca6669754db75c1c17de"
+    },
+    "tests/kernel/test_p1_control_plane.py": {
+      "bytes": 532,
+      "sha256": "95ecbcab94013a592849848991772af28cb51aa9a00e04121ea5fe524e56d602",
+      "git_blob_sha1": "c5f0e064648f85c8b04123bb30186c172dd7620c",
+      "git_show_sha256": "95ecbcab94013a592849848991772af28cb51aa9a00e04121ea5fe524e56d602"
+    },
+    "tests/kernel/test_gemma_pcm_mel.py": {
+      "bytes": 1291,
+      "sha256": "3b8362c75951ba9c93b215b8cbde20428341baa467c1462ce869277659afc3c9",
+      "git_blob_sha1": "78b0cc84d7b5004911129f31d74ecc20ce3487cc",
+      "git_show_sha256": "3b8362c75951ba9c93b215b8cbde20428341baa467c1462ce869277659afc3c9"
+    }
+  }
+}

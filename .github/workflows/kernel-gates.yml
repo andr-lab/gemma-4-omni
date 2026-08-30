@@ -1,0 +1,40 @@
+name: Kernel gate verification
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-kernel-gates:
+    name: Verify P0/P1 reports
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install verifier dependency
+        run: python -m pip install --disable-pip-version-check numpy
+
+      - name: Verify published P0 run1/run2 and P1
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha="$(tr -d '\r\n' < validation/kernel_gates/ACTIVE_SHA)"
+          root="validation/kernel_gates/${sha}"
+          test -f "${root}/P0/run1/P0_report.json"
+          test -f "${root}/P0/run2/P0_report.json"
+          test -f "${root}/P1/run1/P1_report.json"
+          python tools/kernel_gates/verify_report.py \
+            "${root}/P0/run1/P0_report.json" \
+            --compare "${root}/P0/run2/P0_report.json"
+          python tools/kernel_gates/verify_report.py \
+            "${root}/P1/run1/P1_report.json"
