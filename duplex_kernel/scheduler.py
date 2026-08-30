@@ -6,6 +6,7 @@ Gemma, V9, Qwen, or the WebSocket protocol; those components consume complete
 """
 from __future__ import annotations
 
+import logging
 import math
 import queue
 import threading
@@ -15,6 +16,8 @@ from typing import Callable
 
 import numpy as np
 
+
+logger = logging.getLogger("duplex_kernel.scheduler")
 
 DEFAULT_SAMPLE_RATE = 16_000
 DEFAULT_FRAME_DURATION_MS = 80
@@ -323,15 +326,21 @@ class DuplexScheduler:
         on_listener: Callback | None = None,
         on_policy: Callback | None = None,
         on_speaker: Callback | None = None,
+        on_error: Callable[[BaseException], None] | None = None,
         deadline_jitter_budget_ms: float = 20.0,
+        history_limit: int = 4096,
     ) -> None:
         if deadline_jitter_budget_ms < 0:
             raise ValueError("deadline_jitter_budget_ms non può essere negativo")
+        if history_limit < 0:
+            raise ValueError("history_limit non può essere negativo")
         self.ingress = ingress
         self.clock = clock or MonotonicFrameClock()
         self.on_listener = on_listener
         self.on_policy = on_policy
         self.on_speaker = on_speaker
+        self.on_error = on_error
+        self.history_limit = int(history_limit)
         self.deadline_jitter_budget_ns = int(deadline_jitter_budget_ms * 1_000_000)
         self._next_tick_index = 0
         self._ticks = 0
@@ -343,16 +352,53 @@ class DuplexScheduler:
         self._last_tick_frame_id: int | None = None
         self._input_frames_during_speaking = 0
         self._history: list[DuplexTick] = []
+        self._lifecycle_lock = threading.RLock()
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._error: BaseException | None = None
 
     def _phase_now(self) -> int:
         return self.clock.now_ns()
 
-    def _dispatch(self, callback: Callback | None, frame: AudioFrame | None, tick: DuplexTick) -> int | None:
-        if callback is None:
-            return None
-        started = self._phase_now()
-        callback(frame, tick)
-        return started
+    def start(self, *, name: str = "duplex-scheduler") -> None:
+        """Start the real-time clock loop; the loop is the queue consumer."""
+        with self._lifecycle_lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._stop_event.clear()
+            self._error = None
+            self._thread = threading.Thread(target=self._run_forever, name=name, daemon=True)
+            self._thread.start()
+
+    def _run_forever(self) -> None:
+        try:
+            while not self._stop_event.is_set():
+                self.tick()
+        except BaseException as exc:
+            self._error = exc
+            logger.exception("DuplexScheduler arrestato per errore")
+            if self.on_error is not None:
+                self.on_error(exc)
+
+    def stop(self, *, timeout: float = 2.0) -> None:
+        """Stop the clock loop and wait for an in-flight callback to finish."""
+        with self._lifecycle_lock:
+            thread = self._thread
+            self._stop_event.set()
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=max(0.0, timeout))
+        with self._lifecycle_lock:
+            if self._thread is thread and (thread is None or not thread.is_alive()):
+                self._thread = None
+
+    @property
+    def is_running(self) -> bool:
+        with self._lifecycle_lock:
+            return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def error(self) -> BaseException | None:
+        return self._error
 
     def tick(self) -> DuplexTick:
         """Wait for and execute the next tick."""
@@ -388,23 +434,28 @@ class DuplexScheduler:
             observed_ns=actual,
         )
 
-        if self.on_listener is not None:
+        # A missing input frame is an idle tick, not a callback invocation:
+        # listener/policy/speaker are driven only by the scheduler when a
+        # complete frame has been consumed from the ingress queue.
+        if frame is not None and self.on_listener is not None:
             tick.listener_start_ns = self._phase_now()
             self.on_listener(frame, tick)
             tick.listener_end_ns = self._phase_now()
-        if self.on_policy is not None:
+        if frame is not None and self.on_policy is not None:
             self.on_policy(frame, tick)
             tick.policy_ns = self._phase_now()
-        if self.on_speaker is not None:
-            if frame is not None:
-                self._input_frames_during_speaking += 1
+        if frame is not None and self.on_speaker is not None:
+            self._input_frames_during_speaking += 1
             tick.speaker_start_ns = self._phase_now()
             self.on_speaker(frame, tick)
             tick.speaker_end_ns = self._phase_now()
 
         self._next_tick_index += 1
         self._ticks += 1
-        self._history.append(tick)
+        if self.history_limit:
+            self._history.append(tick)
+            if len(self._history) > self.history_limit:
+                del self._history[:-self.history_limit]
         return tick
 
     def run_ticks(self, count: int) -> list[DuplexTick]:

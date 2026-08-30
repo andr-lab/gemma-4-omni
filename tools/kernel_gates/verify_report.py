@@ -439,12 +439,32 @@ def verify_p2(report_path: Path) -> tuple[dict[str, Any], list[str]]:
     jitter_p99 = round(float(np.percentile(real_jitter, 99)), 3) if real_jitter else None
     miss_rate = sum(value > 20.0 for value in real_jitter) / len(real_jitter) if real_jitter else None
 
+    def transport(stream: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+        arrivals = [e for e in events if e.get("event") == "p2_input_arrival" and e.get("stream") == stream]
+        enqueued = [e for e in events if e.get("event") == "p2_input_enqueued" and e.get("stream") == stream]
+        consumed = [e for e in events if e.get("event") == "p2_input_consumed" and e.get("stream") == stream]
+        dropped = [e for e in events if e.get("event") == "p2_input_drop" and e.get("stream") == stream]
+        if len(arrivals) != len(enqueued) + len(dropped):
+            fail(errors, f"transport {stream}: arrivals != enqueued + dropped")
+        return arrivals, enqueued, consumed, dropped
+
+    virtual_arrivals, virtual_enqueued, virtual_consumed, virtual_dropped = transport("virtual_60s")
+    concurrent_arrivals, concurrent_enqueued, concurrent_consumed, concurrent_dropped = transport("concurrent")
+    concurrent_speaker = [e for e in events if e.get("event") == "p2_concurrent_speaker_frame"]
     speaking = [e for e in events if e.get("event") == "p2_speaking_frame"]
     speaking_ids = [e.get("frame_id") for e in speaking]
     if len(speaking_ids) != len(set(speaking_ids)) or speaking_ids != list(range(750)):
         fail(errors, "frame input durante speaking non completo o non ordinato")
     if any(e.get("tick_frame_id") != e.get("frame_id") for e in speaking):
         fail(errors, "speaking frame non associato al tick corretto")
+    if [e.get("frame_id") for e in virtual_arrivals] != list(range(750)):
+        fail(errors, "arrivi virtuali P2 mancanti/duplicati/non ordinati")
+    if [e.get("frame_id") for e in virtual_enqueued] != list(range(750)):
+        fail(errors, "enqueue virtuali P2 mancanti/duplicati/non ordinati")
+    if [e.get("frame_id") for e in virtual_consumed] != list(range(750)):
+        fail(errors, "consume virtuali P2 mancanti/duplicati/non ordinati")
+    if [e.get("frame_id") for e in concurrent_speaker] != [e.get("frame_id") for e in concurrent_consumed]:
+        fail(errors, "consumer concurrent non sincronizzato con lo speaker")
 
     cpu_contract = metadata_event.get("cpu_contract", {})
     recomputed = {
@@ -457,14 +477,22 @@ def verify_p2(report_path: Path) -> tuple[dict[str, Any], list[str]]:
         "virtual_60_missing_ticks": 0 if len(virtual_60) == 750 else 1,
         "virtual_60_duplicate_ticks": 0 if len(speaking_ids) == len(set(speaking_ids)) else 1,
         "virtual_60_out_of_order_ticks": 0 if [e.get("frame_id") for e in virtual_60] == list(range(750)) else 1,
-        "input_frames_received": len(virtual_60),
-        "input_frames_enqueued": sum(e.get("enqueue_ns") is not None for e in virtual_60),
-        "input_frames_consumed": len(virtual_60),
-        "input_samples_received": len(virtual_60) * 1280,
-        "dropped_input_frames": 0,
-        "duplicate_input_frames": 0 if len(speaking_ids) == len(set(speaking_ids)) else 1,
-        "out_of_order_input_frames": 0 if speaking_ids == list(range(750)) else 1,
+        "input_frames_received": len(virtual_arrivals),
+        "input_frames_enqueued": len(virtual_enqueued),
+        "input_frames_consumed": len(virtual_consumed),
+        "input_samples_received": sum(int(e.get("samples", 0)) for e in virtual_arrivals),
+        "dropped_input_frames": len(virtual_dropped),
+        "duplicate_input_frames": len(virtual_consumed) - len({e.get("frame_id") for e in virtual_consumed}),
+        "out_of_order_input_frames": int([e.get("frame_id") for e in virtual_consumed] != sorted(e.get("frame_id") for e in virtual_consumed)),
         "input_frames_during_speaking": len(speaking_ids),
+        "concurrent_input_frames_received": len(concurrent_arrivals),
+        "concurrent_input_frames_enqueued": len(concurrent_enqueued),
+        "concurrent_input_frames_consumed": len(concurrent_consumed),
+        "concurrent_input_frames_during_speaking": sum(bool(e.get("speaker_active")) for e in concurrent_arrivals),
+        "concurrent_dropped_input_frames": len(concurrent_dropped),
+        "concurrent_duplicate_input_frames": len(concurrent_consumed) - len({e.get("frame_id") for e in concurrent_consumed}),
+        "concurrent_out_of_order_input_frames": int([e.get("frame_id") for e in concurrent_consumed] != sorted(e.get("frame_id") for e in concurrent_consumed)),
+        "concurrent_speaker_frames": len(concurrent_speaker),
         "real_ticks": len(real_ticks),
         "real_duration_s": round(float(real_config.get("elapsed_s", 0.0)), 3),
         "real_deadline_miss_rate": miss_rate,
@@ -495,6 +523,13 @@ def verify_p2(report_path: Path) -> tuple[dict[str, Any], list[str]]:
         "dropped_input_frames": recomputed["dropped_input_frames"],
         "duplicate_input_frames": recomputed["duplicate_input_frames"],
         "out_of_order_input_frames": recomputed["out_of_order_input_frames"],
+        "concurrent_input_frames_received": recomputed["concurrent_input_frames_received"],
+        "concurrent_input_frames_enqueued": recomputed["concurrent_input_frames_enqueued"],
+        "concurrent_input_frames_consumed": recomputed["concurrent_input_frames_consumed"],
+        "concurrent_dropped_input_frames": recomputed["concurrent_dropped_input_frames"],
+        "concurrent_duplicate_input_frames": recomputed["concurrent_duplicate_input_frames"],
+        "concurrent_out_of_order_input_frames": recomputed["concurrent_out_of_order_input_frames"],
+        "concurrent_speaker_frames": recomputed["concurrent_speaker_frames"],
         "real_ticks": recomputed["real_ticks"],
     }
     for key, actual in exact_thresholds.items():
@@ -504,6 +539,8 @@ def verify_p2(report_path: Path) -> tuple[dict[str, Any], list[str]]:
             fail(errors, f"threshold P2 fallita: {key}={actual!r} != {thresholds[key]!r}")
     if float(recomputed["input_frames_during_speaking"]) < float(thresholds.get("input_frames_during_speaking_min", 1)):
         fail(errors, "threshold P2 fallita: nessun input durante speaking")
+    if float(recomputed["concurrent_input_frames_during_speaking"]) < float(thresholds.get("concurrent_input_frames_during_speaking_min", 1)):
+        fail(errors, "threshold P2 fallita: producer concurrent non attivo durante speaking")
     if requested_duration < float(thresholds.get("real_duration_min_s", 60.0)):
         fail(errors, "threshold P2 fallita: real clock sotto 60 secondi")
     if float(recomputed["real_duration_s"]) < requested_duration:

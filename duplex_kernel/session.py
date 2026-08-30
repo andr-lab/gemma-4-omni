@@ -100,6 +100,13 @@ class DuplexSession:
     language: str = "Italian"
     tools: list[dict[str, Any]] = field(default_factory=list)
     auto_response: bool = False
+    scheduler: Any = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        # The scheduler owns consumption of audio_ingress.  Server adapters
+        # inject callbacks but never call get()/policy.step() themselves.
+        from duplex_kernel.scheduler import DuplexScheduler
+        self.scheduler = DuplexScheduler(self.audio_ingress)
 
     def touch(self) -> None:
         self.last_activity = time.time()
@@ -249,6 +256,7 @@ class SessionManager:
         with self._lock:
             sess = self.sessions.pop(session_id, None)
         if sess is not None:
+            sess.scheduler.stop()
             sess.turn_kv.clear()
             sess.talker_prefix.clear()
             sess.audio_ingress.close()
@@ -262,6 +270,7 @@ class SessionManager:
                    if now - sess.last_activity > self.idle_timeout_s]
         for sid in expired:
             sess = self.sessions.pop(sid)
+            sess.scheduler.stop()
             sess.turn_kv.clear()
             sess.talker_prefix.clear()
             sess.audio_ingress.close()

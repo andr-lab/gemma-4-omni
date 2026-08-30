@@ -1,8 +1,8 @@
 """Content-addressed source attestation for kernel gate artifacts.
 
-The attestation is valid only for a clean Git checkout.  The verifier compares
-both the worktree bytes and Git blob IDs, so a JSON summary cannot silently
-claim a different source revision.
+The attestation is valid only for a clean Git checkout.  The verifier checks
+Git object bytes and blob IDs, so a JSON summary cannot silently claim a
+different source revision.
 """
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ DEFAULT_FILES = (
     "duplex_kernel/kv_cache.py",
     "duplex_kernel/server.py",
     "duplex_kernel/session.py",
+    "duplex_kernel/scheduler.py",
     "duplex_kernel/turn_policy.py",
     "duplex_kernel/turnhead.py",
     "duplex_kernel/turnhead_adapter.py",
@@ -29,11 +30,13 @@ DEFAULT_FILES = (
     "duplex_kernel/models/talker.py",
     "tools/kernel_gates/build_manifest.py",
     "tools/kernel_gates/p1_checks.py",
+    "tools/kernel_gates/p2_checks.py",
     "tools/kernel_gates/run_phase.py",
     "tools/kernel_gates/source_attestation.py",
     "tools/kernel_gates/verify_report.py",
     "tests/test_duplex_kernel_contract.py",
     "tests/kernel/test_p1_control_plane.py",
+    "tests/kernel/test_p2_scheduler.py",
     "tests/kernel/test_gemma_pcm_mel.py",
 )
 

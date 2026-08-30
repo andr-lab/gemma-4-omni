@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+import threading
+import time
 
 import numpy as np
 import pytest
@@ -46,9 +48,19 @@ def test_session_websocket_routes_arbitrary_chunks_to_independent_ingress() -> N
         ws.send_json({"type": "session.update", "session": {}})
         assert ws.receive_json()["type"] == "session.updated"
         session = sessions.all()[0]
-        assert session.audio_ingress.qsize == 2
-        assert session.audio_ingress.stats()["input_frames_received"] == 2
-        assert session.audio_ingress.stats()["input_samples_received"] == 2 * FRAME_SAMPLES
+        deadline = time.monotonic() + 1.0
+        while session.audio_ingress.stats()["input_frames_consumed"] < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        stats = session.audio_ingress.stats()
+        assert session.scheduler.is_running
+        assert stats["input_frames_received"] == 2
+        assert stats["input_frames_enqueued"] == 2
+        assert stats["input_frames_consumed"] == 2
+        assert stats["input_samples_received"] == 2 * FRAME_SAMPLES
+        assert stats["dropped_input_frames"] == 0
+        frame_ticks = [tick for tick in session.scheduler.history if tick.enqueue_ns is not None]
+        assert len(frame_ticks) == 2
+        assert frame_ticks[1].deadline_ns - frame_ticks[0].deadline_ns == 80_000_000
         ws.send_json({"type": "session.close"})
 
 
@@ -76,6 +88,66 @@ def test_audio_ingress_segments_arbitrary_chunks_without_loss() -> None:
     assert stats["dropped_input_frames"] == 0
     assert stats["duplicate_input_frames"] == 0
     assert stats["out_of_order_input_frames"] == 0
+
+
+def test_p2_attestation_covers_scheduler_harness_and_test() -> None:
+    from tools.kernel_gates.source_attestation import DEFAULT_FILES
+
+    assert "duplex_kernel/scheduler.py" in DEFAULT_FILES
+    assert "tools/kernel_gates/p2_checks.py" in DEFAULT_FILES
+    assert "tests/kernel/test_p2_scheduler.py" in DEFAULT_FILES
+
+
+def test_scheduler_consumes_frames_appended_while_speaker_callback_is_busy() -> None:
+    ingress = AudioIngressQueue()
+    ingress.put(np.zeros(FRAME_SAMPLES, dtype=np.float32), capture_start_ns=0)
+    speaking = threading.Event()
+    producer_done = threading.Event()
+    produced_while_speaking: list[int] = []
+    producer_thread: threading.Thread | None = None
+
+    def produce() -> None:
+        try:
+            for frame_id in range(1, 21):
+                ingress.put(
+                    np.full(FRAME_SAMPLES, frame_id, dtype=np.float32),
+                    capture_start_ns=frame_id * 80_000_000,
+                )
+                if speaking.is_set():
+                    produced_while_speaking.append(frame_id)
+                time.sleep(0.002)
+        finally:
+            producer_done.set()
+
+    def speaker(frame, tick) -> None:
+        nonlocal producer_thread
+        assert frame is not None
+        if frame.frame_id == 0:
+            speaking.set()
+            producer_thread = threading.Thread(target=produce, name="p2-concurrent-producer")
+            producer_thread.start()
+            # Keep the speaker callback occupied while the producer appends.
+            time.sleep(0.05)
+        else:
+            time.sleep(0.005)
+
+    scheduler = DuplexScheduler(
+        ingress,
+        clock=MonotonicFrameClock(),
+        on_speaker=speaker,
+    )
+    scheduler.run_ticks(21)
+    assert producer_done.wait(timeout=1.0)
+    assert producer_thread is not None
+    producer_thread.join(timeout=1.0)
+    metrics = scheduler.stats()
+    assert len(produced_while_speaking) == 20
+    assert metrics["input_frames_received"] == 21
+    assert metrics["input_frames_consumed"] == 21
+    assert metrics["input_frames_during_speaking"] == 21
+    assert metrics["dropped_input_frames"] == 0
+    assert metrics["duplicate_input_frames"] == 0
+    assert metrics["out_of_order_input_frames"] == 0
 
 
 def test_audio_ingress_rejects_non_frame_put_and_nonfinite_samples() -> None:

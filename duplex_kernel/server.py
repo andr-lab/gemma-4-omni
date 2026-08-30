@@ -219,6 +219,59 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
             await ws.close(code=1008, reason="usa /v1/realtime?duplex=1"); return
         await ws.accept(); sess = sessions.create_session(); _ensure_policy(sess); response_task: asyncio.Task | None = None
         auto_task: asyncio.Task | None = None
+        loop = asyncio.get_running_loop()
+        scheduler_events: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+
+        async def publish_scheduler_events() -> None:
+            while True:
+                event = await scheduler_events.get()
+                if event is None:
+                    return
+                try:
+                    await ws.send_json(event)
+                except (WebSocketDisconnect, RuntimeError):
+                    return
+
+        def scheduler_policy(frame: Any, tick: Any) -> None:
+            """Policy callback invoked only by DuplexScheduler's tick thread."""
+            if frame is None:
+                return
+            policy = sess.turn_policy
+            if policy is None:
+                return
+            decision = policy.step(PolicyInput(
+                session_id=sess.session_id,
+                frame_id=frame.frame_id,
+                user_pcm=frame.pcm,
+                speaker_active=sess.active_response,
+                generation_id=sess.session_generation_id,
+                speaker_segment_id=sess.speaker_segment_id,
+            ))
+            gate = speaker_gate.apply(decision, sess)
+            logger.info("[realtime %s] scheduler action=%s frame=%d active=%s", sess.session_id[:8], decision.action.value, frame.frame_id, sess.active_response)
+            if not gate.stop_synthesis:
+                return
+            if hasattr(engine, "stop_generation"):
+                engine.stop_generation()
+            with sess._generation_lock:
+                if sess.response_cancel_notified:
+                    return
+                sess.response_cancel_notified = True
+                event = {"type": "response.cancelled", "reason": gate.action.value.lower(), "response_id": sess.response_id}
+            loop.call_soon_threadsafe(scheduler_events.put_nowait, event)
+
+        def scheduler_error(exc: BaseException) -> None:
+            loop.call_soon_threadsafe(
+                scheduler_events.put_nowait,
+                {"type": "error", "error": {"code": "SCHEDULER_ERROR", "message": str(exc)[:240]}},
+            )
+
+        # The scheduler is the sole consumer of audio_ingress and owns the
+        # 80 ms cadence; the WebSocket path only validates and appends PCM.
+        sess.scheduler.on_policy = scheduler_policy
+        sess.scheduler.on_error = scheduler_error
+        sess.scheduler.start(name=f"duplex-scheduler-{sess.session_id[:8]}")
+        scheduler_event_task = asyncio.create_task(publish_scheduler_events())
 
         async def produce_response(committed_audio: np.ndarray) -> None:
             nonlocal response_task
@@ -379,27 +432,10 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     if sess.pending_audio.size + pcm.size > USER_SAMPLE_RATE * 30:
                         await ws.send_json({"type": "error", "error": {"code": "AUDIO_LIMIT", "message": "massimo 30 secondi per turno"}}); continue
                     sess.touch(); sess.pending_audio = np.concatenate((sess.pending_audio, pcm))
-                    # L'ingress è frame-based e indipendente dalla commit della
-                    # request: chunk WS arbitrari vengono segmentati senza perdita;
-                    # la policy vede solo tick completi da 80 ms.
-                    frames = sess.audio_ingress.append(pcm)
-                    for frame in frames:
-                        decision = sess.turn_policy.step(PolicyInput(
-                            session_id=sess.session_id,
-                            frame_id=frame.frame_id,
-                            user_pcm=frame.pcm,
-                            speaker_active=sess.active_response,
-                            generation_id=sess.session_generation_id,
-                            speaker_segment_id=sess.speaker_segment_id,
-                        ))
-                        gate = speaker_gate.apply(decision, sess)
-                        logger.info("[realtime %s] policy action=%s frame=%d active=%s", sess.session_id[:8], decision.action.value, frame.frame_id, sess.active_response)
-                        if gate.stop_synthesis:
-                            if hasattr(engine, "stop_generation"):
-                                engine.stop_generation()
-                            if not sess.response_cancel_notified:
-                                sess.response_cancel_notified = True
-                                await ws.send_json({"type": "response.cancelled", "reason": gate.action.value.lower(), "response_id": sess.response_id})
+                    # Il WebSocket è solo transport: la queue è consumata e
+                    # segmentata dal DuplexScheduler, che invoca la policy a
+                    # cadenza 80 ms anche mentre la risposta è attiva.
+                    sess.audio_ingress.append(pcm)
                     if sess.auto_response and not sess.active_response:
                         await schedule_auto_response()
                 elif et in {"input_audio_buffer.commit", "response.create"}:
@@ -421,6 +457,8 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
         finally:
             if auto_task and not auto_task.done(): auto_task.cancel()
             if response_task and not response_task.done(): response_task.cancel()
+            scheduler_events.put_nowait(None)
+            if scheduler_event_task and not scheduler_event_task.done(): scheduler_event_task.cancel()
             sessions.close(sess.session_id)
     return app
 
