@@ -189,8 +189,8 @@ def run_p0(manifest_path: Path, raw_path: Path, workspace: Path, seed: int) -> d
                 event["cuda_peak_reserved_bytes"] = int(torch.cuda.max_memory_reserved())
             events.append(event)
             raw_path.parent.mkdir(parents=True, exist_ok=True)
-            with raw_path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
+            with raw_path.open("ab") as f:
+                f.write((json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8"))
             print(f"[{index + 1}/{len(inputs)}] {item['id']} success={event['success']} total_ms={event['total_time_ms']:.0f}", flush=True)
     finally:
         try:
@@ -249,7 +249,7 @@ def run_p1(raw_path: Path, workspace: Path, seed: int, source_binding: dict[str,
         "history_non_emitted_accepted": 0,
     }
     metrics["passed"] = bool(checks["passed"] and cpu["exit_code"] == 0)
-    raw_path.write_text("".join(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n" for event in events), encoding="utf-8")
+    raw_path.write_bytes("".join(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n" for event in events).encode("utf-8"))
     return metrics, thresholds
 
 
@@ -293,13 +293,13 @@ def main() -> int:
     else:
         cpu = run_cpu_contract("tests/test_duplex_kernel_contract.py")
         print("CPU contract exit_code=", cpu["exit_code"], flush=True)
-        with raw_path.open("w", encoding="utf-8") as f:
+        with raw_path.open("wb") as f:
             initial_events = [
                 {"event": "phase_metadata", "seed": seed, "rng_seed_applied": True, "cpu_contract": cpu},
                 {"event": "source_workspace_binding", **source_binding},
                 *({"event": "source_workspace_file", **item} for item in source_binding["files"]),
             ]
-            f.write("".join(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n" for event in initial_events))
+            f.write("".join(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n" for event in initial_events).encode("utf-8"))
         metrics = run_p0(manifest_path, raw_path, args.workspace, seed)
         metrics["cpu_contract"] = cpu
         thresholds = {
