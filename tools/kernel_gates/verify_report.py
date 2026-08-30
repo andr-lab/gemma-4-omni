@@ -448,6 +448,20 @@ def verify_p2(report_path: Path) -> tuple[dict[str, Any], list[str]]:
             fail(errors, f"transport {stream}: arrivals != enqueued + dropped")
         return arrivals, enqueued, consumed, dropped
 
+    dependency_events = [e for e in events if e.get("event") == "p2_dependency_scan"]
+    if len(dependency_events) != 1:
+        fail(errors, f"p2_dependency_scan count={len(dependency_events)}")
+    dependency_event = dependency_events[0] if dependency_events else {}
+    for key in (
+        "direct_server_audio_ingress_consumers",
+        "direct_ws_policy_calls",
+    ):
+        if not isinstance(dependency_event.get(key), int) or dependency_event.get(key) < 0:
+            fail(errors, f"p2_dependency_scan campo non valido: {key}")
+    for key in ("scheduler_policy_binding", "scheduler_start_binding"):
+        if not isinstance(dependency_event.get(key), bool):
+            fail(errors, f"p2_dependency_scan campo non valido: {key}")
+
     virtual_arrivals, virtual_enqueued, virtual_consumed, virtual_dropped = transport("virtual_60s")
     concurrent_arrivals, concurrent_enqueued, concurrent_consumed, concurrent_dropped = transport("concurrent")
     concurrent_speaker = [e for e in events if e.get("event") == "p2_concurrent_speaker_frame"]
@@ -469,6 +483,10 @@ def verify_p2(report_path: Path) -> tuple[dict[str, Any], list[str]]:
     cpu_contract = metadata_event.get("cpu_contract", {})
     recomputed = {
         "cpu_contract": cpu_contract,
+        "direct_server_audio_ingress_consumers": dependency_event.get("direct_server_audio_ingress_consumers"),
+        "direct_ws_policy_calls": dependency_event.get("direct_ws_policy_calls"),
+        "scheduler_policy_binding": dependency_event.get("scheduler_policy_binding"),
+        "scheduler_start_binding": dependency_event.get("scheduler_start_binding"),
         "virtual_10_ticks": len(virtual_10),
         "virtual_10_missing_ticks": 0 if len(virtual_10) == 125 else 1,
         "virtual_10_duplicate_ticks": 0 if [e.get("frame_id") for e in virtual_10] == list(range(125)) else 1,
@@ -508,6 +526,10 @@ def verify_p2(report_path: Path) -> tuple[dict[str, Any], list[str]]:
     thresholds = report.get("thresholds", {})
     exact_thresholds = {
         "cpu_contract_exit_code": cpu_contract.get("exit_code"),
+        "direct_server_audio_ingress_consumers": recomputed["direct_server_audio_ingress_consumers"],
+        "direct_ws_policy_calls": recomputed["direct_ws_policy_calls"],
+        "scheduler_policy_binding": recomputed["scheduler_policy_binding"],
+        "scheduler_start_binding": recomputed["scheduler_start_binding"],
         "virtual_10_ticks": recomputed["virtual_10_ticks"],
         "virtual_10_missing_ticks": recomputed["virtual_10_missing_ticks"],
         "virtual_10_duplicate_ticks": recomputed["virtual_10_duplicate_ticks"],
