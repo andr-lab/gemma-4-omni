@@ -253,9 +253,30 @@ def run_p1(raw_path: Path, workspace: Path, seed: int, source_binding: dict[str,
     return metrics, thresholds
 
 
+def run_p2(raw_path: Path, workspace: Path, seed: int, source_binding: dict[str, Any],
+            real_duration_s: float, cpu_contract: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    from tools.kernel_gates.p2_checks import run_checks
+
+    events: list[dict[str, Any]] = []
+    metrics, thresholds = run_checks(
+        workspace,
+        seed=seed,
+        real_duration_s=real_duration_s,
+        cpu_contract=cpu_contract,
+        trace=events,
+    )
+    binding_index = 1
+    events.insert(binding_index, {"event": "source_workspace_binding", **source_binding})
+    events[binding_index + 1:binding_index + 1] = [
+        {"event": "source_workspace_file", **item} for item in source_binding["files"]
+    ]
+    raw_path.write_bytes("".join(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n" for event in events).encode("utf-8"))
+    return metrics, thresholds
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--phase", choices=["P0", "P1"], required=True)
+    ap.add_argument("--phase", choices=["P0", "P1", "P2"], required=True)
     ap.add_argument("--workspace", type=Path, default=ROOT)
     ap.add_argument("--manifest", type=Path, default=None)
     ap.add_argument("--out-root", type=Path, default=ROOT / "artifacts" / "kernel_gates")
@@ -264,6 +285,8 @@ def main() -> int:
     ap.add_argument("--git-dirty", choices=["true", "false"], default=None)
     ap.add_argument("--source-attestation", type=Path, required=True,
                     help="attestation content-addressed del checkout Git pulito")
+    ap.add_argument("--real-duration-s", type=float, default=60.0,
+                    help="durata real-clock P2; il gate completo richiede almeno 60 s")
     args = ap.parse_args()
     manifest_path = args.manifest or (ROOT / "tools" / "kernel_gates" / "manifests" / "p0_inputs.json")
     if not manifest_path.is_absolute():
@@ -289,6 +312,13 @@ def main() -> int:
         raw_path.unlink()
     if args.phase == "P1":
         metrics, thresholds = run_p1(raw_path, args.workspace, seed, source_binding)
+        passed = bool(metrics["passed"])
+    elif args.phase == "P2":
+        cpu = run_cpu_contract(["tests/kernel/test_p2_scheduler.py", "tests/test_duplex_kernel_contract.py"])
+        print("CPU contract exit_code=", cpu["exit_code"], flush=True)
+        metrics, thresholds = run_p2(
+            raw_path, args.workspace, seed, source_binding, args.real_duration_s, cpu,
+        )
         passed = bool(metrics["passed"])
     else:
         cpu = run_cpu_contract("tests/test_duplex_kernel_contract.py")

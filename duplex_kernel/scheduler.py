@@ -45,6 +45,8 @@ class DuplexTick:
     capture_start_ns: int
     capture_end_ns: int
     enqueue_ns: int | None
+    deadline_ns: int | None = None
+    observed_ns: int | None = None
     listener_start_ns: int | None = None
     listener_end_ns: int | None = None
     policy_ns: int | None = None
@@ -382,6 +384,8 @@ class DuplexScheduler:
             capture_start_ns=capture_start,
             capture_end_ns=capture_end,
             enqueue_ns=frame.enqueue_ns if frame is not None else None,
+            deadline_ns=deadline,
+            observed_ns=actual,
         )
 
         if self.on_listener is not None:

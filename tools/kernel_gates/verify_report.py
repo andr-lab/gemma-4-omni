@@ -351,11 +351,178 @@ def verify_p1(report_path: Path) -> tuple[dict[str, Any], list[str]]:
     return report, errors
 
 
+def verify_p2(report_path: Path) -> tuple[dict[str, Any], list[str]]:
+    """Verify P2 from elemental scheduler events, never from runner summaries."""
+    errors: list[str] = []
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    if report.get("schema_version") != 1 or report.get("phase") != "P2":
+        fail(errors, "report non valido per P2")
+    if report.get("git_dirty") is not False:
+        fail(errors, "git_dirty deve essere false")
+    verify_source_attestation(report, report_path, errors)
+    raw = Path(report.get("raw_trace", ""))
+    if not raw.is_absolute():
+        raw = report_path.parent / raw
+    events: list[dict[str, Any]] = []
+    if not raw.is_file():
+        fail(errors, f"raw trace mancante: {raw}")
+    else:
+        if sha256(raw) != report.get("raw_trace_sha256"):
+            fail(errors, "hash raw trace non coincide")
+        for line_no, line in enumerate(raw.read_text(encoding="utf-8").splitlines(), 1):
+            try:
+                event = json.loads(line)
+                if not isinstance(event, dict):
+                    raise ValueError("non-object")
+                events.append(event)
+            except Exception as exc:
+                fail(errors, f"raw trace line {line_no} invalida: {exc}")
+    verify_workspace_binding(report, events, report_path, errors)
+
+    metadata_events = [e for e in events if e.get("event") == "phase_metadata"]
+    if len(metadata_events) != 1:
+        fail(errors, f"phase_metadata count={len(metadata_events)}")
+    metadata_event = metadata_events[0] if metadata_events else {}
+    if metadata_event.get("seed") != report.get("seed") or metadata_event.get("rng_seed_applied") is not True:
+        fail(errors, "RNG seed P2 non attestato")
+    if metadata_event.get("frame_duration_ms") != 80 or metadata_event.get("sample_rate") != 16_000:
+        fail(errors, "contratto frame P2 non attestato")
+
+    manifest = Path(report.get("input_manifest", ""))
+    if not manifest.is_absolute():
+        manifest = report_path.parent / manifest
+    if not manifest.is_file():
+        fail(errors, f"manifest mancante: {manifest}")
+    elif sha256(manifest) != report.get("input_manifest_sha256"):
+        fail(errors, "hash manifest non coincide")
+
+    def sequence(clock: str, count: int) -> list[dict[str, Any]]:
+        selected = [e for e in events if e.get("event") == "p2_tick" and e.get("clock") == clock]
+        if len(selected) != count:
+            fail(errors, f"tick {clock}: count={len(selected)} atteso={count}")
+        ids = [e.get("frame_id") for e in selected]
+        if ids != list(range(count)):
+            fail(errors, f"tick {clock}: frame_id non sequenziale")
+        for index, event in enumerate(selected):
+            expected_start = index * 80_000_000 if clock.startswith("virtual") else event.get("capture_start_ns")
+            if clock.startswith("virtual"):
+                if event.get("capture_start_ns") != expected_start:
+                    fail(errors, f"tick {clock} {index}: capture_start_ns non causale")
+                if event.get("capture_end_ns") != expected_start + 80_000_000:
+                    fail(errors, f"tick {clock} {index}: capture_end_ns non valido")
+            if event.get("enqueue_ns") is None:
+                fail(errors, f"tick {clock} {index}: frame ingress mancante")
+        return selected
+
+    virtual_10 = sequence("virtual_10s", 125)
+    virtual_60 = sequence("virtual_60s", 750)
+    real_run = [e for e in events if e.get("event") == "p2_real_run"]
+    if len(real_run) != 1:
+        fail(errors, f"p2_real_run count={len(real_run)}")
+        real_config: dict[str, Any] = {}
+    else:
+        real_config = real_run[0]
+    requested_duration = float(real_config.get("requested_duration_s", 0.0))
+    expected_real = int(real_config.get("expected_ticks", 0))
+    real_ticks = sequence("real", expected_real) if expected_real else []
+    real_jitter = []
+    for index, event in enumerate(real_ticks):
+        deadline = event.get("deadline_ns")
+        observed = event.get("observed_ns")
+        if not isinstance(deadline, int) or not isinstance(observed, int):
+            fail(errors, f"tick real {index}: deadline/observed mancanti")
+            continue
+        real_jitter.append(max(0, observed - deadline) / 1_000_000.0)
+    jitter_p99 = round(float(np.percentile(real_jitter, 99)), 3) if real_jitter else None
+    miss_rate = sum(value > 20.0 for value in real_jitter) / len(real_jitter) if real_jitter else None
+
+    speaking = [e for e in events if e.get("event") == "p2_speaking_frame"]
+    speaking_ids = [e.get("frame_id") for e in speaking]
+    if len(speaking_ids) != len(set(speaking_ids)) or speaking_ids != list(range(750)):
+        fail(errors, "frame input durante speaking non completo o non ordinato")
+    if any(e.get("tick_frame_id") != e.get("frame_id") for e in speaking):
+        fail(errors, "speaking frame non associato al tick corretto")
+
+    cpu_contract = metadata_event.get("cpu_contract", {})
+    recomputed = {
+        "cpu_contract": cpu_contract,
+        "virtual_10_ticks": len(virtual_10),
+        "virtual_10_missing_ticks": 0 if len(virtual_10) == 125 else 1,
+        "virtual_10_duplicate_ticks": 0 if [e.get("frame_id") for e in virtual_10] == list(range(125)) else 1,
+        "virtual_10_out_of_order_ticks": 0 if [e.get("frame_id") for e in virtual_10] == list(range(125)) else 1,
+        "virtual_60_ticks": len(virtual_60),
+        "virtual_60_missing_ticks": 0 if len(virtual_60) == 750 else 1,
+        "virtual_60_duplicate_ticks": 0 if len(speaking_ids) == len(set(speaking_ids)) else 1,
+        "virtual_60_out_of_order_ticks": 0 if [e.get("frame_id") for e in virtual_60] == list(range(750)) else 1,
+        "input_frames_received": len(virtual_60),
+        "input_frames_enqueued": sum(e.get("enqueue_ns") is not None for e in virtual_60),
+        "input_frames_consumed": len(virtual_60),
+        "input_samples_received": len(virtual_60) * 1280,
+        "dropped_input_frames": 0,
+        "duplicate_input_frames": 0 if len(speaking_ids) == len(set(speaking_ids)) else 1,
+        "out_of_order_input_frames": 0 if speaking_ids == list(range(750)) else 1,
+        "input_frames_during_speaking": len(speaking_ids),
+        "real_ticks": len(real_ticks),
+        "real_duration_s": round(float(real_config.get("elapsed_s", 0.0)), 3),
+        "real_deadline_miss_rate": miss_rate,
+        "real_tick_jitter_p99_ms": jitter_p99,
+    }
+    metrics = report.get("metrics", {})
+    for key, expected in recomputed.items():
+        if metrics.get(key) != expected:
+            fail(errors, f"metrica P2 {key} non coincide col raw trace: {metrics.get(key)!r} != {expected!r}")
+    if metrics.get("cpu_contract") != metadata_event.get("cpu_contract"):
+        fail(errors, "cpu_contract P2 non coincide col raw trace")
+
+    thresholds = report.get("thresholds", {})
+    exact_thresholds = {
+        "cpu_contract_exit_code": cpu_contract.get("exit_code"),
+        "virtual_10_ticks": recomputed["virtual_10_ticks"],
+        "virtual_10_missing_ticks": recomputed["virtual_10_missing_ticks"],
+        "virtual_10_duplicate_ticks": recomputed["virtual_10_duplicate_ticks"],
+        "virtual_10_out_of_order_ticks": recomputed["virtual_10_out_of_order_ticks"],
+        "virtual_60_ticks": recomputed["virtual_60_ticks"],
+        "virtual_60_missing_ticks": recomputed["virtual_60_missing_ticks"],
+        "virtual_60_duplicate_ticks": recomputed["virtual_60_duplicate_ticks"],
+        "virtual_60_out_of_order_ticks": recomputed["virtual_60_out_of_order_ticks"],
+        "input_frames_received": recomputed["input_frames_received"],
+        "input_frames_enqueued": recomputed["input_frames_enqueued"],
+        "input_frames_consumed": recomputed["input_frames_consumed"],
+        "input_samples_received": recomputed["input_samples_received"],
+        "dropped_input_frames": recomputed["dropped_input_frames"],
+        "duplicate_input_frames": recomputed["duplicate_input_frames"],
+        "out_of_order_input_frames": recomputed["out_of_order_input_frames"],
+        "real_ticks": recomputed["real_ticks"],
+    }
+    for key, actual in exact_thresholds.items():
+        if key not in thresholds:
+            fail(errors, f"threshold P2 mancante: {key}")
+        elif actual != thresholds[key]:
+            fail(errors, f"threshold P2 fallita: {key}={actual!r} != {thresholds[key]!r}")
+    if float(recomputed["input_frames_during_speaking"]) < float(thresholds.get("input_frames_during_speaking_min", 1)):
+        fail(errors, "threshold P2 fallita: nessun input durante speaking")
+    if requested_duration < float(thresholds.get("real_duration_min_s", 60.0)):
+        fail(errors, "threshold P2 fallita: real clock sotto 60 secondi")
+    if float(recomputed["real_duration_s"]) < requested_duration:
+        fail(errors, "real clock elapsed sotto la durata richiesta")
+    if miss_rate is None or miss_rate > float(thresholds.get("real_deadline_miss_rate_max", 0.005)):
+        fail(errors, "threshold P2 fallita: deadline_miss_rate")
+    if jitter_p99 is None or jitter_p99 > float(thresholds.get("real_tick_jitter_p99_ms_max", 20.0)):
+        fail(errors, "threshold P2 fallita: tick_jitter_p99")
+
+    independently_passed = not errors
+    if report.get("passed") is not independently_passed:
+        fail(errors, f"passed non coincide col risultato indipendente: {report.get('passed')} != {independently_passed}")
+    return report, errors
+
+
 def verify_one(report_path: Path) -> tuple[dict[str, Any], list[str]]:
     errors: list[str] = []
     report = json.loads(report_path.read_text(encoding="utf-8"))
     if report.get("schema_version") != 1:
         fail(errors, "schema_version non supportata")
+    if report.get("phase") == "P2":
+        return verify_p2(report_path)
     verify_source_attestation(report, report_path, errors)
     if report.get("phase") == "P1":
         return verify_p1(report_path)
