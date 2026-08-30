@@ -312,7 +312,7 @@ def run_p3(raw_path: Path, workspace: Path, seed: int, source_binding: dict[str,
         and metrics["assistant_reference_delay_frames"] == thresholds["assistant_reference_delay_frames"]
     )
     events.append({"event": "cpu_contract_result", **cpu_contract})
-    raw_path.write_bytes("".join(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\\n" for event in events).encode("utf-8"))
+    raw_path.write_bytes("".join(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n" for event in events).encode("utf-8"))
     return metrics, thresholds
 
 
