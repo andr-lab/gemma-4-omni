@@ -154,6 +154,7 @@ def test_realtime_scheduler_routes_listener_hidden_through_incremental_v9() -> N
         assert session.v9_state is not None
         assert session.v9_state.frames_processed == 1
         assert tuple(session.listener_hidden.shape) == (1, 16)
+        torch.testing.assert_close(session.v9_text_anchor, torch.ones(1, 8))
         ws.send_json({"type": "session.close"})
 
 

@@ -281,11 +281,15 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                                 dtype=getattr(engine, "dtype", None),
                                 max_seq_len=v9_stream.max_seq_len,
                             )
-                            sess.v9_text_anchor = torch.zeros(
-                                (1, v9_stream.raw_dim),
+                            # P4D causal anchor: freeze the first Gemma
+                            # pre-conv hidden received at t=0.  It is available
+                            # without looking into future frames and remains
+                            # fixed for the whole V9 sequence.
+                            sess.v9_text_anchor = torch.as_tensor(
+                                output.hidden_t,
                                 device=sess.v9_state.device,
                                 dtype=sess.v9_state.dtype,
-                            )
+                            ).reshape(1, v9_stream.raw_dim).clone()
                         listener_hidden = v9_stream.step(output.hidden_t, sess.v9_text_anchor, sess.v9_state)
             except Exception as exc:
                 logger.exception("[realtime %s] listener/V9 failed on frame %d", sess.session_id[:8], frame.frame_id)
