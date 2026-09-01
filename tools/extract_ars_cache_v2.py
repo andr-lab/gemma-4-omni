@@ -40,6 +40,8 @@ ap.add_argument("--batch-size", type=int, default=16,
 ap.add_argument("--smoke", action="store_true")
 ap.add_argument("--raw-stage", choices=("pre_causal_conv", "post_causal_conv"), default="pre_causal_conv",
                 help="stadio salvato in tr_raw/va_raw; P4 richiede pre_causal_conv")
+ap.add_argument("--validation-only", action="store_true",
+                help="non estrarre il train split; utile per i gate che consumano solo va_raw")
 args = ap.parse_args()
 
 print("[CACHE2] 1/4 Carico sistema + adapter...", flush=True)
@@ -120,7 +122,7 @@ def extract(ds, limit, subsample=1, batch_size=16):
     return raw, sub, htx, cs
 
 
-n_tr = min(len(ds_train), 300) if args.smoke else len(ds_train)
+n_tr = 0 if args.validation_only else (min(len(ds_train), 300) if args.smoke else len(ds_train))
 n_va = min(len(ds_val), 40) if args.smoke else min(len(ds_val), 100)
 tr_raw, tr_sub, tr_htx, tr_c = extract(ds_train, n_tr, args.subsample, args.batch_size)
 va_raw, va_sub, va_htx, va_c = extract(ds_val, n_va, args.subsample, args.batch_size)
@@ -133,6 +135,7 @@ torch.save({"tr_raw": tr_raw, "tr_sub": tr_sub, "tr_htx": tr_htx, "tr_c": tr_c,
                 if args.raw_stage == "pre_causal_conv" else
                 "Gemma hidden after causal_conv; not valid as direct P4 input"},
            args.output)
+train_shape = tr_raw[0].shape if tr_raw else None
 print(f"[CACHE2] Salvata {args.output}: {len(tr_raw)} train / {len(va_raw)} val "
-      f"(h_raw {tr_raw[0].shape}, h_sub {tr_sub[0].shape}, h_text {tr_htx[0].shape})", flush=True)
+      f"(h_raw {train_shape}, h_sub {tr_sub[0].shape if tr_sub else None}, h_text {tr_htx[0].shape if tr_htx else None})", flush=True)
 print("[CACHE2] FATTO.", flush=True)
