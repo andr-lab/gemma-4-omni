@@ -35,6 +35,7 @@ DEFAULT_FILES = (
     "tools/kernel_gates/p1_checks.py",
     "tools/kernel_gates/p2_checks.py",
     "tools/kernel_gates/p3_checks.py",
+    "tools/extract_ars_cache_v2.py",
     "tools/kernel_gates/p4_checks.py",
     "tools/kernel_gates/run_phase.py",
     "tools/kernel_gates/source_attestation.py",

@@ -11,7 +11,7 @@ from duplex_kernel.models.v9 import (
 )
 from duplex_kernel.server import create_app
 from duplex_kernel.session import SessionManager
-from tools.kernel_gates.p4_checks import _run_equivalence, _run_future_prefix
+from tools.kernel_gates.p4_checks import _run_equivalence, _run_future_prefix, _stack_cache
 
 
 def _tiny_stream() -> tuple[DeepCausalTransformerProjectorV9, CausalConv1D, IncrementalV9Projector]:
@@ -155,6 +155,26 @@ def test_realtime_scheduler_routes_listener_hidden_through_incremental_v9() -> N
         assert session.v9_state.frames_processed == 1
         assert tuple(session.listener_hidden.shape) == (1, 16)
         ws.send_json({"type": "session.close"})
+
+
+def test_p4_gate_rejects_post_causal_conv_cache(tmp_path) -> None:
+    cache = {
+        "va_raw": [torch.zeros(1, 1536) for _ in range(100)],
+        "va_htx": [torch.zeros(1536) for _ in range(100)],
+        "va_c": [torch.zeros(1, dtype=torch.long) for _ in range(100)],
+        "v9_raw_stage": "post_causal_conv",
+    }
+    path = tmp_path / "cache.pt"
+    torch.save(cache, path)
+    with pytest.raises(ValueError, match="pre-causal_conv|doppia"):
+        _stack_cache(path)
+    cache["v9_raw_stage"] = "pre_causal_conv"
+    torch.save(cache, path)
+    raw, anchor, codes, stage = _stack_cache(path)
+    assert raw.shape == (100, 1, 1536)
+    assert anchor.shape == (100, 1536)
+    assert codes.shape == (100, 1)
+    assert stage == "pre_causal_conv"
 
 
 def test_incremental_v9_rejects_bad_shapes_and_sequence_overrun() -> None:

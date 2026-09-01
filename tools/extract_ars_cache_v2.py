@@ -6,8 +6,8 @@ Motivazione (docs/DESIGN_FULLDUPLEX_LETTERATURA.md §2.0):
   - il predittore cb0 attuale usa h_sub (output adapter ACUSTICO, addestrato per i
     residui cb1..15) -> probe per-frame 3.7%: h_sub non contiene l'info cb0.
   - Il contenuto semantico sta in Gemma. Due canali diretti da testare:
-      h_raw: hidden di Gemma PRE-adapter (dopo causal_conv) sulle posizioni audio
-             (pattern Thinker->Talker, Qwen2.5-Omni arXiv:2503.20215)
+      h_raw: hidden di Gemma PRE-adapter e PRE-causal_conv sulle posizioni audio
+             (la causal_conv viene applicata una sola volta dal runner V9)
       h_text: hidden di Gemma sul blocco TESTO della risposta agente
               ([bos]+48 token testo, left-pad) -> pooling -> ancora testuale
               (inner monologue, Moshi arXiv:2410.00037; text-instructed, Mini-Omni)
@@ -15,7 +15,8 @@ Motivazione (docs/DESIGN_FULLDUPLEX_LETTERATURA.md §2.0):
     il v4 usera' h_raw+h_text come condizionamento del predittore cb0.
 
 Cache di output (cache_ars_full_v2.pt):
-  tr_raw/va_raw: hidden Gemma pre-adapter, posizioni audio (B,T,1536)
+  tr_raw/va_raw: hidden Gemma pre-adapter e pre-causal_conv, posizioni audio
+                  (B,T,1536); metadata `v9_raw_stage=pre_causal_conv`
   tr_sub/va_sub: h_sub post-adapter (identico a cache_ars_full.pt, per confronto)
   tr_htx/va_htx: h_text pooled sul blocco testo (B,1536) o (B,T,1536) se per-frame
   tr_c/va_c: cb0 target (invariato)
@@ -37,6 +38,8 @@ ap.add_argument("--subsample", type=int, default=1,
 ap.add_argument("--batch-size", type=int, default=16,
                 help="batch per forward Gemma (default 16; ridurre a 8/4 in parallelo con altri processi GPU)")
 ap.add_argument("--smoke", action="store_true")
+ap.add_argument("--raw-stage", choices=("pre_causal_conv", "post_causal_conv"), default="pre_causal_conv",
+                help="stadio salvato in tr_raw/va_raw; P4 richiede pre_causal_conv")
 args = ap.parse_args()
 
 print("[CACHE2] 1/4 Carico sistema + adapter...", flush=True)
@@ -108,7 +111,7 @@ def extract(ds, limit, subsample=1, batch_size=16):
         h_s = duplex_model.ht_adapter(
             ad.to(next(duplex_model.ht_adapter.parameters()).dtype)).float()
         for j in range(B):
-            raw.append(ad[j].cpu())
+            raw.append((ah if args.raw_stage == "pre_causal_conv" else ad)[j].cpu())
             sub.append(h_s[j].cpu())
             htx.append(htx_b[j].cpu())
             cs.append(items[j]["audio_targets"][:, 0].clone())
@@ -124,7 +127,11 @@ va_raw, va_sub, va_htx, va_c = extract(ds_val, n_va, args.subsample, args.batch_
 
 print("[CACHE2] 4/4 Salvataggio...", flush=True)
 torch.save({"tr_raw": tr_raw, "tr_sub": tr_sub, "tr_htx": tr_htx, "tr_c": tr_c,
-            "va_raw": va_raw, "va_sub": va_sub, "va_htx": va_htx, "va_c": va_c},
+            "va_raw": va_raw, "va_sub": va_sub, "va_htx": va_htx, "va_c": va_c,
+            "v9_raw_stage": args.raw_stage,
+            "v9_raw_description": "Gemma hidden before causal_conv; runner applies causal_conv once"
+                if args.raw_stage == "pre_causal_conv" else
+                "Gemma hidden after causal_conv; not valid as direct P4 input"},
            args.output)
 print(f"[CACHE2] Salvata {args.output}: {len(tr_raw)} train / {len(va_raw)} val "
       f"(h_raw {tr_raw[0].shape}, h_sub {tr_sub[0].shape}, h_text {tr_htx[0].shape})", flush=True)

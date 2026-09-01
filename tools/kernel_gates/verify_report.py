@@ -948,6 +948,8 @@ def verify_p4(report_path: Path) -> tuple[dict[str, Any], list[str]]:
     )
 
     metrics = report.get("metrics", {})
+    if metrics.get("cache_raw_stage") != "pre_causal_conv":
+        fail(errors, "P4 cache_raw_stage non è pre_causal_conv")
     expected_sections = {
         "equivalence": eq_recomputed,
         "future_prefix": future_recomputed,

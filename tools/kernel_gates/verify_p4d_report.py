@@ -102,6 +102,11 @@ def verify(report_path: Path) -> list[str]:
     errors: list[str] = []
     if report.get("phase") != "P4D":
         errors.append("phase non è P4D")
+    inputs = report.get("inputs", {})
+    if inputs.get("raw_stage") != "pre_causal_conv":
+        errors.append("cache P4D non attestata come pre-causal_conv")
+    if inputs.get("causal_conv_applied_by_runner") is not True:
+        errors.append("P4D non attesta una sola causal_conv nel runner")
     qwen = report.get("qwen", {})
     if qwen.get("frozen") is not True or qwen.get("weights_modified") is not False:
         errors.append("Qwen non attestato frozen/immutato")

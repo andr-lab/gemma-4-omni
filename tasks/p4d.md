@@ -21,14 +21,24 @@ Il rerun reale `P4/run8` al commit `269f4cf` è **FAIL**: CE ratio `1.3047` e
 top-5 drop `6.953 pp`. Il risultato precedente PASS era un bug del verifier,
 che controllava solo la presenza di una differenza causale.
 
-## Esperimenti frozen
+## Esperimenti frozen (precedente evidenza invalidata)
+
+L'evidenza iniziale P4D è stata invalidata: `cache_ars_full_v2.pt` salvava
+`va_raw` dopo `causal_conv`, mentre il runner la riapplicava. Non viene usata
+per alcuna decisione.
+
+`tools/extract_ars_cache_v2.py --raw-stage pre_causal_conv` ora produce la
+cache corretta e il runner rifiuta cache senza metadata
+`v9_raw_stage=pre_causal_conv`; la `causal_conv` viene applicata esattamente
+una volta nel percorso P4/P4D.
 
 `tools/kernel_gates/p4d_checks.py` confronta FULL con prefisso causale più un
 lookahead reale di `L` frame, equivalente a `L * 80 ms` di speaker playout.
 Valuta inoltre anchor causali deterministiche, senza parametri addestrati:
 zero e primo frame raw fissato.
 
-Risultati RTX 3090, 100 sequenze/6.400 frame per variante:
+Risultati preliminari **non validi**, solo per localizzare il candidato,
+RTX 3090, 100 sequenze/6.400 frame per variante:
 
 | anchor | lookahead | delay | CE ratio | top-1 drop | top-5 drop | gate |
 |---|---:|---:|---:|---:|---:|---|
@@ -38,10 +48,10 @@ Risultati RTX 3090, 100 sequenze/6.400 frame per variante:
 | first raw | 7 | 560 ms | 1.0992 | 0.500 pp | 1.813 pp | PASS |
 | first raw | 8 | 640 ms | 1.0950 | 0.359 pp | 1.844 pp | PASS |
 
-Il minimo candidato osservato è `first_raw_frame + 7 frame` (560 ms),
-senza modificare Qwen. `first_raw_frame` è causale e fisso dall'inizio della
-sequenza; `oracle_text` è usato solo come baseline diagnostico e non è valido
-come anchor runtime.
+Il minimo candidato preliminare era `first_raw_frame + 7 frame` (560 ms), ma
+va riconfermato sulla cache pre-conv. `first_raw_frame` è causale e fisso
+dall'inizio della sequenza; `oracle_text` è usato solo come baseline
+diagnostico e non è valido come anchor runtime.
 
 ## Playout
 
@@ -55,7 +65,8 @@ sessione realtime.
 Questa infrastruttura non viene dichiarata soluzione completa finché il
 Talker runtime non consuma una sequenza V9 frame-stateful con il prefisso
 `<= t+L`; il gate P4D dimostra prima la sufficienza del conditioning frozen,
-non introduce una scorciatoia che ritardi Gemma.
+non introduce una scorciatoia che ritardi Gemma. Il precedente PASS P4D resta
+revocato fino alla nuova cache/evidence.
 
 ## Next step
 

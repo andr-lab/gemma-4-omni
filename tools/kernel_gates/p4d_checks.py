@@ -120,7 +120,7 @@ def run_experiment(
     git_sha: str = "attested-by-caller",
     source_attestation: Path | None = None,
 ) -> dict[str, Any]:
-    raw, anchors, cache_codes = _stack_cache(cache_path)
+    raw, anchors, cache_codes, raw_stage = _stack_cache(cache_path)
     if cache_codes is None:
         raise ValueError("cache validation priva di va_c")
     codes, codes_start = _load_codes(codes_path, codes_metadata_path, cache_codes)
@@ -202,6 +202,8 @@ def run_experiment(
         },
         "inputs": {
             "cache_path": str(cache_path),
+            "raw_stage": raw_stage,
+            "causal_conv_applied_by_runner": True,
             "codes_path": str(codes_path),
             "sequences": int(raw.shape[0]),
             "frames_per_sequence": int(raw.shape[1]),

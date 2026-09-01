@@ -24,8 +24,14 @@ ABLATION_TOP1_DROP_MAX = 0.05
 ABLATION_TOP5_DROP_MAX = 0.03
 
 
-def _stack_cache(cache_path: Path) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+def _stack_cache(cache_path: Path) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, str]:
     cache = torch.load(cache_path, map_location="cpu", weights_only=False)
+    raw_stage = cache.get("v9_raw_stage")
+    if raw_stage != "pre_causal_conv":
+        raise ValueError(
+            "cache V9 non valida: va_raw deve essere Gemma hidden pre-causal_conv "
+            f"(v9_raw_stage={raw_stage!r}); evita la doppia causal convolution"
+        )
     try:
         raw = torch.stack([torch.as_tensor(item) for item in cache["va_raw"]])
         anchor = torch.stack([torch.as_tensor(item) for item in cache["va_htx"]])
@@ -40,7 +46,7 @@ def _stack_cache(cache_path: Path) -> tuple[torch.Tensor, torch.Tensor, torch.Te
         raise ValueError(f"va_htx non allineato a va_raw: {tuple(anchor.shape)}")
     if codes is not None and codes.shape[:2] != raw.shape[:2]:
         raise ValueError(f"va_c non allineato a va_raw: {tuple(codes.shape)}")
-    return raw, anchor, codes
+    return raw, anchor, codes, raw_stage
 
 
 def _finite(value: float) -> bool:
@@ -393,7 +399,7 @@ def run_checks(
     trace: list[dict[str, Any]],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     del workspace
-    raw, anchors, cache_codes = _stack_cache(cache_path)
+    raw, anchors, cache_codes, raw_stage = _stack_cache(cache_path)
     if cache_codes is None:
         raise ValueError("cache validation priva di va_c: T4 non può verificare l'allineamento codebook")
     if stream.max_seq_len < raw.shape[1]:
@@ -439,6 +445,7 @@ def run_checks(
     metrics = {
         "real_model_required": True,
         "cache_path": str(cache_path),
+        "cache_raw_stage": raw_stage,
         "equivalence": equivalence,
         "future_prefix": future,
         "performance": performance,
