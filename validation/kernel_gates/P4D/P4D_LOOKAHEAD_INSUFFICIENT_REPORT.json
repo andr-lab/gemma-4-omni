@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "phase": "P4D",
+  "status": "REJECTED_DELAY_INSUFFICIENT",
+  "decision": "DECLARATION_OF_INFEASIBILITY_PASSIVE_DELAY",
+  "dataset": "cache_ars_runtime_aligned_v1.pt",
+  "sequences": 100,
+  "frames": 6400,
+  "talker": "Qwen3-TTS 12Hz 1.7B Base (frozen, byte-identical)",
+  "runtime_speaker": "FuturePrefixQwen.slot_kv",
+  "anchor_mode": "first_raw_frame",
+  "quality_gates": {
+    "ce_ratio_max": 1.10,
+    "top1_drop_max": 0.05,
+    "top5_drop_max": 0.03
+  },
+  "variants": {
+    "first_raw_frame_L0": {
+      "lookahead_frames": 0,
+      "playout_delay_ms": 0,
+      "ce_ratio": 1.4086,
+      "top1_drop": 0.0525,
+      "top5_drop": 0.0889,
+      "passed": false
+    },
+    "first_raw_frame_L1": {
+      "lookahead_frames": 1,
+      "playout_delay_ms": 80,
+      "ce_ratio": 1.3928,
+      "top1_drop": 0.0484,
+      "top5_drop": 0.0836,
+      "passed": false
+    },
+    "first_raw_frame_L2": {
+      "lookahead_frames": 2,
+      "playout_delay_ms": 160,
+      "ce_ratio": 1.3779,
+      "top1_drop": 0.0458,
+      "top5_drop": 0.0794,
+      "passed": false
+    },
+    "first_raw_frame_L4": {
+      "lookahead_frames": 4,
+      "playout_delay_ms": 320,
+      "ce_ratio": 1.3545,
+      "top1_drop": 0.0455,
+      "top5_drop": 0.0737,
+      "passed": false
+    }
+  },
+  "recovery_slope_per_frame": -0.0135,
+  "projected_lookahead_for_gate": {
+    "frames_required": 24,
+    "delay_seconds": 1.92,
+    "upper_bound_historical_frames": 40,
+    "upper_bound_historical_seconds": 3.20
+  },
+  "architectural_conclusion": "Compensating the causal information loss of a frozen Talker purely through playout delay requires 2.0 to 3.2 seconds of buffer latency. Any delay exceeding 500 ms (6.25 frames) destroys interactive full-duplex conversational dynamics. The passive delay approach is formally abandoned in favor of active methods (FuturePrefixDrafter or causal co-adaptation)."
+}
