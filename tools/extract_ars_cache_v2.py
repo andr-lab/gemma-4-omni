@@ -28,6 +28,7 @@ os.environ.setdefault("PIPELINE_ENV", "local3090")
 
 import numpy as np
 import torch
+from duplex_kernel.gemma_representation import canonical_lm_hidden
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--dataset", default="/workspace/data/train_tokens_cv26_it_40.8h_31916s.parquet")
@@ -98,8 +99,13 @@ def extract(ds, limit, subsample=1, batch_size=16):
             "input_features": torch.stack([it["input_features"] for it in items]).to(device),
             "input_features_mask": torch.stack([it["input_features_mask"] for it in items]).to(device),
         }
-        go = duplex_model.base_model(**inp, output_hidden_states=True, return_dict=True)
-        lh = go.hidden_states[-1]                              # (B, L, 1536)
+        lh, _ = canonical_lm_hidden(
+            duplex_model.base_model,
+            input_ids=inp["input_ids"],
+            attention_mask=inp["attention_mask"],
+            input_features=inp["input_features"],
+            input_features_mask=inp["input_features_mask"],
+        )                                                        # (B, L, 1536)
         # blocco testo: posizioni [1, 1+TEXT_BLOCK_LEN) -> mean pooling per batch
         tblock = lh[:, 1:1+TEXT_BLOCK_LEN, :]                  # (B, 48, 1536)
         tid = inp["input_ids"][:, 1:1+TEXT_BLOCK_LEN]

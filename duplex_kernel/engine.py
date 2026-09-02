@@ -18,18 +18,42 @@ Flusso (ADR-022/023/024):
 from __future__ import annotations
 
 import logging
+import threading
 import time
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 
+from duplex_kernel.config import (
+    FROZEN_QWEN_CONDITIONING_WAIT_TIMEOUT_S,
+    FROZEN_QWEN_LOOKAHEAD_FRAMES,
+)
+from duplex_kernel.future_prefix import FuturePrefixQwen
 from duplex_kernel.models.talker import load_talker
 from duplex_kernel.models.thinker import load_thinker
 from duplex_kernel.models.v9 import IncrementalV9Projector, load_v9_conditioning
 
 logger = logging.getLogger("duplex_kernel.engine")
+
+
+@dataclass(frozen=True)
+class V9PrefixSequence:
+    """Verified runtime sequence produced from Gemma pre-conv hidden states."""
+
+    h_pfx: torch.Tensor
+    raw_stage: str
+    anchor: torch.Tensor
+
+    def __post_init__(self) -> None:
+        if self.raw_stage != "pre_causal_conv":
+            raise ValueError("V9 runtime richiede hidden Gemma pre_causal_conv")
+        if self.h_pfx.ndim != 3 or self.h_pfx.shape[-1] != 2048:
+            raise ValueError("h_pfx runtime deve avere shape (B,T,2048)")
+        if self.anchor.ndim != 2 or self.anchor.shape[-1] != 1536:
+            raise ValueError("anchor runtime deve avere shape (B,1536)")
 
 
 class PipelineEngine:
@@ -48,6 +72,7 @@ class PipelineEngine:
         self.subtalker_graph: Any | None = None
         self.residual_sampler: Any | None = None
         self.listener: Any | None = None
+        self._talker_lock = threading.RLock()
         self._mtp_ready = False  # MTP parallelo: disattivato (fallback generate HF bit-exact)
         self.loaded = False
         self._stop_event = False
@@ -192,6 +217,40 @@ class PipelineEngine:
             raise RuntimeError("V9 ha prodotto h_pfx non finito")
         return out
 
+    @torch.inference_mode()
+    def v9_prefix_stateful(self, hidden: torch.Tensor, prompt_len: int) -> V9PrefixSequence:
+        """Project Gemma final-layer (pre-conv) states one frame at a time.
+
+        ``hidden`` is the final hidden sequence returned by Gemma; no causal
+        convolution has been applied yet.  The first generated hidden is the
+        fixed causal anchor and every subsequent frame goes through exactly
+        one ``IncrementalV9Projector.step`` call.
+        """
+        if self.v9_stream is None:
+            raise RuntimeError("V9 incrementale non caricato")
+        if hidden.ndim != 3 or hidden.shape[0] != 1 or hidden.shape[-1] != self.v9_stream.raw_dim:
+            raise ValueError(
+                f"hidden Gemma deve avere shape (1,T,{self.v9_stream.raw_dim}), got {tuple(hidden.shape)}"
+            )
+        start = int(prompt_len)
+        if start < 0 or start >= hidden.shape[1]:
+            raise ValueError("prompt_len non lascia hidden Gemma generati")
+        raw = hidden[:, start:, :]
+        anchor = raw[:, :1, :].squeeze(1).to(device=self.v9_stream.projector.audio_in.weight.device,
+                                             dtype=self.v9_stream.projector.audio_in.weight.dtype)
+        state = self.v9_stream.new_state(
+            batch_size=1,
+            device=self.v9_stream.projector.audio_in.weight.device,
+            dtype=self.v9_stream.projector.audio_in.weight.dtype,
+            max_seq_len=raw.shape[1],
+        )
+        projected = [self.v9_stream.step(raw[:, index, :], anchor, state).unsqueeze(1)
+                     for index in range(raw.shape[1])]
+        h_pfx = torch.cat(projected, dim=1)
+        if not torch.isfinite(h_pfx).all():
+            raise RuntimeError("V9 runtime ha prodotto h_pfx non finito")
+        return V9PrefixSequence(h_pfx=h_pfx.detach(), raw_stage="pre_causal_conv", anchor=anchor.detach())
+
     # ------------------------------------------------------------------
     # Talker
     # ------------------------------------------------------------------
@@ -210,6 +269,178 @@ class PipelineEngine:
     def stop_generation(self) -> None:
         """Richiede l'arresto al prossimo frame; sicuro da chiamare dal WS."""
         self._stop_event = True
+
+    @torch.inference_mode()
+    def talk_stateful(
+        self,
+        text: str,
+        h_pfx: torch.Tensor | None = None,
+        *,
+        n_words: int,
+        voice_conditioning: dict[str, Any] | None = None,
+        stop_check: Any | None = None,
+        state: Any | None = None,
+        on_audio_chunk: Any | None = None,
+        on_audio_chunk_with_horizon: Any | None = None,
+        min_frames: int = 48,
+        metrics: dict[str, Any] | None = None,
+        generation_id: int | None = None,
+        lookahead_frames: int = FROZEN_QWEN_LOOKAHEAD_FRAMES,
+        conditioning_buffer: Any | None = None,
+    ) -> np.ndarray:
+        """Generate speech from a frame-stateful V9 prefix.
+
+        Real Qwen uses ``FuturePrefixQwen``'s position-addressable slot KV:
+        stable ICL/text, each conditioning slot, and each audio query are
+        committed once.  The 4-D mask still enforces the bounded lookahead;
+        deterministic fake backends retain the full-sequence fallback.
+        """
+        if self.talker is None or self.subtalker_graph is None:
+            raise RuntimeError("talker e SubTalker non caricati")
+        if lookahead_frames < 0 or lookahead_frames >= 64:
+            raise ValueError("lookahead_frames deve essere compreso tra 0 e 63")
+        if conditioning_buffer is None:
+            if h_pfx is None:
+                raise ValueError("h_pfx è obbligatorio senza conditioning_buffer")
+            if h_pfx.ndim == 2:
+                h_pfx = h_pfx.unsqueeze(0)
+            if h_pfx.ndim != 3 or h_pfx.shape[0] != 1 or h_pfx.shape[-1] != 2048:
+                raise ValueError(f"h_pfx deve avere shape (1,T,2048), got {tuple(h_pfx.shape)}")
+            if h_pfx.shape[1] == 0:
+                raise ValueError("h_pfx non può essere vuoto")
+        elif not callable(getattr(conditioning_buffer, "wait_for_through", None)):
+            raise TypeError("conditioning_buffer non espone wait_for_through")
+
+        if (on_audio_chunk is not None or on_audio_chunk_with_horizon is not None) and min_frames < 48:
+            T_gen = max(min_frames, min(32, int(n_words * 2.0) + 4))
+        else:
+            T_gen = max(min_frames, min(140, int(n_words * 4.8) + 12))
+        if conditioning_buffer is not None:
+            # P4D validated prefix capacity is 64 frames; do not silently
+            # continue with an unconditioned static tail.
+            T_gen = min(T_gen, 64)
+
+        with self._talker_lock:
+            self._stop_event = False
+            if state is not None and generation_id is not None and not state.is_generation_current(generation_id=generation_id):
+                state.stale_kv_writes += 1
+                return np.zeros(0, dtype=np.float32)
+
+            had_voice = hasattr(self.talker, "voice_conditioning")
+            previous_voice = getattr(self.talker, "voice_conditioning", None)
+            if voice_conditioning is not None:
+                self.talker.voice_conditioning = voice_conditioning
+            try:
+                speaker = FuturePrefixQwen(
+                    self.talker,
+                    lookahead_frames=lookahead_frames,
+                    max_prefix_frames=64,
+                    device=self.device,
+                    dtype=next(self.talker.talker.model.parameters()).dtype,
+                    max_audio_frames=max(64, T_gen),
+                )
+                speaker.begin(text, voice_conditioning=voice_conditioning)
+
+                def cancelled() -> bool:
+                    if self._stop_event or (stop_check is not None and stop_check()):
+                        return True
+                    return state is not None and generation_id is not None and not state.is_generation_current(
+                        generation_id=generation_id
+                    )
+
+                if conditioning_buffer is None:
+                    assert h_pfx is not None
+                    for frame_id in range(min(64, h_pfx.shape[1])):
+                        speaker.push_v9_frame(frame_id, h_pfx[:, frame_id, :])
+
+                def sync_conditioning(required_frame_id: int) -> bool:
+                    if conditioning_buffer is None:
+                        return True
+                    required = min(63, int(required_frame_id))
+                    frames = conditioning_buffer.wait_for_through(
+                        required,
+                        stop_check=cancelled,
+                        timeout_s=FROZEN_QWEN_CONDITIONING_WAIT_TIMEOUT_S,
+                    )
+                    if not frames:
+                        return False
+                    already_pushed = speaker.buffer.buffered_frames
+                    for relative_id, frame in enumerate(frames):
+                        if relative_id < already_pushed:
+                            continue
+                        speaker.push_v9_frame(relative_id, frame.h_pfx)
+                    return speaker.buffer.available_through >= required
+
+                codes: list[list[int]] = []
+                streamed_audio: list[np.ndarray] = []
+
+                def decode_chunk(chunk_codes: list[list[int]]) -> np.ndarray:
+                    tensor = torch.tensor(chunk_codes, device=self.device, dtype=torch.long).unsqueeze(0)
+                    chunk = self.talker.decode(tensor).numpy().astype(np.float32)
+                    if not np.isfinite(chunk).all():
+                        raise RuntimeError("Code2Wav ha prodotto audio non finito")
+                    return chunk
+
+                while len(codes) < T_gen:
+                    if cancelled():
+                        break
+                    if conditioning_buffer is not None and not sync_conditioning(len(codes) + lookahead_frames):
+                        break
+                    step = speaker.step_frame(allow_reduced_horizon=conditioning_buffer is None)
+                    if not torch.isfinite(step.logits).all():
+                        raise RuntimeError(f"Talker codec_head non finito al frame {step.frame_id}")
+                    c0 = self._cb0_sample(step.logits)
+                    last_h = step.last_hidden
+                    c0_embed = self.talker.talker.get_input_embeddings()(
+                        torch.tensor([[c0]], device=self.device)
+                    )
+                    residual = self.subtalker_graph.generate(last_h, c0, c0_embed=c0_embed)
+                    if isinstance(residual, torch.Tensor):
+                        residual = residual.reshape(-1).tolist()
+                    residual = [int(value) for value in residual]
+                    if len(residual) != 15:
+                        raise RuntimeError(f"SubTalker ha prodotto {len(residual)} residui, attesi 15")
+                    frame_codes = [c0] + residual
+                    speaker.commit_codes(frame_codes)
+                    codes.append(frame_codes)
+                    if cancelled():
+                        break
+                    if on_audio_chunk is not None or on_audio_chunk_with_horizon is not None:
+                        if len(codes) % 8 == 0:
+                            chunk = decode_chunk(codes[-8:])
+                            streamed_audio.append(chunk)
+                            if on_audio_chunk_with_horizon is not None:
+                                on_audio_chunk_with_horizon(chunk, step.visible_prefix_end)
+                            elif on_audio_chunk is not None:
+                                on_audio_chunk(chunk)
+
+                if cancelled():
+                    if metrics is not None:
+                        metrics.update({"generated_cb0_frames": len(codes), "generated_pcm_samples": 0, "cancelled": True})
+                    return np.zeros(0, dtype=np.float32)
+
+                remainder = len(codes) % 8
+                if remainder and (on_audio_chunk is not None or on_audio_chunk_with_horizon is not None):
+                    chunk = decode_chunk(codes[-remainder:])
+                    streamed_audio.append(chunk)
+                    horizon = speaker.buffer.visible_prefix_end(len(codes) - 1, lookahead_frames)
+                    if on_audio_chunk_with_horizon is not None:
+                        on_audio_chunk_with_horizon(chunk, horizon)
+                    elif on_audio_chunk is not None:
+                        on_audio_chunk(chunk)
+
+                if on_audio_chunk is not None or on_audio_chunk_with_horizon is not None:
+                    wav = np.concatenate(streamed_audio) if streamed_audio else np.zeros(0, dtype=np.float32)
+                else:
+                    wav = decode_chunk(codes) if codes else np.zeros(0, dtype=np.float32)
+                if metrics is not None:
+                    metrics.update({"generated_cb0_frames": len(codes), "generated_pcm_samples": int(len(wav))})
+                return self._postprocess(wav) if wav.size else wav
+            finally:
+                if had_voice:
+                    self.talker.voice_conditioning = previous_voice
+                elif hasattr(self.talker, "voice_conditioning"):
+                    delattr(self.talker, "voice_conditioning")
 
     @torch.inference_mode()
     def talk(self, text: str, h_pfx: torch.Tensor, *, n_words: int,
@@ -353,4 +584,4 @@ class PipelineEngine:
         torch.cuda.empty_cache()
 
 
-__all__ = ["PipelineEngine"]
+__all__ = ["PipelineEngine", "V9PrefixSequence"]

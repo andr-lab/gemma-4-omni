@@ -117,24 +117,25 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
             request.get("ref_audio"), request.get("ref_text"),
         )
         streamed_audio: list[np.ndarray] = []
+        duplex_realtime = bool(request.get("_duplex_realtime"))
         stream_requested = callable(request.get("_on_audio_chunk")) and not tools
         def render_text_chunk(chunk_text: str, chunk_hidden: Any, chunk_prompt_len: int) -> None:
             if not chunk_text or not stream_requested:
                 return
-            chunk_h = engine.v9_prefix(chunk_hidden, chunk_prompt_len)
-            if sess.turn_policy is not None and (generation_id is None or sess.is_generation_current(generation_id=generation_id)):
-                sess.turn_policy.update_hidden(chunk_h)
-            elif generation_id is not None:
-                sess.stale_session_mutations += 1
+            if not duplex_realtime:
+                chunk_h = engine.v9_prefix(chunk_hidden, chunk_prompt_len)
+                if sess.turn_policy is not None and (generation_id is None or sess.is_generation_current(generation_id=generation_id)):
+                    sess.turn_policy.update_hidden(chunk_h)
+                elif generation_id is not None:
+                    sess.stale_session_mutations += 1
             if request.get("_generation_token") is not None:
                 sess.record_synthesized_text(request["_generation_token"], chunk_text)
             if callable(request.get("_on_text_chunk")):
                 request["_on_text_chunk"](chunk_text)
-            chunk_wav = engine.talk(chunk_text, chunk_h, n_words=max(1, len(chunk_text.split())),
-                                    voice_conditioning=cond, stop_check=request.get("_stop_check"),
-                                    state=sess, on_audio_chunk=request.get("_on_audio_chunk"), min_frames=8,
-                                    generation_id=generation_id)
-            streamed_audio.append(chunk_wav)
+            # Audio is synthesized once, after Thinker has committed the full
+            # response hidden sequence.  Synthesizing each text chunk would
+            # reintroduce the old one-shot Qwen path and cannot enforce P4D's
+            # frame lookahead.
         think = engine.think(ids, max_new_tokens=int(request.get("max_tokens", 64)),
                              temperature=float(request.get("temperature", 0.7)), top_p=float(request.get("top_p", 0.9)),
                              stop_check=request.get("_stop_check"), state=sess,
@@ -148,15 +149,37 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
         text = think["text"]
         if request.get("_generation_token") is not None:
             sess.record_planned_text(request["_generation_token"], text)
-        h_pfx = engine.v9_prefix(think["hidden"], think["prompt_len"])
-        if sess.turn_policy is not None and (generation_id is None or sess.is_generation_current(generation_id=generation_id)):
-            sess.turn_policy.update_hidden(h_pfx)
+        use_stateful_speaker = duplex_realtime and callable(getattr(engine, "talk_stateful", None))
+        if duplex_realtime:
+            # The realtime speaker consumes V9 frames produced by the
+            # GemmaListener scheduler.  No Thinker hidden is repurposed as a
+            # static speaker prefix here.
+            h_pfx = None
+            policy_hidden = sess.listener_hidden
+        else:
+            h_pfx = engine.v9_prefix(think["hidden"], think["prompt_len"])
+            policy_hidden = h_pfx
+        if policy_hidden is not None and sess.turn_policy is not None and (generation_id is None or sess.is_generation_current(generation_id=generation_id)):
+            sess.turn_policy.update_hidden(policy_hidden)
         elif generation_id is not None:
             sess.stale_session_mutations += 1
         wav = None
         if "audio" in (request.get("modalities") or ["text"]):
             if stream_requested and streamed_audio:
                 wav = np.concatenate(streamed_audio)
+            elif use_stateful_speaker:
+                wav = engine.talk_stateful(
+                    text,
+                    h_pfx,
+                    n_words=max(1, len(text.split())),
+                    voice_conditioning=cond,
+                    stop_check=lambda: sess.stop_requested,
+                    state=sess,
+                    on_audio_chunk=request.get("_on_audio_chunk"),
+                    on_audio_chunk_with_horizon=request.get("_on_audio_chunk_with_horizon"),
+                    generation_id=generation_id,
+                    conditioning_buffer=sess.conditioning_buffer,
+                )
             else:
                 wav = engine.talk(text, h_pfx, n_words=max(1, len(text.split())), voice_conditioning=cond,
                                    stop_check=lambda: sess.stop_requested, state=sess,
@@ -270,27 +293,47 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
             try:
                 output = sess.listener.step(frame.pcm, reference, sess.listener_state)
                 v9_stream = getattr(engine, "v9_stream", None)
-                listener_hidden = output.hidden_t
+                listener_hidden = output.gemma_hidden_t
                 if v9_stream is not None:
                     import torch
-                    with sess.v9_state_lock:
-                        if sess.v9_state is None:
-                            sess.v9_state = v9_stream.new_state(
-                                batch_size=1,
-                                device=getattr(engine, "device", None),
-                                dtype=getattr(engine, "dtype", None),
-                                max_seq_len=v9_stream.max_seq_len,
+                    # Generation fencing and conditioning append are one
+                    # transaction.  begin_segment() takes the same lock before
+                    # rebasing the buffer; therefore a frame cannot be read as
+                    # generation G and appended after G has been replaced.
+                    with sess._generation_lock:
+                        conditioning_generation = sess.session_generation_id
+                        conditioning_segment = sess.speaker_segment_id or ""
+                        with sess.v9_state_lock:
+                            if sess.v9_state is None:
+                                sess.v9_state = v9_stream.new_state(
+                                    batch_size=1,
+                                    device=getattr(engine, "device", None),
+                                    dtype=getattr(engine, "dtype", None),
+                                    max_seq_len=v9_stream.max_seq_len,
+                                )
+                                # P4D causal anchor: freeze the first Gemma
+                                # pre-conv hidden received at t=0.  It is available
+                                # without looking into future frames and remains
+                                # fixed for the whole V9 sequence.
+                                sess.v9_text_anchor = torch.as_tensor(
+                                    output.gemma_hidden_t,
+                                    device=sess.v9_state.device,
+                                    dtype=sess.v9_state.dtype,
+                                ).reshape(1, v9_stream.raw_dim).clone()
+                            listener_hidden = v9_stream.step(
+                                output.gemma_hidden_t, sess.v9_text_anchor, sess.v9_state
                             )
-                            # P4D causal anchor: freeze the first Gemma
-                            # pre-conv hidden received at t=0.  It is available
-                            # without looking into future frames and remains
-                            # fixed for the whole V9 sequence.
-                            sess.v9_text_anchor = torch.as_tensor(
-                                output.hidden_t,
-                                device=sess.v9_state.device,
-                                dtype=sess.v9_state.dtype,
-                            ).reshape(1, v9_stream.raw_dim).clone()
-                        listener_hidden = v9_stream.step(output.hidden_t, sess.v9_text_anchor, sess.v9_state)
+                            # Production V9 is fixed at 2048 dims. Tiny CPU
+                            # projectors used by the kernel contract tests do not
+                            # represent a consumable Qwen conditioning frame.
+                            if getattr(listener_hidden, "shape", ())[-1:] == (2048,):
+                                sess.conditioning_buffer.append_values(
+                                    frame_id=output.frame_id,
+                                    h_pfx=listener_hidden,
+                                    produced_at_ns=time.monotonic_ns(),
+                                    generation_id=conditioning_generation,
+                                    segment_id=conditioning_segment,
+                                )
             except Exception as exc:
                 logger.exception("[realtime %s] listener/V9 failed on frame %d", sess.session_id[:8], frame.frame_id)
                 scheduler_error(exc)
@@ -349,6 +392,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
             token = sess.begin_response(response_id)
             sess.active_response = True
             logger.info("[realtime %s] start %s audio_samples=%d auto=%s", sess.session_id[:8], response_id, committed_audio.size, sess.auto_response)
+            playout: SpeakerPlayoutBuffer | None = None
             try:
                 await ws.send_json({"type": "response.created", "response_id": response_id})
                 audio_queue: queue.Queue[np.ndarray] = queue.Queue()
@@ -356,17 +400,23 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                 playout = SpeakerPlayoutBuffer(delay_frames=sess.speaker_playout_delay_frames)
                 next_generated_frame_id = 0
                 streamed_chunks = 0
-                def on_audio_chunk(chunk: np.ndarray) -> None:
+                def on_audio_chunk_with_horizon(chunk: np.ndarray, conditioning_frame_id: int) -> None:
                     nonlocal next_generated_frame_id
                     array = np.asarray(chunk, dtype=np.float32)
                     def enqueue_ready() -> None:
                         nonlocal next_generated_frame_id
                         generated = playout.push_chunk(array, first_frame_id=next_generated_frame_id)
                         next_generated_frame_id += len(generated)
-                        ready = playout.release_ready(conditioning_frame_id=generated[-1].frame_id)
+                        ready = playout.release_ready(conditioning_frame_id=int(conditioning_frame_id))
                         for frame in ready:
                             audio_queue.put(frame.pcm)
                     sess.guarded_write(token, "audio", enqueue_ready)
+
+                def on_audio_chunk(chunk: np.ndarray) -> None:
+                    # Compatibility callback for the legacy one-shot path.  The
+                    # stateful path supplies the real V9 horizon explicitly.
+                    horizon = max(-1, next_generated_frame_id - 1)
+                    on_audio_chunk_with_horizon(chunk, horizon)
                 def on_text_chunk(chunk: str) -> None:
                     sess.guarded_write(token, "text", lambda: text_queue.put(str(chunk)))
 
@@ -396,7 +446,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                         if committed_audio.size and not history:
                             history.append({"role": "user", "content": "[audio input ricevuto in streaming]"})
                         logger.info("[realtime %s %s] Thinker/Talker start (listener già attivo)", sess.session_id[:8], response_id)
-                        result = run_response(sess, history or [{"role": "user", "content": "Ciao!"}], {"modalities": ["text", "audio"], "tools": sess.tools, "voice": sess.voice, "voice_style": sess.voice_style, "ref_text": sess.ref_text, "_generation_id": token.session_generation_id, "_generation_token": token, "_defer_history": True, "_stop_check": lambda: sess.stop_requested, "_on_audio_chunk": on_audio_chunk, "_on_text_chunk": on_text_chunk})
+                        result = run_response(sess, history or [{"role": "user", "content": "Ciao!"}], {"modalities": ["text", "audio"], "tools": sess.tools, "voice": sess.voice, "voice_style": sess.voice_style, "ref_text": sess.ref_text, "_generation_id": token.session_generation_id, "_generation_token": token, "_defer_history": True, "_stop_check": lambda: sess.stop_requested, "_on_audio_chunk": on_audio_chunk, "_on_audio_chunk_with_horizon": on_audio_chunk_with_horizon, "_on_text_chunk": on_text_chunk, "_duplex_realtime": True})
                         logger.info("[realtime %s %s] Thinker/Talker done elapsed=%.2fs", sess.session_id[:8], response_id, time.perf_counter() - started)
                         return result
                 loop = asyncio.get_running_loop()
@@ -430,7 +480,24 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                         await ws.send_json({"type": "response.output_text.delta", "delta": chunk_text, "response_id": response_id})
                         sess.record_emitted_text(token, chunk_text)
                 result = await future
-                if not sess.is_generation_current(token):
+                current = sess.is_generation_current(token)
+                if not current or result.get("cancelled"):
+                    # Cancellation is destructive for the current speaker
+                    # segment: pending PCM must never be flushed or fed back
+                    # into the listener self-reference path.
+                    playout.cancel()
+                    while True:
+                        try:
+                            audio_queue.get_nowait()
+                        except queue.Empty:
+                            break
+                    while True:
+                        try:
+                            text_queue.get_nowait()
+                        except queue.Empty:
+                            break
+                    if current and not sess.response_cancel_notified:
+                        await ws.send_json({"type": "response.cancelled", "reason": "cooperative_stop", "response_id": response_id})
                     return
                 for frame in playout.flush():
                     audio_queue.put(frame.pcm)
@@ -483,6 +550,10 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                 logger.exception("realtime response failed")
                 await ws.send_json({"type": "error", "error": {"code": "INFERENCE_ERROR", "message": str(exc)[:240]}})
             finally:
+                # Also covers timeout/task cancellation: no pending frame from
+                # this generation survives into a later response.
+                if playout is not None:
+                    playout.cancel()
                 sess.end_response(token)
                 if sess.auto_response and sess.pending_audio.size and not sess.active_response:
                     await schedule_auto_response()

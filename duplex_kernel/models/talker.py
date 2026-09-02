@@ -104,10 +104,17 @@ class TalkerModel:
 
     def decode(self, codes: torch.Tensor) -> torch.Tensor:
         """RVQ codes → waveform 24kHz."""
+        if self.code2wav is None:
+            raise RuntimeError("Code2Wav non è stato caricato in questa istanza del Talker")
         return self.code2wav.decode(codes).audio_values[0].detach().cpu()
 
 
-def load_talker(workspace: str = "/workspace", *, device: str = "cuda") -> TalkerModel:
+def load_talker(
+    workspace: str = "/workspace",
+    *,
+    device: str = "cuda",
+    load_code2wav: bool = True,
+) -> TalkerModel:
     _install_shims(workspace)
     import qwen_tts.core.models as _M
     import safetensors.torch as st
@@ -130,13 +137,15 @@ def load_talker(workspace: str = "/workspace", *, device: str = "cuda") -> Talke
     teacher = teacher.to(device=device, dtype=torch.bfloat16).eval()
     tok = AutoTokenizer.from_pretrained(snap, use_fast=True)
     proc = _M.Qwen3TTSProcessor(tokenizer=tok)
-    snaps_tok = sorted(
-        glob.glob(os.path.join(workspace, ".hf_cache/models--Qwen--Qwen3-TTS-Tokenizer-12Hz/snapshots/*"))
-    )
-    if not snaps_tok:
-        raise FileNotFoundError("Code2Wav (TokenizerV2) non trovato")
-    code2wav = Qwen3TTSTokenizerV2Model.from_pretrained(snaps_tok[-1]).to(device).eval()
-    logger.info("[talker] Qwen3-TTS + Code2Wav caricati")
+    code2wav = None
+    if load_code2wav:
+        snaps_tok = sorted(
+            glob.glob(os.path.join(workspace, ".hf_cache/models--Qwen--Qwen3-TTS-Tokenizer-12Hz/snapshots/*"))
+        )
+        if not snaps_tok:
+            raise FileNotFoundError("Code2Wav (TokenizerV2) non trovato")
+        code2wav = Qwen3TTSTokenizerV2Model.from_pretrained(snaps_tok[-1]).to(device).eval()
+    logger.info("[talker] Qwen3-TTS%s caricati", " + Code2Wav" if code2wav is not None else " (Code2Wav escluso)")
     return TalkerModel(teacher.talker, proc, code2wav, teacher.config, _cfg.talker_config, device=device)
 
 

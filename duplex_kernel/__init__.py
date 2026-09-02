@@ -17,6 +17,7 @@ from duplex_kernel.listener import (  # noqa: F401
     AssistantReferenceBuffer,
     AssistantReferenceFrame,
     GemmaAudioTowerBackend,
+    ListenerBackendOutput,
     GemmaListener,
     GemmaListenerState,
     ListenerOutput,

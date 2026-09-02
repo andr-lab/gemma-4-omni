@@ -101,7 +101,9 @@ def test_session_v9_state_is_reset_and_released_with_session_lifecycle() -> None
     session.v9_text_anchor = torch.ones(1, 8)
     stream.step(torch.zeros(1, 8), session.v9_text_anchor, session.v9_state)
     session.reset_turn()
-    assert session.v9_state.frames_processed == 0
+    # The listener remains continuous, but V9 is turn-owned: the next frame
+    # must allocate a fresh state before freezing its first raw-frame anchor.
+    assert session.v9_state is None
     assert session.v9_text_anchor is None
     assert hasattr(session, "stale_session_mutations")
     sessions.close(session.session_id)

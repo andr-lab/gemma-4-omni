@@ -26,6 +26,7 @@ from typing import Any
 import numpy as np
 
 from duplex_kernel.config import FROZEN_QWEN_PLAYOUT_DELAY_FRAMES
+from duplex_kernel.future_prefix import ConditioningFrameBuffer
 from duplex_kernel.kv_cache import TalkerPrefixKV, ThinkerContext, TurnKVState
 from duplex_kernel.listener import AssistantReferenceBuffer, GemmaListenerState
 from duplex_kernel.scheduler import AudioIngressQueue
@@ -99,6 +100,7 @@ class DuplexSession:
     v9_state: Any | None = field(default=None, repr=False, compare=False)
     v9_text_anchor: Any | None = field(default=None, repr=False, compare=False)
     v9_state_lock: threading.RLock = field(default_factory=threading.RLock, repr=False, compare=False)
+    conditioning_buffer: ConditioningFrameBuffer = field(default_factory=ConditioningFrameBuffer, repr=False, compare=False)
     assistant_reference_next_frame_id: int = 0
     last_listener_frame_id: int | None = field(default=None, repr=False)
     # Micro-turn in corso (compatibilità commit/ASR)
@@ -137,6 +139,12 @@ class DuplexSession:
             self.response_cancel_notified = False
             self.control_state = ControlState.SPEAKING
             self.speaker_segment = SpeakerSegmentState(self.speaker_segment_id, self.session_generation_id)
+            base_frame_id = self.last_listener_frame_id if self.last_listener_frame_id is not None else 0
+            self.conditioning_buffer.begin_segment(
+                generation_id=self.session_generation_id,
+                segment_id=self.speaker_segment_id,
+                base_frame_id=base_frame_id,
+            )
             return GenerationToken(self.session_generation_id, response_id, self.speaker_segment_id)
 
     def next_frame(self) -> int:
@@ -210,6 +218,7 @@ class DuplexSession:
         with self._generation_lock:
             self.session_generation_id += 1
             self.stop_requested = True
+            self.conditioning_buffer.invalidate()
             logger.debug("[session] generation invalidata %s: %s", self.session_id, reason)
             return self.session_generation_id
 
@@ -251,9 +260,13 @@ class DuplexSession:
         self.pending_audio = np.empty(0, dtype=np.float32)
         self.pending_mel = np.empty((0, 128), dtype=np.float32)
         self.turn_kv.clear()
+        self.conditioning_buffer.invalidate()
+        # V9 state is turn-owned.  Keep the listener clock/history alive, but
+        # force the next frame to create a fresh state and first-raw-frame
+        # anchor.  Resetting in place while clearing the anchor leaves a live
+        # state that cannot satisfy IncrementalV9's fixed-anchor contract.
         with self.v9_state_lock:
-            if self.v9_state is not None:
-                self.v9_state.reset()
+            self.v9_state = None
             self.v9_text_anchor = None
         self.control_state = ControlState.LISTENING
         if self.turn_policy is not None and hasattr(self.turn_policy, "reset"):
@@ -300,6 +313,7 @@ class SessionManager:
             sess.talker_prefix.clear()
             sess.listener_state.close()
             sess.assistant_reference_buffer.clear()
+            sess.conditioning_buffer.close()
             sess.audio_ingress.close()
             with sess.v9_state_lock:
                 sess.v9_state = None
@@ -319,6 +333,7 @@ class SessionManager:
             sess.talker_prefix.clear()
             sess.listener_state.close()
             sess.assistant_reference_buffer.clear()
+            sess.conditioning_buffer.close()
             sess.audio_ingress.close()
             with sess.v9_state_lock:
                 sess.v9_state = None

@@ -374,7 +374,7 @@ def run_p4(
         })
         if codes_path is not None and codes_path.is_file():
             try:
-                talker = load_talker(str(workspace), device="cuda")
+                talker = load_talker(str(workspace), device="cuda", load_code2wav=False)
                 events.append({"event": "p4_qwen_model_metadata", "real_model": True, "backend": "Qwen3TTSTalkerModel"})
             except Exception as exc:
                 events.append({"event": "p4_qwen_load_error", "error": f"{type(exc).__name__}: {exc}"})

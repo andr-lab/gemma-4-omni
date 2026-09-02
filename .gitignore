@@ -53,3 +53,11 @@ turnhead_*_out/
 *.tar.gz
 *.log
 
+# Local kernel-gate evidence and diagnostic probes (reports are documented separately)
+/validation/kernel_gates/
+/_agy_*
+/tmp_*.py
+/tmp_*.txt
+/nul
+/p4_preconv_source_attestation.json
+

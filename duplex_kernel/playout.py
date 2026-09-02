@@ -118,6 +118,12 @@ class SpeakerPlayoutBuffer:
             self._released += 1
         return released
 
+    def cancel(self) -> None:
+        """Discard all pending frames without releasing them."""
+        self._pending.clear()
+        self._next_input_id = 0
+        self._next_release_id = 0
+
     def stats(self) -> dict[str, int]:
         return {
             "delay_frames": self.delay_frames,

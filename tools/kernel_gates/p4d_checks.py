@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from duplex_kernel.future_prefix import FuturePrefixQwen
 from duplex_kernel.models.talker import load_talker
 from duplex_kernel.models.v9 import IncrementalV9Projector, load_v9_conditioning
 from tools.kernel_gates.p4_checks import (
@@ -30,7 +31,7 @@ from tools.kernel_gates.p4_checks import (
     ABLATION_TOP5_DROP_MAX,
     _load_codes,
     _stack_cache,
-    _run_qwen_ablation,
+    _qwen_logits,
 )
 
 
@@ -108,6 +109,142 @@ def _quality(metrics: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+@torch.inference_mode()
+def _run_runtime_qwen_ablation(
+    talker: Any,
+    stream: IncrementalV9Projector,
+    raw: torch.Tensor,
+    anchors: torch.Tensor,
+    codes: torch.Tensor,
+    *,
+    trace: list[dict[str, Any]],
+    prefix_lookahead: int,
+    anchor_name: str,
+) -> dict[str, Any]:
+    """Measure the actual slot-KV speaker path, not only a batch oracle.
+
+    The unrestricted reference still uses the independent full-sequence
+    Qwen forward.  The causal side is now the production ``FuturePrefixQwen``
+    state machine: incremental V9, one position-addressable KV write per
+    conditioning frame, and one cached audio query per frame.
+    """
+    device = stream.projector.audio_in.weight.device
+    dtype = stream.projector.audio_in.weight.dtype
+    sequences, frames_per_sequence = raw.shape[:2]
+    full_losses: list[float] = []
+    causal_losses: list[float] = []
+    full_top1: list[float] = []
+    causal_top1: list[float] = []
+    full_top5: list[float] = []
+    causal_top5: list[float] = []
+    kl_values: list[float] = []
+    logit_deltas: list[float] = []
+
+    if frames_per_sequence != 64:
+        raise ValueError("P4D runtime richiede esattamente 64 frame di prefisso")
+    for sequence_id in range(sequences):
+        v9_state = stream.new_state(
+            batch_size=1, device=device, dtype=dtype, max_seq_len=frames_per_sequence
+        )
+        prefix_frames = [
+            stream.step(
+                raw[sequence_id, frame].to(device=device, dtype=dtype).view(1, -1),
+                anchors[sequence_id].to(device=device, dtype=dtype).view(1, -1),
+                v9_state,
+            ).unsqueeze(1)
+            for frame in range(frames_per_sequence)
+        ]
+        prefix = torch.cat(prefix_frames, dim=1)
+        code_sequence = codes[sequence_id:sequence_id + 1].to(device=device)
+        full = _qwen_logits(
+            talker, prefix, code_sequence, causal_prefix=False
+        )
+        speaker = FuturePrefixQwen(
+            talker,
+            lookahead_frames=prefix_lookahead,
+            max_prefix_frames=frames_per_sequence,
+            device=device,
+            dtype=dtype,
+            max_audio_frames=frames_per_sequence,
+        )
+        speaker.begin("Verifica causale del kernel.")
+        for frame in range(frames_per_sequence):
+            speaker.push_v9_frame(frame, prefix[:, frame, :])
+
+        runtime_logits: list[torch.Tensor] = []
+        for frame in range(frames_per_sequence):
+            step = speaker.step_frame()
+            runtime_logits.append(step.logits[:, :1, :])
+            speaker.commit_codes(code_sequence[0, frame])
+        causal = torch.cat(runtime_logits, dim=1)
+
+        target = code_sequence[:, :, 0]
+        full_log_probs = torch.log_softmax(full.float(), dim=-1)
+        causal_log_probs = torch.log_softmax(causal.float(), dim=-1)
+        full_nll = -full_log_probs.gather(-1, target.unsqueeze(-1)).squeeze(-1)
+        causal_nll = -causal_log_probs.gather(-1, target.unsqueeze(-1)).squeeze(-1)
+        full_prob = full_log_probs.exp()
+        kl = (full_prob * (full_log_probs - causal_log_probs)).sum(dim=-1)
+        delta = (full.float() - causal.float()).abs().amax(dim=-1)
+        full_top1_values = full.argmax(dim=-1).eq(target)
+        causal_top1_values = causal.argmax(dim=-1).eq(target)
+        full_top5_values = full.topk(5, dim=-1).indices.eq(target.unsqueeze(-1)).any(dim=-1)
+        causal_top5_values = causal.topk(5, dim=-1).indices.eq(target.unsqueeze(-1)).any(dim=-1)
+        for frame in range(frames_per_sequence):
+            trace.append({
+                "event": "p4_qwen_ablation_frame",
+                "sequence_id": sequence_id,
+                "prefix_lookahead_frames": int(prefix_lookahead),
+                "frame_id": frame,
+                "full_ce": float(full_nll[0, frame].item()),
+                "causal_ce": float(causal_nll[0, frame].item()),
+                "full_top1": bool(full_top1_values[0, frame]),
+                "causal_top1": bool(causal_top1_values[0, frame]),
+                "full_top5": bool(full_top5_values[0, frame]),
+                "causal_top5": bool(causal_top5_values[0, frame]),
+                "kl_full_to_causal": float(kl[0, frame].item()),
+                "max_logit_delta": float(delta[0, frame].item()),
+                "experiment_id": f"{anchor_name}_L{prefix_lookahead}",
+                "anchor_mode": anchor_name,
+                "anchor_causal": anchor_name != "oracle_text",
+                "speaker_runtime": "FuturePrefixQwen.slot_kv",
+                "v9_runtime": "IncrementalV9Projector.step",
+            })
+        full_losses.extend(full_nll.flatten().tolist())
+        causal_losses.extend(causal_nll.flatten().tolist())
+        full_top1.extend(full_top1_values.float().flatten().tolist())
+        causal_top1.extend(causal_top1_values.float().flatten().tolist())
+        full_top5.extend(full_top5_values.float().flatten().tolist())
+        causal_top5.extend(causal_top5_values.float().flatten().tolist())
+        kl_values.extend(kl.flatten().tolist())
+        logit_deltas.extend(delta.flatten().tolist())
+        del speaker, prefix, prefix_frames, v9_state
+
+    full_ce = sum(full_losses) / len(full_losses)
+    causal_ce = sum(causal_losses) / len(causal_losses)
+    return {
+        "sequences": int(sequences),
+        "frames": int(len(full_losses)),
+        "full_ce": full_ce,
+        "causal_ce": causal_ce,
+        "delta_ce": causal_ce - full_ce,
+        "full_top1": sum(full_top1) / len(full_top1),
+        "causal_top1": sum(causal_top1) / len(causal_top1),
+        "full_top5": sum(full_top5) / len(full_top5),
+        "causal_top5": sum(causal_top5) / len(causal_top5),
+        "kl_full_to_causal": sum(kl_values) / len(kl_values),
+        "max_logit_delta": max(logit_deltas),
+        "finite": all(
+            torch.isfinite(torch.tensor(values, dtype=torch.float64)).all().item()
+            for values in (full_losses, causal_losses, kl_values, logit_deltas)
+        ),
+        "mask_future_prefix": True,
+        "prefix_lookahead_frames": int(prefix_lookahead),
+        "speaker_runtime": "FuturePrefixQwen.slot_kv",
+        "v9_runtime": "IncrementalV9Projector.step",
+    }
+
+
 def run_experiment(
     *,
     workspace: Path,
@@ -127,7 +264,10 @@ def run_experiment(
 
     projector, causal_conv = load_v9_conditioning(device="cuda", dtype=torch.bfloat16)
     stream = IncrementalV9Projector(projector, causal_conv, max_seq_len=16_384)
-    talker = load_talker(str(workspace), device="cuda")
+    # P4D evaluates only the frozen Talker logits.  Do not load Code2Wav
+    # alongside the 1.7B Talker on a 24-GB card: it is not part of this gate
+    # and would turn a valid Qwen test into an avoidable OOM.
+    talker = load_talker(str(workspace), device="cuda", load_code2wav=False)
     talker.talker.eval()
     talker.talker.requires_grad_(False)
     qwen_trainable = [name for name, parameter in talker.talker.named_parameters() if parameter.requires_grad]
@@ -147,7 +287,7 @@ def run_experiment(
                     raise ValueError("lookahead non può essere negativo")
                 experiment_id = f"{anchor_name}_L{lookahead}"
                 local_trace: list[dict[str, Any]] = []
-                metrics = _run_qwen_ablation(
+                metrics = _run_runtime_qwen_ablation(
                     talker,
                     stream,
                     raw,
@@ -155,11 +295,7 @@ def run_experiment(
                     codes,
                     trace=local_trace,
                     prefix_lookahead=lookahead,
-                    event_context={
-                        "experiment_id": experiment_id,
-                        "anchor_mode": anchor_name,
-                        "anchor_causal": anchor_name != "oracle_text",
-                    },
+                    anchor_name=anchor_name,
                 )
                 metrics = _quality(metrics)
                 metrics.update({
@@ -193,6 +329,11 @@ def run_experiment(
         "git_dirty": False,
         "platform": platform.platform(),
         "real_model_required": True,
+        "runtime_path": {
+            "speaker": "FuturePrefixQwen.slot_kv",
+            "v9": "IncrementalV9Projector.step",
+            "full_reference": "_qwen_logits full-sequence",
+        },
         "qwen": {
             "checkpoint_files": checkpoint_files,
             "trainable_parameter_names": qwen_trainable,
