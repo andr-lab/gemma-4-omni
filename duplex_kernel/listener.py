@@ -293,6 +293,15 @@ class GemmaListenerState:
                 "last_reference_frame_id": self.last_reference_frame_id,
             }
 
+    def invalidate_gemma_lm_state(self) -> None:
+        """Discard a partial LM transaction; history will be replayed next tick."""
+        with self._lock:
+            self.gemma_lm_cache = None
+            self.gemma_lm_shared_kv_states = None
+            self.gemma_lm_audio_frames = 0
+            self.gemma_lm_context_start_frame = 0
+            self.gemma_lm_text_context = ()
+
     def close(self) -> None:
         with self._lock:
             self._closed = True
@@ -395,6 +404,14 @@ class GemmaAudioTowerBackend:
             bool(getattr(getattr(layer, "self_attn", None), "is_kv_shared_layer", False))
             for layer in getattr(language_model, "layers", ())
         )
+        self._shape_stable_lm = None
+        self._frame_pad_ple: Any | None = None
+        if language_model is not None:
+            from duplex_kernel.shape_stable_listener import ShapeStableGemmaListenerLM
+
+            # This is a zero-weight-copy functional view.  Its cache/workspace
+            # is listener-owned; the normal Thinker keeps its native forward.
+            self._shape_stable_lm = ShapeStableGemmaListenerLM(language_model, target_length=291)
         try:
             import torch
             parameter = next(self.gemma_model.audio_tower.parameters())
@@ -464,14 +481,16 @@ class GemmaAudioTowerBackend:
         positions: Any,
         state: GemmaListenerState,
     ) -> Any:
-        """Run one native Gemma LM chunk and commit its KV side state."""
+        """Run one shape-stable listener-only Gemma LM chunk and commit its KV."""
         import torch
 
-        lm = self.gemma_model.language_model
+        if self._shape_stable_lm is None:
+            raise RuntimeError("runtime LM shape-stable non disponibile")
         from transformers.models.gemma4.modeling_gemma4 import create_masks_for_generate
+
         position_ids = positions.view(1, -1)
-        # Build the mask exactly where Gemma4Model.forward builds it: before
-        # entering the text LM and against the multimodal Gemma config.
+        # The native Gemma mask factory remains the source of truth.  The
+        # listener view consumes it without changing the Thinker modules.
         mask_mapping = create_masks_for_generate(
             self.gemma_model.config,
             embeds,
@@ -479,31 +498,34 @@ class GemmaAudioTowerBackend:
             past_key_values=state.gemma_lm_cache,
             position_ids=position_ids,
         )
-        kwargs: dict[str, Any] = {
-            "inputs_embeds": embeds,
-            "per_layer_inputs": per_layer,
-            "attention_mask": mask_mapping,
-            "position_ids": position_ids,
-            "past_key_values": state.gemma_lm_cache,
-            "use_cache": True,
-            "return_dict": True,
-        }
-        if self._lm_has_shared_kv:
-            kwargs["return_shared_kv_states"] = True
-            if state.gemma_lm_shared_kv_states is not None:
-                kwargs["shared_kv_states"] = state.gemma_lm_shared_kv_states
         with torch.inference_mode():
-            output = lm(**kwargs)
-        next_shared = getattr(output, "shared_kv_states", None)
-        if next_shared is None:
-            # Current Transformers/Gemma stores this side state on the cache
-            # object rather than exposing it in the model output.
-            next_shared = getattr(output.past_key_values, "shared_layers", None)
-        if self._lm_has_shared_kv and next_shared is None:
-            raise RuntimeError("Gemma LM non ha restituito shared_kv_states per il percorso incrementale")
+            output = self._shape_stable_lm.forward(
+                inputs_embeds=embeds,
+                per_layer_inputs=per_layer,
+                attention_mask=mask_mapping,
+                position_ids=position_ids,
+                past_key_values=state.gemma_lm_cache,
+                shared_kv_states=state.gemma_lm_shared_kv_states,
+            )
         state.gemma_lm_cache = output.past_key_values
-        state.gemma_lm_shared_kv_states = next_shared
+        state.gemma_lm_shared_kv_states = getattr(output.past_key_values, "shared_layers", None)
+        if self._lm_has_shared_kv and state.gemma_lm_shared_kv_states is None:
+            raise RuntimeError("Gemma listener non ha costruito lo shared-KV session-owned")
         return output.last_hidden_state
+
+    def _frame_pad_per_layer_inputs(self, language_model: Any) -> Any:
+        """Return immutable PLE for the four PAD identities used by every tick."""
+        if self._frame_pad_ple is None:
+            import torch
+
+            pad_ids = torch.full(
+                (1, AUDIO_FEATURES_PER_FRAME), self.pad_token_id,
+                dtype=torch.long, device=self.device,
+            )
+            with torch.inference_mode():
+                pad_embeds = language_model.embed_tokens(pad_ids)
+                self._frame_pad_ple = language_model.get_per_layer_inputs(pad_ids, pad_embeds).detach()
+        return self._frame_pad_ple
 
     def _run_incremental_lm(
         self,
@@ -544,53 +566,40 @@ class GemmaAudioTowerBackend:
         frame_rows = AUDIO_FEATURES_PER_FRAME
 
         if context_changed:
-            # Recreate the initial context with the same four-token calls used
-            # while the session is live.  This is rare (window rollover/text
-            # change); steady state remains one cached LM call per frame.
+            # Recreate the prefix, then replay every audio frame as a distinct
+            # Q=4 call.  Joining prefix+first-frame changes the BF16 GEMM shape
+            # and is therefore not representation-equivalent.
             state.gemma_lm_cache = None
             state.gemma_lm_shared_kv_states = None
             state.gemma_lm_audio_frames = 0
+            self._forward_incremental_lm(
+                embeds=stable_embeds,
+                per_layer=stable_ple,
+                attention=stable_attention,
+                positions=torch.arange(AUDIO_START_AFTER_TEXT, device=self.device, dtype=torch.long),
+                state=state,
+            )
+            frame_ple = self._frame_pad_per_layer_inputs(lm)
             for cached_frame in range(frame_index + 1):
                 start = cached_frame * frame_rows
                 frame_audio = audio_soft[:, start:start + frame_rows, :].to(dtype=lm_dtype)
-                pad_ids = torch.full(
-                    (1, frame_rows), self.pad_token_id,
-                    dtype=torch.long, device=self.device,
-                )
-                pad_embeds = lm.embed_tokens(pad_ids)
-                frame_ple = lm.get_per_layer_inputs(pad_ids, pad_embeds)
-                if cached_frame == 0:
-                    embeds = torch.cat((stable_embeds, frame_audio), dim=1)
-                    per_layer = torch.cat((stable_ple, frame_ple), dim=1)
-                    start_position = 0
-                    query_offset = AUDIO_START_AFTER_TEXT
-                else:
-                    embeds = frame_audio
-                    per_layer = frame_ple
-                    start_position = AUDIO_START_AFTER_TEXT + start
-                    query_offset = 0
+                start_position = AUDIO_START_AFTER_TEXT + start
                 positions = torch.arange(
-                    start_position,
-                    start_position + frame_rows + (AUDIO_START_AFTER_TEXT if cached_frame == 0 else 0),
-                    device=self.device,
-                    dtype=torch.long,
+                    start_position, start_position + frame_rows,
+                    device=self.device, dtype=torch.long,
                 )
-                attention = torch.ones(
-                    (1, start_position + embeds.shape[1]),
-                    device=self.device,
-                    dtype=torch.long,
+                frame_attention = torch.ones(
+                    (1, start_position + frame_rows), device=self.device, dtype=torch.long
                 )
-                attention[:, :AUDIO_START_AFTER_TEXT] = stable_attention
+                frame_attention[:, :AUDIO_START_AFTER_TEXT] = stable_attention
                 hidden = self._forward_incremental_lm(
-                    embeds=embeds,
-                    per_layer=per_layer,
-                    attention=attention,
+                    embeds=frame_audio,
+                    per_layer=frame_ple,
+                    attention=frame_attention,
                     positions=positions,
                     state=state,
                 )
-                # The first call includes stable positions; later calls return
-                # the current frame directly at query offset zero.
-                current_hidden = hidden[:, query_offset, :]
+                current_hidden = hidden[:, 0, :]
                 state.gemma_lm_audio_frames = cached_frame + 1
             state.gemma_lm_context_start_frame = context_start
             state.gemma_lm_text_context = text_ids
@@ -598,12 +607,7 @@ class GemmaAudioTowerBackend:
 
         start = frame_index * frame_rows
         frame_audio = audio_soft[:, start:start + frame_rows, :].to(dtype=lm_dtype)
-        pad_ids = torch.full(
-            (1, frame_rows), self.pad_token_id,
-            dtype=torch.long, device=self.device,
-        )
-        pad_embeds = lm.embed_tokens(pad_ids)
-        frame_ple = lm.get_per_layer_inputs(pad_ids, pad_embeds)
+        frame_ple = self._frame_pad_per_layer_inputs(lm)
         start_position = AUDIO_START_AFTER_TEXT + start
         positions = torch.arange(
             start_position, start_position + frame_rows,
@@ -636,6 +640,10 @@ class GemmaAudioTowerBackend:
             user_wave = np.concatenate(tuple(state.user_pcm_history), axis=0)
             assistant_wave = np.concatenate(tuple(state.assistant_pcm_history), axis=0)
             canonical = self.multimodal_model is not None
+            if canonical and state.context_frames > DEFAULT_CONTEXT_FRAMES:
+                raise ValueError(
+                    f"contesto listener Gemma oltre il massimo attestato di {DEFAULT_CONTEXT_FRAMES} frame"
+                )
             target_rows = state.context_frames * MEL_PER_LISTENER_FRAME if canonical else None
             user_mel, assistant_mel = self._extract([user_wave, assistant_wave], rows=target_rows)
             rows = target_rows or max(len(user_mel), len(assistant_mel))
@@ -884,6 +892,10 @@ class GemmaListener:
             except BaseException:
                 state.user_pcm_history.pop()
                 state.assistant_pcm_history.pop()
+                # The functional LM may have appended part of the failing
+                # chunk before an exception.  Never reuse that partial cache:
+                # the next valid tick will deterministically replay history.
+                state.invalidate_gemma_lm_state()
                 state.dropped_listener_frames += 1
                 raise
             finite, nonempty = self._hidden_health(hidden)
@@ -891,12 +903,14 @@ class GemmaListener:
                 state.empty_hidden_count += 1
                 state.user_pcm_history.pop()
                 state.assistant_pcm_history.pop()
+                state.invalidate_gemma_lm_state()
                 state.dropped_listener_frames += 1
                 raise RuntimeError("listener hidden vuoto")
             if not finite:
                 state.nonfinite_hidden_count += 1
                 state.user_pcm_history.pop()
                 state.assistant_pcm_history.pop()
+                state.invalidate_gemma_lm_state()
                 state.dropped_listener_frames += 1
                 raise RuntimeError("listener hidden non finito")
 

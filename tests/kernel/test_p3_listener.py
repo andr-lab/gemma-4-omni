@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import threading
 import time
 from types import SimpleNamespace
 
@@ -79,6 +80,63 @@ def test_native_audio_tower_backend_builds_causal_interleaved_stream() -> None:
     np.testing.assert_array_equal(gemma.seen_features[0, 0].float().numpy(), 1.0)
     np.testing.assert_array_equal(gemma.seen_features[0, 1].float().numpy(), 2.0)
     assert extractor.calls
+
+
+def test_canonical_gemma_listener_rejects_context_above_attested_window() -> None:
+    from duplex_kernel.listener import GemmaAudioTowerBackend
+
+    backend = object.__new__(GemmaAudioTowerBackend)
+    backend._lock = threading.Lock()
+    backend.multimodal_model = object()
+    state = GemmaListenerState(context_frames=65)
+    zero = np.zeros(FRAME_SAMPLES, dtype=np.float32)
+    state.user_pcm_history.append(zero)
+    state.assistant_pcm_history.append(zero)
+
+    with pytest.raises(ValueError, match="massimo attestato"):
+        backend.encode(zero, None, state)
+
+
+def test_listener_failure_discards_partial_listener_lm_cache() -> None:
+    class _FailingBackend:
+        def encode(self, _user_pcm, _assistant_reference, state):
+            state.gemma_lm_cache = object()
+            state.gemma_lm_shared_kv_states = {0: object()}
+            state.gemma_lm_audio_frames = 7
+            state.gemma_lm_context_start_frame = 3
+            state.gemma_lm_text_context = (1, 2)
+            raise RuntimeError("errore simulato dopo avanzamento KV")
+
+    state = GemmaListenerState()
+    listener = GemmaListener(backend=_FailingBackend())
+
+    with pytest.raises(RuntimeError, match="errore simulato"):
+        listener.step(np.zeros(FRAME_SAMPLES, dtype=np.float32), None, state)
+
+    assert state.gemma_lm_cache is None
+    assert state.gemma_lm_shared_kv_states is None
+    assert state.gemma_lm_audio_frames == 0
+    assert state.gemma_lm_context_start_frame == 0
+    assert state.gemma_lm_text_context == ()
+
+
+def test_listener_nonfinite_hidden_discards_partial_listener_lm_cache() -> None:
+    class _NonfiniteBackend:
+        def encode(self, _user_pcm, _assistant_reference, state):
+            state.gemma_lm_cache = object()
+            state.gemma_lm_shared_kv_states = {0: object()}
+            state.gemma_lm_audio_frames = 1
+            return np.array([[np.nan]], dtype=np.float32)
+
+    state = GemmaListenerState()
+    listener = GemmaListener(backend=_NonfiniteBackend())
+
+    with pytest.raises(RuntimeError, match="non finito"):
+        listener.step(np.zeros(FRAME_SAMPLES, dtype=np.float32), None, state)
+
+    assert state.gemma_lm_cache is None
+    assert state.gemma_lm_shared_kv_states is None
+    assert state.gemma_lm_audio_frames == 0
 
 
 def test_assistant_reference_buffer_exposes_only_one_completed_frame_behind() -> None:
