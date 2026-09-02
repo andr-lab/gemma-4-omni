@@ -35,6 +35,8 @@ DEFAULT_FILES = (
     "duplex_kernel/gemma_representation.py",
     "tools/extract_runtime_cache.py",
     "tools/kernel_gates/representation_parity.py",
+    "tools/kernel_gates/runtime_dataset.py",
+    "tests/kernel/test_runtime_dataset.py",
     "tests/kernel/test_p4d_runtime.py",
     "tools/kernel_gates/build_manifest.py",
     "tools/kernel_gates/p1_checks.py",

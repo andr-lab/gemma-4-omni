@@ -23,6 +23,7 @@ os.environ.setdefault("PIPELINE_ENV", "local3090")
 
 from duplex_kernel.gemma_representation import canonical_full_lm_hidden  # noqa: E402
 from duplex_kernel.models.thinker import load_thinker, resolve_thinker_path  # noqa: E402
+from tools.kernel_gates.runtime_dataset import aligned_validation_start  # noqa: E402
 
 
 def main() -> int:
@@ -50,11 +51,17 @@ def main() -> int:
     sidecar = Path(prefix + "_hyperparams.json")
     metadata = json.loads(sidecar.read_text(encoding="utf-8")) if sidecar.is_file() else {}
     segment_ends = [int(value) for value in metadata.get("SEGMENT_ENDS", [])]
-    val_start = int(0.90 * agent_codes.shape[1])
-    for end in segment_ends:
-        if end >= val_start:
-            val_start = end
-            break
+    validation_fraction = float(metadata.get("VAL_FRACTION", 0.10))
+    # The text sidecar is indexed in fixed 64-frame windows.  Never start a
+    # validation dataset mid-window: that pairs audio after the split with
+    # text from an unrelated earlier window.
+    val_start = aligned_validation_start(
+        total_frames=int(agent_codes.shape[1]),
+        validation_fraction=validation_fraction,
+        segment_ends=segment_ends,
+        window_frames=64,
+    )
+    val_text_by_window = text_by_window[val_start // 64 :]
 
     mel_per_frame = int(kp.MEL_PER_AGENT_FRAME)
     train_ds = kp.FullDuplexDataset(
@@ -69,9 +76,14 @@ def main() -> int:
         agent_mel[val_start * mel_per_frame :],
         agent_codes[:, val_start:],
         seq_len=64,
-        text_by_window=text_by_window,
+        text_by_window=val_text_by_window,
     )
 
+    print(
+        f"[RUNTIME-CACHE] validation_start={val_start} "
+        f"text_window_offset={val_start // 64}",
+        flush=True,
+    )
     print("[RUNTIME-CACHE] loading native thinker", flush=True)
     thinker = load_thinker("/workspace", device="cuda", dtype=torch.bfloat16)
     model = thinker.model.model
@@ -141,6 +153,9 @@ def main() -> int:
             "text_block_len": int(kp.TEXT_BLOCK_LEN),
             "audio_start": audio_start,
             "features_per_agent_frame": fpf,
+            "validation_start_frame": val_start,
+            "validation_text_window_offset": val_start // 64,
+            "validation_fraction": validation_fraction,
         },
         output,
     )

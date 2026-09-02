@@ -260,7 +260,13 @@ def run_experiment(
     raw, anchors, cache_codes, raw_stage = _stack_cache(cache_path)
     if cache_codes is None:
         raise ValueError("cache validation priva di va_c")
-    codes, codes_start = _load_codes(codes_path, codes_metadata_path, cache_codes)
+    cache_metadata = torch.load(cache_path, map_location="cpu", weights_only=False)
+    codes, codes_start = _load_codes(
+        codes_path,
+        codes_metadata_path,
+        cache_codes,
+        validation_start_frame=cache_metadata.get("validation_start_frame"),
+    )
 
     projector, causal_conv = load_v9_conditioning(device="cuda", dtype=torch.bfloat16)
     stream = IncrementalV9Projector(projector, causal_conv, max_seq_len=16_384)

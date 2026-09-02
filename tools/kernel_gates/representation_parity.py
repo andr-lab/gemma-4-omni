@@ -25,6 +25,7 @@ if str(ROOT) not in sys.path:
 os.environ.setdefault("PIPELINE_ENV", "local3090")
 
 from duplex_kernel.models.thinker import load_thinker, resolve_thinker_path  # noqa: E402
+from tools.kernel_gates.runtime_dataset import aligned_validation_start  # noqa: E402
 
 
 def sha256(path: Path) -> str:
@@ -35,27 +36,28 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _dataset_split(dataset: Path) -> tuple[Any, int]:
+def _dataset_split(dataset: Path) -> tuple[Any, int, int]:
     import kaggle_pipeline as kp
 
     prefix = str(dataset).removesuffix(".parquet")
     user_mel, agent_mel, codes, text_by_window = kp.load_tokens_from_parquet(str(dataset))
     sidecar = Path(prefix + "_hyperparams.json")
     metadata = json.loads(sidecar.read_text(encoding="utf-8")) if sidecar.is_file() else {}
-    val_start = int(0.90 * codes.shape[1])
-    for end in (int(value) for value in metadata.get("SEGMENT_ENDS", [])):
-        if end >= val_start:
-            val_start = end
-            break
+    val_start = aligned_validation_start(
+        total_frames=int(codes.shape[1]),
+        validation_fraction=float(metadata.get("VAL_FRACTION", 0.10)),
+        segment_ends=(int(value) for value in metadata.get("SEGMENT_ENDS", [])),
+        window_frames=64,
+    )
     mel_per_frame = int(kp.MEL_PER_AGENT_FRAME)
     ds = kp.FullDuplexDataset(
         user_mel[val_start * mel_per_frame :],
         agent_mel[val_start * mel_per_frame :],
         codes[:, val_start:],
         seq_len=64,
-        text_by_window=text_by_window,
+        text_by_window=text_by_window[val_start // 64 :],
     )
-    return ds, int(kp.TEXT_BLOCK_LEN)
+    return ds, int(kp.TEXT_BLOCK_LEN), val_start
 
 
 def run(
@@ -74,7 +76,14 @@ def run(
     if not isinstance(cached, list) or not cached:
         raise ValueError("representation cache priva di va_raw")
 
-    ds, text_block_len = _dataset_split(dataset)
+    ds, text_block_len, validation_start_frame = _dataset_split(dataset)
+    if int(cache.get("validation_start_frame", -1)) != validation_start_frame:
+        raise ValueError(
+            "cache validation_start_frame non coincide con la split allineata: "
+            f"cache={cache.get('validation_start_frame')!r}, expected={validation_start_frame}"
+        )
+    if int(cache.get("validation_text_window_offset", -1)) != validation_start_frame // 64:
+        raise ValueError("cache validation_text_window_offset non attestato o non allineato")
     count = min(int(limit), len(ds), len(cached))
     if count <= 0:
         raise ValueError("nessuna sequenza validation disponibile")
@@ -191,6 +200,8 @@ def run(
             "masks": "Gemma4Model.forward create_masks_for_generate sliding_attention/full_attention",
             "audio_token_id": audio_token_id,
             "text_block_len": text_block_len,
+            "validation_start_frame": validation_start_frame,
+            "validation_text_window_offset": validation_start_frame // 64,
             "audio_features_per_frame": audio_features_per_frame,
         },
         "model": {

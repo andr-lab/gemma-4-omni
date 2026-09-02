@@ -10,6 +10,8 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
+from tools.kernel_gates.runtime_dataset import attested_validation_start
+
 
 MIN_SEQUENCES = 100
 MIN_FRAMES = 5_000
@@ -206,7 +208,13 @@ def _run_performance(stream: Any, raw: torch.Tensor, anchors: torch.Tensor, *, t
     }
 
 
-def _load_codes(codes_path: Path, metadata_path: Path | None, cache_codes: torch.Tensor) -> tuple[torch.Tensor, int]:
+def _load_codes(
+    codes_path: Path,
+    metadata_path: Path | None,
+    cache_codes: torch.Tensor,
+    *,
+    validation_start_frame: int | None,
+) -> tuple[torch.Tensor, int]:
     try:
         import pyarrow.parquet as pq
     except ImportError as exc:
@@ -220,9 +228,13 @@ def _load_codes(codes_path: Path, metadata_path: Path | None, cache_codes: torch
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         fraction = float(metadata.get("VAL_FRACTION", fraction))
         segment_ends = [int(item) for item in metadata.get("SEGMENT_ENDS", [])]
-    start = int((1.0 - fraction) * codes.shape[0])
-    if segment_ends:
-        start = next((item for item in segment_ends if item >= start), start)
+    start = attested_validation_start(
+        cache_start_frame=validation_start_frame,
+        total_frames=int(codes.shape[0]),
+        validation_fraction=fraction,
+        segment_ends=segment_ends,
+        window_frames=int(cache_codes.shape[1]),
+    )
     expected = codes[start:start + cache_codes.shape[0] * cache_codes.shape[1], 0].reshape(cache_codes.shape)
     if not torch.equal(expected, cache_codes.to(torch.long)):
         raise ValueError("va_c non coincide con a_cb_0 della validation split; allineamento rifiutato")
@@ -400,6 +412,8 @@ def run_checks(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     del workspace
     raw, anchors, cache_codes, raw_stage = _stack_cache(cache_path)
+    cache_metadata = torch.load(cache_path, map_location="cpu", weights_only=False)
+    validation_start_frame = cache_metadata.get("validation_start_frame")
     if cache_codes is None:
         raise ValueError("cache validation priva di va_c: T4 non può verificare l'allineamento codebook")
     if stream.max_seq_len < raw.shape[1]:
@@ -412,7 +426,12 @@ def run_checks(
     if talker is None or codes_path is None:
         ablation = {"passed": False, "blocked": True, "reason": "Qwen/tokens validation non forniti"}
     else:
-        codes, codes_start = _load_codes(codes_path, codes_metadata_path, cache_codes)
+        codes, codes_start = _load_codes(
+            codes_path,
+            codes_metadata_path,
+            cache_codes,
+            validation_start_frame=validation_start_frame,
+        )
         ablation = _run_qwen_ablation(talker, stream, raw, anchors, codes, trace=trace)
         ablation["ce_ratio"] = ablation["causal_ce"] / max(ablation["full_ce"], 1e-12)
         ablation["top1_drop"] = ablation["full_top1"] - ablation["causal_top1"]
