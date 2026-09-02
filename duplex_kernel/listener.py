@@ -554,8 +554,7 @@ class GemmaAudioTowerBackend:
         context_changed = (
             state.gemma_lm_cache is None
             or state.gemma_lm_text_context != text_ids
-            or state.gemma_lm_context_start_frame != context_start
-            or state.gemma_lm_audio_frames != frame_index
+            or state.gemma_lm_audio_frames != state.next_frame_id
         )
         stable_ids = input_ids[:, :AUDIO_START_AFTER_TEXT]
         stable_attention = attention_mask[:, :AUDIO_START_AFTER_TEXT].to(
@@ -608,7 +607,7 @@ class GemmaAudioTowerBackend:
         start = frame_index * frame_rows
         frame_audio = audio_soft[:, start:start + frame_rows, :].to(dtype=lm_dtype)
         frame_ple = self._frame_pad_per_layer_inputs(lm)
-        start_position = AUDIO_START_AFTER_TEXT + start
+        start_position = AUDIO_START_AFTER_TEXT + state.gemma_lm_audio_frames * frame_rows
         positions = torch.arange(
             start_position, start_position + frame_rows,
             device=self.device, dtype=torch.long,
@@ -624,7 +623,7 @@ class GemmaAudioTowerBackend:
             positions=positions,
             state=state,
         )
-        state.gemma_lm_audio_frames = frame_index + 1
+        state.gemma_lm_audio_frames += 1
         state.gemma_lm_context_start_frame = context_start
         state.gemma_lm_text_context = text_ids
         return hidden[:, 0, :]

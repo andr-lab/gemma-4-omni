@@ -73,6 +73,7 @@ class PipelineEngine:
         self.residual_sampler: Any | None = None
         self.listener: Any | None = None
         self._talker_lock = threading.RLock()
+        self._thinker_lock = threading.Lock()
         self._mtp_ready = False  # MTP parallelo: disattivato (fallback generate HF bit-exact)
         self.loaded = False
         self._stop_event = False
@@ -91,6 +92,8 @@ class PipelineEngine:
             self.tokenizer = th.tokenizer
             from duplex_kernel.listener import GemmaListener
             self.listener = GemmaListener.from_thinker(th)
+            if hasattr(self.listener, "backend") and hasattr(self.listener.backend, "_lock"):
+                self._thinker_lock = self.listener.backend._lock
             logger.info("[engine] thinker + continuous listener in %.1fs", time.time() - t0)
 
             self.talker = load_talker(workspace, device=self.device)
@@ -123,32 +126,33 @@ class PipelineEngine:
     def think(self, prompt_token_ids: list[int], *, max_new_tokens: int = 64,
               temperature: float = 0.7, top_p: float = 0.9, stop_check: Any | None = None,
               state: Any | None = None, generation_id: int | None = None,
-              on_text_chunk: Any | None = None) -> dict[str, Any]:
+              on_text_chunk: Any | None = None, min_new_tokens: int = 0) -> dict[str, Any]:
         """Decode Thinker controllato dal kernel con riuso opportunistico della KV."""
         cached_ids = list(getattr(state, "thinker_cache_ids", [])) if state is not None else []
         use_cached = bool(cached_ids and len(prompt_token_ids) > len(cached_ids)
                           and prompt_token_ids[:len(cached_ids)] == cached_ids
                           and getattr(state, "thinker_kv", None) is not None
                           and getattr(state, "thinker_hidden", None) is not None)
-        if use_cached:
-            suffix = prompt_token_ids[len(cached_ids):]
-            ids = torch.tensor([suffix], device=self.device)
-            mask = torch.ones((1, len(cached_ids) + len(suffix)), device=self.device, dtype=torch.long)
-            out = self.thinker(input_ids=ids, attention_mask=mask, past_key_values=state.thinker_kv,
-                               use_cache=True, output_hidden_states=True, return_dict=True)
-            hidden_parts = [state.thinker_hidden, out.hidden_states[-1]]
-        else:
-            ids = torch.tensor([prompt_token_ids], device=self.device)
-            mask = torch.ones_like(ids)
-            out = self.thinker(input_ids=ids, attention_mask=mask, use_cache=True,
-                               output_hidden_states=True, return_dict=True)
-            hidden_parts = [out.hidden_states[-1]]
+        with self._thinker_lock:
+            if use_cached:
+                suffix = prompt_token_ids[len(cached_ids):]
+                ids = torch.tensor([suffix], device=self.device)
+                mask = torch.ones((1, len(cached_ids) + len(suffix)), device=self.device, dtype=torch.long)
+                out = self.thinker(input_ids=ids, attention_mask=mask, past_key_values=state.thinker_kv,
+                                   use_cache=True, output_hidden_states=True, return_dict=True)
+                hidden_parts = [state.thinker_hidden, out.hidden_states[-1]]
+            else:
+                ids = torch.tensor([prompt_token_ids], device=self.device)
+                mask = torch.ones_like(ids)
+                out = self.thinker(input_ids=ids, attention_mask=mask, use_cache=True,
+                                   output_hidden_states=True, return_dict=True)
+                hidden_parts = [out.hidden_states[-1]]
         past = out.past_key_values
         logits = out.logits[:, -1, :]
         generated: list[int] = []
         pending_chunk: list[int] = []
         eos = {x for x in (self.tokenizer.eos_token_id, getattr(self.tokenizer, "eot_id", None)) if x is not None}
-        for _ in range(max_new_tokens):
+        for step in range(max_new_tokens):
             if stop_check is not None and stop_check():
                 break
             if temperature <= 1e-5:
@@ -163,13 +167,14 @@ class PipelineEngine:
                     probs = probs / probs.sum(dim=-1, keepdim=True)
                 token = torch.multinomial(probs, 1)
             value = int(token.item())
-            if value in eos:
+            if value in eos and (step + 1) >= min_new_tokens:
                 break
             generated.append(value)
             pending_chunk.append(value)
             mask = torch.cat([mask, torch.ones((1, 1), device=self.device, dtype=mask.dtype)], dim=1)
-            out = self.thinker(input_ids=token, attention_mask=mask, past_key_values=past,
-                               use_cache=True, output_hidden_states=True, return_dict=True)
+            with self._thinker_lock:
+                out = self.thinker(input_ids=token, attention_mask=mask, past_key_values=past,
+                                   use_cache=True, output_hidden_states=True, return_dict=True)
             past = out.past_key_values
             hidden_parts.append(out.hidden_states[-1])
             logits = out.logits[:, -1, :]

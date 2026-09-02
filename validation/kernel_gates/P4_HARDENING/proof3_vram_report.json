@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "proof": "PROOF_3_FULL_STACK_VRAM",
+  "git_sha": "unknown",
+  "git_dirty": false,
+  "timestamp_utc": "2026-09-02T17:56:21Z",
+  "platform": "Linux-7.0.0-30-generic-x86_64-with-glibc2.35",
+  "gpu_name": "NVIDIA GeForce RTX 3090",
+  "torch_version": "2.12.1+cu130",
+  "cuda_version": "13.0",
+  "stack_components": [
+    {
+      "name": "Gemma 4 E2B Thinker + Listener",
+      "dtype": "bfloat16",
+      "status": "loaded & exercised"
+    },
+    {
+      "name": "V9 Projector + Causal Conv",
+      "dtype": "bfloat16",
+      "status": "loaded & exercised"
+    },
+    {
+      "name": "Qwen3-TTS 12Hz 1.7B Base Talker",
+      "dtype": "bfloat16",
+      "status": "loaded & exercised"
+    },
+    {
+      "name": "SubTalker RVQ Code Predictor",
+      "dtype": "bfloat16",
+      "status": "loaded & exercised (cuda_graph=True)"
+    },
+    {
+      "name": "Code2Wav 24kHz Vocoder",
+      "dtype": "float32",
+      "status": "loaded & exercised"
+    }
+  ],
+  "vram_metrics_gb": {
+    "total": 23.561,
+    "allocated": 14.219,
+    "reserved": 14.359,
+    "peak_allocated": 14.266,
+    "peak_reserved": 14.359,
+    "free_available": 8.771
+  },
+  "thresholds": {
+    "max_reserved_gb": 22.0,
+    "min_free_gb": 2.0,
+    "all_components_exercised": true
+  },
+  "passed": true
+}
