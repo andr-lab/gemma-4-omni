@@ -246,9 +246,15 @@ def _load_codes(
 
 def _aggregate_code_embeddings(model: Any, codes: torch.Tensor) -> torch.Tensor:
     """Somma embedding CB0..CB15 come nella ricetta Qwen ufficiale."""
+    if codes.dim() == 2:
+        codes = codes.unsqueeze(-1)
     parts = [model.get_input_embeddings()(codes[..., :1])]
-    for codebook in range(1, 16):
-        parts.append(model.code_predictor.get_input_embeddings()[codebook - 1](codes[..., codebook:codebook + 1]))
+    code_predictor = getattr(model, "code_predictor", None)
+    if code_predictor is not None:
+        sub_embs = code_predictor.get_input_embeddings()
+        max_cbs = min(codes.shape[-1], len(sub_embs) + 1, 16)
+        for codebook in range(1, max_cbs):
+            parts.append(sub_embs[codebook - 1](codes[..., codebook:codebook + 1]))
     return torch.cat(parts, dim=-2).sum(dim=-2)
 
 

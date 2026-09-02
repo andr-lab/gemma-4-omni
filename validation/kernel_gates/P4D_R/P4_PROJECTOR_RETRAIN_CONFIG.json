@@ -1,0 +1,19 @@
+{
+  "git_sha": "unknown",
+  "source_v9_ckpt": "/workspace/checkpoints/v9_prefix_final.pt",
+  "source_v9_sha256": "2b8139a66c2dcdeba510f3416ec7cdc58cfcee8c9ea762072cdd3f27e01cd096",
+  "frozen_components_sha256": {
+    "qwen_talker": "38fc7fc51c5e776e840414b6fd443962e9411b9654888fd7913e4da643cb857c"
+  },
+  "epochs": 5,
+  "batch_size": 4,
+  "lr": 0.0001,
+  "min_lr": 1e-05,
+  "weight_decay": 0.01,
+  "clip_grad": 1.0,
+  "teacher_weight": 0.0,
+  "train_conv": false,
+  "num_trainable_params": 211830784,
+  "target_lookahead": 0,
+  "causal_anchor": "first_raw_frame"
+}

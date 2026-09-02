@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "test": "AUDIT_FUTURE_LEAK_P4D_R",
+  "num_sequences_audited": 100,
+  "max_diff_raw": 0.0,
+  "max_diff_tx": 0.0,
+  "max_diff_conv": 0.0,
+  "max_diff_pfx": 0.0,
+  "tolerance": 1e-05,
+  "mask_violations": 0,
+  "passed": true
+}

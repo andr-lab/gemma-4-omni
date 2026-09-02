@@ -36,6 +36,7 @@ def main() -> int:
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--validation-only", action="store_true")
     parser.add_argument("--limit", type=int, default=100)
+    parser.add_argument("--train-limit", type=int, default=None)
     args = parser.parse_args()
     if args.batch_size <= 0 or args.limit <= 0:
         parser.error("batch-size e limit devono essere positivi")
@@ -124,7 +125,7 @@ def main() -> int:
             pooled = (text * valid).sum(1) / valid.sum(1).clamp_min(1.0)
             for index, item in enumerate(items):
                 raw.append(selected[index].cpu())
-                targets.append(item["audio_targets"][:, 0].clone().cpu())
+                targets.append(item["audio_targets"].clone().cpu())
                 text_hidden.append(pooled[index].cpu())
             print(f"[RUNTIME-CACHE] {len(raw)}/{count}", flush=True)
         return raw, targets, text_hidden
@@ -133,7 +134,8 @@ def main() -> int:
     train_targets: list[torch.Tensor] = []
     train_text: list[torch.Tensor] = []
     if not args.validation_only:
-        train_raw, train_targets, train_text = extract(train_ds, len(train_ds))
+        train_count = len(train_ds) if args.train_limit is None else min(args.train_limit, len(train_ds))
+        train_raw, train_targets, train_text = extract(train_ds, train_count)
     val_raw, val_targets, val_text = extract(val_ds, args.limit)
 
     output = Path(args.output)
