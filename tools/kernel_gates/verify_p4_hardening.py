@@ -61,6 +61,24 @@ def verify_proof1(proof_dir: Path) -> tuple[bool, dict[str, Any]]:
     if spikes > 0:
         return False, {"error": f"anomalous latency spikes detected: {spikes} frames over 150ms"}
 
+    # Strict Realtime Latency Gate on complete listener step (<= 80.0 ms)
+    p95 = lat.get("p95", 999.0)
+    if p95 > 80.0:
+        return False, {"error": f"complete listener step p95 latency ({p95}ms) > 80.0ms threshold"}
+
+    # Strict Realtime Wall-Elapsed / Throughput Gate:
+    # 3750 frames at 12.5 Hz (80ms) = 300.0s nominal audio
+    expected_duration_s = total_frames * 0.08
+    wall_elapsed_s = rep.get("wall_elapsed_s", 999.0)
+    if wall_elapsed_s > expected_duration_s * 1.05:
+        return False, {
+            "error": f"wall_elapsed_s ({wall_elapsed_s}s) > expected ({expected_duration_s}s * 1.05 = {expected_duration_s * 1.05:.2f}s)"
+        }
+
+    miss_rate = lat.get("deadline_miss_rate", None)
+    if miss_rate is not None and miss_rate > 1.0:
+        return False, {"error": f"deadline miss rate ({miss_rate}%) > 1.0% threshold"}
+
     health = rep.get("health", {})
     if health.get("errors", 1) != 0 or health.get("non_finite_count", 1) != 0 or health.get("dropped_frames", 1) != 0:
         return False, {"error": f"health check failed: {health}"}
@@ -79,7 +97,9 @@ def verify_proof1(proof_dir: Path) -> tuple[bool, dict[str, Any]]:
         "mae": mae,
         "cosine_min": cos_min,
         "p50_ms": lat.get("p50"),
-        "p95_ms": lat.get("p95"),
+        "p95_ms": p95,
+        "wall_elapsed_s": wall_elapsed_s,
+        "expected_duration_s": expected_duration_s,
         "spikes_over_150ms": spikes,
         "trace_sha256": _file_sha256(trace_path),
     }
@@ -112,18 +132,26 @@ def verify_proof2(proof_dir: Path) -> tuple[bool, dict[str, Any]]:
     if dropped != 0 or len(errors) != 0:
         return False, {"error": f"concurrent listener errors or drops: dropped={dropped}, errors={errors}"}
 
-    # 3. LM latency check
+    # 3. Total Listener Step Latency check (Must gate the FULL transaction including lock-wait)
+    tot_lat = listener.get("total_step_latency_ms", {})
+    tot_p95 = tot_lat.get("p95", 999.0)
+    if tot_p95 > 80.0:
+        return False, {"error": f"total listener step p95 during thinking ({tot_p95}ms) > 80.0ms threshold"}
+
+    # 4. LM latency check
     lm_lat = listener.get("lm_latency_ms", {})
-    p95 = lm_lat.get("p95", 999.0)
-    if p95 > 80.0:
-        return False, {"error": f"listener LM p95 latency ({p95}ms) > 80.0ms threshold"}
+    lm_p95 = lm_lat.get("p95", 999.0)
+    if lm_p95 > 80.0:
+        return False, {"error": f"listener LM p95 latency ({lm_p95}ms) > 80.0ms threshold"}
 
     return True, {
         "tokens_generated": tokens_gen,
         "duration_s": gen.get("duration_s"),
         "frames_during_thinking": frames_during,
         "lm_p50_ms": lm_lat.get("p50"),
-        "lm_p95_ms": p95,
+        "lm_p95_ms": lm_p95,
+        "total_p50_ms": tot_lat.get("p50"),
+        "total_p95_ms": tot_p95,
         "dropped_frames": dropped,
         "trace_sha256": _file_sha256(trace_path),
     }
@@ -178,6 +206,7 @@ def run_verification(proof_dir: Path) -> bool:
     if p2_pass:
         print(f"  • Tokens Generated: {p2_info['tokens_generated']} in {p2_info['duration_s']}s")
         print(f"  • Concurrent Frames: {p2_info['frames_during_thinking']}, Dropped: {p2_info['dropped_frames']}")
+        print(f"  • Listener Total Latency: p50={p2_info['total_p50_ms']}ms, p95={p2_info['total_p95_ms']}ms (Gate <= 80ms)")
         print(f"  • Listener LM Latency: p50={p2_info['lm_p50_ms']}ms, p95={p2_info['lm_p95_ms']}ms (Gate <= 80ms)")
     else:
         print(f"  FAILED: {p2_info}")
@@ -199,6 +228,7 @@ def run_verification(proof_dir: Path) -> bool:
         return True
     else:
         print("VERIFICATION FAILED: NOT ALL GATES PASSED.")
+        print("\n>>> P4 OPEN — GEMMA_LISTENER_REALTIME_FAIL <<<\n")
         print("=" * 70)
         return False
 
