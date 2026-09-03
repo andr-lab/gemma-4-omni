@@ -16,7 +16,13 @@ WORKSPACE = os.environ.get("GEMMA4_OMNI_WORKSPACE", "/workspace")
 # ---------------------------------------------------------------------------
 # Checkpoint addestrati (pesi custom, non dai modelli base)
 # ---------------------------------------------------------------------------
-V9_CKPT = os.environ.get("GEMMA4_OMNI_V9_CKPT", os.path.join(WORKSPACE, "checkpoints", "v9_prefix_final.pt"))
+_causal_v9_candidates = [
+    os.path.join(WORKSPACE, "checkpoints", "v9_causal_l0_final.pt"),
+    os.path.join(WORKSPACE, "checkpoints", "v9_causal_l0_unknown.pt"),
+    os.path.join(WORKSPACE, "checkpoints", "v9_prefix_final.pt"),
+]
+_default_v9 = next((p for p in _causal_v9_candidates if os.path.exists(p)), _causal_v9_candidates[0])
+V9_CKPT = os.environ.get("GEMMA4_OMNI_V9_CKPT", _default_v9)
 HEADS_CKPT = os.environ.get("GEMMA4_OMNI_HEADS_CKPT", "")  # custom_duplex_heads.pt (causal_conv)
 TURNHEAD_CKPT = os.environ.get(
     "GEMMA4_OMNI_TURNHEAD_CKPT",
@@ -57,9 +63,10 @@ TALKER_EOS_TOKEN_ID = 2150
 # Code2Wav: 24 kHz, chunk di 8 frame = 640ms (ADR-023).
 CODEC_SAMPLE_RATE = 24000
 CODEC_CHUNK_FRAMES = 8
-# P4D: lookahead minimo riconfermato con anchor first_raw_frame (L=40).
-# È un vincolo del solo speaker conditioning, non del listener clock.
-FROZEN_QWEN_LOOKAHEAD_FRAMES = int(os.environ.get("GEMMA4_OMNI_FROZEN_QWEN_LOOKAHEAD_FRAMES", "40"))
+# P4D: candidate runtime causale V9 a L=0 (zero lookahead acustico, zero delay).
+# Il valore storico L=40 e' preservato unicamente come modalita' diagnostica legacy.
+FROZEN_QWEN_LOOKAHEAD_FRAMES_LEGACY = 40  # diagnostica storica reference
+FROZEN_QWEN_LOOKAHEAD_FRAMES = int(os.environ.get("GEMMA4_OMNI_FROZEN_QWEN_LOOKAHEAD_FRAMES", "0"))
 if FROZEN_QWEN_LOOKAHEAD_FRAMES < 0 or FROZEN_QWEN_LOOKAHEAD_FRAMES >= 64:
     raise ValueError("GEMMA4_OMNI_FROZEN_QWEN_LOOKAHEAD_FRAMES deve essere tra 0 e 63")
 # Ritardo playout opzionale aggiuntivo; zero conserva il comportamento storico.

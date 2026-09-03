@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "checkpoint": "/workspace/checkpoints/v9_causal_l0_unknown.pt",
+  "gate_7_runtime_quality": {
+    "ref_ce": 2.9001052379608154,
+    "ref_top1": 0.3423437476158142,
+    "ref_top5": 0.6524999737739563,
+    "runtime_ce": 2.606239080429077,
+    "runtime_top1": 0.3610937297344208,
+    "runtime_top5": 0.6800000071525574,
+    "ce_ratio": 0.8986705193710943,
+    "top1_drop_pp": -1.8749982118606567,
+    "top5_drop_pp": -2.7500033378601074,
+    "pass_ce": true,
+    "pass_top1": true,
+    "pass_top5": true,
+    "all_pass": true
+  },
+  "gate_8_future_leak": {
+    "max_leak_diff": 0.0,
+    "leak_violations": 0,
+    "pass_leak": true
+  },
+  "gate_9_performance": {
+    "v9": {
+      "p50": 2.8419039249420166,
+      "p95": 2.868673551082611,
+      "p99": 2.953721222877502,
+      "mean": 2.8470616292953492,
+      "max": 5.127488136291504
+    },
+    "qwen_slot": {
+      "p50": 0.12176000326871872,
+      "p95": 0.13097600638866425,
+      "p99": 0.1322649611532688,
+      "mean": 0.12292160008847713,
+      "max": 0.15036800503730774
+    },
+    "qwen_audio_step": {
+      "p50": 71.05126190185547,
+      "p95": 71.44652557373047,
+      "p99": 71.67577186584472,
+      "mean": 71.04021408081054,
+      "max": 75.30400085449219
+    },
+    "subtalker": {
+      "p50": 15.531007766723633,
+      "p95": 16.00215082168579,
+      "p99": 16.276564407348634,
+      "mean": 15.611374904632568,
+      "max": 16.311296463012695
+    },
+    "combined": {
+      "p50": 89.61112213134766,
+      "p95": 90.14153213500977,
+      "p99": 90.50971618652343,
+      "mean": 89.62157231140137,
+      "max": 94.12825775146484
+    },
+    "jitter_ms": 0.8985940551757778,
+    "deadline_miss_rate": 100.0,
+    "nominal_deadline_ms": 80.0,
+    "pass_performance": true
+  },
+  "gate_10_listen": {
+    "duration_s": 10.0,
+    "listener_ticks": 125,
+    "qwen_calls": 0,
+    "subtalker_calls": 0,
+    "pass_listen": true
+  },
+  "gate_11_fencing": {
+    "num_transitions": 1000,
+    "stale_writes": 0,
+    "ghost_frames": 0,
+    "pass_fencing": true
+  },
+  "all_gates_pass": true,
+  "verdict": "P4D CAUSAL PROJECTOR PASS \u2014 L=0"
+}

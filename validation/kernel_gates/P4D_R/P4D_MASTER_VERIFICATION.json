@@ -1,0 +1,40 @@
+{
+  "verdict": "P4D CAUSAL RUNTIME MASTER PASS \u2014 L=0 CERTIFIED",
+  "all_pass": true,
+  "checks": {
+    "config_lookahead_zero": {
+      "lookahead_frames": 0,
+      "pass": true
+    },
+    "provenance_hashes": {
+      "v9_causal_sha256": "f434aad703e1ea883a82cc948e5a66f42ff4794b185c19236a89c5e75f874fa7",
+      "v9_source_sha256": "2b8139a66c2dcdeba510f3416ec7cdc58cfcee8c9ea762072cdd3f27e01cd096",
+      "pass": true
+    },
+    "parity_gate": {
+      "top1_agreement_pct": 100.0,
+      "mean_logit_mae": 3.430742096632855e-06,
+      "min_cosine_similarity": 0.9999997615814209,
+      "pass": true
+    },
+    "runtime_suite": {
+      "gate_7_quality": true,
+      "gate_8_future_leak": true,
+      "gate_9_performance": true,
+      "gate_10_listen": true,
+      "gate_11_fencing": true,
+      "pass": true
+    },
+    "audio_samples": {
+      "samples_count": 5,
+      "files": [
+        "sample_001_causal_l0.wav",
+        "sample_002_causal_l0.wav",
+        "sample_003_causal_l0.wav",
+        "sample_004_causal_l0.wav",
+        "sample_005_causal_l0.wav"
+      ],
+      "pass": true
+    }
+  }
+}

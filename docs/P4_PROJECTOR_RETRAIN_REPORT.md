@@ -12,9 +12,9 @@ Target di produzione: **Zero Lookahead Acustico ($L=0$), Zero Playout Delay ($0$
 * **Commit Base**: `26f5a6f`
 * **Checkpoint V9 Sorgente (Warm-start)**:  
   `/workspace/checkpoints/v9_prefix_final.pt`  
-  SHA256: `633e9b7a421b8b80b721867ad68b4ad1ffdbbbda8bba5481fe911e3b6d091e92`
+  SHA256: `2b8139a66c2dcdeba510f3416ec7cdc58cfcee8c9ea762072cdd3f27e01cd096`
 * **Nuovo Checkpoint V9 Causale ($L=0$)**:  
-  `/workspace/checkpoints/v9_causal_l0_unknown.pt`  
+  `/workspace/checkpoints/v9_causal_l0_final.pt` (alias canonico di `/workspace/checkpoints/v9_causal_l0_unknown.pt`)  
   SHA256: `f434aad703e1ea883a82cc948e5a66f42ff4794b185c19236a89c5e75f874fa7`
 * **Parametri Addestrati**: **211,830,784** (`DeepCausalTransformerProjectorV9`)
 * **Parametri Congelati (100% Invariati / Byte-Identical)**:

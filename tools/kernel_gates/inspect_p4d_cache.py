@@ -4,9 +4,8 @@ from pathlib import Path
 import torch
 
 for name in [
+    "cache_p4d_r_512.pt",
     "cache_ars_runtime_aligned_v1.pt",
-    "cache_ars_preconv_v1.pt",
-    "cache_ars_stateful_v3.pt",
 ]:
     p = Path("/workspace") / name
     if not p.exists():

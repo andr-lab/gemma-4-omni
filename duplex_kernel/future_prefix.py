@@ -489,8 +489,9 @@ class _SlotKVCache:
             raise ValueError("dimensione batch/head incompatibile con Qwen slot KV")
         keys.index_copy_(2, positions, key_states)
         values.index_copy_(2, positions, value_states)
-        if positions.numel():
-            self._max_position = max(self._max_position, int(positions.max().item()))
+        pos_int = cache_kwargs.get("cache_position_int") if cache_kwargs is not None else None
+        if pos_int is not None:
+            self._max_position = max(self._max_position, int(pos_int))
         return keys, values
 
     def get_seq_length(self, layer_idx: int = 0) -> int:
@@ -588,19 +589,39 @@ class FuturePrefixQwen:
         positions: torch.Tensor,
         *,
         visible_prefix_end: int,
+        q_pos_int: int | None = None,
     ) -> torch.Tensor:
         """Build [B,1,Q,K] additive mask for position-addressed cache slots."""
         if self._slot_cache is None:
             raise RuntimeError("slot KV non inizializzata")
-        q_positions = positions.to(device=self.device, dtype=torch.long).reshape(-1)
         total = self._slot_cache.max_cache_len
+        mask_val = torch.finfo(self.dtype).min
+        keys = torch.arange(total, device=self.device, dtype=torch.long)
+
+        if positions.numel() == 1 and q_pos_int is not None:
+            allowed = keys <= q_pos_int
+            if q_pos_int >= self._audio_start:
+                prefix_limit = self._prefix_start + int(visible_prefix_end)
+                prefix_slots = (keys >= self._prefix_start) & (keys < self._audio_start)
+                allowed &= (~prefix_slots) | (keys <= prefix_limit)
+            else:
+                allowed &= keys <= q_pos_int
+            mask = torch.full(
+                (self._icl.shape[0], 1, 1, total),
+                mask_val,
+                device=self.device,
+                dtype=self.dtype,
+            )
+            mask[0, 0, 0, allowed] = 0
+            return mask
+
+        q_positions = positions.to(device=self.device, dtype=torch.long).reshape(-1)
         mask = torch.full(
             (self._icl.shape[0], 1, q_positions.numel(), total),
-            torch.finfo(self.dtype).min,
+            mask_val,
             device=self.device,
             dtype=self.dtype,
         )
-        keys = torch.arange(total, device=self.device, dtype=torch.long)
         for row, query_position in enumerate(q_positions.tolist()):
             allowed = keys <= int(query_position)
             if int(query_position) >= self._audio_start:
@@ -608,8 +629,6 @@ class FuturePrefixQwen:
                 prefix_slots = (keys >= self._prefix_start) & (keys < self._audio_start)
                 allowed &= (~prefix_slots) | (keys <= prefix_limit)
             else:
-                # A prefix query can see only the stable prefix and slots up
-                # to itself; future slots remain zero and masked.
                 allowed &= keys <= int(query_position)
             mask[0, 0, row, allowed] = 0
         return mask
@@ -701,8 +720,9 @@ class FuturePrefixQwen:
                 device=self.device,
                 dtype=self.dtype,
             )
-        position = torch.tensor([self._audio_start + frame_id], device=self.device, dtype=torch.long)
-        mask = self._slot_mask(position, visible_prefix_end=visible_end)
+        pos_int = self._audio_start + frame_id
+        position = torch.tensor([pos_int], device=self.device, dtype=torch.long)
+        mask = self._slot_mask(position, visible_prefix_end=visible_end, q_pos_int=pos_int)
         model = getattr(getattr(self.talker, "talker", self.talker), "model", self.talker)
         with torch.inference_mode():
             out = model(

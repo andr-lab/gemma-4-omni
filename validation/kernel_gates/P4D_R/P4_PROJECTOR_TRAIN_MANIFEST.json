@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "type": "post_training_provenance_attestation",
+  "phase": "P4D-R_TRAIN_MANIFEST",
+  "git_commit_origin": "26f5a6f85f1c95b6dd3e42939b69992d95b5e35e",
+  "git_commit_completion": "13cf665e48216b71bc38a74e036585ffd451da14",
+  "git_sha_raw_runtime": "unknown",
+  "reason_for_unknown_suffix": "Host directory /home/administrator/gemma-4-omni on remote gpu3090 does not contain a .git directory; training script git rev-parse returned 'unknown'. Checkpoint bytes are intact and fully verified.",
+  "new_checkpoint": "/workspace/checkpoints/v9_causal_l0_unknown.pt",
+  "new_checkpoint_sha256": "f434aad703e1ea883a82cc948e5a66f42ff4794b185c19236a89c5e75f874fa7",
+  "source_checkpoint": "/workspace/checkpoints/v9_prefix_final.pt",
+  "source_checkpoint_sha256": "2b8139a66c2dcdeba510f3416ec7cdc58cfcee8c9ea762072cdd3f27e01cd096",
+  "training_cache": "/workspace/cache_p4d_r_512.pt",
+  "training_cache_sha256": "8c6023475da69c6d42e331fd31aaf033c951726e2cab54aa63017d0641eeb87f",
+  "validation_cache": "/workspace/cache_ars_runtime_aligned_v1.pt",
+  "validation_cache_sha256": "7360419811c3414acb2502ab0ed0a5d8d31d8d618433bf9d86bd85caf9792076",
+  "training_trace": "/workspace/validation/kernel_gates/P4D_R/P4_PROJECTOR_TRAIN_TRACE.jsonl",
+  "training_trace_sha256": "6d66b751f5bb965b7e22551c54c2a13ec912cd467f1f566bfd4582ea998d37ab",
+  "training_trace_total_steps": 640,
+  "training_epochs": 5,
+  "frozen_components_verified_identical": true,
+  "frozen_components_sha256": {
+    "qwen_talker": "38fc7fc51c5e776e840414b6fd443962e9411b9654888fd7913e4da643cb857c",
+    "gemma_multimodal": "2db5482b20d746879bb3ef79b5203e9075a2e2b98f54ec7c2f281c1477ddc550",
+    "code2wav_speech_tokenizer": "836b7b357f5ea43e889936a3709af68dfe3751881acefe4ecf0dbd30ba571258",
+    "custom_duplex_heads_causal_conv": "5b637b902f0d5c6edb6986b676bc20ec108a48552d712bb09bb2b8b83933ef0b"
+  },
+  "num_trainable_params": 211830784,
+  "causal_anchor": "first_raw_frame"
+}

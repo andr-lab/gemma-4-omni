@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "checkpoint": "/workspace/checkpoints/v9_causal_l0_unknown.pt",
+  "total_sequences": 100,
+  "total_frames": 6400,
+  "lookahead_frames": 0,
+  "mean_mae": 3.430742096632855e-06,
+  "max_diff": 0.00015616416931152344,
+  "min_cosine": 0.9999997615814209,
+  "top1_agreement_pct": 100.0,
+  "top5_agreement_pct": 100.0,
+  "avg_ref_ce": 2.6062388554495555,
+  "avg_run_ce": 2.6062388138376265,
+  "ce_ratio_run_to_ref": 0.9999999840337239,
+  "nonfinite_count": 0,
+  "gates": {
+    "top1_agreement_is_100": true,
+    "mean_mae_le_0_02": true,
+    "min_cosine_ge_0_999": true,
+    "nonfinite_is_0": true,
+    "all_pass": true
+  },
+  "verdict": "P4D RUNTIME SLOT-KV PARITY PASS"
+}

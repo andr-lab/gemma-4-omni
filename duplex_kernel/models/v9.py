@@ -26,7 +26,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-DEFAULT_V9_CKPT = "/workspace/checkpoints/v9_prefix_final.pt"
+_CAUSAL_V9_CANDIDATES = (
+    "/workspace/checkpoints/v9_causal_l0_final.pt",
+    "/workspace/checkpoints/v9_causal_l0_unknown.pt",
+    "/workspace/checkpoints/v9_prefix_final.pt",
+)
+DEFAULT_V9_CKPT = next((p for p in _CAUSAL_V9_CANDIDATES if os.path.exists(p)), _CAUSAL_V9_CANDIDATES[0])
 DEFAULT_HEADS_CKPT = "/workspace/_archive_ckpts/gemma4_duplex_sota/custom_duplex_heads.pt"
 
 
