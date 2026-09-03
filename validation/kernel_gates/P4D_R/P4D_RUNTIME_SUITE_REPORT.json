@@ -60,7 +60,9 @@
     "jitter_ms": 0.8985940551757778,
     "deadline_miss_rate": 100.0,
     "nominal_deadline_ms": 80.0,
-    "pass_performance": true
+    "pass_p95": false,
+    "pass_miss_rate": false,
+    "pass_performance": false
   },
   "gate_10_listen": {
     "duration_s": 10.0,
@@ -75,6 +77,6 @@
     "ghost_frames": 0,
     "pass_fencing": true
   },
-  "all_gates_pass": true,
-  "verdict": "P4D CAUSAL PROJECTOR PASS \u2014 L=0"
+  "all_gates_pass": false,
+  "verdict": "P4D OPEN — REALTIME_DEADLINE_FAIL"
 }

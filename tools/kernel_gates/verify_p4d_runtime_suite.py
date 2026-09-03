@@ -320,18 +320,20 @@ def run_realtime_profiling(
     comb_s = p_stats(combined_speaker_times)
 
     deadline_misses = sum(1 for x in combined_speaker_times if x > 80.0)
-    deadline_miss_rate = (deadline_misses / len(combined_speaker_times)) * 100.0
+    deadline_miss_rate = (deadline_misses / len(combined_speaker_times)) * 100.0 if combined_speaker_times else 100.0
     jitter_ms = comb_s["p99"] - comb_s["p50"]
-    pass_performance = (len(combined_speaker_times) == num_frames and np.isfinite(comb_s["mean"]) and jitter_ms < 15.0)
+    pass_p95 = bool(comb_s["p95"] <= 80.0)
+    pass_miss_rate = bool(deadline_miss_rate <= 1.0)
+    pass_performance = bool(len(combined_speaker_times) == num_frames and np.isfinite(comb_s["mean"]) and pass_p95 and pass_miss_rate)
 
     print(f"  V9.step latency:          p50={v9_s['p50']:.2f}ms, p95={v9_s['p95']:.2f}ms, p99={v9_s['p99']:.2f}ms", flush=True)
     print(f"  Qwen prefix slot update:  p50={slot_s['p50']:.2f}ms, p95={slot_s['p95']:.2f}ms", flush=True)
     print(f"  Qwen audio step + CB0:    p50={step_s['p50']:.2f}ms, p95={step_s['p95']:.2f}ms, p99={step_s['p99']:.2f}ms", flush=True)
     print(f"  SubTalker (15 graphs):    p50={sub_s['p50']:.2f}ms, p95={sub_s['p95']:.2f}ms, p99={sub_s['p99']:.2f}ms", flush=True)
-    print(f"  COMBINED [V9+Qwen+SubT]:  p50={comb_s['p50']:.2f}ms, p95={comb_s['p95']:.2f}ms, p99={comb_s['p99']:.2f}ms", flush=True)
+    print(f"  COMBINED [V9+Qwen+SubT]:  p50={comb_s['p50']:.2f}ms, p95={comb_s['p95']:.2f}ms, p99={comb_s['p99']:.2f}ms (target p95 <= 80ms) -> {'PASS' if pass_p95 else 'FAIL'}", flush=True)
     print(f"  Jitter (p99 - p50):       {jitter_ms:.2f}ms", flush=True)
-    print(f"  Deadline miss rate (>80ms): {deadline_miss_rate:.2f}%", flush=True)
-    print(f"  Performance execution pass: {'PASS' if pass_performance else 'FAIL'}", flush=True)
+    print(f"  Deadline miss rate (>80ms): {deadline_miss_rate:.2f}% (target <= 1.0%) -> {'PASS' if pass_miss_rate else 'FAIL'}", flush=True)
+    print(f"  Performance gate pass:    {'PASS' if pass_performance else 'FAIL'}", flush=True)
 
     return {
         "v9": v9_s,
@@ -342,6 +344,8 @@ def run_realtime_profiling(
         "jitter_ms": jitter_ms,
         "deadline_miss_rate": deadline_miss_rate,
         "nominal_deadline_ms": 80.0,
+        "pass_p95": pass_p95,
+        "pass_miss_rate": pass_miss_rate,
         "pass_performance": pass_performance,
     }
 
@@ -484,7 +488,7 @@ def main() -> int:
     # 5. Gate §11: Cancellation / Fencing
     g11 = run_cancellation_fencing(device=device, num_transitions=1000)
 
-    all_gates_pass = (
+    all_gates_pass = bool(
         g7["all_pass"]
         and g8["pass_leak"]
         and g9["pass_performance"]
@@ -492,7 +496,12 @@ def main() -> int:
         and g11["pass_fencing"]
     )
 
-    verdict = "P4D CAUSAL PROJECTOR PASS — L=0" if all_gates_pass else "P4D OPEN — SUITE_GATE_FAIL"
+    if all_gates_pass:
+        verdict = "P4D CAUSAL RUNTIME PASS — L=0"
+    elif not g9.get("pass_performance", False):
+        verdict = "P4D OPEN — REALTIME_DEADLINE_FAIL"
+    else:
+        verdict = "P4D OPEN — SUITE_GATE_FAIL"
 
     print("\n" + "=" * 60)
     print("VERDETTO FINALE SUITE RUNTIME P4D:")

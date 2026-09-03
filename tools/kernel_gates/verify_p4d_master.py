@@ -123,19 +123,41 @@ def main() -> int:
         g10 = suite.get("gate_10_listen", {})
         g11 = suite.get("gate_11_fencing", {})
 
-        p_g7 = g7.get("all_pass", False)
-        p_g8 = g8.get("pass_leak", False)
-        p_g9 = g9.get("pass_performance", False)
-        p_g10 = g10.get("pass_listen", False)
-        p_g11 = g11.get("pass_fencing", False)
+        # Re-compute Gate 7 Quality from raw values
+        ce_ratio = float(g7.get("ce_ratio", 99.0))
+        top1_drop = float(g7.get("top1_drop_pp", 99.0))
+        top5_drop = float(g7.get("top5_drop_pp", 99.0))
+        p_g7 = bool(ce_ratio <= 1.10 and top1_drop <= 5.0 and top5_drop <= 3.0)
 
-        print(f"  Gate §7 (Quality Gate L=0):     {'PASS' if p_g7 else 'FAIL'} (CE ratio={g7.get('ce_ratio', 0):.4f}, Top-1 drop={g7.get('top1_drop_pp', 0):.2f}pp)")
-        print(f"  Gate §8 (Future-Leak Invariance):{'PASS' if p_g8 else 'FAIL'} (max_leak={g8.get('max_leak_diff', 1):.2e})")
-        print(f"  Gate §9 (Performance Profiling):{'PASS' if p_g9 else 'FAIL'} (p50={g9.get('combined', {}).get('p50', 0):.2f}ms, jitter={g9.get('jitter_ms', 0):.2f}ms)")
-        print(f"  Gate §10 (Semantica LISTEN):     {'PASS' if p_g10 else 'FAIL'} (speaker calls={g10.get('qwen_calls', -1)})")
-        print(f"  Gate §11 (Fencing/Cancellation): {'PASS' if p_g11 else 'FAIL'} (stale writes={g11.get('stale_writes', -1)}, ghost frames={g11.get('ghost_frames', -1)})")
+        # Re-compute Gate 8 Future Leak from raw values
+        max_leak = float(g8.get("max_leak_diff", 99.0))
+        leak_viols = int(g8.get("leak_violations", 99))
+        p_g8 = bool(max_leak <= 1e-5 and leak_viols == 0)
 
-        suite_pass = p_g7 and p_g8 and p_g9 and p_g10 and p_g11
+        # Re-compute Gate 9 Performance from raw values (STRICT P4 CONTRACT: p95 <= 80ms, miss_rate <= 1.0%)
+        comb_p95 = float(g9.get("combined", {}).get("p95", 999.0))
+        comb_mean = float(g9.get("combined", {}).get("mean", 999.0))
+        miss_rate = float(g9.get("deadline_miss_rate", 100.0))
+        p_g9 = bool(comb_p95 <= 80.0 and miss_rate <= 1.0 and (comb_mean > 0))
+
+        # Re-compute Gate 10 LISTEN from raw values
+        ticks = int(g10.get("listener_ticks", 0))
+        qwen_c = int(g10.get("qwen_calls", 99))
+        sub_c = int(g10.get("subtalker_calls", 99))
+        p_g10 = bool(ticks >= 125 and qwen_c == 0 and sub_c == 0)
+
+        # Re-compute Gate 11 Fencing from raw values
+        stale_w = int(g11.get("stale_writes", 99))
+        ghost_f = int(g11.get("ghost_frames", 99))
+        p_g11 = bool(stale_w == 0 and ghost_f == 0)
+
+        print(f"  Gate §7 (Quality Gate L=0):     {'PASS' if p_g7 else 'FAIL'} (CE ratio={ce_ratio:.4f} <= 1.10, Top-1 drop={top1_drop:.2f}pp <= 5pp, Top-5 drop={top5_drop:.2f}pp <= 3pp)")
+        print(f"  Gate §8 (Future-Leak Invariance):{'PASS' if p_g8 else 'FAIL'} (max_leak={max_leak:.2e} <= 1e-5, viols={leak_viols})")
+        print(f"  Gate §9 (Performance Realtime): {'PASS' if p_g9 else 'FAIL'} (p95={comb_p95:.2f}ms <= 80ms, deadline_miss_rate={miss_rate:.2f}% <= 1.0%)")
+        print(f"  Gate §10 (Semantica LISTEN):     {'PASS' if p_g10 else 'FAIL'} (ticks={ticks} >= 125, speaker calls={qwen_c}, subtalker calls={sub_c})")
+        print(f"  Gate §11 (Fencing/Cancellation): {'PASS' if p_g11 else 'FAIL'} (stale writes={stale_w}, ghost frames={ghost_f})")
+
+        suite_pass = bool(p_g7 and p_g8 and p_g9 and p_g10 and p_g11)
         checks["runtime_suite"] = {
             "gate_7_quality": p_g7,
             "gate_8_future_leak": p_g8,
@@ -162,7 +184,12 @@ def main() -> int:
         all_pass = False
 
     print("\n" + "=" * 70)
-    master_verdict = "P4D CAUSAL RUNTIME MASTER PASS — L=0 CERTIFIED" if all_pass else "P4D MASTER FAIL"
+    if all_pass:
+        master_verdict = "P4D CAUSAL RUNTIME MASTER PASS — L=0 CERTIFIED"
+    elif not checks.get("runtime_suite", {}).get("gate_9_performance", True):
+        master_verdict = "P4D OPEN — REALTIME_DEADLINE_FAIL"
+    else:
+        master_verdict = "P4D OPEN — SUITE_GATE_FAIL"
     print(f"VERDETTO GLOBALE MASTER VERIFIER: {master_verdict}")
     print("=" * 70 + "\n")
 
