@@ -394,7 +394,7 @@ class GemmaAudioTowerBackend:
         self.feature_extractor = getattr(self.processor, "feature_extractor", self.processor)
         if not callable(self.feature_extractor):
             raise TypeError("processor Gemma audio non disponibile")
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self.text_token_ids = tuple(int(value) for value in (text_token_ids or ()))
         config = getattr(gemma_model, "config", None)
         text_config = getattr(config, "text_config", None)
@@ -617,6 +617,29 @@ class GemmaAudioTowerBackend:
                 pad_embeds = language_model.embed_tokens(pad_ids)
                 self._frame_pad_ple = language_model.get_per_layer_inputs(pad_ids, pad_embeds).detach()
         return self._frame_pad_ple
+
+    def prime_steady_state(self, state: GemmaListenerState, text_token_ids: tuple[int, ...] = ()) -> None:
+        """Prime the listener state to steady-state so frame 0 executes in <=80ms without cold replay."""
+        import torch
+        text_ids = tuple(int(x) for x in (text_token_ids or self.text_token_ids))
+        lm = self.gemma_model.language_model
+        input_ids, attention_mask = self._build_multimodal_inputs(text_ids, 1024, device=self.device)
+        stable_attention = attention_mask[:, :AUDIO_START_AFTER_TEXT].to(device=self.device, dtype=torch.long)
+        stable_ids = input_ids[:, :AUDIO_START_AFTER_TEXT]
+        stable_embeds = lm.embed_tokens(stable_ids)
+        stable_ple = lm.get_per_layer_inputs(stable_ids, stable_embeds)
+        state.gemma_lm_cache = None
+        state.gemma_lm_shared_kv_states = None
+        state.gemma_lm_audio_frames = 0
+        self._forward_incremental_lm(
+            embeds=stable_embeds,
+            per_layer=stable_ple,
+            attention=stable_attention,
+            positions=torch.arange(AUDIO_START_AFTER_TEXT, device=self.device, dtype=torch.long),
+            state=state,
+        )
+        state.gemma_lm_text_context = text_ids
+        state.next_frame_id = 0
 
     def _run_incremental_lm(
         self,
@@ -1074,6 +1097,10 @@ class GemmaListener:
                 self.backend._frame_done_event.set()
             if hasattr(self.backend, "_frame_counter") and self.backend._frame_counter is not None:
                 self.backend._frame_counter += 1
+
+    def prime_steady_state(self, state: GemmaListenerState) -> None:
+        if hasattr(self.backend, "prime_steady_state"):
+            self.backend.prime_steady_state(state)
 
     def stats(self, state: GemmaListenerState) -> dict[str, int | None]:
         return state.stats()

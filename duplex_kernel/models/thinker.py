@@ -127,7 +127,7 @@ def load_thinker(
     model = transformers.AutoModelForCausalLM.from_pretrained(
         path,
         torch_dtype=dtype,
-        device_map="cuda" if device == "cuda" else "cpu",
+        device_map="cuda" if (str(device).startswith("cuda") or (isinstance(device, torch.device) and device.type == "cuda")) else "cpu",
         trust_remote_code=True,
     )
     model.eval()

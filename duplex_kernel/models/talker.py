@@ -50,8 +50,8 @@ def _install_shims(workspace: str) -> None:
 
     _ropeu.ROPE_INIT_FUNCTIONS["default"] = _default_rope_init
     _ropeu.ROPE_INIT_FUNCTIONS["interleaved"] = _default_rope_init
-    sys.path.insert(0, workspace)
-    sys.path.insert(0, os.path.join(workspace, "qwen3tts_src"))
+    sys.path.insert(0, str(workspace))
+    sys.path.insert(0, str(os.path.join(workspace, "qwen3tts_src")))
 
 
 class TalkerModel:

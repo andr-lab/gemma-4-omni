@@ -138,7 +138,13 @@ class PipelineEngine:
         with self._thinker_lock:
             if is_compiled:
                 from transformers import StaticCache
-                cache = StaticCache(config=self.thinker.config, max_batch_size=1, max_cache_len=256, device=self.device, dtype=self.dtype)
+                if not hasattr(self, "_persistent_static_cache") or self._persistent_static_cache is None:
+                    self._persistent_static_cache = StaticCache(
+                        config=self.thinker.config, max_batch_size=1, max_cache_len=256, device=self.device, dtype=self.dtype
+                    )
+                else:
+                    self._persistent_static_cache.reset()
+                cache = self._persistent_static_cache
                 ids = torch.tensor([prompt_token_ids], device=self.device)
                 out = self.thinker(input_ids=ids, past_key_values=cache, use_cache=True, output_hidden_states=True, return_dict=True)
                 hidden_parts = [out.hidden_states[-1]]

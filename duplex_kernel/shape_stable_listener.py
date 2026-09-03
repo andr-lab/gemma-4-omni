@@ -83,14 +83,17 @@ class ShapeStableGemmaListenerLM:
     DynamicCache, and shared-KV topology are retained unchanged.
     """
 
-    def __init__(self, language_model: Any, *, target_length: int) -> None:
+    def __init__(self, language_model: Any, *, target_length: int, stream_length: int = 4) -> None:
         if int(target_length) <= 0:
             raise ValueError("target_length deve essere positivo")
         if not hasattr(language_model, "layers") or not hasattr(language_model, "config"):
             raise TypeError("language_model Gemma non valido")
         self.language_model = language_model
         self.target_length = int(target_length)
-        self._workspace = _StaticPaddingWorkspace(self.target_length)
+        self.stream_length = int(stream_length)
+        self._workspace_prefill = _StaticPaddingWorkspace(self.target_length)
+        self._workspace_stream = _StaticPaddingWorkspace(self.stream_length)
+        self._workspace = self._workspace_stream
         self._source_parameter_data_ptrs = {
             name: int(parameter.data_ptr())
             for name, parameter in language_model.named_parameters()
@@ -118,7 +121,7 @@ class ShapeStableGemmaListenerLM:
             "created_reserved_bytes": self._created_reserved_bytes,
             "current_allocated_bytes": self._cuda_memory("memory_allocated"),
             "current_reserved_bytes": self._cuda_memory("memory_reserved"),
-            "workspace_static_bytes": self._workspace.allocated_bytes,
+            "workspace_static_bytes": self._workspace_prefill.allocated_bytes + self._workspace_stream.allocated_bytes,
         }
 
     @staticmethod
@@ -315,7 +318,12 @@ class ShapeStableGemmaListenerLM:
         lm = self.language_model
         if inputs_embeds.ndim != 3 or inputs_embeds.shape[-1] != lm.config.hidden_size:
             raise ValueError(f"inputs_embeds Gemma inattesi: {tuple(inputs_embeds.shape)}")
-        if int(inputs_embeds.shape[1]) > self.target_length:
+        q_len = int(inputs_embeds.shape[1])
+        if q_len <= self.stream_length:
+            self._workspace = self._workspace_stream
+        elif q_len <= self.target_length:
+            self._workspace = self._workspace_prefill
+        else:
             raise ValueError("query listener oltre il target shape-stable")
         # Match Gemma4TextModel(use_cache=True): the cache is listener-session
         # state, created only when this invocation begins a new listener stream.

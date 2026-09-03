@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "gate": "P4_FRONTEND_PARITY",
+  "timestamp_utc": "2026-09-03T19:22:49.495446+00:00",
+  "frames_tested": 5000,
+  "total_audio_seconds": 400.0,
+  "mel_metrics": {
+    "mae": 0.0,
+    "max_diff": 0.0,
+    "decile_maes": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "cumulative_drift": 0.0,
+    "passed": true
+  },
+  "gemma_hidden_oracle": {
+    "mae": 0.0,
+    "cosine_min": 0.99999994,
+    "future_leak": 0.0,
+    "passed": true
+  },
+  "thresholds": {
+    "mel_mae_max": 1e-06,
+    "hidden_mae_max": 0.0001,
+    "hidden_cosine_min": 0.9999,
+    "future_leak_max": 1e-05
+  },
+  "trace_sha256": "21c9692ac65d525149e74c3d2099be4dfee3b933b96c55840cd6414ec985e7ad",
+  "passed": true
+}

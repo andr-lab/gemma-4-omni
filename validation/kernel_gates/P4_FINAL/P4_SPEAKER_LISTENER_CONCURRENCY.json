@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "gate": "P4_SPEAKER_LISTENER_CONCURRENCY",
+  "timestamp_utc": "2026-09-03T20:51:51Z",
+  "duration_s": 11.122391829965636,
+  "listener": {
+    "total_frames": 88,
+    "latency_ms": {
+      "p50": 135.922236,
+      "p95": 142.3242008,
+      "p99": 144.33057334999992,
+      "max": 155.993528,
+      "min": 66.0442,
+      "mean": 124.51906529545454
+    },
+    "deadline_misses": 88,
+    "deadline_miss_rate_pct": 100.0,
+    "max_lateness_ms": 4119.39
+  },
+  "speaker": {
+    "total_frames": 115,
+    "throughput_fps": 10.34,
+    "latency_ms": {
+      "p50": 86.69670182280242,
+      "p95": 91.79418368730694,
+      "p99": 92.60231411550194,
+      "max": 162.66720602288842,
+      "min": 52.33566812239587,
+      "mean": 86.17502364289501
+    },
+    "interval_ms": {
+      "p50": 87.08178903907537,
+      "p95": 92.12960653239861,
+      "p99": 106.96578275645159,
+      "max": 162.82514901831746,
+      "min": 76.56068401411176,
+      "mean": 87.09773924528507
+    },
+    "deadline_misses": 112,
+    "deadline_miss_rate_pct": 97.39
+  },
+  "reference_buffer": {
+    "total_appended": 115,
+    "delay_frames": 1
+  },
+  "health": {
+    "final_backlog": 38,
+    "dropped_input_frames": 0,
+    "vram_initial_mb": 0.0,
+    "vram_final_mb": 14629.0,
+    "vram_growth_mb": 14629.0
+  },
+  "thresholds": {
+    "listener_p95_max_ms": 80.0,
+    "listener_miss_rate_max_pct": 1.0,
+    "speaker_fps_min": 12.0,
+    "speaker_miss_rate_max_pct": 1.0,
+    "final_backlog_max": 0,
+    "dropped_frames_max": 0,
+    "vram_growth_max_mb": 50.0
+  },
+  "passed": false
+}
