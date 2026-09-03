@@ -1,130 +1,612 @@
-{"event": "proof2_concurrent_listener_frame", "frame_id": 0, "lm_gpu_ms": 74.875, "step_total_ms": 169.987, "finite": true, "is_thinking": true, "timestamp": 1155883.0174}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 1, "lm_gpu_ms": 74.745, "step_total_ms": 168.696, "finite": true, "is_thinking": true, "timestamp": 1155883.1864}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 2, "lm_gpu_ms": 74.713, "step_total_ms": 178.541, "finite": true, "is_thinking": true, "timestamp": 1155883.3652}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 3, "lm_gpu_ms": 74.965, "step_total_ms": 178.274, "finite": true, "is_thinking": true, "timestamp": 1155883.5437}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 4, "lm_gpu_ms": 74.757, "step_total_ms": 178.728, "finite": true, "is_thinking": true, "timestamp": 1155883.7227}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 5, "lm_gpu_ms": 74.729, "step_total_ms": 178.326, "finite": true, "is_thinking": true, "timestamp": 1155883.9013}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 6, "lm_gpu_ms": 74.877, "step_total_ms": 179.475, "finite": true, "is_thinking": true, "timestamp": 1155884.0811}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 7, "lm_gpu_ms": 74.709, "step_total_ms": 178.287, "finite": true, "is_thinking": true, "timestamp": 1155884.2596}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 8, "lm_gpu_ms": 75.067, "step_total_ms": 185.828, "finite": true, "is_thinking": true, "timestamp": 1155884.4457}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 9, "lm_gpu_ms": 74.957, "step_total_ms": 176.863, "finite": true, "is_thinking": true, "timestamp": 1155884.6228}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 10, "lm_gpu_ms": 75.147, "step_total_ms": 177.632, "finite": true, "is_thinking": true, "timestamp": 1155884.8006}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 11, "lm_gpu_ms": 75.026, "step_total_ms": 180.597, "finite": true, "is_thinking": true, "timestamp": 1155884.9815}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 12, "lm_gpu_ms": 74.964, "step_total_ms": 180.41, "finite": true, "is_thinking": true, "timestamp": 1155885.1621}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 13, "lm_gpu_ms": 75.022, "step_total_ms": 175.441, "finite": true, "is_thinking": true, "timestamp": 1155885.3377}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 14, "lm_gpu_ms": 75.193, "step_total_ms": 177.527, "finite": true, "is_thinking": true, "timestamp": 1155885.5154}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 15, "lm_gpu_ms": 75.042, "step_total_ms": 178.068, "finite": true, "is_thinking": true, "timestamp": 1155885.6937}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 16, "lm_gpu_ms": 79.498, "step_total_ms": 183.33, "finite": true, "is_thinking": true, "timestamp": 1155885.8773}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 17, "lm_gpu_ms": 74.69, "step_total_ms": 176.19, "finite": true, "is_thinking": true, "timestamp": 1155886.0537}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 18, "lm_gpu_ms": 74.774, "step_total_ms": 176.859, "finite": true, "is_thinking": true, "timestamp": 1155886.2308}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 19, "lm_gpu_ms": 74.752, "step_total_ms": 180.67, "finite": true, "is_thinking": true, "timestamp": 1155886.4117}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 20, "lm_gpu_ms": 74.711, "step_total_ms": 175.817, "finite": true, "is_thinking": true, "timestamp": 1155886.5877}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 21, "lm_gpu_ms": 74.628, "step_total_ms": 176.497, "finite": true, "is_thinking": true, "timestamp": 1155886.7644}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 22, "lm_gpu_ms": 74.7, "step_total_ms": 181.739, "finite": true, "is_thinking": true, "timestamp": 1155886.9464}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 23, "lm_gpu_ms": 74.839, "step_total_ms": 177.269, "finite": true, "is_thinking": true, "timestamp": 1155887.1239}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 24, "lm_gpu_ms": 75.083, "step_total_ms": 175.179, "finite": true, "is_thinking": true, "timestamp": 1155887.2993}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 25, "lm_gpu_ms": 75.17, "step_total_ms": 175.053, "finite": true, "is_thinking": true, "timestamp": 1155887.4746}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 26, "lm_gpu_ms": 75.076, "step_total_ms": 175.131, "finite": true, "is_thinking": true, "timestamp": 1155887.65}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 27, "lm_gpu_ms": 75.146, "step_total_ms": 175.427, "finite": true, "is_thinking": true, "timestamp": 1155887.8258}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 28, "lm_gpu_ms": 75.09, "step_total_ms": 175.404, "finite": true, "is_thinking": true, "timestamp": 1155888.0014}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 29, "lm_gpu_ms": 75.136, "step_total_ms": 175.498, "finite": true, "is_thinking": true, "timestamp": 1155888.1773}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 30, "lm_gpu_ms": 75.138, "step_total_ms": 175.898, "finite": true, "is_thinking": true, "timestamp": 1155888.3534}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 31, "lm_gpu_ms": 75.286, "step_total_ms": 175.811, "finite": true, "is_thinking": true, "timestamp": 1155888.5296}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 32, "lm_gpu_ms": 75.063, "step_total_ms": 175.737, "finite": true, "is_thinking": true, "timestamp": 1155888.7056}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 33, "lm_gpu_ms": 75.112, "step_total_ms": 175.716, "finite": true, "is_thinking": true, "timestamp": 1155888.8816}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 34, "lm_gpu_ms": 75.091, "step_total_ms": 176.198, "finite": true, "is_thinking": true, "timestamp": 1155889.0581}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 35, "lm_gpu_ms": 75.418, "step_total_ms": 176.448, "finite": true, "is_thinking": true, "timestamp": 1155889.2349}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 36, "lm_gpu_ms": 75.122, "step_total_ms": 176.263, "finite": true, "is_thinking": true, "timestamp": 1155889.4114}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 37, "lm_gpu_ms": 75.34, "step_total_ms": 176.689, "finite": true, "is_thinking": true, "timestamp": 1155889.5885}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 38, "lm_gpu_ms": 75.183, "step_total_ms": 176.618, "finite": true, "is_thinking": true, "timestamp": 1155889.7654}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 39, "lm_gpu_ms": 75.277, "step_total_ms": 177.062, "finite": true, "is_thinking": true, "timestamp": 1155889.9427}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 40, "lm_gpu_ms": 75.325, "step_total_ms": 177.298, "finite": true, "is_thinking": true, "timestamp": 1155890.1203}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 41, "lm_gpu_ms": 75.22, "step_total_ms": 177.188, "finite": true, "is_thinking": true, "timestamp": 1155890.2978}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 42, "lm_gpu_ms": 75.194, "step_total_ms": 177.369, "finite": true, "is_thinking": true, "timestamp": 1155890.4754}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 43, "lm_gpu_ms": 75.051, "step_total_ms": 176.987, "finite": true, "is_thinking": true, "timestamp": 1155890.6527}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 44, "lm_gpu_ms": 75.213, "step_total_ms": 177.213, "finite": true, "is_thinking": true, "timestamp": 1155890.8302}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 45, "lm_gpu_ms": 75.163, "step_total_ms": 174.245, "finite": true, "is_thinking": true, "timestamp": 1155891.0047}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 46, "lm_gpu_ms": 75.409, "step_total_ms": 177.675, "finite": true, "is_thinking": true, "timestamp": 1155891.1827}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 47, "lm_gpu_ms": 75.168, "step_total_ms": 177.538, "finite": true, "is_thinking": true, "timestamp": 1155891.3605}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 48, "lm_gpu_ms": 75.357, "step_total_ms": 177.917, "finite": true, "is_thinking": true, "timestamp": 1155891.5387}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 49, "lm_gpu_ms": 75.423, "step_total_ms": 178.119, "finite": true, "is_thinking": true, "timestamp": 1155891.7171}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 50, "lm_gpu_ms": 75.431, "step_total_ms": 178.687, "finite": true, "is_thinking": true, "timestamp": 1155891.8961}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 51, "lm_gpu_ms": 75.427, "step_total_ms": 178.097, "finite": true, "is_thinking": true, "timestamp": 1155892.0745}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 52, "lm_gpu_ms": 75.242, "step_total_ms": 178.116, "finite": true, "is_thinking": true, "timestamp": 1155892.253}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 53, "lm_gpu_ms": 75.314, "step_total_ms": 178.543, "finite": true, "is_thinking": true, "timestamp": 1155892.4318}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 54, "lm_gpu_ms": 75.461, "step_total_ms": 178.791, "finite": true, "is_thinking": true, "timestamp": 1155892.6109}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 55, "lm_gpu_ms": 75.549, "step_total_ms": 178.784, "finite": true, "is_thinking": true, "timestamp": 1155892.79}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 56, "lm_gpu_ms": 75.335, "step_total_ms": 178.745, "finite": true, "is_thinking": true, "timestamp": 1155892.9691}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 57, "lm_gpu_ms": 75.013, "step_total_ms": 178.223, "finite": true, "is_thinking": true, "timestamp": 1155893.1476}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 58, "lm_gpu_ms": 75.243, "step_total_ms": 178.432, "finite": true, "is_thinking": true, "timestamp": 1155893.3264}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 59, "lm_gpu_ms": 75.086, "step_total_ms": 178.565, "finite": true, "is_thinking": true, "timestamp": 1155893.5052}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 60, "lm_gpu_ms": 75.334, "step_total_ms": 178.721, "finite": true, "is_thinking": true, "timestamp": 1155893.6843}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 61, "lm_gpu_ms": 72.641, "step_total_ms": 175.744, "finite": true, "is_thinking": true, "timestamp": 1155893.8603}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 62, "lm_gpu_ms": 72.619, "step_total_ms": 175.952, "finite": true, "is_thinking": true, "timestamp": 1155894.0366}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 63, "lm_gpu_ms": 72.799, "step_total_ms": 176.068, "finite": true, "is_thinking": true, "timestamp": 1155894.2129}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 64, "lm_gpu_ms": 72.664, "step_total_ms": 175.793, "finite": true, "is_thinking": true, "timestamp": 1155894.3891}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 65, "lm_gpu_ms": 72.604, "step_total_ms": 175.713, "finite": true, "is_thinking": true, "timestamp": 1155894.5652}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 66, "lm_gpu_ms": 72.664, "step_total_ms": 176.43, "finite": true, "is_thinking": true, "timestamp": 1155894.7419}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 67, "lm_gpu_ms": 72.617, "step_total_ms": 175.699, "finite": true, "is_thinking": true, "timestamp": 1155894.9179}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 68, "lm_gpu_ms": 72.648, "step_total_ms": 175.797, "finite": true, "is_thinking": true, "timestamp": 1155895.0939}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 69, "lm_gpu_ms": 72.558, "step_total_ms": 175.586, "finite": true, "is_thinking": true, "timestamp": 1155895.2698}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 70, "lm_gpu_ms": 72.535, "step_total_ms": 172.425, "finite": true, "is_thinking": true, "timestamp": 1155895.4425}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 71, "lm_gpu_ms": 72.447, "step_total_ms": 175.308, "finite": true, "is_thinking": true, "timestamp": 1155895.6181}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 72, "lm_gpu_ms": 72.641, "step_total_ms": 175.566, "finite": true, "is_thinking": true, "timestamp": 1155895.7939}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 73, "lm_gpu_ms": 72.703, "step_total_ms": 175.826, "finite": true, "is_thinking": true, "timestamp": 1155895.9701}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 74, "lm_gpu_ms": 72.626, "step_total_ms": 175.942, "finite": true, "is_thinking": true, "timestamp": 1155896.1463}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 75, "lm_gpu_ms": 72.667, "step_total_ms": 175.547, "finite": true, "is_thinking": true, "timestamp": 1155896.3221}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 76, "lm_gpu_ms": 72.563, "step_total_ms": 175.577, "finite": true, "is_thinking": true, "timestamp": 1155896.498}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 77, "lm_gpu_ms": 72.685, "step_total_ms": 175.589, "finite": true, "is_thinking": true, "timestamp": 1155896.674}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 78, "lm_gpu_ms": 72.594, "step_total_ms": 175.849, "finite": true, "is_thinking": true, "timestamp": 1155896.8501}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 79, "lm_gpu_ms": 72.472, "step_total_ms": 175.368, "finite": true, "is_thinking": true, "timestamp": 1155897.0258}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 80, "lm_gpu_ms": 72.478, "step_total_ms": 175.516, "finite": true, "is_thinking": true, "timestamp": 1155897.2016}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 81, "lm_gpu_ms": 72.83, "step_total_ms": 175.781, "finite": true, "is_thinking": true, "timestamp": 1155897.3777}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 82, "lm_gpu_ms": 72.557, "step_total_ms": 175.407, "finite": true, "is_thinking": true, "timestamp": 1155897.5533}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 83, "lm_gpu_ms": 72.821, "step_total_ms": 176.031, "finite": true, "is_thinking": true, "timestamp": 1155897.7296}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 84, "lm_gpu_ms": 72.735, "step_total_ms": 175.838, "finite": true, "is_thinking": true, "timestamp": 1155897.9057}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 85, "lm_gpu_ms": 72.897, "step_total_ms": 175.842, "finite": true, "is_thinking": true, "timestamp": 1155898.0819}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 86, "lm_gpu_ms": 72.666, "step_total_ms": 175.63, "finite": true, "is_thinking": true, "timestamp": 1155898.2578}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 87, "lm_gpu_ms": 72.782, "step_total_ms": 172.275, "finite": true, "is_thinking": true, "timestamp": 1155898.4303}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 88, "lm_gpu_ms": 72.847, "step_total_ms": 172.617, "finite": true, "is_thinking": true, "timestamp": 1155898.6032}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 89, "lm_gpu_ms": 72.721, "step_total_ms": 175.536, "finite": true, "is_thinking": true, "timestamp": 1155898.7791}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 90, "lm_gpu_ms": 72.532, "step_total_ms": 175.481, "finite": true, "is_thinking": true, "timestamp": 1155898.9549}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 91, "lm_gpu_ms": 72.794, "step_total_ms": 175.146, "finite": true, "is_thinking": true, "timestamp": 1155899.1303}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 92, "lm_gpu_ms": 72.632, "step_total_ms": 172.243, "finite": true, "is_thinking": true, "timestamp": 1155899.3029}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 93, "lm_gpu_ms": 72.9, "step_total_ms": 172.754, "finite": true, "is_thinking": true, "timestamp": 1155899.4759}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 94, "lm_gpu_ms": 72.399, "step_total_ms": 172.138, "finite": true, "is_thinking": true, "timestamp": 1155899.6484}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 95, "lm_gpu_ms": 72.805, "step_total_ms": 172.46, "finite": true, "is_thinking": true, "timestamp": 1155899.8211}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 96, "lm_gpu_ms": 72.494, "step_total_ms": 172.205, "finite": true, "is_thinking": true, "timestamp": 1155899.9936}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 97, "lm_gpu_ms": 72.673, "step_total_ms": 175.585, "finite": true, "is_thinking": true, "timestamp": 1155900.1696}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 98, "lm_gpu_ms": 72.474, "step_total_ms": 175.213, "finite": true, "is_thinking": true, "timestamp": 1155900.3451}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 99, "lm_gpu_ms": 72.648, "step_total_ms": 175.461, "finite": true, "is_thinking": true, "timestamp": 1155900.5208}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 100, "lm_gpu_ms": 72.675, "step_total_ms": 175.721, "finite": true, "is_thinking": true, "timestamp": 1155900.6968}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 101, "lm_gpu_ms": 72.787, "step_total_ms": 172.465, "finite": true, "is_thinking": true, "timestamp": 1155900.8696}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 102, "lm_gpu_ms": 72.616, "step_total_ms": 175.773, "finite": true, "is_thinking": true, "timestamp": 1155901.0457}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 103, "lm_gpu_ms": 72.761, "step_total_ms": 175.723, "finite": true, "is_thinking": true, "timestamp": 1155901.2217}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 104, "lm_gpu_ms": 72.44, "step_total_ms": 175.098, "finite": true, "is_thinking": true, "timestamp": 1155901.3971}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 105, "lm_gpu_ms": 72.632, "step_total_ms": 175.472, "finite": true, "is_thinking": true, "timestamp": 1155901.5729}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 106, "lm_gpu_ms": 72.602, "step_total_ms": 175.71, "finite": true, "is_thinking": true, "timestamp": 1155901.749}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 107, "lm_gpu_ms": 72.528, "step_total_ms": 175.412, "finite": true, "is_thinking": true, "timestamp": 1155901.9246}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 108, "lm_gpu_ms": 72.566, "step_total_ms": 175.478, "finite": true, "is_thinking": true, "timestamp": 1155902.1004}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 109, "lm_gpu_ms": 72.682, "step_total_ms": 175.663, "finite": true, "is_thinking": true, "timestamp": 1155902.2764}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 110, "lm_gpu_ms": 72.588, "step_total_ms": 175.495, "finite": true, "is_thinking": true, "timestamp": 1155902.4522}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 111, "lm_gpu_ms": 72.515, "step_total_ms": 175.496, "finite": true, "is_thinking": true, "timestamp": 1155902.6279}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 112, "lm_gpu_ms": 72.812, "step_total_ms": 175.909, "finite": true, "is_thinking": true, "timestamp": 1155902.8041}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 113, "lm_gpu_ms": 72.703, "step_total_ms": 175.69, "finite": true, "is_thinking": true, "timestamp": 1155902.9801}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 114, "lm_gpu_ms": 72.738, "step_total_ms": 176.123, "finite": true, "is_thinking": true, "timestamp": 1155903.1565}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 115, "lm_gpu_ms": 72.798, "step_total_ms": 175.71, "finite": true, "is_thinking": true, "timestamp": 1155903.3326}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 116, "lm_gpu_ms": 72.608, "step_total_ms": 175.495, "finite": true, "is_thinking": true, "timestamp": 1155903.5083}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 117, "lm_gpu_ms": 72.691, "step_total_ms": 175.434, "finite": true, "is_thinking": true, "timestamp": 1155903.6841}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 118, "lm_gpu_ms": 72.388, "step_total_ms": 175.239, "finite": true, "is_thinking": true, "timestamp": 1155903.8596}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 119, "lm_gpu_ms": 72.565, "step_total_ms": 175.523, "finite": true, "is_thinking": true, "timestamp": 1155904.0354}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 120, "lm_gpu_ms": 72.662, "step_total_ms": 175.485, "finite": true, "is_thinking": true, "timestamp": 1155904.2111}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 121, "lm_gpu_ms": 72.639, "step_total_ms": 175.413, "finite": true, "is_thinking": true, "timestamp": 1155904.3868}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 122, "lm_gpu_ms": 72.548, "step_total_ms": 175.242, "finite": true, "is_thinking": true, "timestamp": 1155904.5623}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 123, "lm_gpu_ms": 72.504, "step_total_ms": 175.886, "finite": true, "is_thinking": true, "timestamp": 1155904.7385}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 124, "lm_gpu_ms": 72.462, "step_total_ms": 175.343, "finite": true, "is_thinking": true, "timestamp": 1155904.9142}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 125, "lm_gpu_ms": 72.814, "step_total_ms": 175.705, "finite": true, "is_thinking": true, "timestamp": 1155905.0902}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 126, "lm_gpu_ms": 72.839, "step_total_ms": 176.562, "finite": true, "is_thinking": false, "timestamp": 1155905.2669}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 127, "lm_gpu_ms": 72.732, "step_total_ms": 119.69, "finite": true, "is_thinking": false, "timestamp": 1155905.3867}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 128, "lm_gpu_ms": 72.8, "step_total_ms": 119.937, "finite": true, "is_thinking": false, "timestamp": 1155905.5068}
-{"event": "proof2_concurrent_listener_frame", "frame_id": 129, "lm_gpu_ms": 72.858, "step_total_ms": 119.979, "finite": true, "is_thinking": false, "timestamp": 1155905.627}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 0, "lm_gpu_ms": 65.988, "step_total_ms": 74.541, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245656.5773}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 1, "lm_gpu_ms": 66.104, "step_total_ms": 74.637, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245656.6574}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 2, "lm_gpu_ms": 66.071, "step_total_ms": 74.596, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245656.7374}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 3, "lm_gpu_ms": 66.039, "step_total_ms": 74.565, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245656.8173}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 4, "lm_gpu_ms": 66.87, "step_total_ms": 81.44, "lock_wait_ms": 2.682, "finite": true, "is_thinking": true, "timestamp": 1245656.9043}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 5, "lm_gpu_ms": 66.004, "step_total_ms": 74.521, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245656.9789}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 6, "lm_gpu_ms": 65.816, "step_total_ms": 74.325, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245657.0571}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 7, "lm_gpu_ms": 65.728, "step_total_ms": 74.231, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245657.137}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 8, "lm_gpu_ms": 65.869, "step_total_ms": 74.735, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245657.2175}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 9, "lm_gpu_ms": 66.734, "step_total_ms": 81.122, "lock_wait_ms": 2.458, "finite": true, "is_thinking": true, "timestamp": 1245657.3039}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 10, "lm_gpu_ms": 66.005, "step_total_ms": 74.527, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245657.3786}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 11, "lm_gpu_ms": 65.773, "step_total_ms": 74.299, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245657.457}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 12, "lm_gpu_ms": 65.979, "step_total_ms": 74.502, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245657.5373}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 13, "lm_gpu_ms": 65.571, "step_total_ms": 74.401, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245657.6172}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 14, "lm_gpu_ms": 67.043, "step_total_ms": 81.006, "lock_wait_ms": 1.789, "finite": true, "is_thinking": true, "timestamp": 1245657.7038}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 15, "lm_gpu_ms": 66.223, "step_total_ms": 74.772, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245657.7787}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 16, "lm_gpu_ms": 65.8, "step_total_ms": 74.307, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245657.8571}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 17, "lm_gpu_ms": 65.744, "step_total_ms": 74.257, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245657.937}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 18, "lm_gpu_ms": 65.79, "step_total_ms": 74.32, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245658.0171}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 19, "lm_gpu_ms": 66.738, "step_total_ms": 80.06, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245658.1029}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 20, "lm_gpu_ms": 65.885, "step_total_ms": 74.41, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245658.1774}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 21, "lm_gpu_ms": 65.896, "step_total_ms": 74.432, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245658.2572}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 22, "lm_gpu_ms": 65.839, "step_total_ms": 74.364, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245658.3371}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 23, "lm_gpu_ms": 67.081, "step_total_ms": 80.34, "lock_wait_ms": 0.915, "finite": true, "is_thinking": true, "timestamp": 1245658.4232}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 24, "lm_gpu_ms": 66.174, "step_total_ms": 74.698, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245658.498}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 25, "lm_gpu_ms": 65.945, "step_total_ms": 74.466, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245658.5772}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 26, "lm_gpu_ms": 65.902, "step_total_ms": 74.454, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245658.6572}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 27, "lm_gpu_ms": 66.009, "step_total_ms": 74.538, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245658.7373}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 28, "lm_gpu_ms": 66.73, "step_total_ms": 80.59, "lock_wait_ms": 1.662, "finite": true, "is_thinking": true, "timestamp": 1245658.8233}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 29, "lm_gpu_ms": 65.87, "step_total_ms": 74.383, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245658.8979}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 30, "lm_gpu_ms": 65.712, "step_total_ms": 74.218, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245658.977}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 31, "lm_gpu_ms": 65.692, "step_total_ms": 74.232, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245659.057}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 32, "lm_gpu_ms": 65.937, "step_total_ms": 74.46, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245659.1372}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 33, "lm_gpu_ms": 66.806, "step_total_ms": 80.899, "lock_wait_ms": 2.228, "finite": true, "is_thinking": true, "timestamp": 1245659.2237}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 34, "lm_gpu_ms": 66.159, "step_total_ms": 74.678, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245659.2986}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 35, "lm_gpu_ms": 65.89, "step_total_ms": 74.41, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245659.3772}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 36, "lm_gpu_ms": 65.824, "step_total_ms": 74.336, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245659.4571}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 37, "lm_gpu_ms": 65.699, "step_total_ms": 74.514, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245659.5373}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 38, "lm_gpu_ms": 66.788, "step_total_ms": 79.777, "lock_wait_ms": 0.445, "finite": true, "is_thinking": true, "timestamp": 1245659.6227}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 39, "lm_gpu_ms": 65.843, "step_total_ms": 74.397, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245659.6972}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 40, "lm_gpu_ms": 65.772, "step_total_ms": 74.277, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245659.777}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 41, "lm_gpu_ms": 65.749, "step_total_ms": 74.256, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245659.857}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 42, "lm_gpu_ms": 65.651, "step_total_ms": 74.169, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245659.9369}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 43, "lm_gpu_ms": 66.71, "step_total_ms": 79.834, "lock_wait_ms": 0.675, "finite": true, "is_thinking": true, "timestamp": 1245660.0227}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 44, "lm_gpu_ms": 65.507, "step_total_ms": 74.034, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245660.0968}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 45, "lm_gpu_ms": 65.644, "step_total_ms": 74.155, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245660.1769}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 46, "lm_gpu_ms": 65.789, "step_total_ms": 74.299, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245660.2571}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 47, "lm_gpu_ms": 66.62, "step_total_ms": 79.817, "lock_wait_ms": 1.017, "finite": true, "is_thinking": true, "timestamp": 1245660.3426}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 48, "lm_gpu_ms": 65.849, "step_total_ms": 74.374, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245660.4171}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 49, "lm_gpu_ms": 65.695, "step_total_ms": 74.195, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245660.4969}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 50, "lm_gpu_ms": 65.593, "step_total_ms": 74.106, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245660.5769}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 51, "lm_gpu_ms": 65.573, "step_total_ms": 74.086, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245660.6568}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 52, "lm_gpu_ms": 66.353, "step_total_ms": 79.721, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245660.7426}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 53, "lm_gpu_ms": 66.092, "step_total_ms": 74.639, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245660.8174}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 54, "lm_gpu_ms": 65.92, "step_total_ms": 74.45, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245660.8972}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 55, "lm_gpu_ms": 65.833, "step_total_ms": 74.364, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245660.9771}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 56, "lm_gpu_ms": 65.775, "step_total_ms": 74.271, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245661.057}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 57, "lm_gpu_ms": 66.709, "step_total_ms": 79.863, "lock_wait_ms": 0.649, "finite": true, "is_thinking": true, "timestamp": 1245661.1427}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 58, "lm_gpu_ms": 65.788, "step_total_ms": 74.351, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245661.2172}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 59, "lm_gpu_ms": 65.861, "step_total_ms": 74.4, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245661.2971}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 60, "lm_gpu_ms": 65.481, "step_total_ms": 74.297, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245661.3771}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 61, "lm_gpu_ms": 65.847, "step_total_ms": 74.648, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245661.4574}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 62, "lm_gpu_ms": 66.678, "step_total_ms": 80.449, "lock_wait_ms": 1.601, "finite": true, "is_thinking": true, "timestamp": 1245661.5432}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 63, "lm_gpu_ms": 65.973, "step_total_ms": 74.498, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245661.6179}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 64, "lm_gpu_ms": 65.538, "step_total_ms": 74.086, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245661.6968}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 65, "lm_gpu_ms": 65.758, "step_total_ms": 74.262, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245661.777}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 66, "lm_gpu_ms": 65.899, "step_total_ms": 74.698, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245661.8575}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 67, "lm_gpu_ms": 66.994, "step_total_ms": 80.519, "lock_wait_ms": 1.335, "finite": true, "is_thinking": true, "timestamp": 1245661.9434}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 68, "lm_gpu_ms": 65.745, "step_total_ms": 74.265, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245662.0178}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 69, "lm_gpu_ms": 65.709, "step_total_ms": 74.215, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245662.097}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 70, "lm_gpu_ms": 65.569, "step_total_ms": 74.086, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245662.1769}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 71, "lm_gpu_ms": 65.85, "step_total_ms": 74.367, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245662.2571}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 72, "lm_gpu_ms": 66.829, "step_total_ms": 80.5, "lock_wait_ms": 1.426, "finite": true, "is_thinking": true, "timestamp": 1245662.3433}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 73, "lm_gpu_ms": 65.903, "step_total_ms": 74.43, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245662.4179}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 74, "lm_gpu_ms": 65.571, "step_total_ms": 74.085, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245662.4968}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 75, "lm_gpu_ms": 65.715, "step_total_ms": 74.231, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245662.577}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 76, "lm_gpu_ms": 65.485, "step_total_ms": 74.009, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245662.6568}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 77, "lm_gpu_ms": 66.518, "step_total_ms": 79.782, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245662.7426}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 78, "lm_gpu_ms": 65.908, "step_total_ms": 74.487, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245662.8172}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 79, "lm_gpu_ms": 65.71, "step_total_ms": 74.223, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245662.897}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 80, "lm_gpu_ms": 65.725, "step_total_ms": 74.234, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245662.977}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 81, "lm_gpu_ms": 65.789, "step_total_ms": 74.286, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245663.0571}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 82, "lm_gpu_ms": 66.72, "step_total_ms": 79.892, "lock_wait_ms": 0.814, "finite": true, "is_thinking": true, "timestamp": 1245663.1427}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 83, "lm_gpu_ms": 65.763, "step_total_ms": 74.309, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245663.2172}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 84, "lm_gpu_ms": 65.592, "step_total_ms": 74.102, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245663.2968}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 85, "lm_gpu_ms": 65.787, "step_total_ms": 74.296, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245663.3771}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 86, "lm_gpu_ms": 65.628, "step_total_ms": 74.143, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245663.4569}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 87, "lm_gpu_ms": 66.71, "step_total_ms": 79.904, "lock_wait_ms": 0.746, "finite": true, "is_thinking": true, "timestamp": 1245663.5427}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 88, "lm_gpu_ms": 65.834, "step_total_ms": 74.359, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245663.6172}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 89, "lm_gpu_ms": 65.595, "step_total_ms": 74.093, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245663.6968}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 90, "lm_gpu_ms": 65.546, "step_total_ms": 74.054, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245663.7768}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 91, "lm_gpu_ms": 65.519, "step_total_ms": 74.034, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245663.8568}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 92, "lm_gpu_ms": 66.69, "step_total_ms": 79.746, "lock_wait_ms": 0.649, "finite": true, "is_thinking": true, "timestamp": 1245663.9425}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 93, "lm_gpu_ms": 65.889, "step_total_ms": 74.46, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245664.0171}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 94, "lm_gpu_ms": 65.705, "step_total_ms": 74.215, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245664.097}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 95, "lm_gpu_ms": 65.562, "step_total_ms": 74.368, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245664.1771}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 96, "lm_gpu_ms": 65.494, "step_total_ms": 74.262, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245664.257}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 97, "lm_gpu_ms": 66.54, "step_total_ms": 79.554, "lock_wait_ms": 0.632, "finite": true, "is_thinking": true, "timestamp": 1245664.3424}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 98, "lm_gpu_ms": 66.152, "step_total_ms": 74.67, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245664.4172}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 99, "lm_gpu_ms": 65.663, "step_total_ms": 74.196, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245664.4969}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 100, "lm_gpu_ms": 65.785, "step_total_ms": 74.285, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245664.577}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 101, "lm_gpu_ms": 65.585, "step_total_ms": 74.105, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245664.6569}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 102, "lm_gpu_ms": 66.428, "step_total_ms": 79.817, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245664.7427}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 103, "lm_gpu_ms": 66.123, "step_total_ms": 74.634, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245664.8174}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 104, "lm_gpu_ms": 65.541, "step_total_ms": 74.075, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245664.8968}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 105, "lm_gpu_ms": 65.49, "step_total_ms": 74.007, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245664.9767}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 106, "lm_gpu_ms": 65.867, "step_total_ms": 74.379, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245665.0571}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 107, "lm_gpu_ms": 66.247, "step_total_ms": 79.706, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245665.1425}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 108, "lm_gpu_ms": 66.037, "step_total_ms": 74.553, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245665.2172}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 109, "lm_gpu_ms": 65.668, "step_total_ms": 74.192, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245665.297}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 110, "lm_gpu_ms": 65.711, "step_total_ms": 74.228, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245665.377}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 111, "lm_gpu_ms": 65.63, "step_total_ms": 74.147, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245665.4569}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 112, "lm_gpu_ms": 66.351, "step_total_ms": 79.84, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245665.5426}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 113, "lm_gpu_ms": 65.904, "step_total_ms": 74.46, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245665.6172}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 114, "lm_gpu_ms": 65.715, "step_total_ms": 74.227, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245665.697}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 115, "lm_gpu_ms": 65.808, "step_total_ms": 74.359, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245665.7772}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 116, "lm_gpu_ms": 65.737, "step_total_ms": 74.515, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245665.8573}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 117, "lm_gpu_ms": 66.203, "step_total_ms": 79.504, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245665.9423}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 118, "lm_gpu_ms": 65.996, "step_total_ms": 74.499, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245666.0169}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 119, "lm_gpu_ms": 65.741, "step_total_ms": 74.25, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245666.097}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 120, "lm_gpu_ms": 65.592, "step_total_ms": 74.106, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245666.1768}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 121, "lm_gpu_ms": 65.49, "step_total_ms": 74.002, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245666.2567}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 122, "lm_gpu_ms": 66.331, "step_total_ms": 79.898, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245666.3427}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 123, "lm_gpu_ms": 66.113, "step_total_ms": 74.629, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245666.4175}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 124, "lm_gpu_ms": 65.695, "step_total_ms": 74.251, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245666.4971}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 125, "lm_gpu_ms": 65.82, "step_total_ms": 74.575, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245666.5773}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 126, "lm_gpu_ms": 66.095, "step_total_ms": 74.838, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245666.6591}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 127, "lm_gpu_ms": 66.391, "step_total_ms": 79.789, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245666.7426}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 128, "lm_gpu_ms": 65.782, "step_total_ms": 74.286, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245666.8171}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 129, "lm_gpu_ms": 65.597, "step_total_ms": 74.159, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245666.8969}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 130, "lm_gpu_ms": 65.777, "step_total_ms": 74.307, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245666.9771}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 131, "lm_gpu_ms": 65.735, "step_total_ms": 74.249, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245667.0571}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 132, "lm_gpu_ms": 66.266, "step_total_ms": 79.671, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245667.1425}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 133, "lm_gpu_ms": 65.846, "step_total_ms": 74.379, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245667.217}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 134, "lm_gpu_ms": 65.766, "step_total_ms": 74.28, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245667.297}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 135, "lm_gpu_ms": 65.803, "step_total_ms": 74.347, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245667.3771}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 136, "lm_gpu_ms": 65.65, "step_total_ms": 74.163, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245667.4569}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 137, "lm_gpu_ms": 66.217, "step_total_ms": 79.624, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245667.5425}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 138, "lm_gpu_ms": 65.824, "step_total_ms": 74.371, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245667.617}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 139, "lm_gpu_ms": 65.668, "step_total_ms": 74.189, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245667.6969}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 140, "lm_gpu_ms": 65.689, "step_total_ms": 74.227, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245667.7771}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 141, "lm_gpu_ms": 65.67, "step_total_ms": 74.192, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245667.857}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 142, "lm_gpu_ms": 66.347, "step_total_ms": 79.97, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245667.9428}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 143, "lm_gpu_ms": 65.764, "step_total_ms": 74.3, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245668.0173}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 144, "lm_gpu_ms": 65.49, "step_total_ms": 74.031, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245668.0969}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 145, "lm_gpu_ms": 65.667, "step_total_ms": 74.214, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245668.177}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 146, "lm_gpu_ms": 65.536, "step_total_ms": 74.099, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245668.2569}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 147, "lm_gpu_ms": 66.348, "step_total_ms": 79.71, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245668.3425}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 148, "lm_gpu_ms": 65.847, "step_total_ms": 74.336, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245668.417}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 149, "lm_gpu_ms": 65.765, "step_total_ms": 74.305, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245668.497}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 150, "lm_gpu_ms": 65.663, "step_total_ms": 74.171, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245668.5769}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 151, "lm_gpu_ms": 66.008, "step_total_ms": 74.551, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245668.6573}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 152, "lm_gpu_ms": 66.374, "step_total_ms": 79.721, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245668.7425}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 153, "lm_gpu_ms": 65.813, "step_total_ms": 74.312, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245668.817}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 154, "lm_gpu_ms": 65.641, "step_total_ms": 74.199, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245668.897}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 155, "lm_gpu_ms": 65.727, "step_total_ms": 74.235, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245668.977}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 156, "lm_gpu_ms": 66.352, "step_total_ms": 79.7, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245669.0625}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 157, "lm_gpu_ms": 65.822, "step_total_ms": 74.333, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245669.137}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 158, "lm_gpu_ms": 65.643, "step_total_ms": 74.171, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245669.2169}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 159, "lm_gpu_ms": 65.59, "step_total_ms": 74.166, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245669.297}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 160, "lm_gpu_ms": 66.343, "step_total_ms": 79.596, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245669.3824}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 161, "lm_gpu_ms": 65.77, "step_total_ms": 74.301, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245669.4569}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 162, "lm_gpu_ms": 65.547, "step_total_ms": 74.125, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245669.5369}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 163, "lm_gpu_ms": 65.581, "step_total_ms": 74.104, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245669.6168}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 164, "lm_gpu_ms": 65.54, "step_total_ms": 74.252, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245669.697}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 165, "lm_gpu_ms": 66.45, "step_total_ms": 79.767, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245669.7826}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 166, "lm_gpu_ms": 65.919, "step_total_ms": 74.448, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245669.8572}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 167, "lm_gpu_ms": 65.626, "step_total_ms": 74.208, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245669.937}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 168, "lm_gpu_ms": 65.545, "step_total_ms": 74.065, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245670.0168}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 169, "lm_gpu_ms": 65.707, "step_total_ms": 74.228, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245670.097}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 170, "lm_gpu_ms": 66.445, "step_total_ms": 79.861, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245670.1827}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 171, "lm_gpu_ms": 65.835, "step_total_ms": 74.375, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245670.2572}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 172, "lm_gpu_ms": 65.73, "step_total_ms": 74.33, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245670.3371}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 173, "lm_gpu_ms": 65.781, "step_total_ms": 74.287, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245670.417}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 174, "lm_gpu_ms": 65.819, "step_total_ms": 74.335, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245670.4971}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 175, "lm_gpu_ms": 66.236, "step_total_ms": 79.52, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245670.5824}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 176, "lm_gpu_ms": 65.844, "step_total_ms": 74.387, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245670.6569}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 177, "lm_gpu_ms": 65.618, "step_total_ms": 74.205, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245670.737}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 178, "lm_gpu_ms": 65.62, "step_total_ms": 74.205, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245670.817}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 179, "lm_gpu_ms": 65.615, "step_total_ms": 74.126, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245670.8969}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 180, "lm_gpu_ms": 66.275, "step_total_ms": 79.566, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245670.9824}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 181, "lm_gpu_ms": 65.781, "step_total_ms": 74.28, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245671.0568}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 182, "lm_gpu_ms": 65.595, "step_total_ms": 74.267, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245671.137}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 183, "lm_gpu_ms": 65.844, "step_total_ms": 74.527, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245671.2173}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 184, "lm_gpu_ms": 66.454, "step_total_ms": 79.843, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245671.3027}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 185, "lm_gpu_ms": 65.896, "step_total_ms": 74.438, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245671.3773}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 186, "lm_gpu_ms": 65.434, "step_total_ms": 73.958, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245671.4567}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 187, "lm_gpu_ms": 65.724, "step_total_ms": 74.325, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245671.5371}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 188, "lm_gpu_ms": 65.599, "step_total_ms": 74.205, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245671.617}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 189, "lm_gpu_ms": 66.471, "step_total_ms": 79.808, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245671.7027}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 190, "lm_gpu_ms": 65.524, "step_total_ms": 74.036, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245671.7768}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 191, "lm_gpu_ms": 65.82, "step_total_ms": 74.326, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245671.8571}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 192, "lm_gpu_ms": 65.571, "step_total_ms": 74.087, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245671.9368}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 193, "lm_gpu_ms": 66.097, "step_total_ms": 79.52, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245672.0223}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 194, "lm_gpu_ms": 65.659, "step_total_ms": 74.162, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245672.0966}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 195, "lm_gpu_ms": 65.568, "step_total_ms": 74.109, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245672.1769}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 196, "lm_gpu_ms": 65.372, "step_total_ms": 73.978, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245672.2568}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 197, "lm_gpu_ms": 65.668, "step_total_ms": 74.249, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245672.3371}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 198, "lm_gpu_ms": 66.307, "step_total_ms": 79.522, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245672.4223}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 199, "lm_gpu_ms": 65.978, "step_total_ms": 74.468, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245672.4969}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 200, "lm_gpu_ms": 65.629, "step_total_ms": 74.153, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245672.5769}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 201, "lm_gpu_ms": 65.837, "step_total_ms": 74.482, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245672.6573}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 202, "lm_gpu_ms": 65.789, "step_total_ms": 74.409, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245672.7372}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 203, "lm_gpu_ms": 66.463, "step_total_ms": 79.883, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245672.8228}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 204, "lm_gpu_ms": 65.989, "step_total_ms": 74.538, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245672.8975}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 205, "lm_gpu_ms": 65.745, "step_total_ms": 74.284, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245672.977}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 206, "lm_gpu_ms": 65.572, "step_total_ms": 74.065, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245673.0568}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 207, "lm_gpu_ms": 65.92, "step_total_ms": 74.535, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245673.1373}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 208, "lm_gpu_ms": 66.397, "step_total_ms": 79.779, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245673.2226}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 209, "lm_gpu_ms": 65.987, "step_total_ms": 74.511, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245673.2973}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 210, "lm_gpu_ms": 65.822, "step_total_ms": 74.366, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245673.3771}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 211, "lm_gpu_ms": 65.761, "step_total_ms": 74.266, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245673.457}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 212, "lm_gpu_ms": 65.683, "step_total_ms": 74.306, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245673.5371}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 213, "lm_gpu_ms": 66.425, "step_total_ms": 79.752, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245673.6226}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 214, "lm_gpu_ms": 65.653, "step_total_ms": 74.168, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245673.6969}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 215, "lm_gpu_ms": 65.723, "step_total_ms": 74.244, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245673.777}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 216, "lm_gpu_ms": 65.746, "step_total_ms": 74.255, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245673.857}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 217, "lm_gpu_ms": 65.814, "step_total_ms": 74.323, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245673.9371}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 218, "lm_gpu_ms": 66.511, "step_total_ms": 79.88, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245674.0228}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 219, "lm_gpu_ms": 65.696, "step_total_ms": 74.237, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245674.0971}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 220, "lm_gpu_ms": 65.605, "step_total_ms": 74.119, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245674.1769}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 221, "lm_gpu_ms": 65.796, "step_total_ms": 74.307, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245674.2571}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 222, "lm_gpu_ms": 66.3, "step_total_ms": 79.571, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245674.3423}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 223, "lm_gpu_ms": 65.905, "step_total_ms": 74.41, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245674.4169}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 224, "lm_gpu_ms": 65.387, "step_total_ms": 73.898, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245674.4966}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 225, "lm_gpu_ms": 65.746, "step_total_ms": 74.262, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245674.577}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 226, "lm_gpu_ms": 65.185, "step_total_ms": 73.688, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245674.6564}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 227, "lm_gpu_ms": 66.152, "step_total_ms": 79.419, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245674.7423}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 228, "lm_gpu_ms": 66.0, "step_total_ms": 74.472, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245674.8169}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 229, "lm_gpu_ms": 65.649, "step_total_ms": 74.176, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245674.897}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 230, "lm_gpu_ms": 65.414, "step_total_ms": 74.052, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245674.9768}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 231, "lm_gpu_ms": 65.663, "step_total_ms": 74.165, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245675.0569}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 232, "lm_gpu_ms": 66.14, "step_total_ms": 79.475, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245675.1423}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 233, "lm_gpu_ms": 66.031, "step_total_ms": 74.527, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245675.217}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 234, "lm_gpu_ms": 65.515, "step_total_ms": 74.018, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245675.2968}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 235, "lm_gpu_ms": 65.566, "step_total_ms": 74.075, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245675.3768}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 236, "lm_gpu_ms": 65.393, "step_total_ms": 73.91, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245675.4567}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 237, "lm_gpu_ms": 66.362, "step_total_ms": 79.693, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245675.5425}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 238, "lm_gpu_ms": 65.924, "step_total_ms": 74.431, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245675.6171}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 239, "lm_gpu_ms": 65.658, "step_total_ms": 74.315, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245675.6971}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 240, "lm_gpu_ms": 65.726, "step_total_ms": 74.259, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245675.777}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 241, "lm_gpu_ms": 65.688, "step_total_ms": 74.195, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245675.8569}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 242, "lm_gpu_ms": 66.311, "step_total_ms": 79.703, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245675.9425}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 243, "lm_gpu_ms": 65.718, "step_total_ms": 74.222, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245676.0169}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 244, "lm_gpu_ms": 65.616, "step_total_ms": 74.138, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245676.0969}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 245, "lm_gpu_ms": 65.749, "step_total_ms": 74.255, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245676.177}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 246, "lm_gpu_ms": 66.356, "step_total_ms": 79.646, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245676.2625}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 247, "lm_gpu_ms": 65.971, "step_total_ms": 74.511, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245676.3372}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 248, "lm_gpu_ms": 65.682, "step_total_ms": 74.257, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245676.417}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 249, "lm_gpu_ms": 65.754, "step_total_ms": 74.463, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245676.4973}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 250, "lm_gpu_ms": 65.706, "step_total_ms": 74.418, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245676.5772}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 251, "lm_gpu_ms": 66.336, "step_total_ms": 79.713, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245676.6625}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 252, "lm_gpu_ms": 65.512, "step_total_ms": 74.911, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245676.7376}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 253, "lm_gpu_ms": 65.551, "step_total_ms": 74.116, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245676.8169}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 254, "lm_gpu_ms": 65.613, "step_total_ms": 74.169, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245676.8969}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 255, "lm_gpu_ms": 66.352, "step_total_ms": 79.892, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245676.9827}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 256, "lm_gpu_ms": 65.876, "step_total_ms": 74.462, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245677.0573}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 257, "lm_gpu_ms": 65.841, "step_total_ms": 74.545, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245677.1373}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 258, "lm_gpu_ms": 65.587, "step_total_ms": 74.14, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245677.2169}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 259, "lm_gpu_ms": 65.519, "step_total_ms": 74.087, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245677.2968}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 260, "lm_gpu_ms": 66.438, "step_total_ms": 79.747, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245677.3826}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 261, "lm_gpu_ms": 65.762, "step_total_ms": 74.344, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245677.4571}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 262, "lm_gpu_ms": 65.813, "step_total_ms": 74.391, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245677.5371}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 263, "lm_gpu_ms": 65.635, "step_total_ms": 74.35, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245677.6171}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 264, "lm_gpu_ms": 65.599, "step_total_ms": 74.318, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245677.6971}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 265, "lm_gpu_ms": 66.321, "step_total_ms": 79.826, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245677.7827}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 266, "lm_gpu_ms": 65.489, "step_total_ms": 74.029, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245677.8569}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 267, "lm_gpu_ms": 65.819, "step_total_ms": 74.389, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245677.9371}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 268, "lm_gpu_ms": 65.694, "step_total_ms": 74.404, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245678.0172}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 269, "lm_gpu_ms": 66.278, "step_total_ms": 79.603, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245678.1024}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 270, "lm_gpu_ms": 65.734, "step_total_ms": 74.305, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245678.1768}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 271, "lm_gpu_ms": 65.715, "step_total_ms": 74.26, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245678.257}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 272, "lm_gpu_ms": 65.318, "step_total_ms": 74.024, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245678.3368}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 273, "lm_gpu_ms": 65.729, "step_total_ms": 74.287, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245678.417}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 274, "lm_gpu_ms": 66.414, "step_total_ms": 79.723, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245678.5025}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 275, "lm_gpu_ms": 65.911, "step_total_ms": 74.486, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245678.5771}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 276, "lm_gpu_ms": 65.426, "step_total_ms": 74.138, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245678.6569}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 277, "lm_gpu_ms": 65.629, "step_total_ms": 74.353, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245678.7372}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 278, "lm_gpu_ms": 65.542, "step_total_ms": 74.248, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245678.817}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 279, "lm_gpu_ms": 66.215, "step_total_ms": 79.507, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245678.9024}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 280, "lm_gpu_ms": 65.692, "step_total_ms": 74.246, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245678.9767}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 281, "lm_gpu_ms": 65.654, "step_total_ms": 74.4, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245679.0572}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 282, "lm_gpu_ms": 65.737, "step_total_ms": 74.458, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245679.1372}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 283, "lm_gpu_ms": 66.722, "step_total_ms": 79.719, "lock_wait_ms": 0.4, "finite": true, "is_thinking": true, "timestamp": 1245679.2225}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 284, "lm_gpu_ms": 66.046, "step_total_ms": 74.612, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245679.2972}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 285, "lm_gpu_ms": 65.804, "step_total_ms": 74.379, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245679.3771}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 286, "lm_gpu_ms": 65.76, "step_total_ms": 74.32, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245679.4571}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 287, "lm_gpu_ms": 65.746, "step_total_ms": 74.468, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245679.5373}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 288, "lm_gpu_ms": 66.442, "step_total_ms": 79.973, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245679.6228}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 289, "lm_gpu_ms": 65.636, "step_total_ms": 74.203, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245679.6971}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 290, "lm_gpu_ms": 65.596, "step_total_ms": 74.155, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245679.7769}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 291, "lm_gpu_ms": 65.776, "step_total_ms": 74.504, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245679.8573}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 292, "lm_gpu_ms": 66.333, "step_total_ms": 79.823, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245679.9426}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 293, "lm_gpu_ms": 66.085, "step_total_ms": 74.645, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245680.0174}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 294, "lm_gpu_ms": 65.688, "step_total_ms": 74.258, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245680.097}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 295, "lm_gpu_ms": 65.504, "step_total_ms": 74.061, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245680.1768}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 296, "lm_gpu_ms": 65.692, "step_total_ms": 74.252, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245680.257}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 297, "lm_gpu_ms": 66.331, "step_total_ms": 79.748, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245680.3425}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 298, "lm_gpu_ms": 65.605, "step_total_ms": 74.16, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245680.4168}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 299, "lm_gpu_ms": 65.726, "step_total_ms": 74.277, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245680.497}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 300, "lm_gpu_ms": 65.555, "step_total_ms": 74.272, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245680.5771}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 301, "lm_gpu_ms": 66.095, "step_total_ms": 79.532, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245680.6624}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 302, "lm_gpu_ms": 65.503, "step_total_ms": 74.064, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245680.7366}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 303, "lm_gpu_ms": 65.652, "step_total_ms": 74.207, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245680.8169}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 304, "lm_gpu_ms": 65.644, "step_total_ms": 74.208, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245680.8969}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 305, "lm_gpu_ms": 65.713, "step_total_ms": 74.279, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245680.9786}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 306, "lm_gpu_ms": 66.224, "step_total_ms": 79.553, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245681.0623}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 307, "lm_gpu_ms": 65.894, "step_total_ms": 74.446, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245681.1369}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 308, "lm_gpu_ms": 65.61, "step_total_ms": 74.158, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245681.2169}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 309, "lm_gpu_ms": 65.69, "step_total_ms": 74.245, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245681.297}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 310, "lm_gpu_ms": 65.527, "step_total_ms": 74.087, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245681.3768}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 311, "lm_gpu_ms": 66.201, "step_total_ms": 79.518, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245681.4623}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 312, "lm_gpu_ms": 65.692, "step_total_ms": 74.259, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245681.5367}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 313, "lm_gpu_ms": 65.631, "step_total_ms": 74.189, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245681.6169}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 314, "lm_gpu_ms": 65.612, "step_total_ms": 74.174, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245681.6969}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 315, "lm_gpu_ms": 65.676, "step_total_ms": 74.252, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245681.777}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 316, "lm_gpu_ms": 66.379, "step_total_ms": 79.751, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245681.8626}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 317, "lm_gpu_ms": 65.847, "step_total_ms": 74.411, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245681.9372}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 318, "lm_gpu_ms": 65.389, "step_total_ms": 73.969, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245682.0167}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 319, "lm_gpu_ms": 65.683, "step_total_ms": 74.242, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245682.097}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 320, "lm_gpu_ms": 65.666, "step_total_ms": 74.224, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245682.177}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 321, "lm_gpu_ms": 66.512, "step_total_ms": 80.015, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245682.2629}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 322, "lm_gpu_ms": 65.725, "step_total_ms": 74.305, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245682.3374}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 323, "lm_gpu_ms": 65.629, "step_total_ms": 74.396, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245682.4172}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 324, "lm_gpu_ms": 65.67, "step_total_ms": 74.23, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245682.497}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 325, "lm_gpu_ms": 65.692, "step_total_ms": 74.242, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245682.577}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 326, "lm_gpu_ms": 66.097, "step_total_ms": 79.655, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245682.6625}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 327, "lm_gpu_ms": 65.894, "step_total_ms": 74.445, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245682.7371}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 328, "lm_gpu_ms": 65.419, "step_total_ms": 73.972, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245682.8167}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 329, "lm_gpu_ms": 65.708, "step_total_ms": 74.261, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245682.897}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 330, "lm_gpu_ms": 65.656, "step_total_ms": 74.423, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245682.9772}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 331, "lm_gpu_ms": 66.246, "step_total_ms": 79.609, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245683.0625}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 332, "lm_gpu_ms": 65.718, "step_total_ms": 74.287, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245683.137}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 333, "lm_gpu_ms": 65.699, "step_total_ms": 74.256, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245683.217}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 334, "lm_gpu_ms": 65.716, "step_total_ms": 74.278, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245683.297}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 335, "lm_gpu_ms": 66.218, "step_total_ms": 79.664, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245683.3825}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 336, "lm_gpu_ms": 65.723, "step_total_ms": 74.276, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245683.4569}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 337, "lm_gpu_ms": 65.73, "step_total_ms": 74.298, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245683.537}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 338, "lm_gpu_ms": 65.624, "step_total_ms": 74.387, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245683.6172}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 339, "lm_gpu_ms": 66.103, "step_total_ms": 74.874, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245683.6993}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 340, "lm_gpu_ms": 66.444, "step_total_ms": 79.924, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245683.7827}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 341, "lm_gpu_ms": 65.359, "step_total_ms": 73.937, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245683.8568}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 342, "lm_gpu_ms": 65.645, "step_total_ms": 74.211, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245683.937}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 343, "lm_gpu_ms": 65.767, "step_total_ms": 74.362, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245684.0171}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 344, "lm_gpu_ms": 66.243, "step_total_ms": 79.628, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245684.1024}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 345, "lm_gpu_ms": 66.158, "step_total_ms": 74.708, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245684.1773}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 346, "lm_gpu_ms": 65.493, "step_total_ms": 74.046, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245684.2568}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 347, "lm_gpu_ms": 65.649, "step_total_ms": 74.203, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245684.3369}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 348, "lm_gpu_ms": 65.556, "step_total_ms": 74.111, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245684.4169}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 349, "lm_gpu_ms": 66.27, "step_total_ms": 79.644, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245684.5025}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 350, "lm_gpu_ms": 65.809, "step_total_ms": 74.357, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245684.577}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 351, "lm_gpu_ms": 65.718, "step_total_ms": 74.281, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245684.657}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 352, "lm_gpu_ms": 65.427, "step_total_ms": 73.983, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245684.7367}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 353, "lm_gpu_ms": 65.855, "step_total_ms": 74.651, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245684.8174}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 354, "lm_gpu_ms": 66.234, "step_total_ms": 79.69, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245684.9025}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 355, "lm_gpu_ms": 65.727, "step_total_ms": 74.292, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245684.977}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 356, "lm_gpu_ms": 65.72, "step_total_ms": 74.266, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245685.057}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 357, "lm_gpu_ms": 65.62, "step_total_ms": 74.416, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245685.1372}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 358, "lm_gpu_ms": 66.557, "step_total_ms": 79.915, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245685.2227}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 359, "lm_gpu_ms": 65.794, "step_total_ms": 74.372, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245685.2972}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 360, "lm_gpu_ms": 65.66, "step_total_ms": 74.228, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245685.377}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 361, "lm_gpu_ms": 65.796, "step_total_ms": 74.374, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245685.4571}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 362, "lm_gpu_ms": 66.44, "step_total_ms": 79.791, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245685.5426}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 363, "lm_gpu_ms": 65.628, "step_total_ms": 74.194, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245685.6169}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 364, "lm_gpu_ms": 65.607, "step_total_ms": 74.169, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245685.6969}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 365, "lm_gpu_ms": 65.744, "step_total_ms": 74.319, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245685.7771}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 366, "lm_gpu_ms": 66.352, "step_total_ms": 79.69, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245685.8625}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 367, "lm_gpu_ms": 65.907, "step_total_ms": 74.477, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245685.9371}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 368, "lm_gpu_ms": 65.718, "step_total_ms": 74.281, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245686.017}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 369, "lm_gpu_ms": 65.669, "step_total_ms": 74.249, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245686.097}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 370, "lm_gpu_ms": 65.47, "step_total_ms": 74.042, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245686.1768}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 371, "lm_gpu_ms": 66.426, "step_total_ms": 79.969, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245686.2628}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 372, "lm_gpu_ms": 65.673, "step_total_ms": 74.249, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245686.3372}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 373, "lm_gpu_ms": 65.581, "step_total_ms": 74.141, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245686.4169}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 374, "lm_gpu_ms": 65.379, "step_total_ms": 73.989, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245686.4967}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 375, "lm_gpu_ms": 65.644, "step_total_ms": 74.473, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245686.5773}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 376, "lm_gpu_ms": 66.441, "step_total_ms": 79.923, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245686.6627}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 377, "lm_gpu_ms": 65.727, "step_total_ms": 74.334, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245686.7372}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 378, "lm_gpu_ms": 65.401, "step_total_ms": 74.226, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245686.817}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 379, "lm_gpu_ms": 65.605, "step_total_ms": 74.164, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245686.8969}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 380, "lm_gpu_ms": 65.442, "step_total_ms": 74.001, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245686.9767}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 381, "lm_gpu_ms": 66.33, "step_total_ms": 79.702, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245687.0625}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 382, "lm_gpu_ms": 65.488, "step_total_ms": 74.05, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245687.1367}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 383, "lm_gpu_ms": 65.316, "step_total_ms": 73.882, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245687.2166}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 384, "lm_gpu_ms": 65.463, "step_total_ms": 74.046, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245687.2968}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 385, "lm_gpu_ms": 65.367, "step_total_ms": 73.935, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245687.3767}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 386, "lm_gpu_ms": 66.399, "step_total_ms": 79.616, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245687.4624}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 387, "lm_gpu_ms": 65.406, "step_total_ms": 73.968, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245687.5365}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 388, "lm_gpu_ms": 65.589, "step_total_ms": 74.151, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245687.6169}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 389, "lm_gpu_ms": 65.691, "step_total_ms": 74.262, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245687.697}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 390, "lm_gpu_ms": 66.112, "step_total_ms": 79.415, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245687.7822}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 391, "lm_gpu_ms": 65.734, "step_total_ms": 74.312, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245687.8567}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 392, "lm_gpu_ms": 65.795, "step_total_ms": 74.375, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245687.9371}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 393, "lm_gpu_ms": 65.498, "step_total_ms": 74.334, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245688.0171}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 394, "lm_gpu_ms": 65.764, "step_total_ms": 74.317, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245688.0971}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 395, "lm_gpu_ms": 66.513, "step_total_ms": 80.088, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245688.183}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 396, "lm_gpu_ms": 65.626, "step_total_ms": 74.205, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245688.2573}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 397, "lm_gpu_ms": 65.684, "step_total_ms": 74.249, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245688.337}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 398, "lm_gpu_ms": 65.671, "step_total_ms": 74.235, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245688.417}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 399, "lm_gpu_ms": 65.682, "step_total_ms": 74.263, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245688.497}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 400, "lm_gpu_ms": 66.267, "step_total_ms": 79.809, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245688.5826}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 401, "lm_gpu_ms": 65.63, "step_total_ms": 74.202, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245688.657}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 402, "lm_gpu_ms": 65.576, "step_total_ms": 74.14, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245688.7369}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 403, "lm_gpu_ms": 65.744, "step_total_ms": 74.308, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245688.8171}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 404, "lm_gpu_ms": 65.614, "step_total_ms": 74.181, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245688.8969}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 405, "lm_gpu_ms": 66.31, "step_total_ms": 79.967, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245688.9828}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 406, "lm_gpu_ms": 65.52, "step_total_ms": 74.11, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245689.057}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 407, "lm_gpu_ms": 65.564, "step_total_ms": 74.173, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245689.1369}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 408, "lm_gpu_ms": 65.536, "step_total_ms": 74.093, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245689.2168}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 409, "lm_gpu_ms": 65.754, "step_total_ms": 74.302, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245689.2971}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 410, "lm_gpu_ms": 66.366, "step_total_ms": 79.755, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245689.3825}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 411, "lm_gpu_ms": 65.982, "step_total_ms": 74.545, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245689.4572}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 412, "lm_gpu_ms": 65.643, "step_total_ms": 74.203, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245689.5369}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 413, "lm_gpu_ms": 65.501, "step_total_ms": 74.051, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245689.6168}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 414, "lm_gpu_ms": 65.605, "step_total_ms": 74.167, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245689.6969}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 415, "lm_gpu_ms": 66.423, "step_total_ms": 80.015, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245689.7829}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 416, "lm_gpu_ms": 65.985, "step_total_ms": 74.566, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245689.8576}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 417, "lm_gpu_ms": 65.711, "step_total_ms": 74.548, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245689.9373}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 418, "lm_gpu_ms": 65.819, "step_total_ms": 74.391, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245690.0171}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 419, "lm_gpu_ms": 65.72, "step_total_ms": 74.582, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245690.0974}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 420, "lm_gpu_ms": 66.411, "step_total_ms": 80.04, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245690.1829}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 421, "lm_gpu_ms": 65.763, "step_total_ms": 74.333, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245690.2574}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 422, "lm_gpu_ms": 65.729, "step_total_ms": 74.278, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245690.337}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 423, "lm_gpu_ms": 65.903, "step_total_ms": 74.509, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245690.4172}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 424, "lm_gpu_ms": 65.627, "step_total_ms": 74.179, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245690.4969}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 425, "lm_gpu_ms": 66.429, "step_total_ms": 80.004, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245690.5829}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 426, "lm_gpu_ms": 65.786, "step_total_ms": 74.358, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245690.6574}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 427, "lm_gpu_ms": 65.712, "step_total_ms": 74.268, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245690.737}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 428, "lm_gpu_ms": 65.774, "step_total_ms": 74.614, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245690.8174}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 429, "lm_gpu_ms": 65.776, "step_total_ms": 74.328, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245690.8971}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 430, "lm_gpu_ms": 66.255, "step_total_ms": 79.869, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245690.9828}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 431, "lm_gpu_ms": 66.303, "step_total_ms": 74.876, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245691.0578}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 432, "lm_gpu_ms": 65.794, "step_total_ms": 74.351, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245691.1371}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 433, "lm_gpu_ms": 66.078, "step_total_ms": 74.64, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245691.2174}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 434, "lm_gpu_ms": 65.738, "step_total_ms": 74.325, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245691.2971}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 435, "lm_gpu_ms": 66.615, "step_total_ms": 79.937, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245691.3827}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 436, "lm_gpu_ms": 66.002, "step_total_ms": 74.599, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245691.4575}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 437, "lm_gpu_ms": 65.986, "step_total_ms": 74.549, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245691.5373}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 438, "lm_gpu_ms": 65.935, "step_total_ms": 74.597, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245691.6174}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 439, "lm_gpu_ms": 65.674, "step_total_ms": 74.244, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245691.697}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 440, "lm_gpu_ms": 66.557, "step_total_ms": 80.337, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245691.7832}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 441, "lm_gpu_ms": 65.988, "step_total_ms": 74.532, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245691.8579}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 442, "lm_gpu_ms": 65.773, "step_total_ms": 74.335, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245691.9371}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 443, "lm_gpu_ms": 65.946, "step_total_ms": 74.519, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245692.0173}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 444, "lm_gpu_ms": 65.661, "step_total_ms": 74.228, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245692.097}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 445, "lm_gpu_ms": 66.303, "step_total_ms": 79.718, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245692.1825}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 446, "lm_gpu_ms": 66.299, "step_total_ms": 74.865, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245692.2575}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 447, "lm_gpu_ms": 65.787, "step_total_ms": 74.363, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245692.3371}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 448, "lm_gpu_ms": 65.588, "step_total_ms": 74.446, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245692.4172}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 449, "lm_gpu_ms": 65.959, "step_total_ms": 74.531, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245692.4973}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 450, "lm_gpu_ms": 66.186, "step_total_ms": 79.808, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245692.5827}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 451, "lm_gpu_ms": 65.947, "step_total_ms": 74.522, "lock_wait_ms": 0.007, "finite": true, "is_thinking": true, "timestamp": 1245692.6574}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 452, "lm_gpu_ms": 65.77, "step_total_ms": 74.304, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245692.7371}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 453, "lm_gpu_ms": 65.865, "step_total_ms": 74.438, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245692.8172}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 454, "lm_gpu_ms": 65.638, "step_total_ms": 74.207, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245692.8969}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 455, "lm_gpu_ms": 66.62, "step_total_ms": 80.267, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245692.9831}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 456, "lm_gpu_ms": 65.766, "step_total_ms": 74.318, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245693.0576}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 457, "lm_gpu_ms": 65.872, "step_total_ms": 74.427, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245693.1372}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 458, "lm_gpu_ms": 65.66, "step_total_ms": 74.214, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245693.217}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 459, "lm_gpu_ms": 66.596, "step_total_ms": 79.926, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245693.3027}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 460, "lm_gpu_ms": 65.775, "step_total_ms": 74.368, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245693.3772}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 461, "lm_gpu_ms": 65.794, "step_total_ms": 74.364, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245693.4571}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 462, "lm_gpu_ms": 65.819, "step_total_ms": 74.388, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245693.5371}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 463, "lm_gpu_ms": 65.806, "step_total_ms": 74.382, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245693.6171}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 464, "lm_gpu_ms": 66.398, "step_total_ms": 80.002, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245693.7029}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 465, "lm_gpu_ms": 65.946, "step_total_ms": 74.505, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245693.7776}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 466, "lm_gpu_ms": 65.67, "step_total_ms": 74.231, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245693.857}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 467, "lm_gpu_ms": 65.748, "step_total_ms": 74.347, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245693.9371}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 468, "lm_gpu_ms": 65.744, "step_total_ms": 74.295, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245694.0186}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 469, "lm_gpu_ms": 66.47, "step_total_ms": 79.755, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245694.1026}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 470, "lm_gpu_ms": 65.893, "step_total_ms": 74.476, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245694.1772}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 471, "lm_gpu_ms": 65.965, "step_total_ms": 74.533, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245694.2573}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 472, "lm_gpu_ms": 65.844, "step_total_ms": 74.42, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245694.3372}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 473, "lm_gpu_ms": 66.793, "step_total_ms": 80.237, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245694.423}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 474, "lm_gpu_ms": 65.712, "step_total_ms": 74.272, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245694.4975}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 475, "lm_gpu_ms": 65.931, "step_total_ms": 74.518, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245694.5773}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 476, "lm_gpu_ms": 65.958, "step_total_ms": 74.522, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245694.6573}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 477, "lm_gpu_ms": 66.699, "step_total_ms": 80.195, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245694.7431}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 478, "lm_gpu_ms": 65.843, "step_total_ms": 74.386, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245694.8176}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 479, "lm_gpu_ms": 65.852, "step_total_ms": 74.428, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245694.8972}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 480, "lm_gpu_ms": 65.746, "step_total_ms": 74.582, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245694.9774}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 481, "lm_gpu_ms": 66.342, "step_total_ms": 79.877, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245695.0627}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 482, "lm_gpu_ms": 65.983, "step_total_ms": 74.549, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245695.1374}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 483, "lm_gpu_ms": 66.021, "step_total_ms": 74.623, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245695.2174}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 484, "lm_gpu_ms": 65.814, "step_total_ms": 74.682, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245695.2975}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 485, "lm_gpu_ms": 65.857, "step_total_ms": 74.429, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245695.3772}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 486, "lm_gpu_ms": 66.437, "step_total_ms": 80.169, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245695.4631}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 487, "lm_gpu_ms": 65.745, "step_total_ms": 74.319, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245695.5375}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 488, "lm_gpu_ms": 65.757, "step_total_ms": 74.306, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245695.6171}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 489, "lm_gpu_ms": 65.648, "step_total_ms": 74.212, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245695.697}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 490, "lm_gpu_ms": 66.647, "step_total_ms": 80.015, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245695.7828}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 491, "lm_gpu_ms": 65.881, "step_total_ms": 74.442, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245695.8574}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 492, "lm_gpu_ms": 65.752, "step_total_ms": 74.333, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245695.9371}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 493, "lm_gpu_ms": 65.855, "step_total_ms": 74.438, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245696.0172}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 494, "lm_gpu_ms": 66.378, "step_total_ms": 80.039, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245696.1029}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 495, "lm_gpu_ms": 65.874, "step_total_ms": 74.439, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245696.1775}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 496, "lm_gpu_ms": 65.799, "step_total_ms": 74.384, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245696.2571}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 497, "lm_gpu_ms": 65.64, "step_total_ms": 74.203, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245696.3369}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 498, "lm_gpu_ms": 66.446, "step_total_ms": 79.912, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245696.4227}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 499, "lm_gpu_ms": 65.999, "step_total_ms": 74.564, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245696.4974}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 500, "lm_gpu_ms": 65.519, "step_total_ms": 74.097, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245696.5768}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 501, "lm_gpu_ms": 65.807, "step_total_ms": 74.377, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245696.6571}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 502, "lm_gpu_ms": 65.604, "step_total_ms": 74.17, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245696.7369}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 503, "lm_gpu_ms": 66.427, "step_total_ms": 79.824, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245696.8227}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 504, "lm_gpu_ms": 65.933, "step_total_ms": 74.522, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245696.8973}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 505, "lm_gpu_ms": 65.811, "step_total_ms": 74.389, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245696.9771}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 506, "lm_gpu_ms": 65.789, "step_total_ms": 74.419, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245697.0572}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 507, "lm_gpu_ms": 65.837, "step_total_ms": 74.447, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245697.1372}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 508, "lm_gpu_ms": 66.199, "step_total_ms": 79.526, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245697.2223}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 509, "lm_gpu_ms": 65.858, "step_total_ms": 74.424, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245697.2969}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 510, "lm_gpu_ms": 65.591, "step_total_ms": 74.178, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245697.3769}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 511, "lm_gpu_ms": 65.778, "step_total_ms": 74.36, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245697.4571}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 512, "lm_gpu_ms": 65.452, "step_total_ms": 74.021, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245697.5368}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 513, "lm_gpu_ms": 66.491, "step_total_ms": 79.801, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245697.6226}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 514, "lm_gpu_ms": 65.735, "step_total_ms": 74.321, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245697.6971}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 515, "lm_gpu_ms": 65.657, "step_total_ms": 74.227, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245697.777}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 516, "lm_gpu_ms": 65.706, "step_total_ms": 74.274, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245697.857}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 517, "lm_gpu_ms": 65.615, "step_total_ms": 74.194, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245697.9369}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 518, "lm_gpu_ms": 66.289, "step_total_ms": 79.981, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245698.0228}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 519, "lm_gpu_ms": 65.763, "step_total_ms": 74.354, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245698.0973}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 520, "lm_gpu_ms": 65.637, "step_total_ms": 74.541, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245698.1773}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 521, "lm_gpu_ms": 65.562, "step_total_ms": 74.453, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245698.2572}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 522, "lm_gpu_ms": 65.88, "step_total_ms": 74.474, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245698.3372}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 523, "lm_gpu_ms": 66.252, "step_total_ms": 79.7, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245698.4225}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 524, "lm_gpu_ms": 65.826, "step_total_ms": 74.409, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245698.4971}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 525, "lm_gpu_ms": 65.617, "step_total_ms": 74.507, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245698.5773}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 526, "lm_gpu_ms": 65.704, "step_total_ms": 74.291, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245698.6571}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 527, "lm_gpu_ms": 66.524, "step_total_ms": 79.909, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245698.7427}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 528, "lm_gpu_ms": 65.583, "step_total_ms": 74.18, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245698.817}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 529, "lm_gpu_ms": 65.781, "step_total_ms": 74.382, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245698.8971}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 530, "lm_gpu_ms": 65.389, "step_total_ms": 74.275, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245698.9771}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 531, "lm_gpu_ms": 66.518, "step_total_ms": 79.947, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245699.0628}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 532, "lm_gpu_ms": 65.858, "step_total_ms": 74.47, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245699.1374}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 533, "lm_gpu_ms": 65.759, "step_total_ms": 74.703, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245699.2175}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 534, "lm_gpu_ms": 65.688, "step_total_ms": 74.275, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245699.297}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 535, "lm_gpu_ms": 65.782, "step_total_ms": 74.419, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245699.3772}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 536, "lm_gpu_ms": 66.362, "step_total_ms": 79.923, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245699.4627}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 537, "lm_gpu_ms": 65.812, "step_total_ms": 74.423, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245699.5372}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 538, "lm_gpu_ms": 65.484, "step_total_ms": 74.099, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245699.6168}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 539, "lm_gpu_ms": 65.731, "step_total_ms": 74.362, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245699.6971}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 540, "lm_gpu_ms": 65.699, "step_total_ms": 74.29, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245699.7771}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 541, "lm_gpu_ms": 66.213, "step_total_ms": 79.828, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245699.8626}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 542, "lm_gpu_ms": 65.745, "step_total_ms": 74.378, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245699.9371}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 543, "lm_gpu_ms": 65.621, "step_total_ms": 74.261, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245700.017}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 544, "lm_gpu_ms": 65.583, "step_total_ms": 74.497, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245700.0972}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 545, "lm_gpu_ms": 65.716, "step_total_ms": 74.342, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245700.1771}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 546, "lm_gpu_ms": 66.355, "step_total_ms": 80.0, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245700.2628}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 547, "lm_gpu_ms": 65.652, "step_total_ms": 74.292, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245700.3372}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 548, "lm_gpu_ms": 65.662, "step_total_ms": 74.266, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245700.417}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 549, "lm_gpu_ms": 65.416, "step_total_ms": 74.061, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245700.4968}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 550, "lm_gpu_ms": 65.526, "step_total_ms": 74.186, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245700.5769}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 551, "lm_gpu_ms": 66.178, "step_total_ms": 79.804, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245700.6626}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 552, "lm_gpu_ms": 65.512, "step_total_ms": 74.123, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245700.7368}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 553, "lm_gpu_ms": 65.733, "step_total_ms": 74.345, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245700.8171}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 554, "lm_gpu_ms": 65.491, "step_total_ms": 74.091, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245700.8968}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 555, "lm_gpu_ms": 69.166, "step_total_ms": 82.935, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245700.9857}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 556, "lm_gpu_ms": 73.251, "step_total_ms": 81.939, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245701.0678}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 557, "lm_gpu_ms": 76.551, "step_total_ms": 85.356, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245701.1534}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 558, "lm_gpu_ms": 66.224, "step_total_ms": 75.02, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245701.2286}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 559, "lm_gpu_ms": 65.678, "step_total_ms": 74.295, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245701.303}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 560, "lm_gpu_ms": 65.377, "step_total_ms": 73.99, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245701.3772}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 561, "lm_gpu_ms": 65.804, "step_total_ms": 74.418, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245701.4572}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 562, "lm_gpu_ms": 66.23, "step_total_ms": 80.159, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245701.5429}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 563, "lm_gpu_ms": 66.045, "step_total_ms": 74.634, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245701.6177}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 564, "lm_gpu_ms": 65.656, "step_total_ms": 74.262, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245701.697}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 565, "lm_gpu_ms": 65.706, "step_total_ms": 74.32, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245701.7771}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 566, "lm_gpu_ms": 65.605, "step_total_ms": 74.211, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245701.857}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 567, "lm_gpu_ms": 66.264, "step_total_ms": 80.105, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245701.9429}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 568, "lm_gpu_ms": 65.871, "step_total_ms": 74.464, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245702.0175}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 569, "lm_gpu_ms": 65.553, "step_total_ms": 74.127, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245702.0969}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 570, "lm_gpu_ms": 65.581, "step_total_ms": 74.238, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245702.177}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 571, "lm_gpu_ms": 65.699, "step_total_ms": 74.306, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245702.2586}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 572, "lm_gpu_ms": 66.403, "step_total_ms": 79.823, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245702.3427}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 573, "lm_gpu_ms": 65.621, "step_total_ms": 74.26, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245702.4171}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 574, "lm_gpu_ms": 65.61, "step_total_ms": 74.29, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245702.497}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 575, "lm_gpu_ms": 65.575, "step_total_ms": 74.226, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245702.577}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 576, "lm_gpu_ms": 65.593, "step_total_ms": 74.216, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245702.657}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 577, "lm_gpu_ms": 66.168, "step_total_ms": 80.0, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245702.7428}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 578, "lm_gpu_ms": 65.608, "step_total_ms": 74.235, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245702.8172}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 579, "lm_gpu_ms": 65.695, "step_total_ms": 74.311, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245702.8971}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 580, "lm_gpu_ms": 65.391, "step_total_ms": 74.005, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245702.9768}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 581, "lm_gpu_ms": 65.754, "step_total_ms": 74.379, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245703.0571}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 582, "lm_gpu_ms": 66.118, "step_total_ms": 79.387, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245703.1422}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 583, "lm_gpu_ms": 65.467, "step_total_ms": 74.069, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245703.2164}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 584, "lm_gpu_ms": 65.351, "step_total_ms": 74.195, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245703.2969}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 585, "lm_gpu_ms": 65.597, "step_total_ms": 74.212, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245703.377}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 586, "lm_gpu_ms": 65.963, "step_total_ms": 79.646, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245703.4625}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 587, "lm_gpu_ms": 65.859, "step_total_ms": 74.484, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245703.5371}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 588, "lm_gpu_ms": 65.497, "step_total_ms": 74.109, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245703.6168}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 589, "lm_gpu_ms": 65.672, "step_total_ms": 74.298, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245703.697}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 590, "lm_gpu_ms": 65.581, "step_total_ms": 74.206, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245703.7769}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 591, "lm_gpu_ms": 66.266, "step_total_ms": 79.652, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245703.8625}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 592, "lm_gpu_ms": 65.857, "step_total_ms": 74.526, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245703.9372}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 593, "lm_gpu_ms": 65.54, "step_total_ms": 74.132, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245704.0169}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 594, "lm_gpu_ms": 65.427, "step_total_ms": 74.043, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245704.0968}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 595, "lm_gpu_ms": 65.548, "step_total_ms": 74.379, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245704.1771}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 596, "lm_gpu_ms": 66.19, "step_total_ms": 79.788, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245704.2626}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 597, "lm_gpu_ms": 65.803, "step_total_ms": 74.424, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245704.3372}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 598, "lm_gpu_ms": 65.579, "step_total_ms": 74.193, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245704.4169}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 599, "lm_gpu_ms": 65.663, "step_total_ms": 74.297, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245704.497}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 600, "lm_gpu_ms": 65.546, "step_total_ms": 74.233, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245704.577}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 601, "lm_gpu_ms": 66.265, "step_total_ms": 79.604, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245704.6625}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 602, "lm_gpu_ms": 65.895, "step_total_ms": 74.526, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245704.7371}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 603, "lm_gpu_ms": 65.674, "step_total_ms": 74.324, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245704.8171}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 604, "lm_gpu_ms": 65.578, "step_total_ms": 74.215, "lock_wait_ms": 0.002, "finite": true, "is_thinking": true, "timestamp": 1245704.897}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 605, "lm_gpu_ms": 65.681, "step_total_ms": 74.361, "lock_wait_ms": 0.001, "finite": true, "is_thinking": true, "timestamp": 1245704.9772}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 606, "lm_gpu_ms": 66.638, "step_total_ms": 80.725, "lock_wait_ms": 0.002, "finite": true, "is_thinking": false, "timestamp": 1245705.0635}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 607, "lm_gpu_ms": 65.596, "step_total_ms": 74.251, "lock_wait_ms": 0.002, "finite": true, "is_thinking": false, "timestamp": 1245705.1379}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 608, "lm_gpu_ms": 65.314, "step_total_ms": 73.949, "lock_wait_ms": 0.002, "finite": true, "is_thinking": false, "timestamp": 1245705.2167}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 609, "lm_gpu_ms": 65.342, "step_total_ms": 73.973, "lock_wait_ms": 0.002, "finite": true, "is_thinking": false, "timestamp": 1245705.2967}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 610, "lm_gpu_ms": 65.193, "step_total_ms": 74.022, "lock_wait_ms": 0.001, "finite": true, "is_thinking": false, "timestamp": 1245705.3768}
+{"event": "proof2_concurrent_listener_frame", "frame_id": 611, "lm_gpu_ms": 65.503, "step_total_ms": 74.136, "lock_wait_ms": 0.001, "finite": true, "is_thinking": false, "timestamp": 1245705.4569}

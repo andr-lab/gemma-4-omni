@@ -46,9 +46,8 @@ class _StaticPaddingWorkspace:
         key = (slot, tuple(shape), value.dtype, value.device)
         buffer = self._buffers.get(key)
         if buffer is None:
-            buffer = torch.empty(shape, dtype=value.dtype, device=value.device)
+            buffer = torch.zeros(shape, dtype=value.dtype, device=value.device)
             self._buffers[key] = buffer
-        buffer.zero_()
         target = [slice(None)] * value.ndim
         target[axis] = slice(0, length)
         buffer[tuple(target)].copy_(value)
@@ -61,11 +60,10 @@ class _StaticPaddingWorkspace:
         shape[-1] = self.target_length
         key = (tuple(shape), mask.dtype, mask.device)
         buffer = self._mask_buffers.get(key)
-        if buffer is None:
-            buffer = torch.empty(shape, dtype=mask.dtype, device=mask.device)
-            self._mask_buffers[key] = buffer
         fill = torch.finfo(mask.dtype).min if mask.is_floating_point() else False
-        buffer.fill_(fill)
+        if buffer is None:
+            buffer = torch.full(shape, fill, dtype=mask.dtype, device=mask.device)
+            self._mask_buffers[key] = buffer
         buffer[..., :key_length].copy_(mask)
         return buffer
 

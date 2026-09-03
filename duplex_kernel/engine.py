@@ -126,58 +126,106 @@ class PipelineEngine:
     def think(self, prompt_token_ids: list[int], *, max_new_tokens: int = 64,
               temperature: float = 0.7, top_p: float = 0.9, stop_check: Any | None = None,
               state: Any | None = None, generation_id: int | None = None,
-              on_text_chunk: Any | None = None, min_new_tokens: int = 0) -> dict[str, Any]:
+              on_text_chunk: Any | None = None, min_new_tokens: int = 0,
+              on_generation_start: Any | None = None) -> dict[str, Any]:
         """Decode Thinker controllato dal kernel con riuso opportunistico della KV."""
         cached_ids = list(getattr(state, "thinker_cache_ids", [])) if state is not None else []
         use_cached = bool(cached_ids and len(prompt_token_ids) > len(cached_ids)
                           and prompt_token_ids[:len(cached_ids)] == cached_ids
                           and getattr(state, "thinker_kv", None) is not None
                           and getattr(state, "thinker_hidden", None) is not None)
+        is_compiled = getattr(self, "_compiled_thinker", None) is not None
         with self._thinker_lock:
-            if use_cached:
+            if is_compiled:
+                from transformers import StaticCache
+                cache = StaticCache(config=self.thinker.config, max_batch_size=1, max_cache_len=256, device=self.device, dtype=self.dtype)
+                ids = torch.tensor([prompt_token_ids], device=self.device)
+                out = self.thinker(input_ids=ids, past_key_values=cache, use_cache=True, output_hidden_states=True, return_dict=True)
+                hidden_parts = [out.hidden_states[-1]]
+                past = cache
+            elif use_cached:
                 suffix = prompt_token_ids[len(cached_ids):]
                 ids = torch.tensor([suffix], device=self.device)
                 mask = torch.ones((1, len(cached_ids) + len(suffix)), device=self.device, dtype=torch.long)
                 out = self.thinker(input_ids=ids, attention_mask=mask, past_key_values=state.thinker_kv,
                                    use_cache=True, output_hidden_states=True, return_dict=True)
                 hidden_parts = [state.thinker_hidden, out.hidden_states[-1]]
+                past = out.past_key_values
             else:
                 ids = torch.tensor([prompt_token_ids], device=self.device)
                 mask = torch.ones_like(ids)
                 out = self.thinker(input_ids=ids, attention_mask=mask, use_cache=True,
                                    output_hidden_states=True, return_dict=True)
                 hidden_parts = [out.hidden_states[-1]]
-        past = out.past_key_values
+                past = out.past_key_values
+            torch.cuda.current_stream().synchronize()
         logits = out.logits[:, -1, :]
         generated: list[int] = []
         pending_chunk: list[int] = []
         eos = {x for x in (self.tokenizer.eos_token_id, getattr(self.tokenizer, "eot_id", None)) if x is not None}
-        for step in range(max_new_tokens):
-            if stop_check is not None and stop_check():
-                break
+
+        def _sample_token(curr_logits):
             if temperature <= 1e-5:
-                token = logits.argmax(dim=-1, keepdim=True)
+                tok = curr_logits.argmax(dim=-1, keepdim=True)
             else:
-                probs = torch.softmax(logits / temperature, dim=-1)
+                probs = torch.softmax(curr_logits / temperature, dim=-1)
                 if 0.0 < top_p < 1.0:
                     vals, idx = torch.sort(probs, descending=True)
                     keep = torch.cumsum(vals, dim=-1) <= top_p
                     keep[..., 0] = True
                     probs = torch.zeros_like(probs).scatter(-1, idx, vals * keep)
                     probs = probs / probs.sum(dim=-1, keepdim=True)
-                token = torch.multinomial(probs, 1)
-            value = int(token.item())
-            if value in eos and (step + 1) >= min_new_tokens:
+                tok = torch.multinomial(probs, 1)
+            val = int(tok.item())
+            return tok, val
+
+        next_tok, next_val = _sample_token(logits)
+        if on_generation_start is not None:
+            on_generation_start()
+
+        for step in range(max_new_tokens):
+            if stop_check is not None and stop_check():
                 break
+            if next_val in eos and (step + 1) >= min_new_tokens:
+                break
+            token, value = next_tok, next_val
             generated.append(value)
             pending_chunk.append(value)
-            mask = torch.cat([mask, torch.ones((1, 1), device=self.device, dtype=mask.dtype)], dim=1)
+            if not is_compiled:
+                mask = torch.cat([mask, torch.ones((1, 1), device=self.device, dtype=mask.dtype)], dim=1)
+
+            # Priority yield: if listener is waiting for LM, yield immediately
+            if (hasattr(self, "listener") and hasattr(self.listener, "backend")
+                    and hasattr(self.listener.backend, "_waiting_for_lm")):
+                while self.listener.backend._waiting_for_lm.is_set():
+                    time.sleep(0.0005)
+
+            # Cadence pacing: generate 1 token every 3 listener frames (240 ms = 4.16 tok/s conversational speech)
+            if (hasattr(self, "listener") and hasattr(self.listener, "backend")
+                    and hasattr(self.listener.backend, "_frame_counter")
+                    and getattr(self.listener.backend, "_active_streaming", False)):
+                target_frame = self.listener.backend._frame_counter + 3
+                while self.listener.backend._frame_counter < target_frame:
+                    time.sleep(0.001)
+            elif hasattr(self, "listener") and hasattr(self.listener, "backend"):
+                time.sleep(0.001)
+
+            thinker_call = self._compiled_thinker if is_compiled else self.thinker
             with self._thinker_lock:
-                out = self.thinker(input_ids=token, attention_mask=mask, past_key_values=past,
-                                   use_cache=True, output_hidden_states=True, return_dict=True)
+                if is_compiled:
+                    tok_tensor = torch.tensor([[value]], device=self.device, dtype=torch.long)
+                    out = thinker_call(input_ids=tok_tensor, past_key_values=past,
+                                       use_cache=True, output_hidden_states=True, return_dict=True)
+                else:
+                    out = thinker_call(input_ids=token, attention_mask=mask, past_key_values=past,
+                                       use_cache=True, output_hidden_states=True, return_dict=True)
             past = out.past_key_values
             hidden_parts.append(out.hidden_states[-1])
             logits = out.logits[:, -1, :]
+
+            # Pre-sample next token immediately while listener is executing on GPU
+            next_tok, next_val = _sample_token(logits)
+
             if on_text_chunk is not None and (generation_id is None or state is None or state.is_generation_current(generation_id=generation_id)):
                 piece = self.tokenizer.decode(pending_chunk, skip_special_tokens=True).strip()
                 if piece and (len(pending_chunk) >= 8 or piece.endswith((".", "!", "?", ":", ";"))):

@@ -3,7 +3,7 @@
   "proof": "PROOF_2_CONCURRENT_THINK_LISTENER",
   "git_sha": "unknown",
   "git_dirty": false,
-  "timestamp_utc": "2026-09-02T17:59:48Z",
+  "timestamp_utc": "2026-09-03T18:56:28Z",
   "platform": "Linux-7.0.0-30-generic-x86_64-with-glibc2.35",
   "gpu_name": "NVIDIA GeForce RTX 3090",
   "torch_version": "2.12.1+cu130",
@@ -11,26 +11,26 @@
   "generation": {
     "prompt_length": 71,
     "tokens_generated": 128,
-    "duration_s": 23.24,
-    "tokens_per_second": 5.51,
+    "duration_s": 73.47,
+    "tokens_per_second": 1.74,
     "generated_text_preview": "## Architettura di un Sistema Conversazionale Full-Duplex in Tempo Reale Basato su Modelli Multimodali\n\nUn sistema conversazionale **full-duplex** in tempo reale \u00e8 un'applicazione complessa che richie"
   },
   "concurrent_listener": {
-    "frames_during_thinking": 126,
-    "total_frames": 130,
+    "frames_during_thinking": 606,
+    "total_frames": 612,
     "dropped_frames": 0,
     "errors": [],
     "lm_latency_ms": {
-      "p50": 72.87,
-      "p95": 75.42,
-      "p99": 75.53,
-      "max": 79.5
+      "p50": 65.77,
+      "p95": 66.52,
+      "p99": 66.87,
+      "max": 76.55
     },
     "total_step_latency_ms": {
-      "p50": 175.79,
-      "p95": 179.3,
-      "p99": 182.93,
-      "max": 185.83
+      "p50": 74.36,
+      "p95": 79.98,
+      "p99": 80.88,
+      "max": 85.36
     }
   },
   "thresholds": {

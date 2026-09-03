@@ -303,8 +303,9 @@ class IncrementalV9Projector:
             raise ValueError("state conv_history non compatibile con IncrementalV9")
         raw = self._step_tensor(h_raw_t, name="h_raw_t", batch_size=state.batch_size)
         anchor = self._step_tensor(h_tx_anchor, name="h_tx_anchor", batch_size=state.batch_size)
-        if state.text_anchor is not None and not torch.equal(state.text_anchor, anchor):
-            raise ValueError("h_tx_anchor deve restare fisso lungo la sequenza")
+        if state.text_anchor is not None and state.text_anchor is not anchor and state.text_anchor.data_ptr() != anchor.data_ptr():
+            if not torch.equal(state.text_anchor, anchor):
+                raise ValueError("h_tx_anchor deve restare fisso lungo la sequenza")
         position = int(state.rope_position)
 
         # La finestra [t-2, t-1, t] è la stessa del F.pad(left=2) batch.
@@ -313,37 +314,28 @@ class IncrementalV9Projector:
         conv_t = self.causal_conv.conv(window.transpose(1, 2).to(conv_weight.dtype))
         x = self.projector.audio_in(conv_t[:, :, 0]) + self.projector.text_in(anchor)
 
-        written: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
-        try:
-            for index, layer in enumerate(self.projector.layers):
-                normalized = layer.norm1(x)
-                attention = layer.attn
-                q = attention.q_proj(normalized).view(state.batch_size, self.num_heads, self.head_dim).unsqueeze(2)
-                k = attention.k_proj(normalized).view(state.batch_size, self.num_heads, self.head_dim).unsqueeze(2)
-                v = attention.v_proj(normalized).view(state.batch_size, self.num_heads, self.head_dim).unsqueeze(2)
-                cos, sin = attention.rotary.at(x, position)
-                q, k = apply_rotary_pos_emb(q, k, cos, sin)
+        for index, layer in enumerate(self.projector.layers):
+            normalized = layer.norm1(x)
+            attention = layer.attn
+            q = attention.q_proj(normalized).view(state.batch_size, self.num_heads, self.head_dim).unsqueeze(2)
+            k = attention.k_proj(normalized).view(state.batch_size, self.num_heads, self.head_dim).unsqueeze(2)
+            v = attention.v_proj(normalized).view(state.batch_size, self.num_heads, self.head_dim).unsqueeze(2)
+            cos, sin = attention.rotary.at(x, position)
+            q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
-                key_slot = state.key_cache[index][:, :, position:position + 1, :]
-                value_slot = state.value_cache[index][:, :, position:position + 1, :]
-                written.append((key_slot, value_slot, torch.cat((key_slot, value_slot), dim=-1).clone()))
-                key_slot.copy_(k)
-                value_slot.copy_(v)
-                keys = state.key_cache[index][:, :, :position + 1, :]
-                values = state.value_cache[index][:, :, :position + 1, :]
-                attended = F.scaled_dot_product_attention(q, keys, values, is_causal=False)
-                attended = attended.transpose(1, 2).contiguous().view(state.batch_size, self.hidden_dim)
-                x = x + attention.out_proj(attended)
-                x = x + layer.ffn(layer.norm2(x))
-            output = self.projector.final_norm(x)
-            if not torch.isfinite(output).all():
-                raise RuntimeError("IncrementalV9 ha prodotto output non finito")
-        except BaseException:
-            for key_slot, value_slot, old in written:
-                split = self.head_dim
-                key_slot.copy_(old[..., :split])
-                value_slot.copy_(old[..., split:])
-            raise
+            key_slot = state.key_cache[index][:, :, position:position + 1, :]
+            value_slot = state.value_cache[index][:, :, position:position + 1, :]
+            key_slot.copy_(k)
+            value_slot.copy_(v)
+            keys = state.key_cache[index][:, :, :position + 1, :]
+            values = state.value_cache[index][:, :, :position + 1, :]
+            attended = F.scaled_dot_product_attention(q, keys, values, is_causal=False)
+            attended = attended.transpose(1, 2).contiguous().view(state.batch_size, self.hidden_dim)
+            x = x + attention.out_proj(attended)
+            x = x + layer.ffn(layer.norm2(x))
+        output = self.projector.final_norm(x)
+        if not bool(torch.isfinite(output.sum()).item()):
+            raise RuntimeError("IncrementalV9 ha prodotto output non finito")
 
         state.conv_history = window[:, 1:, :].detach()
         if state.text_anchor is None:

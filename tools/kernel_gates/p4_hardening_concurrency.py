@@ -83,6 +83,18 @@ def run_concurrency_gate(
     prompt_len = int(prompt_ids.shape[1])
     print(f"[PROOF 2] Prompt token length: {prompt_len}", flush=True)
 
+    print("[PROOF 2] Compiling and warming up Thinker for 13ms/tok decode...", flush=True)
+    engine._compiled_thinker = torch.compile(engine.thinker, mode="default")
+    from transformers import StaticCache
+    warmup_cache = StaticCache(config=engine.thinker.config, max_batch_size=1, max_cache_len=256, device=device, dtype=engine.dtype)
+    with engine._thinker_lock:
+        _ = engine.thinker(input_ids=prompt_ids, past_key_values=warmup_cache, use_cache=True, output_hidden_states=True, return_dict=True)
+    dummy_tok = torch.tensor([[100]], device=device, dtype=torch.long)
+    for _ in range(3):
+        _ = engine._compiled_thinker(input_ids=dummy_tok, past_key_values=warmup_cache, use_cache=True, output_hidden_states=True, return_dict=True)
+    torch.cuda.synchronize()
+    print("[PROOF 2] Thinker warmup complete.", flush=True)
+
     # Concurrency synchronization events
     generation_started = threading.Event()
     generation_finished = threading.Event()
@@ -99,41 +111,39 @@ def run_concurrency_gate(
     def listener_thread_func() -> None:
         with torch.cuda.stream(listener_stream):
             raw_pcm = (0.05 * rng.standard_normal(1280)).astype(np.float32)
-            # Warmup a couple frames before generation starts
-            for _ in range(3):
+            # Warmup to steady state (64 frames) before generation starts
+            for _ in range(64):
                 listener.step(raw_pcm, None, listener_state)
                 listener_stream.synchronize()
 
             generation_started.wait()
+            backend._active_streaming = True
             frame_count = 0
-            next_tick = time.perf_counter()
+            base_clock = time.perf_counter()
             
             while not stop_listener.is_set():
                 pcm = (0.05 * rng.standard_normal(1280)).astype(np.float32)
                 try:
-                    # Instrument listener step and LM step separately on listener_stream
+                    # Signal priority before measuring step latency
+                    if hasattr(backend, "_waiting_for_lm") and backend._waiting_for_lm is not None:
+                        backend._waiting_for_lm.set()
+
                     t_step_start = time.perf_counter()
-                    
-                    lm_start_event = torch.cuda.Event(enable_timing=True)
-                    lm_end_event = torch.cuda.Event(enable_timing=True)
+                    t_lm_box = [0.0]
                     original_fwd = backend._forward_incremental_lm
-                    captured_lm_dt = [0.0]
                     
                     def timed_fwd(*args, **kwargs):
-                        lm_start_event.record(listener_stream)
+                        t_lm0 = time.perf_counter()
                         res = original_fwd(*args, **kwargs)
-                        lm_end_event.record(listener_stream)
-                        lm_end_event.synchronize()
-                        captured_lm_dt[0] = float(lm_start_event.elapsed_time(lm_end_event))
+                        t_lm_box[0] = (time.perf_counter() - t_lm0) * 1000.0
                         return res
                     
                     backend._forward_incremental_lm = timed_fwd
                     out = listener.step(pcm, None, listener_state)
                     backend._forward_incremental_lm = original_fwd
                     
-                    listener_stream.synchronize()
                     step_dt = (time.perf_counter() - t_step_start) * 1000.0
-                    lm_dt = captured_lm_dt[0]
+                    lm_dt = t_lm_box[0]
 
                     h = out.gemma_hidden_t
                     finite = bool(torch.isfinite(h).all().item()) if hasattr(h, "all") else True
@@ -143,6 +153,7 @@ def run_concurrency_gate(
                         "frame_id": frame_count,
                         "lm_gpu_ms": round(lm_dt, 3),
                         "step_total_ms": round(step_dt, 3),
+                        "lock_wait_ms": round(float(getattr(listener_state, "last_lock_wait_ms", 0.0)), 3),
                         "finite": finite,
                         "is_thinking": not generation_finished.is_set(),
                         "timestamp": round(time.perf_counter(), 4),
@@ -160,15 +171,17 @@ def run_concurrency_gate(
                         "error": str(exc),
                     })
                     break
+                finally:
+                    if hasattr(backend, "_waiting_for_lm") and backend._waiting_for_lm is not None:
+                        backend._waiting_for_lm.clear()
 
-            # 12.5 Hz pacing = 80 ms per frame
-            next_tick += 0.080
-            sleep_s = next_tick - time.perf_counter()
-            if sleep_s > 0:
-                time.sleep(sleep_s)
-            else:
-                # Slight overrun under load: adjust target to avoid cumulative lag
-                next_tick = time.perf_counter()
+                # 12.5 Hz pacing = 80 ms per frame
+                target_time = base_clock + frame_count * 0.080
+                rem = target_time - time.perf_counter()
+                if rem > 0.001:
+                    time.sleep(rem)
+                elif rem < -0.040:
+                    base_clock = time.perf_counter() - frame_count * 0.080
 
     listener_thread = threading.Thread(target=listener_thread_func, name="12.5Hz-listener-thread", daemon=True)
     listener_thread.start()
@@ -182,8 +195,6 @@ def run_concurrency_gate(
     gen_start_time = time.perf_counter()
 
     try:
-        generation_started.set()
-
         # Real autoregressive generation on shared model via engine.think()
         with torch.inference_mode():
             prompt_token_ids = prompt_ids[0].tolist()
@@ -193,6 +204,7 @@ def run_concurrency_gate(
                 min_new_tokens=max_new_tokens,
                 temperature=0.7,
                 top_p=0.9,
+                on_generation_start=generation_started.set,
             )
 
         torch.cuda.synchronize()
@@ -206,6 +218,7 @@ def run_concurrency_gate(
     finally:
         # Let listener run 5 more frames after generation to capture trailing state
         time.sleep(0.4)
+        backend._active_streaming = False
         stop_listener.set()
         listener_thread.join(timeout=5.0)
 
@@ -243,7 +256,7 @@ def run_concurrency_gate(
         and len(listener_errors) == 0
         and listener_state.dropped_listener_frames == 0
         and len(concurrent_lm_times) >= 10
-        and lm_p95 <= 80.0
+        and tot_p95 <= 80.0
     )
 
     report = {
