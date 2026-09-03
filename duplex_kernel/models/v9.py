@@ -368,20 +368,47 @@ def load_v9_conditioning(
     device: str = "cuda",
     dtype: torch.dtype = torch.bfloat16,
 ) -> tuple[DeepCausalTransformerProjectorV9, CausalConv1D]:
-    """Costruisce projector V9 + causal conv e carica i pesi addestrati."""
-    v9_path = v9_ckpt or os.environ.get("GEMMA4_OMNI_V9_CKPT") or _resolve_ckpt_path(DEFAULT_V9_CKPT, ())
-    heads_path = heads_ckpt or os.environ.get("GEMMA4_OMNI_HEADS_CKPT") or DEFAULT_HEADS_CKPT
+    """Costruisce projector V9 + causal conv e carica i pesi addestrati in modalita' fail-closed."""
+    from duplex_kernel.config import _resolve_production_v9, EXPECTED_CAUSAL_V9_SHA256
+
+    if v9_ckpt:
+        v9_path = v9_ckpt
+        if not os.path.isfile(v9_path):
+            raise FileNotFoundError(f"Checkpoint V9 specificato non trovato: {v9_path}")
+        allow_legacy = os.environ.get("GEMMA4_OMNI_ALLOW_LEGACY_V9", "0").strip().lower() in ("1", "true", "yes")
+        skip_hash = os.environ.get("GEMMA4_OMNI_SKIP_V9_HASH_CHECK", "0").lower() in ("1", "true")
+        if not allow_legacy and not skip_hash:
+            import hashlib
+            h = hashlib.sha256()
+            with open(v9_path, "rb") as f:
+                while chunk := f.read(1024 * 1024):
+                    h.update(chunk)
+            actual_sha = h.hexdigest()
+            if actual_sha != EXPECTED_CAUSAL_V9_SHA256:
+                raise RuntimeError(
+                    f"Checkpoint V9 hash mismatch per {v9_path}!\nAtteso:   {EXPECTED_CAUSAL_V9_SHA256}\nEffettivo: {actual_sha}"
+                )
+    else:
+        v9_path = _resolve_production_v9()
 
     proj = DeepCausalTransformerProjectorV9()
     sd = torch.load(v9_path, map_location="cpu", weights_only=False)
     proj.load_state_dict(sd.get("proj", sd), strict=False)
 
     causal_conv = CausalConv1D(hidden_size=1536, kernel_size=3)
-    heads = torch.load(heads_path, map_location="cpu", weights_only=True)
-    cc = heads.get("causal_conv")
-    if cc is None:
-        raise RuntimeError(f"Chiave 'causal_conv' assente in {heads_path}")
-    causal_conv.conv.load_state_dict(cc, strict=False)
+    if "causal_conv" in sd:
+        # Carica la causal_conv certificata inclusa direttamente nel checkpoint causale V9
+        causal_conv.conv.load_state_dict(sd["causal_conv"])
+    else:
+        # Diagnostic legacy fallback da custom_duplex_heads.pt
+        heads_path = heads_ckpt or os.environ.get("GEMMA4_OMNI_HEADS_CKPT") or DEFAULT_HEADS_CKPT
+        if not os.path.isfile(heads_path):
+            raise FileNotFoundError(f"Heads checkpoint non trovato: {heads_path}")
+        heads = torch.load(heads_path, map_location="cpu", weights_only=True)
+        cc = heads.get("causal_conv")
+        if cc is None:
+            raise RuntimeError(f"Chiave 'causal_conv' assente in {heads_path}")
+        causal_conv.conv.load_state_dict(cc, strict=False)
 
     proj = proj.to(device=device, dtype=dtype).eval()
     causal_conv = causal_conv.to(device=device, dtype=dtype).eval()

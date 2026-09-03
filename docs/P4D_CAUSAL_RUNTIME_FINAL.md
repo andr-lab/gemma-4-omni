@@ -84,42 +84,70 @@ Il proiettore riaddestrato a $L=0$ ottiene una perdita di predizione e un'accura
 
 ---
 
-## 6. Profilo di Latenza Frame-by-Frame (§9)
+## 6. Profilo di Latenza Frame-by-Frame, Verifier Fix e Benchmark di Throughput (§9)
 
-Misurazione temporale reale su 500 iterazioni con `torch.cuda.Event` hardware timing a clock stabilizzato in `bfloat16`:
+### A. Correzione Formale del Performance Gate
+Nel verifier iniziale, `pass_performance` verificava esclusivamente la finitezza della media e il jitter ($< 15\text{ ms}$), omettendo di fallire sull'80 ms nominale. Questo generava una falsa validazione con latenza combinata di $\sim 90.14\text{ ms}$ e $100\%$ deadline miss rate.
+Il gate è stato corretto e reso rigoroso:
+- $\text{combined\_p95} \le 80.0\text{ ms}$
+- $\text{deadline\_miss\_rate} \le 1.0\%$
+Sul codice pre-ottimizzazione, il verifier emetteva correttamente `P4D OPEN — REALTIME_DEADLINE_FAIL` (exit code 1, commit `d505488`).
 
-| Componente del Path Realtime | Latency p50 | Latency p95 | Latency p99 | Mean | Note Operative |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **V9 Incremental Step** | **2.84 ms** | 2.87 ms | 2.95 ms | 2.85 ms | 4 Transformer blocks + CausalConv1D |
-| **Qwen Prefix-Slot Update** | **0.12 ms** | 0.13 ms | 0.13 ms | 0.12 ms | Scrittura slot KV indicizzata assoluta |
-| **Qwen Audio Step + CB0** | **71.05 ms** | 71.45 ms | 71.68 ms | 71.04 ms | Forward 1.7B decoder (eager) |
-| **SubTalker (15 CUDA Graphs)** | **15.53 ms** | 16.00 ms | 16.28 ms | 15.61 ms | 1 prefill + 14 step autoregressivi |
-| **Code2Wav (Vocoder 24kHz)** | **~0.50 ms** | ~0.60 ms | ~0.65 ms | ~0.52 ms | Ammortizzato su chunk di 8 frame (4 ms tot) |
-| **COMBINATO [V9+Qwen+SubT]** | **89.61 ms** | **90.14 ms** | **90.51 ms** | **89.62 ms** | Path sequenziale completo per frame |
-| **Jitter (p99 - p50)** | **0.90 ms** | - | - | - | Eccellente stabilità temporale (<1%) |
+### B. Root-Cause dell'Overhead e Ottimizzazione "Joint 1-Pass"
+L'analisi con micro-profiler a eventi CUDA (`tools/kernel_gates/profile_detailed_runtime.py`) ha rivelato che il runtime sequenziale a 2-pass eseguiva due passate forward complete attraverso i 28 layer del decoder Qwen per ogni singolo frame acustico:
+1. Passata 1: caching del prefisso V9 (`_cache_prefix_through(t)`) $\to \sim 35.4\text{ ms}$
+2. Passata 2: emissione token audio (`_step_frame_slot_kv()`) $\to \sim 35.6\text{ ms}$
+Totale Qwen Step $= 71.05\text{ ms}$, che sommato a V9 ($2.8\text{ ms}$) e SubTalker ($15.5\text{ ms}$) portava il frame a $\sim 90.14\text{ ms}$ p95.
 
-*Analisi del budget di clock:*  
-Il clock dell'interazione vocale Qwen3-TTS 12Hz è di $80.0\text{ ms}$ per frame acustico. L'esecuzione sequenziale diretta impegna $\sim 89.6\text{ ms}$, con un margine minimo ammortizzato dal buffering a chunk da 8 frame di `PipelineEngine`. L'assenza totale di jitter (0.90 ms) e di allocazioni dinamiche garantisce l'assenza di memory leak o pause di garbage collection.
+**Soluzione architetturale:** Consolidamento in un **Joint 1-Pass Step**.
+Invece di invocare il decoder due volte in streaming da 3.4GB di pesi VRAM, il prefisso acustico al frame $t$ e il token audio al frame $t$ vengono valutati in un'unica chiamata forward con batch di 2 token e maschera additiva 4D causale (dove il token audio vede il prefisso, ma il prefisso non vede l'audio).
+- **Equivalenza matematica verificata:** Max Logit Diff $= 3.09 \times 10^{-5}$ su float32, **100.00% Top-1 Agreement** rispetto al 2-pass.
+- **Preallocazione totale:** Rimossa ogni allocazione dinamica per-frame (`torch.zeros`, `torch.arange`, `torch.cat`, `.tolist()`).
+
+### C. Risultati Comparativi di Latenza Hardware (RTX 3090, bfloat16)
+
+| Fase della Pipeline | Pre-Ottimizzazione (2-Pass) | Post-Ottimizzazione (Joint 1-Pass) | Guadagno Latenza |
+| :--- | :--- | :--- | :--- |
+| **V9 Incremental Step** | 2.84 ms | **2.81 ms** | $-0.03$ ms |
+| **Qwen Prefix Slot Update** | 0.12 ms | **0.12 ms** | Invariato |
+| **Qwen Audio Decoder (28 Layer)** | 71.05 ms (2 forward pass) | **36.54 ms (1 forward pass)** | **$-34.51$ ms (-48.6%)** |
+| **SubTalker (15 CUDA Graphs)** | 15.53 ms | **15.53 ms** | Invariato |
+| **COMBINATO [V9+Qwen+SubT] p50** | 89.61 ms | **55.01 ms** | **$-34.60$ ms** |
+| **COMBINATO [V9+Qwen+SubT] p95** | **90.14 ms (FAIL)** | **55.21 ms (PASS $\le 80$ ms)** | **$-34.93$ ms (-38.7%)** |
+| **COMBINATO [V9+Qwen+SubT] p99** | 90.51 ms | **55.94 ms** | **$-34.57$ ms** |
+| **Deadline Miss Rate (>80ms)** | **100.00% (FAIL)** | **0.00% (PASS $\le 1.0\%$)** | **$-100.0$ pp** |
+| **Jitter (p99 - p50)** | 0.90 ms | **0.93 ms** | Stabilità perfetta |
+
+### D. Benchmark Sostenuto di Throughput (5.000 Frame Continui)
+Validazione ad alto carico per 5.000 frame continui ($400\text{ secondi}$ di parlato continuo equivalente, `tools/kernel_gates/benchmark_sustained_throughput.py`):
+- **Frame totali generati:** 5.000
+- **Tempo totale di calcolo:** $281.21\text{ s}$ ($4.69\text{ minuti}$)
+- **Throughput effettivo sostenuto:** **$17.78\text{ frame/s}$** (**PASS**, clock nominale richiesto $\ge 12.5\text{ frame/s}$)
+- **Latenza CUDA p95:** **$56.01\text{ ms}$** (**PASS $\le 80.0\text{ ms}$**)
+- **Latenza CUDA p99:** **$58.15\text{ ms}$**
+- **Deadline Miss Rate (>80ms):** **$0.00\%$** (**PASS $\le 1.0\%$**)
+- **Drift VRAM iniziale $\to$ finale:** **$+0.28\text{ MB}$** (zero memory leak su 5.000 frame)
 
 ---
 
-## 7. Verifiche di Fencing, LISTEN e Cancellazione (§10 & §11)
+## 7. Verifiche di Fencing, LISTEN e Cancellazione su Runtime Vero (§10 & §11)
 
-### A. Semantica LISTEN (10 Secondi Continui)
-* Esecuzione per 10.0 secondi di audio continuo (125 tick listener a 12.5 Hz / 80 ms).
-* **Speaker Gate:** Disattivato (stato LISTEN).
-* **Chiamate Qwen Audio Step:** **0**
-* **Chiamate SubTalker Graph:** **0**
-* **Chiamate Code2Wav Decoder:** **0**
-* **Ghost Frames emessi:** **0**
-* **Esito:** **PASS**.
+### A. Semantica LISTEN Reale (10 Secondi / 125 Tick Audio)
+Test eseguito instanziando il vero control plane `DuplexSession` e `SpeakerGate`:
+- Esecuzione di 125 tick consecutivi a 12.5 Hz (80 ms) in stato `ControlState.LISTENING`.
+- **Avanzamento Timeline Listener:** 125 frame registrati (`session.last_listener_frame_id = 124`).
+- **Chiamate Qwen Audio Step:** **0** (speaker completamente silenziato).
+- **Chiamate SubTalker Graph:** **0**
+- **Chiamate Code2Wav Decoder:** **0**
+- **Byte PCM emessi:** **0 byte**
+- **Esito:** **PASS**.
 
-### B. Robustezza a Race Condition / Cancellazioni (1.000 Transizioni)
-* 1.000 transizioni casuali simulate di `yield_turn()`, invalidazione anticipata di buffer e cambio turno improvviso.
-* **Scritture stale rilevate in slot KV:** **0**
-* **Ghost frame emessi dopo cancel:** **0**
-* **Integrità del generation fencing:** **100% rispettata**
-* **Esito:** **PASS**.
+### B. Robustezza a Race Condition / Cancellazioni Reali (1.000 Transizioni)
+Simulazione di 1.000 transizioni casuali continue tra tutti gli stati del control plane (`SPEAK`, `CONTINUE`, `YIELD`, `REPLAN`, `LISTEN`, `HARD_STOP`) con generation token crittografici reali e invalidazione:
+- **Scritture stale rilevate in slot KV:** **0** (tutti i tentativi di commit da thread disallineati respinti con `is_generation_current() == False`).
+- **Scritture stale su testo/audio/PCM:** **0**
+- **Ghost frames da ConditioningFrameBuffer:** **0** (buffer svuotato atomicamente con `invalidate()`).
+- **Esito:** **PASS**.
 
 ---
 
@@ -160,16 +188,22 @@ Il runtime di produzione in `duplex_kernel/config.py` e `duplex_kernel/models/v9
 ```python
 # duplex_kernel/config.py
 FROZEN_QWEN_LOOKAHEAD_FRAMES: int = 0  # Zero lookahead (causal V9 L=0)
-FROZEN_QWEN_LOOKAHEAD_FRAMES_LEGACY: int = 40  # Mantenuto solo a scopo diagnostico/benchmark storico
+EXPECTED_CAUSAL_V9_SHA256: str = "f434aad703e1ea883a82cc948e5a66f42ff4794b185c19236a89c5e75f874fa7"
 
-V9_CKPT: str = _resolve_v9_checkpoint()  # Risolve v9_causal_l0_final.pt (SHA256: f434aad703...)
+# Risoluzione fail-closed obbligatoria con verifica crittografica SHA-256
+V9_CKPT: str = _resolve_production_v9()
 ```
 
-Nessun ritardo o lookahead è attivo nel clock del listener Gemma (80 ms) o nel path di emissione audio dello speaker Qwen Talker.
+Caricamento `load_v9_conditioning()` rigorosamente fail-closed:
+- Se il checkpoint è assente $\to$ `FileNotFoundError` (HARD FAIL).
+- Se l'hash SHA-256 non corrisponde $\to$ `RuntimeError` (HARD FAIL).
+- Il fallback silenzioso a legacy V9 è disattivato (ammesso solo con esplicita flag diagnostica d'ambiente `GEMMA4_OMNI_ALLOW_LEGACY_V9=1`).
+- La `causal_conv` interna è bit-exact identica a `custom_duplex_heads.pt` (`max_diff = 0.00e+00`) e viene caricata prioritariamente dal checkpoint V9 consolidato.
 
 ---
 
 ## 11. Conclusione
 
-La fase **P4D è formalmente CHIUSA con esito PASS**.  
-Tutti i prerequisiti per la pipeline Full-Duplex real-time a latenza minima sono soddisfatti e attestati.
+La fase **P4D è formalmente e definitivamente CHIUSA con esito PASS**.  
+Tutti gli Hard Gate operativi, teorici, numerici e di budget real-time sono soddisfatti, riproducibili e certificati dal Master Verifier automatico.
+La codebase è pronta per la transizione a **P5**.

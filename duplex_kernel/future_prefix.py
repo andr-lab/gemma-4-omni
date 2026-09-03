@@ -596,7 +596,10 @@ class FuturePrefixQwen:
             raise RuntimeError("slot KV non inizializzata")
         total = self._slot_cache.max_cache_len
         mask_val = torch.finfo(self.dtype).min
-        keys = torch.arange(total, device=self.device, dtype=torch.long)
+        keys = getattr(self, "_keys_arange", None)
+        if keys is None or keys.shape[0] != total:
+            keys = torch.arange(total, device=self.device, dtype=torch.long)
+            self._keys_arange = keys
 
         if positions.numel() == 1 and q_pos_int is not None:
             allowed = keys <= q_pos_int
@@ -606,6 +609,7 @@ class FuturePrefixQwen:
                 allowed &= (~prefix_slots) | (keys <= prefix_limit)
             else:
                 allowed &= keys <= q_pos_int
+
             mask = torch.full(
                 (self._icl.shape[0], 1, 1, total),
                 mask_val,
@@ -616,20 +620,22 @@ class FuturePrefixQwen:
             return mask
 
         q_positions = positions.to(device=self.device, dtype=torch.long).reshape(-1)
+        q_len = q_positions.numel()
         mask = torch.full(
-            (self._icl.shape[0], 1, q_positions.numel(), total),
+            (self._icl.shape[0], 1, q_len, total),
             mask_val,
             device=self.device,
             dtype=self.dtype,
         )
-        for row, query_position in enumerate(q_positions.tolist()):
-            allowed = keys <= int(query_position)
-            if int(query_position) >= self._audio_start:
+        for row in range(q_len):
+            q_pos = int(q_positions[row].item())
+            allowed = keys <= q_pos
+            if q_pos >= self._audio_start:
                 prefix_limit = self._prefix_start + int(visible_prefix_end)
                 prefix_slots = (keys >= self._prefix_start) & (keys < self._audio_start)
                 allowed &= (~prefix_slots) | (keys <= prefix_limit)
             else:
-                allowed &= keys <= int(query_position)
+                allowed &= keys <= q_pos
             mask[0, 0, row, allowed] = 0
         return mask
 
@@ -705,36 +711,85 @@ class FuturePrefixQwen:
         visible_end = self.buffer.visible_prefix_end(frame_id, self.lookahead_frames)
         if visible_end < 0:
             raise RuntimeError("nessun conditioning frame disponibile")
-        if self._cached_prefix_frames <= visible_end:
-            self._cache_prefix_through(visible_end)
-        if self._cached_prefix_frames <= visible_end:
-            raise RuntimeError(
-                f"conditioning KV insufficiente: cached={self._cached_prefix_frames}, required={visible_end + 1}"
-            )
-        if frame_id == 0:
-            embedding = self._bos
-        else:
-            embedding = _aggregate_committed_codes(
-                getattr(self.talker, "talker", self.talker),
-                self._committed_codes[-1:],
-                device=self.device,
-                dtype=self.dtype,
-            )
-        pos_int = self._audio_start + frame_id
-        position = torch.tensor([pos_int], device=self.device, dtype=torch.long)
-        mask = self._slot_mask(position, visible_prefix_end=visible_end, q_pos_int=pos_int)
+
         model = getattr(getattr(self.talker, "talker", self.talker), "model", self.talker)
-        with torch.inference_mode():
-            out = model(
-                inputs_embeds=embedding,
-                attention_mask=mask,
-                position_ids=self._position_ids(position, 1),
-                cache_position=position,
-                past_key_values=self._slot_cache,
-                use_cache=True,
-            )
-            hidden = out.last_hidden_state
-            logits = codec_head(hidden)
+
+        # In L=0 o quando un singolo prefix slot (visible_end) deve essere cachato
+        # contestualmente al frame audio corrente, utilizziamo la modalita' JOINT 1-PASS
+        # (un singolo forward pass attraverso i 28 layer di Qwen invece di due sequenziali):
+        if self._cached_prefix_frames == visible_end and visible_end < len(self.buffer._frames):
+            pos_pfx = self._prefix_start + visible_end
+            pos_aud = self._audio_start + frame_id
+
+            # Prefix embedding direttamente da buffer
+            h_pfx = self.buffer._frames[visible_end].to(device=self.device, dtype=self.dtype).view(1, 1, -1)
+
+            # Audio token embedding
+            if frame_id == 0:
+                aud_emb = self._bos
+            else:
+                aud_emb = _aggregate_committed_codes(
+                    getattr(self.talker, "talker", self.talker),
+                    self._committed_codes[-1:],
+                    device=self.device,
+                    dtype=self.dtype,
+                )
+
+            joint_embeds = torch.cat([h_pfx, aud_emb], dim=1)
+            positions = torch.tensor([pos_pfx, pos_aud], device=self.device, dtype=torch.long)
+
+            mask = self._slot_mask(positions, visible_prefix_end=visible_end)
+            # Query 0 (prefix) non deve vedere Query 1 (audio)
+            mask[0, 0, 0, pos_aud] = torch.finfo(self.dtype).min
+
+            pos_ids = self._position_ids(positions, 1)
+
+            with torch.inference_mode():
+                out = model(
+                    inputs_embeds=joint_embeds,
+                    attention_mask=mask,
+                    position_ids=pos_ids,
+                    cache_position=positions,
+                    past_key_values=self._slot_cache,
+                    use_cache=True,
+                )
+                hidden = out.last_hidden_state[:, 1:, :]  # audio token hidden state
+                logits = codec_head(hidden)
+
+            self._cached_prefix_frames = visible_end + 1
+
+        else:
+            # Fallback 2-pass per sequenze multi-slot backlog
+            if self._cached_prefix_frames <= visible_end:
+                self._cache_prefix_through(visible_end)
+            if self._cached_prefix_frames <= visible_end:
+                raise RuntimeError(
+                    f"conditioning KV insufficiente: cached={self._cached_prefix_frames}, required={visible_end + 1}"
+                )
+            if frame_id == 0:
+                embedding = self._bos
+            else:
+                embedding = _aggregate_committed_codes(
+                    getattr(self.talker, "talker", self.talker),
+                    self._committed_codes[-1:],
+                    device=self.device,
+                    dtype=self.dtype,
+                )
+            pos_int = self._audio_start + frame_id
+            position = torch.tensor([pos_int], device=self.device, dtype=torch.long)
+            mask = self._slot_mask(position, visible_prefix_end=visible_end, q_pos_int=pos_int)
+            with torch.inference_mode():
+                out = model(
+                    inputs_embeds=embedding,
+                    attention_mask=mask,
+                    position_ids=self._position_ids(position, 1),
+                    cache_position=position,
+                    past_key_values=self._slot_cache,
+                    use_cache=True,
+                )
+                hidden = out.last_hidden_state
+                logits = codec_head(hidden)
+
         if hidden.shape[1] != 1:
             raise RuntimeError("Qwen KV non ha restituito una sola posizione audio")
         return SpeakerStepOutput(

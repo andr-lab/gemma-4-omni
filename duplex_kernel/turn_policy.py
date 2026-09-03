@@ -178,7 +178,10 @@ class SpeakerGate:
     def apply(self, decision: PolicyDecision, session: Any) -> GateEvent:
         action = decision.action
         if not isinstance(action, ControlAction):
-            raise TypeError("SpeakerGate riceve solo ControlAction")
+            try:
+                action = ControlAction(str(action.value if hasattr(action, 'value') else action))
+            except Exception:
+                raise TypeError("SpeakerGate riceve solo ControlAction")
         previous = getattr(session, "control_state", ControlState.LISTENING)
         if not isinstance(previous, ControlState):
             previous = ControlState(str(previous))

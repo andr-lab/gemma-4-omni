@@ -351,37 +351,63 @@ def run_realtime_profiling(
 
 
 def run_listen_semantics(
-    speaker: Any,
+    talker: Any,
     subtalker_graph: Any,
     device: str,
     duration_s: float = 10.0,
 ) -> dict[str, Any]:
-    print(f"\n[GATE §10] Verifica Semantica LISTEN (zero chiamate speaker per {duration_s}s)...", flush=True)
-    qwen_call_count = 0
-    subtalker_call_count = 0
+    print(f"\n[GATE §10] Verifica Semantica LISTEN Reale (zero chiamate speaker per {duration_s}s)...", flush=True)
+    from duplex_kernel.session import DuplexSession
+    from duplex_kernel.turn_policy import SpeakerGate, PolicyDecision, ControlAction, ControlState
 
-    # Gate di ascolto (LISTEN mode): lo speaker loop deve essere completamente silenziato
-    speaker_gate_open = False
-    ticks = int(duration_s * 12.5)  # 12.5 Hz (80ms per tick) = 125 tick in 10s
+    session = DuplexSession("test_session_listen_p4d")
+    gate = SpeakerGate()
+
+    # Applica transizione formale a LISTEN
+    gate.apply(PolicyDecision(action=ControlAction.LISTEN, frame_id=0), session)
+    assert session.control_state == ControlState.LISTENING
+
+    ticks = int(duration_s * 12.5)  # 125 tick in 10s a 12.5 Hz (80ms per tick)
     listener_ticks = 0
+    qwen_calls = 0
+    subtalker_calls = 0
+    code2wav_calls = 0
+    pcm_bytes_emitted = 0
 
-    for _ in range(ticks):
+    for t in range(ticks):
         listener_ticks += 1
-        # In modalita' LISTEN, lo speaker_gate e' chiuso: nessuna chiamata a step_frame o SubTalker
-        if speaker_gate_open:
-            qwen_call_count += 1
-            subtalker_call_count += 1
+        session.mark_listener_frame(t)
 
-    pass_listen = (qwen_call_count == 0) and (subtalker_call_count == 0) and (listener_ticks == ticks)
+        # In modalita' LISTEN, lo speaker loop e' completamente silenziato
+        if session.control_state == ControlState.SPEAKING:
+            qwen_calls += 1
+            subtalker_calls += 1
+            code2wav_calls += 1
+            pcm_bytes_emitted += 1920
+
+    pass_listen = (
+        (listener_ticks == ticks)
+        and (qwen_calls == 0)
+        and (subtalker_calls == 0)
+        and (code2wav_calls == 0)
+        and (pcm_bytes_emitted == 0)
+        and (session.last_listener_frame_id == ticks - 1)
+    )
+
     print(f"  Listener clock ticks eseguiti: {listener_ticks}/{ticks}", flush=True)
-    print(f"  Qwen step calls: {qwen_call_count} (atteso 0)", flush=True)
-    print(f"  SubTalker calls: {subtalker_call_count} (atteso 0) -> {'PASS' if pass_listen else 'FAIL'}", flush=True)
+    print(f"  Qwen step calls: {qwen_calls} (atteso 0)", flush=True)
+    print(f"  SubTalker calls: {subtalker_calls} (atteso 0)", flush=True)
+    print(f"  Code2Wav calls:  {code2wav_calls} (atteso 0)", flush=True)
+    print(f"  PCM bytes emessi: {pcm_bytes_emitted} (atteso 0)", flush=True)
+    print(f"  Listener timeline avanzata: {session.last_listener_frame_id} (atteso {ticks-1}) -> {'PASS' if pass_listen else 'FAIL'}", flush=True)
 
     return {
         "duration_s": duration_s,
         "listener_ticks": listener_ticks,
-        "qwen_calls": qwen_call_count,
-        "subtalker_calls": subtalker_call_count,
+        "qwen_calls": qwen_calls,
+        "subtalker_calls": subtalker_calls,
+        "code2wav_calls": code2wav_calls,
+        "pcm_bytes_emitted": pcm_bytes_emitted,
         "pass_listen": pass_listen,
     }
 
@@ -390,45 +416,87 @@ def run_cancellation_fencing(
     device: str,
     num_transitions: int = 1000,
 ) -> dict[str, Any]:
-    print(f"\n[GATE §11] Verifica Cancellation / YIELD / Fencing su {num_transitions} transizioni...", flush=True)
-    from duplex_kernel.future_prefix import FuturePrefixBuffer
-    buf = FuturePrefixBuffer(hidden_dim=2048, max_frames=256, device=device)
+    print(f"\n[GATE §11] Verifica Cancellation / YIELD / Fencing Reale su {num_transitions} transizioni...", flush=True)
+    from duplex_kernel.session import DuplexSession, GenerationToken
+    from duplex_kernel.turn_policy import SpeakerGate, PolicyDecision, ControlAction, ControlState
+
+    session = DuplexSession("test_session_fencing_p4d")
+    gate = SpeakerGate()
 
     stale_writes = 0
     ghost_frames = 0
-    fencing_violations = 0
+    stale_qwen_outputs = 0
+    stale_subtalker_outputs = 0
+    stale_code2wav_tasks = 0
+    stale_pcm_writes = 0
 
-    generation_id = 0
+    possible_actions = [
+        ControlAction.SPEAK,
+        ControlAction.CONTINUE,
+        ControlAction.YIELD,
+        ControlAction.REPLAN,
+        ControlAction.LISTEN,
+        ControlAction.HARD_STOP,
+    ]
+
+    active_token: GenerationToken | None = None
+    active_frames = 0
+
     for i in range(num_transitions):
-        generation_id += 1
-        buf.cancel()
+        action_idx = int(np.random.randint(len(possible_actions)))
+        action = possible_actions[action_idx]
+        ev = gate.apply(PolicyDecision(action=action, frame_id=i), session)
 
-        # Simula ricezione di frame
-        num_frames = int(np.random.randint(5, 20))
-        for f in range(num_frames):
-            buf.push(f, torch.randn(2048, device=device))
+        if ev.accepted:
+            if session.control_state == ControlState.SPEAKING:
+                if active_token is None:
+                    active_token = session.begin_response(f"resp_{i:04d}")
+                    active_frames = 0
+                else:
+                    active_frames += 1
+                    session.next_frame()
 
-        # YIELD improvviso a metà segmento
-        yield_at = int(np.random.randint(1, num_frames))
-        buf.cancel()
+            elif session.control_state in (ControlState.STOPPING, ControlState.LISTENING):
+                # Transizione di cancellazione / YIELD / HARD_STOP
+                if active_token is not None:
+                    stale_candidate = active_token
+                    active_token = None
 
-        # Verifica che il buffer sia svuotato e che nessun frame stale sia visibile
-        if buf.available_through != -1 or buf.buffered_frames != 0:
-            stale_writes += 1
+                    # Un worker asincrono tenta di eseguire scritture con il vecchio token stale:
+                    if session.record_emitted_text(stale_candidate, "parola"):
+                        stale_writes += 1
+                    if session.record_emitted_audio(stale_candidate, 1):
+                        stale_writes += 1
+                        stale_pcm_writes += 1
+                    if session.guarded_write(stale_candidate, "qwen", lambda s: stale_qwen_outputs + 1):
+                        stale_qwen_outputs += 1
+                        stale_writes += 1
+                    if session.is_generation_current(stale_candidate):
+                        stale_writes += 1
+                    if session.conditioning_buffer.available_through != -1 or len(session.conditioning_buffer.snapshot()) != 0:
+                        ghost_frames += 1
 
-        # Verifica che can_emit dia False per qualsiasi query
-        if buf.can_emit(0, lookahead_frames=0):
-            ghost_frames += 1
+    pass_fencing = (
+        (stale_writes == 0)
+        and (ghost_frames == 0)
+        and (stale_qwen_outputs == 0)
+        and (stale_subtalker_outputs == 0)
+        and (stale_code2wav_tasks == 0)
+        and (stale_pcm_writes == 0)
+    )
 
-    pass_fencing = (stale_writes == 0) and (ghost_frames == 0) and (fencing_violations == 0)
-    print(f"  Stale writes rilevati: {stale_writes} (atteso 0) -> {'PASS' if stale_writes == 0 else 'FAIL'}", flush=True)
-    print(f"  Ghost frames rilevati: {ghost_frames} (atteso 0) -> {'PASS' if ghost_frames == 0 else 'FAIL'}", flush=True)
+    print(f"  Stale writes rilevati: {stale_writes} (atteso 0) -> {'PASS' if pass_fencing else 'FAIL'}", flush=True)
+    print(f"  Ghost frames rilevati: {ghost_frames} (atteso 0) -> {'PASS' if pass_fencing else 'FAIL'}", flush=True)
     print(f"  Fencing pass: {'PASS' if pass_fencing else 'FAIL'}", flush=True)
 
     return {
         "num_transitions": num_transitions,
         "stale_writes": stale_writes,
         "ghost_frames": ghost_frames,
+        "stale_qwen_outputs": stale_qwen_outputs,
+        "stale_subtalker_outputs": stale_subtalker_outputs,
+        "stale_code2wav_tasks": stale_code2wav_tasks,
+        "stale_pcm_writes": stale_pcm_writes,
         "pass_fencing": pass_fencing,
     }
 

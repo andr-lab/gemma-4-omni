@@ -16,13 +16,56 @@ WORKSPACE = os.environ.get("GEMMA4_OMNI_WORKSPACE", "/workspace")
 # ---------------------------------------------------------------------------
 # Checkpoint addestrati (pesi custom, non dai modelli base)
 # ---------------------------------------------------------------------------
-_causal_v9_candidates = [
-    os.path.join(WORKSPACE, "checkpoints", "v9_causal_l0_final.pt"),
-    os.path.join(WORKSPACE, "checkpoints", "v9_causal_l0_unknown.pt"),
-    os.path.join(WORKSPACE, "checkpoints", "v9_prefix_final.pt"),
-]
-_default_v9 = next((p for p in _causal_v9_candidates if os.path.exists(p)), _causal_v9_candidates[0])
-V9_CKPT = os.environ.get("GEMMA4_OMNI_V9_CKPT", _default_v9)
+EXPECTED_CAUSAL_V9_SHA256: str = "f434aad703e1ea883a82cc948e5a66f42ff4794b185c19236a89c5e75f874fa7"
+
+
+def _resolve_production_v9() -> str:
+    """Risolve il checkpoint causale certificato a L=0 in modalita' fail-closed.
+
+    In produzione:
+    - File missing -> RuntimeError (HARD FAIL)
+    - Hash mismatch -> RuntimeError (HARD FAIL)
+    - Legacy V9 (v9_prefix_final.pt) -> consentito SOLO con GEMMA4_OMNI_ALLOW_LEGACY_V9=1
+    """
+    env_v9 = os.environ.get("GEMMA4_OMNI_V9_CKPT")
+    allow_legacy = os.environ.get("GEMMA4_OMNI_ALLOW_LEGACY_V9", "0").strip().lower() in ("1", "true", "yes")
+
+    if env_v9:
+        candidate = env_v9
+    else:
+        cand_final = os.path.join(WORKSPACE, "checkpoints", "v9_causal_l0_final.pt")
+        cand_unk = os.path.join(WORKSPACE, "checkpoints", "v9_causal_l0_unknown.pt")
+        if os.path.exists(cand_final):
+            candidate = cand_final
+        elif not os.path.isdir(WORKSPACE) or not os.path.isdir(os.path.join(WORKSPACE, "checkpoints")):
+            # Client locale / packaging senza cartella checkpoints (pesi su 3090/Kaggle)
+            candidate = cand_final
+        else:
+            raise FileNotFoundError(
+                f"Checkpoint causale V9 non trovato in {cand_final} ne' in {cand_unk}."
+                " In produzione L=0 il fallback automatico a legacy e' vietato."
+                " (Impostare GEMMA4_OMNI_ALLOW_LEGACY_V9=1 solo per diagnostica storica)."
+            )
+
+    if os.path.isfile(candidate):
+        # Se il file esiste, verifica l'hash crittografico
+        skip_hash = os.environ.get("GEMMA4_OMNI_SKIP_V9_HASH_CHECK", "0").lower() in ("1", "true")
+        if not allow_legacy and not skip_hash:
+            import hashlib
+            h = hashlib.sha256()
+            with open(candidate, "rb") as f:
+                while chunk := f.read(1024 * 1024):
+                    h.update(chunk)
+            actual_sha = h.hexdigest()
+            if actual_sha != EXPECTED_CAUSAL_V9_SHA256:
+                raise RuntimeError(
+                    f"Checkpoint V9 hash mismatch per {candidate}!\nAtteso:   {EXPECTED_CAUSAL_V9_SHA256}\nEffettivo: {actual_sha}\nHard fail di sicurezza: impossibile caricare un modello non certificato."
+                )
+
+    return candidate
+
+
+V9_CKPT = _resolve_production_v9()
 HEADS_CKPT = os.environ.get("GEMMA4_OMNI_HEADS_CKPT", "")  # custom_duplex_heads.pt (causal_conv)
 TURNHEAD_CKPT = os.environ.get(
     "GEMMA4_OMNI_TURNHEAD_CKPT",
