@@ -22,12 +22,13 @@ Target Directory: validation/kernel_gates/P4_HARDENING
 [PROVA 1] Rollover >64 Frame & Oracle Parity (5 min): PASS
   • Frames: 3750 (Rollover: 3686)
   • Parity MAE: 0.00000000, Cosine Min: 0.99999994
-  • Latency Steady: p50=119.37ms, p95=120.49ms, Spikes>150ms: 0
+  • Latency Steady: p50=77.96ms, p95=78.94ms, Spikes>150ms: 0
 
 [PROVA 2] Concurrency 12.5Hz Listener + Long Think (>=128 tok): PASS
-  • Tokens Generated: 128 in 23.24s
-  • Concurrent Frames: 126, Dropped: 0
-  • Listener LM Latency: p50=72.87ms, p95=75.42ms (Gate <= 80ms)
+  • Tokens Generated: 128 in 73.47s
+  • Concurrent Frames: 606, Dropped: 0
+  • Listener Total Latency: p50=74.36ms, p95=79.98ms (Gate <= 80ms)
+  • Listener LM Latency: p50=65.77ms, p95=66.52ms (Gate <= 80ms)
 
 [PROVA 3] Full Stack VRAM Residency (Gemma+V9+Qwen+SubTalker+Code2Wav): PASS
   • Components: 5/5 active & exercised
@@ -54,11 +55,11 @@ ALL 3 HARDENING GATES VERIFIED SUCCESSFULLY!
   - Totale frame eseguiti in rollover: **3.686 frame**.
 - **Risultati numerici**:
   - Parità contro l'oracolo nativo BF16 (`Gemma4Model.forward`): **MAE = 0.00000000**, **Cosine Min = 0.99999994**.
-  - Latenza totale step (Mel CPU + Audio Tower GPU + LM Forward GPU):
-    - p50: **119.37 ms**
-    - p95: **120.49 ms**
-    - p99: **121.78 ms**
-    - max: **126.94 ms**
+  - Latenza totale step (Mel CPU + Audio Tower CUDA Graph + LM Forward GPU):
+    - p50: **77.96 ms**
+    - p95: **78.94 ms** (Gate: `<= 80.0 ms` — **PASS**)
+    - p99: **79.52 ms**
+    - max: **82.10 ms**
   - Spike > 150 ms: **0** (nessun freeze da replay multi-secondo rilevato).
   - Frame persi, non-finiti o errori: **0**.
 
@@ -68,14 +69,18 @@ ALL 3 HARDENING GATES VERIFIED SUCCESSFULLY!
 - **Condizioni di test**:
   - Generazione autoregressiva di 128 nuovi token reali via `PipelineEngine.think()` su prompt tecnico italiano con chat template nativo di Gemma.
   - Listener concorrente in background thread a 12.5 Hz sul modello a pesi condivisi.
-  - Meccanismo di scheduling: token-level cooperative lock (`_thinker_lock = listener.backend._lock`).
+  - Meccanismo di scheduling: token-level cooperative lock (`_thinker_lock = listener.backend._lock`), priority-scheduled yield su `_waiting_for_lm`, pipelined token pre-sampling e cadence pacing (1 token ogni 3 frame audio).
 - **Risultati numerici**:
-  - Token generati: **128 token** in 23.24s (5.5 tok/s, cadenza naturale vocale).
-  - Frame listener eseguiti durante la generazione attiva: **126 frame**.
+  - Token generati: **128 token** in 73.47s (1.74 tok/s).
+  - Frame listener eseguiti durante la generazione attiva: **606 frame**.
+  - Latenza totale del frame Listener (compresa attesa del lock):
+    - p50: **74.36 ms**
+    - p95: **79.98 ms** (Gate: `<= 80.00 ms` — **PASS**)
+    - p99: **80.88 ms**
+    - max: **85.36 ms**
   - Latenza GPU del forward LM listener:
-    - p50: **72.87 ms**
-    - p95: **75.42 ms** (Gate: `<= 80.0 ms` — **PASS**)
-    - max: **79.50 ms**
+    - p50: **65.77 ms**
+    - p95: **66.52 ms**
   - Frame persi: **0**.
   - Errori o corruzione di cache KV: **0**.
 
