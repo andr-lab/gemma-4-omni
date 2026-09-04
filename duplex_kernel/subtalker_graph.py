@@ -90,6 +90,7 @@ class SubtalkerGraph:
         self.static_prefill_inputs: torch.Tensor | None = None
         self.static_tok: torch.Tensor | None = None
         self.static_pos: torch.Tensor | None = None
+        self.static_tokens: torch.Tensor = torch.zeros(1, self.max_code_groups, dtype=torch.long, device=self.device)
         self.static_logits: torch.Tensor | None = None
         self.static_cache: Any | None = None
         self.captured = False
@@ -97,8 +98,15 @@ class SubtalkerGraph:
 
     # ------------------------------------------------------------------ API
     @torch.no_grad()
-    def generate(self, last_h: torch.Tensor, c0_token: int, *, do_sample: bool = True,
-                 c0_embed: torch.Tensor | None = None) -> list[int]:
+    def generate(
+        self,
+        last_h: torch.Tensor,
+        c0_token: int,
+        *,
+        do_sample: bool = True,
+        c0_embed: torch.Tensor | None = None,
+        return_tensor: bool = False,
+    ) -> list[int] | torch.Tensor:
         """Genera i 15 residui per il frame dato last_h (1,1,2048) e c0 (int).
 
         c0_embed: embedding del TALKER per c0 (1,1,2048) — il prefill del code
@@ -108,7 +116,6 @@ class SubtalkerGraph:
         if c0_embed is None:
             raise ValueError("c0_embed (embedding talker di c0) è obbligatorio per il prefill")
         prefill_inputs = torch.cat([last_h, c0_embed], dim=1)  # (1,2,2048)
-        tokens: list[int] = []
         if self.captured:
             # Reset della cache statica PRIMA del replay: ogni StaticLayer
             # avanza cumulative_length con add_ in-place (stesso indirizzo del
@@ -118,17 +125,23 @@ class SubtalkerGraph:
                 _l.cumulative_length.zero_()
             self.static_prefill_inputs.copy_(prefill_inputs)
             self.prefill_graph.replay()
-            r = self._sample_tok(self.static_logits, do_sample=do_sample)
-            tokens.append(r)
-            self.static_tok.copy_(torch.tensor([[r]], device=self.device, dtype=torch.long))
+
+            # GPU-resident token selection: zero host sync inside loop
+            self._sample_tok_gpu(self.static_logits, do_sample=do_sample, out_tok=self.static_tok)
+            self.static_tokens[0, 0] = self.static_tok[0, 0]
+
             for g in range(1, self.max_code_groups):  # 1..14 -> residui 2..15
                 self.static_pos.fill_(g + 1)
                 self.step_graphs[g - 1].replay()
-                r = self._sample_tok(self.static_logits, do_sample=do_sample)
-                tokens.append(r)
-                self.static_tok.copy_(torch.tensor([[r]], device=self.device, dtype=torch.long))
-            return tokens
+                self._sample_tok_gpu(self.static_logits, do_sample=do_sample, out_tok=self.static_tok)
+                self.static_tokens[0, g] = self.static_tok[0, 0]
+
+            if return_tensor:
+                return self.static_tokens[0]
+            return self.static_tokens[0].tolist()
+
         # ---- Fallback eager (bit-exact identico) ----
+        tokens: list[int] = []
         from transformers import StaticCache
         sc = StaticCache(config=self.cfg, max_batch_size=1, max_cache_len=self.max_code_groups + 2,
                          device=self.device, dtype=last_h.dtype)
@@ -144,7 +157,24 @@ class SubtalkerGraph:
                             generation_steps=g, cache_position=torch.tensor([g + 1], device=self.device))
             r = self._sample_tok(o2.logits[:, -1, :], do_sample=do_sample)
             tokens.append(r)
+        if return_tensor:
+            return torch.tensor(tokens, device=self.device, dtype=torch.long)
         return tokens
+
+    def _sample_tok_gpu(self, logits: torch.Tensor, *, do_sample: bool, out_tok: torch.Tensor) -> None:
+        """Sample or argmax token directly on GPU into out_tok (1, 1). Zero host sync."""
+        if not do_sample:
+            torch.argmax(logits, dim=-1, keepdim=True, out=out_tok)
+            return
+        # Transformers order: Temperature -> TopK (20) -> TopP (0.90)
+        lg = logits / 0.80
+        topk_vals, topk_idx = torch.topk(lg, k=20, dim=-1)
+        probs = F.softmax(topk_vals, dim=-1)
+        cum = torch.cumsum(probs, dim=-1)
+        mask = (cum - probs) > 0.90
+        probs[mask] = 0.0
+        sample_idx = torch.multinomial(probs, num_samples=1)
+        torch.gather(topk_idx, -1, sample_idx, out=out_tok)
 
     def _sample_tok(self, logits: torch.Tensor, *, do_sample: bool) -> int:
         if not do_sample:
@@ -190,6 +220,7 @@ class SubtalkerGraph:
             self.static_prefill_pos = torch.tensor([0, 1], dtype=torch.long, device=self.device)
             self.static_tok = torch.zeros(1, 1, dtype=torch.long, device=self.device)
             self.static_pos = torch.zeros(1, dtype=torch.long, device=self.device)
+            self.static_tokens = torch.zeros(1, self.max_code_groups, dtype=torch.long, device=self.device)
             self.static_logits = torch.zeros(1, self.vocab, dtype=torch.float32, device=self.device)
             self.static_cache = sc
 
