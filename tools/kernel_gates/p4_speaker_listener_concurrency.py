@@ -77,7 +77,7 @@ def run_concurrency_gate(
     workspace: Path = Path("/workspace"),
     device: str = "cuda:0",
     turn_len: int = 64,
-    playout_chunk_frames: int = 2,
+    playout_chunk_frames: int = 1,
 ) -> dict[str, Any]:
     print("=" * 70)
     print(f"[PROOF 3 FINAL] Real Full-Duplex LISTEN + SPEAK Concurrency ({duration_s}s)...")
@@ -89,7 +89,7 @@ def run_concurrency_gate(
     print("[PROOF 3 FINAL] Loading Listener, V9 Projector, Talker, SubTalker, Code2Wav...", flush=True)
     from duplex_kernel.models.thinker import load_thinker
     th = load_thinker(workspace, device=device, dtype=dtype)
-    listener = GemmaListener.from_thinker(th)
+    listener = GemmaListener.from_thinker(th, reference_delay_frames=2)
 
     projector, causal_conv = load_v9_conditioning(device=device, dtype=dtype)
     v9_stream = IncrementalV9Projector(projector, causal_conv)
@@ -111,7 +111,7 @@ def run_concurrency_gate(
         max_prefix_frames=turn_len,
         device=device,
         dtype=dtype,
-        max_audio_frames=turn_len,
+        max_audio_frames=max(turn_len, int(duration_s * 12.5) + 256),
     )
 
     listener_state = GemmaListenerState(context_frames=64)
@@ -131,7 +131,7 @@ def run_concurrency_gate(
     torch.cuda.synchronize()
 
     print("[PROOF 3 FINAL] Warming up compiled Speaker & SubTalker (triggering Dynamo compilation)...", flush=True)
-    speaker.begin("Warmup compiled speaker.")
+    speaker.begin("Continuous conversational speech.")
     dummy_cond = torch.randn((1, 2048), device=device, dtype=dtype)
     dummy_codes = torch.randint(0, 2048, (16,), device=device, dtype=torch.long)
     for t in range(8):
@@ -140,7 +140,7 @@ def run_concurrency_gate(
         step_out = speaker.step_frame()
         c0 = int(step_out.logits[:, :1, :].argmax(-1).item())
         c0_embed = talker.talker.get_input_embeddings()(torch.tensor([[c0]], device=device))
-        subtalker_graph.generate(step_out.last_hidden, c0, c0_embed=c0_embed)
+        subtalker_graph.generate(step_out.last_hidden, c0, c0_embed=c0_embed, return_tensor=True)
         speaker.commit_codes(dummy_codes)
         torch.cuda.synchronize()
         print(f"  Warmup step {t}: {time.perf_counter() - t0_w:.2f}s", flush=True)
@@ -163,7 +163,7 @@ def run_concurrency_gate(
     # 3. Setup Scheduler, Queues & Reference Buffer
     clock = MonotonicFrameClock(period_ms=80)
     ingress = AudioIngressQueue(sample_rate=16000, frame_duration_ms=80)
-    ref_buffer = AssistantReferenceBuffer(sample_rate=16000, frame_duration_ms=80, delay_frames=1, max_frames=256)
+    ref_buffer = AssistantReferenceBuffer(sample_rate=16000, frame_duration_ms=80, delay_frames=2, max_frames=256)
     playout_queue: queue.Queue[tuple[int, torch.Tensor] | None] = queue.Queue()
 
     # Telemetry
@@ -218,14 +218,15 @@ def run_concurrency_gate(
         if frame is None:
             return
 
-        t_turn = frame.frame_id % turn_len
-        if t_turn == 0 and frame.frame_id > 0:
-            v9_state = v9_stream.new_state(batch_size=1, dtype=dtype, max_seq_len=turn_len)
-            speaker.begin(f"Turn transition {frame.frame_id // turn_len}")
-
         t_start_ns = time.monotonic_ns()
         try:
-            # Step 1: Listener consumes AssistantReferenceBuffer(delay_frames=1)
+            t_turn = frame.frame_id % turn_len
+            if t_turn == 0 and frame.frame_id > 0:
+                v9_state = v9_stream.new_state(batch_size=1, dtype=dtype, max_seq_len=turn_len)
+                # Keep constant prompt text to preserve token count and avoid Dynamo recompilation
+                speaker.begin("Continuous conversational speech.")
+
+            # Step 1: Listener consumes AssistantReferenceBuffer(delay_frames=2)
             ref_frame = ref_buffer.visible_for(listener_frame_id=frame.frame_id)
             out = listener.step(frame.pcm, ref_frame, listener_state)
             h_gemma = out.gemma_hidden_t
@@ -244,13 +245,12 @@ def run_concurrency_gate(
             c0 = int(step_out.logits[:, :1, :].argmax(-1).item())
             c0_embed = talker.talker.get_input_embeddings()(torch.tensor([[c0]], device=device))
 
-            # Step 4: SubTalker residual generation (GPU resident)
-            sub_codes = subtalker_graph.generate(step_out.last_hidden, c0, c0_embed=c0_embed)
-            codes_16 = torch.tensor(
-                [c0] + (sub_codes if isinstance(sub_codes, list) else sub_codes.tolist()),
-                device=device,
-                dtype=torch.long,
-            )
+            # Step 4: SubTalker residual generation (GPU resident, return_tensor=True)
+            sub_codes = subtalker_graph.generate(step_out.last_hidden, c0, c0_embed=c0_embed, return_tensor=True)
+            if not isinstance(sub_codes, torch.Tensor):
+                sub_codes = torch.tensor(sub_codes, device=device, dtype=torch.long)
+            c0_tensor = torch.tensor([c0], device=device, dtype=torch.long)
+            codes_16 = torch.cat([c0_tensor, sub_codes], dim=0)
             speaker.commit_codes(codes_16)
 
             # Step 5: Enqueue committed codes to background playout worker
@@ -294,14 +294,17 @@ def run_concurrency_gate(
             })
 
             if frame.frame_id < 5 or frame.frame_id % 20 == 0:
+                ref_id_str = str(ref_frame.frame_id) if ref_frame is not None else "None"
                 print(
-                    f"  [Tick {frame.frame_id:3d}] Listener={listener_step_ms:.1f}ms, "
+                    f"  [Tick {frame.frame_id:3d}] Listener={listener_step_ms:.1f}ms (ref={ref_id_str}), "
                     f"Speaker={speaker_step_latency_ms:.1f}ms, Total={total_step_latency_ms:.1f}ms, "
                     f"Lateness={lateness_ms:+.1f}ms",
                     flush=True,
                 )
         except Exception as e:
             print(f"[ERROR] frame {frame.frame_id}: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
 
     scheduler = DuplexScheduler(
         ingress=ingress,
@@ -336,18 +339,28 @@ def run_concurrency_gate(
     play_thread.start()
     scheduler.start()
 
-    time.sleep(duration_s)
+    # Monitored execution loop
+    elapsed = 0.0
+    poll_step = 0.25
+    while elapsed < duration_s:
+        if not scheduler.is_running:
+            if scheduler.error is not None:
+                print(f"[FATAL] Scheduler crashed at elapsed={elapsed:.1f}s: {scheduler.error}", flush=True)
+            break
+        time.sleep(poll_step)
+        elapsed += poll_step
 
-    # Graceful stop
+    # Graceful stop: stop mic first so no extra frames are produced
     stop_event.set()
     p_thread.join(timeout=2.0)
-    play_thread.join(timeout=3.0)
 
-    # Drain queue
-    drain_deadline = time.time() + 1.0
-    while ingress.qsize > 0 and time.time() < drain_deadline:
-        time.sleep(0.010)
+    # Drain remaining frames in ingress up to deadline
+    drain_deadline = time.time() + 2.0
+    while ingress.qsize > 0 and time.time() < drain_deadline and scheduler.is_running:
+        time.sleep(0.020)
+
     scheduler.stop()
+    play_thread.join(timeout=3.0)
 
     t_end = time.perf_counter()
     total_elapsed_s = t_end - t_start
@@ -413,10 +426,12 @@ def run_concurrency_gate(
         "reference_buffer": {
             "total_appended": ref_buffer._appended,
             "delay_frames": ref_buffer.delay_frames,
+            "valid_reference_frames": sum(1 for r in listener_records if r.get("ref_frame_id") is not None),
         },
         "health": {
             "final_backlog": final_backlog,
             "dropped_input_frames": dropped_frames,
+            "scheduler_error": str(scheduler.error) if scheduler.error is not None else None,
             "vram_initial_mb": round(vram_initial_mb, 1),
             "vram_final_mb": round(vram_final_mb, 1),
             "vram_growth_mb": round(vram_growth_mb, 1),

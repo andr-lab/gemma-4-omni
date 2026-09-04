@@ -137,7 +137,7 @@ class SubtalkerGraph:
                 self.static_tokens[0, g] = self.static_tok[0, 0]
 
             if return_tensor:
-                return self.static_tokens[0]
+                return self.static_tokens[0].clone()
             return self.static_tokens[0].tolist()
 
         # ---- Fallback eager (bit-exact identico) ----
@@ -166,10 +166,10 @@ class SubtalkerGraph:
         if not do_sample:
             torch.argmax(logits, dim=-1, keepdim=True, out=out_tok)
             return
-        # Transformers order: Temperature -> TopK (20) -> TopP (0.90)
-        lg = logits / 0.80
-        topk_vals, topk_idx = torch.topk(lg, k=20, dim=-1)
-        probs = F.softmax(topk_vals, dim=-1)
+        # Transformers order: TopK (20) -> Temperature (0.80) -> TopP (0.90)
+        # Note: topk is monotonic, so compute topk directly on logits without full vocab division
+        topk_vals, topk_idx = torch.topk(logits, k=20, dim=-1)
+        probs = F.softmax(topk_vals / 0.80, dim=-1)
         cum = torch.cumsum(probs, dim=-1)
         mask = (cum - probs) > 0.90
         probs[mask] = 0.0

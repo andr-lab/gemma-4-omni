@@ -1,54 +1,56 @@
 {
   "schema_version": 1,
   "gate": "P4_SPEAKER_LISTENER_CONCURRENCY",
-  "timestamp_utc": "2026-09-04T09:15:56Z",
-  "duration_s": 63.18310526595451,
+  "timestamp_utc": "2026-09-04T14:11:14Z",
+  "duration_s": 10.196478173136711,
   "listener": {
-    "total_frames": 64,
+    "total_frames": 79,
     "latency_ms": {
-      "p50": 82.192182,
-      "p95": 94.93135984999998,
-      "p99": 100.90266619999998,
-      "max": 106.302749,
-      "min": 65.18784,
-      "mean": 78.41261990625
+      "p50": 75.046789,
+      "p95": 89.98098809999999,
+      "p99": 105.20426262,
+      "max": 109.949175,
+      "min": 64.616097,
+      "mean": 74.96454796202532
     },
-    "deadline_misses": 64,
+    "deadline_misses": 79,
     "deadline_miss_rate_pct": 100.0,
-    "max_lateness_ms": 2203.96
+    "max_lateness_ms": 3718.55
   },
   "speaker": {
-    "total_frames": 64,
-    "throughput_fps": 1.01,
+    "total_frames": 79,
+    "throughput_fps": 7.75,
     "latency_ms": {
-      "p50": 35.799447,
-      "p95": 36.7395745,
-      "p99": 38.57606959999999,
-      "max": 41.288081,
-      "min": 35.506927,
-      "mean": 35.94117125
+      "p50": 51.963508,
+      "p95": 52.4631223,
+      "p99": 57.341598899999994,
+      "max": 59.457852,
+      "min": 47.588345,
+      "mean": 52.033110392405064
     },
     "interval_ms": {
-      "p50": 112.35756706446409,
-      "p95": 126.16786297876388,
-      "p99": 134.4280785229057,
-      "max": 134.894184069708,
-      "min": 100.89255007915199,
-      "mean": 113.9086001101763
+      "p50": 127.11842847056687,
+      "p95": 142.51346045639366,
+      "p99": 159.95404216926548,
+      "max": 166.91606515087187,
+      "min": 112.54903813824058,
+      "mean": 126.84407932325624
     },
     "deadline_misses": 0,
     "deadline_miss_rate_pct": 0.0
   },
   "reference_buffer": {
-    "total_appended": 64,
-    "delay_frames": 1
+    "total_appended": 60,
+    "delay_frames": 2,
+    "valid_reference_frames": 60
   },
   "health": {
-    "final_backlog": 685,
+    "final_backlog": 22,
     "dropped_input_frames": 0,
-    "vram_initial_mb": 14567.2,
-    "vram_final_mb": 14589.8,
-    "vram_growth_mb": 22.6
+    "scheduler_error": null,
+    "vram_initial_mb": 14568.8,
+    "vram_final_mb": 14590.6,
+    "vram_growth_mb": 21.8
   },
   "thresholds": {
     "listener_p95_max_ms": 80.0,
