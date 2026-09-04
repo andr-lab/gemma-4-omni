@@ -1,6 +1,12 @@
+import sys
 import time
-import torch
 from pathlib import Path
+import torch
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from duplex_kernel.models.thinker import load_thinker
 from transformers import StaticCache
 

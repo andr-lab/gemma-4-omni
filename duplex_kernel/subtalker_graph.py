@@ -101,20 +101,23 @@ class SubtalkerGraph:
     def generate(
         self,
         last_h: torch.Tensor,
-        c0_token: int,
+        c0_token: int | torch.Tensor = 0,
         *,
         do_sample: bool = True,
         c0_embed: torch.Tensor | None = None,
         return_tensor: bool = False,
     ) -> list[int] | torch.Tensor:
-        """Genera i 15 residui per il frame dato last_h (1,1,2048) e c0 (int).
+        """Genera i 15 residui per il frame dato last_h (1,1,2048) e c0 (int o Tensor GPU).
 
-        c0_embed: embedding del TALKER per c0 (1,1,2048) — il prefill del code
-        predictor è cat([last_h, c0_embed]) proiettato da small_to_mtp_projection.
+        c0_embed: embedding del TALKER per c0 (1,1,2048) — se omesso viene derivato
+        direttamente su GPU da c0_token via self.talker_embed.
         """
         # Prefill: embeds = [last_h (2048 dim) | talker_emb(c0) (2048 dim)]
         if c0_embed is None:
-            raise ValueError("c0_embed (embedding talker di c0) è obbligatorio per il prefill")
+            if isinstance(c0_token, torch.Tensor):
+                c0_embed = self.talker_embed(c0_token.view(1, 1))
+            else:
+                c0_embed = self.talker_embed(torch.tensor([[int(c0_token)]], device=self.device))
         prefill_inputs = torch.cat([last_h, c0_embed], dim=1)  # (1,2,2048)
         if self.captured:
             # Reset della cache statica PRIMA del replay: ogni StaticLayer

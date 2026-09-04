@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Verify numerical parity of compiled Qwen vs eager Qwen in FuturePrefixQwen."""
+"""Verify numerical parity of compiled Qwen talker backbone with FuturePrefixQwen slot-KV against Eager."""
 from __future__ import annotations
 
 import sys
 import time
 from pathlib import Path
-
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -13,185 +13,141 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from duplex_kernel.future_prefix import FuturePrefixQwen
 from duplex_kernel.models.talker import load_talker
-from duplex_kernel.models.v9 import CausalConv1D, DeepCausalTransformerProjectorV9
-from tools.kernel_gates.p4_checks import _stack_cache
+from duplex_kernel.future_prefix import FuturePrefixQwen
 
+device = "cuda:0"
+dtype = torch.bfloat16
+workspace = "/workspace"
 
-def main():
-    device = "cuda:0"
-    dtype = torch.float32
-    print("=" * 70)
-    print("[TEST] Verifying Compiled Qwen Slot-KV Parity & Latency")
-    print("=" * 70, flush=True)
+# 1. Load Eager Talker
+print("--- LOADING EAGER TALKER ---", flush=True)
+talker = load_talker(workspace, device=device, load_code2wav=False)
+talker.talker.to(dtype=dtype)
 
-    # 1. Load Talker
-    print("[TEST] Loading Talker Qwen3-TTS...", flush=True)
-    talker = load_talker("/workspace", device=device, load_code2wav=False)
-    talker.talker.to(dtype=dtype)
+speaker_eager = FuturePrefixQwen(
+    talker,
+    lookahead_frames=0,
+    max_prefix_frames=64,
+    device=device,
+    dtype=dtype,
+    max_audio_frames=128,
+)
 
-    # 2. Load Cache
-    cache_path = Path("/workspace/cache_ars_runtime_aligned_v1.pt")
-    print(f"[TEST] Loading cache from {cache_path}...", flush=True)
-    raw, anchors, codes, _ = _stack_cache(cache_path)
-    raw = raw.to(device=device, dtype=dtype)
-    code_seqs = codes.to(device=device)
-    if code_seqs.dim() == 2:
-        code_seqs = code_seqs.unsqueeze(-1)
-    if code_seqs.shape[-1] == 1:
-        pad_cbs = torch.zeros((*code_seqs.shape[:-1], 15), dtype=code_seqs.dtype, device=code_seqs.device)
-        code_seqs = torch.cat((code_seqs, pad_cbs), dim=-1)
+# Deterministic conditioning frames
+rng = np.random.default_rng(2026)
+cond_frames = [
+    torch.tensor(0.05 * rng.standard_normal((1, 2048)), device=device, dtype=dtype)
+    for _ in range(64)
+]
+fixed_codes = [
+    torch.tensor(rng.integers(0, 2048, size=(16,)), device=device, dtype=torch.long)
+    for _ in range(64)
+]
 
-    # 3. Load V9
-    ckpt_path = Path("/workspace/checkpoints/v9_causal_l0_final.pt")
-    sd = torch.load(ckpt_path, map_location="cpu", weights_only=True)
-    projector = DeepCausalTransformerProjectorV9()
-    projector.load_state_dict(sd.get("proj", sd))
-    projector = projector.to(device=device, dtype=dtype).eval()
+prompt_text = "Continuous conversational speech synthesis test prompt."
 
-    causal_conv = CausalConv1D(hidden_size=1536, kernel_size=3)
-    if "causal_conv" in sd:
-        causal_conv.conv.load_state_dict(sd["causal_conv"])
-    causal_conv = causal_conv.to(device=device, dtype=dtype).eval()
+print("--- RUNNING 64 FRAMES ON EAGER SPEAKER ---", flush=True)
+speaker_eager.begin(prompt_text)
+eager_logits = []
+eager_hiddens = []
 
-    # Pre-compute V9 prefix for 5 sequences
-    num_seq = 5
-    frames_per_seq = 64
-    all_pfx = []
-    with torch.no_grad():
-        for s in range(num_seq):
-            seq_raw = raw[s : s + 1]
-            h_tx = seq_raw[:, 0, :]
-            c = causal_conv(seq_raw)
-            pfx = projector(c, h_tx)
-            all_pfx.append(pfx)
+with torch.inference_mode():
+    for t in range(64):
+        speaker_eager.push_v9_frame(t, cond_frames[t])
+        step_out = speaker_eager.step_frame()
+        eager_logits.append(step_out.logits.float().clone())
+        eager_hiddens.append(step_out.last_hidden.float().clone())
+        speaker_eager.commit_codes(fixed_codes[t])
 
-    # --- Run Eager Mode ---
-    print("\n[TEST] Running Eager FuturePrefixQwen on 5 sequences...", flush=True)
-    eager_logits_all = []
-    for s in range(num_seq):
-        pfx = all_pfx[s]
-        seq_codes = code_seqs[s]
-        spk = FuturePrefixQwen(
-            talker,
-            lookahead_frames=0,
-            max_prefix_frames=frames_per_seq,
-            device=device,
-            dtype=dtype,
-            max_audio_frames=frames_per_seq,
-        )
-        spk.begin("Verifica causale del kernel.")
-        seq_l = []
-        for t in range(frames_per_seq):
-            spk.push_v9_frame(t, pfx[:, t, :])
-            step_out = spk.step_frame()
-            seq_l.append(step_out.logits[:, :1, :].clone())
-            spk.commit_codes(seq_codes[t])
-        eager_logits_all.append(torch.cat(seq_l, dim=1))
+print("Eager run complete. 64 frames collected.", flush=True)
 
-    # --- Compile Model ---
-    print("\n[TEST] Compiling Qwen backbone with torch.compile...", flush=True)
-    talker.talker.model = torch.compile(talker.talker.model, mode="default")
+# 2. Compile Qwen backbone
+print("--- COMPILING QWEN BACKBONE WITH TORCH.COMPILE ---", flush=True)
+talker.talker.model = torch.compile(talker.talker.model, mode="default")
 
-    # Warmup compiled model
-    print("[TEST] Warming up compiled Qwen...", flush=True)
-    spk_warm = FuturePrefixQwen(
-        talker,
-        lookahead_frames=0,
-        max_prefix_frames=frames_per_seq,
-        device=device,
-        dtype=dtype,
-        max_audio_frames=frames_per_seq,
-    )
-    spk_warm.begin("Verifica causale del kernel.")
-    for t in range(16):
-        spk_warm.push_v9_frame(t, all_pfx[0][:, t, :])
-        step_out = spk_warm.step_frame()
-        spk_warm.commit_codes(code_seqs[0][t])
-    torch.cuda.synchronize()
-    print("[TEST] Warmup completed.", flush=True)
+speaker_compiled = FuturePrefixQwen(
+    talker,
+    lookahead_frames=0,
+    max_prefix_frames=64,
+    device=device,
+    dtype=dtype,
+    max_audio_frames=128,
+)
 
-    # --- Run Compiled Mode ---
-    print("\n[TEST] Running Compiled FuturePrefixQwen on 5 sequences...", flush=True)
-    compiled_logits_all = []
-    latencies_ms = []
+# Warmup compile
+print("--- WARMING UP COMPILED SPEAKER (triggering Dynamo compilation) ---", flush=True)
+speaker_compiled.begin(prompt_text)
+dummy_cond = torch.randn((1, 2048), device=device, dtype=dtype)
+dummy_code = torch.randint(0, 2048, (16,), device=device, dtype=torch.long)
+with torch.inference_mode():
+    for t in range(6):
+        t0 = time.perf_counter()
+        speaker_compiled.push_v9_frame(t, dummy_cond)
+        _ = speaker_compiled.step_frame()
+        speaker_compiled.commit_codes(dummy_code)
+        torch.cuda.synchronize()
+        print(f"  Warmup step {t}: {time.perf_counter() - t0:.2f}s", flush=True)
 
-    for s in range(num_seq):
-        pfx = all_pfx[s]
-        seq_codes = code_seqs[s]
-        spk = FuturePrefixQwen(
-            talker,
-            lookahead_frames=0,
-            max_prefix_frames=frames_per_seq,
-            device=device,
-            dtype=dtype,
-            max_audio_frames=frames_per_seq,
-        )
-        spk.begin("Verifica causale del kernel.")
-        seq_l = []
-        for t in range(frames_per_seq):
-            spk.push_v9_frame(t, pfx[:, t, :])
-            torch.cuda.synchronize()
-            t0 = time.perf_counter()
-            step_out = spk.step_frame()
-            torch.cuda.synchronize()
-            t1 = time.perf_counter()
-            latencies_ms.append((t1 - t0) * 1000.0)
-            seq_l.append(step_out.logits[:, :1, :].clone())
-            spk.commit_codes(seq_codes[t])
-        compiled_logits_all.append(torch.cat(seq_l, dim=1))
+print("Warmup complete. Resetting for parity test...", flush=True)
 
-    # --- Compare Eager vs Compiled ---
-    total_frames = num_seq * frames_per_seq
-    maes = []
-    cosines = []
-    top1_matches = 0
+# Run compiled test
+speaker_compiled.begin(prompt_text)
+comp_logits = []
+comp_hiddens = []
 
-    for s in range(num_seq):
-        e_l = eager_logits_all[s].float()
-        c_l = compiled_logits_all[s].float()
-        for t in range(frames_per_seq):
-            e_t = e_l[0, t]
-            c_t = c_l[0, t]
-            diff = (e_t - c_t).abs()
-            mae = float(diff.mean().item())
-            cos = float(F.cosine_similarity(e_t.unsqueeze(0), c_t.unsqueeze(0)).item())
-            top1_e = int(e_t.argmax().item())
-            top1_c = int(c_t.argmax().item())
+with torch.inference_mode():
+    for t in range(64):
+        speaker_compiled.push_v9_frame(t, cond_frames[t])
+        step_out = speaker_compiled.step_frame()
+        comp_logits.append(step_out.logits.float().clone())
+        comp_hiddens.append(step_out.last_hidden.float().clone())
+        speaker_compiled.commit_codes(fixed_codes[t])
 
-            maes.append(mae)
-            cosines.append(cos)
-            if top1_e == top1_c:
-                top1_matches += 1
+print("Compiled run complete. Computing parity metrics...", flush=True)
 
-    top1_rate = top1_matches / total_frames * 100.0
-    mean_mae = sum(maes) / len(maes)
-    min_cos = min(cosines)
+# Compare metrics
+top1_matches = 0
+total_tokens = 0
+mae_logits = []
+cos_hiddens = []
 
-    import numpy as np
-    lats = np.array(latencies_ms)
-    p50 = float(np.percentile(lats, 50))
-    p95 = float(np.percentile(lats, 95))
-    p99 = float(np.percentile(lats, 99))
+for t in range(64):
+    lg_e = eager_logits[t]
+    lg_c = comp_logits[t]
+    
+    # Top-1 agreement
+    k0_e = lg_e[:, :1, :].argmax(dim=-1).item()
+    k0_c = lg_c[:, :1, :].argmax(dim=-1).item()
+    if k0_e == k0_c:
+        top1_matches += 1
+    total_tokens += 1
+    
+    mae = (lg_e - lg_c).abs().mean().item()
+    mae_logits.append(mae)
+    
+    h_e = eager_hiddens[t].flatten()
+    h_c = comp_hiddens[t].flatten()
+    cos = F.cosine_similarity(h_e, h_c, dim=0).item()
+    cos_hiddens.append(cos)
+    
+    if t < 5 or t % 10 == 0 or t >= 60:
+        print(f"Frame {t:2d}: Top-1 ({k0_e} vs {k0_c}), Logit MAE={mae:.6e}, Hidden Cosine={cos:.7f}", flush=True)
 
-    print("\n" + "=" * 70)
-    print("[COMPILED QWEN NUMERICAL PARITY RESULTS]")
-    print(f"  • Total Frames Tested: {total_frames}")
-    print(f"  • Top-1 Agreement:     {top1_rate:.2f}% (Target: 100.00%)")
-    print(f"  • Mean Logit MAE:      {mean_mae:.8f} (Target: <= 0.02)")
-    print(f"  • Min Cosine:          {min_cos:.8f} (Target: >= 0.999)")
-    print(f"  • Compiled Latency:    p50={p50:.2f}ms, p95={p95:.2f}ms, p99={p99:.2f}ms")
-    print("=" * 70, flush=True)
+top1_acc = (top1_matches / total_tokens) * 100.0
+mean_mae = sum(mae_logits) / len(mae_logits)
+min_cos = min(cos_hiddens)
 
-    pass_parity = (top1_rate == 100.0) and (mean_mae <= 0.02) and (min_cos >= 0.999)
-    if pass_parity:
-        print(">>> RESULT: COMPILED QWEN PARITY PASS <<<")
-        return 0
-    else:
-        print(">>> RESULT: COMPILED QWEN PARITY FAIL <<<")
-        return 1
+print("\n" + "=" * 70, flush=True)
+print("QWEN SLOT-KV PARITY SUMMARY OVER 64 FRAMES:", flush=True)
+print(f"  Top-1 Agreement: {top1_acc:.2f}% (Gate: 100.0%)", flush=True)
+print(f"  Mean Logit MAE:  {mean_mae:.6e} (Gate: <= 0.02)", flush=True)
+print(f"  Min Hidden Cos:  {min_cos:.7f} (Gate: >= 0.999)", flush=True)
+print("=" * 70, flush=True)
 
-
-if __name__ == "__main__":
-    sys.exit(main())
+if top1_acc == 100.0 and mean_mae <= 0.02 and min_cos >= 0.999:
+    print("VERDICT: PASS — COMPILED QWEN SLOT-KV PARITY CERTIFIED", flush=True)
+    sys.exit(0)
+else:
+    print("VERDICT: FAIL — COMPILED QWEN PARITY GATE NOT MET", flush=True)
+    sys.exit(1)

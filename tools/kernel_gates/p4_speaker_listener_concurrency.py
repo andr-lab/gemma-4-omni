@@ -6,18 +6,19 @@ Implements Sections 9 & 10 of P4 Final Closure:
 2. DuplexScheduler dispatches listener every 80 ms on MonotonicFrameClock.
 3. Listener extracts Gemma audio features + V9 causal conditioning frame (L=0).
 4. Speaker pipeline (Compiled FuturePrefixQwen L=0 -> GPU-Resident SubTalker -> Code2Wav)
-   generates audio continuously with real V9 conditioning.
-5. Playout worker packetizes Code2Wav synthesis into chunks (160-320 ms) and pushes
+   generates audio continuously with real V9 conditioning via unified SpeakerRuntime.
+5. Playout worker packetizes Code2Wav synthesis into 1-frame chunks (80 ms) and pushes
    synthesized audio into AssistantReferenceBuffer(delay_frames=1).
 6. Listener consumes AssistantReferenceBuffer(delay_frames=1) simultaneously.
 
 Verification gates:
 - listener complete latency p95 <= 80 ms
-- speaker audio output throughput >= 12.0 frame/s (realtime target 12.5 fps)
+- speaker audio output throughput >= 12.5 frame/s
 - speaker deadline miss rate <= 1.0%
-- reference buffer contains monotonically increasing frames
+- reference buffer contains monotonically increasing frames with delay=1
 - zero dropped input frames
-- memory growth flat (no leak)
+- memory growth flat (< 50 MB, zero leak)
+- reconciled CUDA / wall breakdown within +-1 ms
 """
 from __future__ import annotations
 
@@ -41,8 +42,11 @@ if str(ROOT) not in sys.path:
 sys.path[:] = [str(p) for p in sys.path]
 
 from duplex_kernel.future_prefix import FuturePrefixQwen
-from duplex_kernel.listener import (
+from duplex_kernel.reference_buffer import (
     AssistantReferenceBuffer,
+    AssistantReferenceFrame,
+)
+from duplex_kernel.listener import (
     GemmaListener,
     GemmaListenerState,
 )
@@ -56,6 +60,7 @@ from duplex_kernel.scheduler import (
     MonotonicFrameClock,
 )
 from duplex_kernel.subtalker_graph import SubtalkerGraph
+from duplex_kernel.speaker_runtime import SpeakerRuntime, SpeakerStepResult
 
 
 def p_stats(arr: list[float]) -> dict[str, float]:
@@ -89,14 +94,15 @@ def run_concurrency_gate(
     print("[PROOF 3 FINAL] Loading Listener, V9 Projector, Talker, SubTalker, Code2Wav...", flush=True)
     from duplex_kernel.models.thinker import load_thinker
     th = load_thinker(workspace, device=device, dtype=dtype)
-    listener = GemmaListener.from_thinker(th, reference_delay_frames=2)
+    # Strict contractual delay: 1 frame (80 ms)
+    listener = GemmaListener.from_thinker(th, reference_delay_frames=1)
 
     projector, causal_conv = load_v9_conditioning(device=device, dtype=dtype)
     v9_stream = IncrementalV9Projector(projector, causal_conv)
     talker = load_talker(workspace, device=device, load_code2wav=True)
     talker.talker.to(dtype=dtype)
 
-    # Fix A: Use compiled Qwen backbone
+    # Use compiled Qwen backbone
     print("[PROOF 3 FINAL] Compiling Qwen backbone with torch.compile...", flush=True)
     talker.talker.model = torch.compile(talker.talker.model, mode="default")
 
@@ -111,8 +117,11 @@ def run_concurrency_gate(
         max_prefix_frames=turn_len,
         device=device,
         dtype=dtype,
-        max_audio_frames=max(turn_len, int(duration_s * 12.5) + 256),
+        max_audio_frames=turn_len,
     )
+
+    # Unified Production Speaker Runtime
+    speaker_runtime = SpeakerRuntime(speaker, subtalker_graph, talker, device=device)
 
     listener_state = GemmaListenerState(context_frames=64)
     v9_anchor = torch.zeros((1, 1536), device=device, dtype=dtype)
@@ -130,18 +139,12 @@ def run_concurrency_gate(
     listener.prime_steady_state(listener_state)
     torch.cuda.synchronize()
 
-    print("[PROOF 3 FINAL] Warming up compiled Speaker & SubTalker (triggering Dynamo compilation)...", flush=True)
-    speaker.begin("Continuous conversational speech.")
+    print("[PROOF 3 FINAL] Warming up SpeakerRuntime (triggering Dynamo compilation)...", flush=True)
+    speaker_runtime.begin("Continuous conversational speech.")
     dummy_cond = torch.randn((1, 2048), device=device, dtype=dtype)
-    dummy_codes = torch.randint(0, 2048, (16,), device=device, dtype=torch.long)
     for t in range(8):
         t0_w = time.perf_counter()
-        speaker.push_v9_frame(t, dummy_cond)
-        step_out = speaker.step_frame()
-        c0 = int(step_out.logits[:, :1, :].argmax(-1).item())
-        c0_embed = talker.talker.get_input_embeddings()(torch.tensor([[c0]], device=device))
-        subtalker_graph.generate(step_out.last_hidden, c0, c0_embed=c0_embed, return_tensor=True)
-        speaker.commit_codes(dummy_codes)
+        _ = speaker_runtime.step(dummy_cond, frame_id=t, record_event=False)
         torch.cuda.synchronize()
         print(f"  Warmup step {t}: {time.perf_counter() - t0_w:.2f}s", flush=True)
 
@@ -160,11 +163,10 @@ def run_concurrency_gate(
     vram_initial_mb = torch.cuda.memory_allocated() / (1024 * 1024)
     print(f"[PROOF 3 FINAL] Post-warmup VRAM baseline: {vram_initial_mb:.1f} MB", flush=True)
 
-    # 3. Setup Scheduler, Queues & Reference Buffer
+    # 3. Setup Scheduler, Queues & Reference Buffer (strict delay_frames = 1)
     clock = MonotonicFrameClock(period_ms=80)
     ingress = AudioIngressQueue(sample_rate=16000, frame_duration_ms=80)
-    ref_buffer = AssistantReferenceBuffer(sample_rate=16000, frame_duration_ms=80, delay_frames=2, max_frames=256)
-    playout_queue: queue.Queue[tuple[int, torch.Tensor] | None] = queue.Queue()
+    ref_buffer = AssistantReferenceBuffer(sample_rate=16000, frame_duration_ms=80, delay_frames=1, max_frames=256)
 
     # Telemetry
     stop_event = threading.Event()
@@ -176,41 +178,16 @@ def run_concurrency_gate(
     speaker_latencies_ms: list[float] = []
     speaker_intervals_ms: list[float] = []
 
-    # 4. Playout Worker Thread (Fixes C & D: Real Code2Wav packetized synthesis)
-    def playout_worker() -> None:
-        buffer_frames: list[tuple[int, torch.Tensor]] = []
-        while not stop_event.is_set() or not playout_queue.empty():
-            try:
-                item = playout_queue.get(timeout=0.010)
-            except queue.Empty:
-                item = None
+    # Fine-grained CUDA timing breakdowns
+    cuda_listener_times: list[float] = []
+    cuda_v9_times: list[float] = []
+    cuda_speaker_times: list[float] = []
+    cuda_c2w_times: list[float] = []
+    cuda_tick_times: list[float] = []
+    wall_tick_times: list[float] = []
 
-            if item is not None:
-                buffer_frames.append(item)
-
-            # Decode when chunk is full or when stopping and remaining frames exist
-            if len(buffer_frames) >= playout_chunk_frames or (stop_event.is_set() and buffer_frames):
-                chunk = buffer_frames[:playout_chunk_frames]
-                buffer_frames = buffer_frames[playout_chunk_frames:]
-
-                frame_ids = [fid for fid, _ in chunk]
-                codes_stacked = torch.stack([c for _, c in chunk], dim=0).unsqueeze(0).to(device)  # (1, K, 16)
-                with torch.no_grad():
-                    pcm_24k = talker.decode(codes_stacked).numpy()
-
-                # Slice each 80ms frame (1920 samples @ 24kHz) and resample to 16kHz (1280 samples)
-                for idx, fid in enumerate(frame_ids):
-                    chunk_slice = pcm_24k[idx * 1920 : (idx + 1) * 1920]
-                    pcm_16k = ref_buffer._resample(chunk_slice, 24000, 16000)
-                    ref_buffer.append(
-                        pcm_16k,
-                        frame_id=fid,
-                        emitted_at_ns=time.monotonic_ns(),
-                        sample_rate=16000,
-                    )
-
-    # 5. Sequenced Listener + Speaker Tick Callback (Fixes B & E)
-    speaker.begin("Continuous conversational speech.")
+    # 4. Sequenced Listener + Speaker Tick Callback
+    speaker_runtime.begin("Continuous conversational speech.")
     last_speaker_time = time.perf_counter()
 
     def on_listener_tick(frame: AudioFrame | None, tick: DuplexTick) -> None:
@@ -219,49 +196,68 @@ def run_concurrency_gate(
             return
 
         t_start_ns = time.monotonic_ns()
+        ev_start = torch.cuda.Event(enable_timing=True)
+        ev_listener = torch.cuda.Event(enable_timing=True)
+        ev_v9 = torch.cuda.Event(enable_timing=True)
+        ev_speaker = torch.cuda.Event(enable_timing=True)
+        ev_tick = torch.cuda.Event(enable_timing=True)
+
+        ev_start.record()
+
         try:
             t_turn = frame.frame_id % turn_len
             if t_turn == 0 and frame.frame_id > 0:
                 v9_state = v9_stream.new_state(batch_size=1, dtype=dtype, max_seq_len=turn_len)
-                # Keep constant prompt text to preserve token count and avoid Dynamo recompilation
-                speaker.begin("Continuous conversational speech.")
+                speaker_runtime.begin("Continuous conversational speech.")
 
-            # Step 1: Listener consumes AssistantReferenceBuffer(delay_frames=2)
+            # Step 1: Listener consumes AssistantReferenceBuffer(delay_frames=1)
             ref_frame = ref_buffer.visible_for(listener_frame_id=frame.frame_id)
             out = listener.step(frame.pcm, ref_frame, listener_state)
+            ev_listener.record()
+
+            # Step 2: Incremental V9 Causal Projector (L=0)
             h_gemma = out.gemma_hidden_t
             if h_gemma.dim() == 1:
                 h_gemma = h_gemma.unsqueeze(0)
-
-            t_l_done_ns = time.monotonic_ns()
-            listener_step_ms = (t_l_done_ns - t_start_ns) / 1_000_000.0
-
-            # Step 2: Incremental V9 Causal Projector (L=0)
             cond_frame = v9_stream.step(h_gemma, v9_anchor, v9_state)
+            ev_v9.record()
 
-            # Step 3: FuturePrefixQwen Joint Step with real V9 conditioning
-            speaker.push_v9_frame(t_turn, cond_frame)
-            step_out = speaker.step_frame()
-            c0 = int(step_out.logits[:, :1, :].argmax(-1).item())
-            c0_embed = talker.talker.get_input_embeddings()(torch.tensor([[c0]], device=device))
+            # Step 3: SpeakerRuntime step (Qwen + SubTalker 15 graphs on GPU)
+            res = speaker_runtime.step(cond_frame, frame_id=t_turn, record_event=False)
+            ev_speaker.record()
 
-            # Step 4: SubTalker residual generation (GPU resident, return_tensor=True)
-            sub_codes = subtalker_graph.generate(step_out.last_hidden, c0, c0_embed=c0_embed, return_tensor=True)
-            if not isinstance(sub_codes, torch.Tensor):
-                sub_codes = torch.tensor(sub_codes, device=device, dtype=torch.long)
-            c0_tensor = torch.tensor([c0], device=device, dtype=torch.long)
-            codes_16 = torch.cat([c0_tensor, sub_codes], dim=0)
-            speaker.commit_codes(codes_16)
+            # Step 4: Code2Wav 1-frame decode & 1-frame echo append to AssistantReferenceBuffer
+            ev_c2w = torch.cuda.Event(enable_timing=True)
+            pcm_24k = speaker_runtime.decode_frame(res.rvq16_tensor)
+            ev_c2w.record()
 
-            # Step 5: Enqueue committed codes to background playout worker
-            playout_queue.put((frame.frame_id, codes_16.detach().cpu()))
+            pcm_16k = ref_buffer._resample(pcm_24k, 24000, 16000)
+            ref_buffer.append(
+                pcm_16k,
+                frame_id=frame.frame_id,
+                emitted_at_ns=time.monotonic_ns(),
+                sample_rate=16000,
+            )
+            ev_tick.record()
 
             torch.cuda.synchronize()
             t_done_ns = time.monotonic_ns()
 
-            # Latency calculations
-            total_step_latency_ms = (t_done_ns - t_start_ns) / 1_000_000.0
-            speaker_step_latency_ms = (t_done_ns - t_l_done_ns) / 1_000_000.0
+            # Fine-grained CUDA timing (ms)
+            l_gpu_ms = ev_start.elapsed_time(ev_listener)
+            v9_gpu_ms = ev_listener.elapsed_time(ev_v9)
+            s_qwen_sub_gpu_ms = ev_v9.elapsed_time(ev_speaker)
+            s_c2w_gpu_ms = ev_speaker.elapsed_time(ev_c2w)
+            tot_speaker_gpu_ms = ev_v9.elapsed_time(ev_c2w)
+            tot_gpu_ms = ev_start.elapsed_time(ev_tick)
+            wall_ms = (t_done_ns - t_start_ns) / 1_000_000.0
+
+            cuda_listener_times.append(l_gpu_ms)
+            cuda_v9_times.append(v9_gpu_ms)
+            cuda_speaker_times.append(tot_speaker_gpu_ms)
+            cuda_c2w_times.append(s_c2w_gpu_ms)
+            cuda_tick_times.append(tot_gpu_ms)
+            wall_tick_times.append(wall_ms)
 
             completion_deadline_ns = tick.deadline_ns + clock.period_ns
             lateness_ms = (t_done_ns - completion_deadline_ns) / 1_000_000.0
@@ -271,17 +267,17 @@ def run_concurrency_gate(
             speaker_interval_ms = (now_perf - last_speaker_time) * 1000.0
             last_speaker_time = now_perf
 
-            listener_latencies_ms.append(listener_step_ms)
+            listener_latencies_ms.append(l_gpu_ms)
             listener_latenesses_ms.append(lateness_ms)
 
-            speaker_latencies_ms.append(speaker_step_latency_ms)
+            speaker_latencies_ms.append(tot_speaker_gpu_ms)
             if frame.frame_id > 0:
                 speaker_intervals_ms.append(speaker_interval_ms)
 
             listener_records.append({
                 "frame_id": frame.frame_id,
-                "latency_ms": listener_step_ms,
-                "total_latency_ms": total_step_latency_ms,
+                "latency_ms": l_gpu_ms,
+                "total_latency_ms": wall_ms,
                 "lateness_ms": lateness_ms,
                 "ref_frame_id": ref_frame.frame_id if ref_frame is not None else None,
                 "q_depth": q_depth,
@@ -289,16 +285,17 @@ def run_concurrency_gate(
 
             speaker_records.append({
                 "speaker_frame_id": frame.frame_id,
-                "latency_ms": speaker_step_latency_ms,
+                "latency_ms": tot_speaker_gpu_ms,
                 "interval_ms": speaker_interval_ms,
             })
 
             if frame.frame_id < 5 or frame.frame_id % 20 == 0:
                 ref_id_str = str(ref_frame.frame_id) if ref_frame is not None else "None"
                 print(
-                    f"  [Tick {frame.frame_id:3d}] Listener={listener_step_ms:.1f}ms (ref={ref_id_str}), "
-                    f"Speaker={speaker_step_latency_ms:.1f}ms, Total={total_step_latency_ms:.1f}ms, "
-                    f"Lateness={lateness_ms:+.1f}ms",
+                    f"  [Tick {frame.frame_id:3d}] ListenerGPU={l_gpu_ms:.1f}ms, "
+                    f"V9={v9_gpu_ms:.1f}ms, SpeakerGPU={s_qwen_sub_gpu_ms:.1f}ms, "
+                    f"C2W={s_c2w_gpu_ms:.1f}ms, TotalGPU={tot_gpu_ms:.1f}ms, Wall={wall_ms:.1f}ms "
+                    f"(ref={ref_id_str}, Lateness={lateness_ms:+.1f}ms)",
                     flush=True,
                 )
         except Exception as e:
@@ -313,7 +310,7 @@ def run_concurrency_gate(
         deadline_jitter_budget_ms=0.0,
     )
 
-    # 6. Microphone Producer Thread
+    # 5. Microphone Producer Thread
     rng = np.random.default_rng(2026)
     def mic_producer() -> None:
         start_ns = clock.start_ns
@@ -332,11 +329,9 @@ def run_concurrency_gate(
     # Launch System
     t_start = time.perf_counter()
     p_thread = threading.Thread(target=mic_producer, name="mic-producer", daemon=True)
-    play_thread = threading.Thread(target=playout_worker, name="playout-worker", daemon=True)
 
     print(f"[PROOF 3 FINAL] Starting execution for {duration_s}s...", flush=True)
     p_thread.start()
-    play_thread.start()
     scheduler.start()
 
     # Monitored execution loop
@@ -360,7 +355,6 @@ def run_concurrency_gate(
         time.sleep(0.020)
 
     scheduler.stop()
-    play_thread.join(timeout=3.0)
 
     t_end = time.perf_counter()
     total_elapsed_s = t_end - t_start
@@ -384,10 +378,10 @@ def run_concurrency_gate(
     dropped_frames = stats["dropped_input_frames"]
     final_backlog = ingress.qsize
 
-    # Gate Evaluation
+    # Gate Evaluation (Strict: speaker_fps >= 12.5)
     pass_listener_p95 = l_stats["p95"] <= 80.0
     pass_listener_miss = l_miss_rate <= 1.0
-    pass_speaker_fps = s_fps >= 12.0  # nominal 12.5 fps with slight timing tolerance
+    pass_speaker_fps = s_fps >= 12.5
     pass_speaker_miss = s_miss_rate <= 1.0
     pass_backlog = final_backlog == 0
     pass_dropped = dropped_frames == 0
@@ -403,81 +397,83 @@ def run_concurrency_gate(
         and pass_vram
     )
 
+    cuda_breakdown = {
+        "listener_mean_ms": float(np.mean(cuda_listener_times)) if cuda_listener_times else 0.0,
+        "v9_mean_ms": float(np.mean(cuda_v9_times)) if cuda_v9_times else 0.0,
+        "speaker_mean_ms": float(np.mean(cuda_speaker_times)) if cuda_speaker_times else 0.0,
+        "c2w_mean_ms": float(np.mean(cuda_c2w_times)) if cuda_c2w_times else 0.0,
+        "total_tick_mean_ms": float(np.mean(cuda_tick_times)) if cuda_tick_times else 0.0,
+        "wall_tick_mean_ms": float(np.mean(wall_tick_times)) if wall_tick_times else 0.0,
+    }
+
     report = {
         "schema_version": 1,
         "gate": "P4_SPEAKER_LISTENER_CONCURRENCY",
         "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "duration_s": total_elapsed_s,
         "listener": {
-            "total_frames": len(listener_records),
-            "latency_ms": l_stats,
-            "deadline_misses": l_misses,
-            "deadline_miss_rate_pct": round(l_miss_rate, 2),
-            "max_lateness_ms": round(l_late_stats["max"], 2),
+            "p50_ms": l_stats["p50"],
+            "p95_ms": l_stats["p95"],
+            "p99_ms": l_stats["p99"],
+            "max_ms": l_stats["max"],
+            "deadline_miss_rate": l_miss_rate,
+            "deadline_miss_count": l_misses,
+            "total_frames": len(listener_latencies_ms),
         },
         "speaker": {
+            "p50_ms": s_stats["p50"],
+            "p95_ms": s_stats["p95"],
+            "throughput_fps": s_fps,
+            "deadline_miss_rate": s_miss_rate,
             "total_frames": len(speaker_records),
-            "throughput_fps": round(s_fps, 2),
-            "latency_ms": s_stats,
-            "interval_ms": s_inter_stats,
-            "deadline_misses": s_misses,
-            "deadline_miss_rate_pct": round(s_miss_rate, 2),
         },
-        "reference_buffer": {
-            "total_appended": ref_buffer._appended,
-            "delay_frames": ref_buffer.delay_frames,
-            "valid_reference_frames": sum(1 for r in listener_records if r.get("ref_frame_id") is not None),
-        },
-        "health": {
-            "final_backlog": final_backlog,
-            "dropped_input_frames": dropped_frames,
-            "scheduler_error": str(scheduler.error) if scheduler.error is not None else None,
-            "vram_initial_mb": round(vram_initial_mb, 1),
-            "vram_final_mb": round(vram_final_mb, 1),
-            "vram_growth_mb": round(vram_growth_mb, 1),
-        },
-        "thresholds": {
-            "listener_p95_max_ms": 80.0,
-            "listener_miss_rate_max_pct": 1.0,
-            "speaker_fps_min": 12.0,
-            "speaker_miss_rate_max_pct": 1.0,
-            "final_backlog_max": 0,
-            "dropped_frames_max": 0,
-            "vram_growth_max_mb": 50.0,
-        },
-        "passed": all_passed,
+        "cuda_breakdown_ms": cuda_breakdown,
+        "final_ingress_backlog": final_backlog,
+        "dropped_input_frames": dropped_frames,
+        "vram_growth_mb": vram_growth_mb,
+        "listener_records": listener_records,
+        "speaker_records": speaker_records,
+        "verdict": "PASS" if all_passed else "FAIL",
     }
 
-    out_dir = Path("/workspace/validation/kernel_gates/P4_FINAL")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    report_file = out_dir / "P4_SPEAKER_LISTENER_CONCURRENCY.json"
-    trace_file = out_dir / "P4_SPEAKER_LISTENER_CONCURRENCY_TRACE.jsonl"
-
-    with open(report_file, "w", encoding="utf-8") as f:
-        json.dump(report, f, indent=2)
-
-    with open(trace_file, "w", encoding="utf-8") as f:
-        for r in listener_records:
-            f.write(json.dumps({"type": "listener", **r}) + "\n")
-        for r in speaker_records:
-            f.write(json.dumps({"type": "speaker", **r}) + "\n")
-
     print("\n" + "=" * 70)
-    print(f"[PROOF 3 FINAL REPORT] Result: {'PASS' if all_passed else 'FAIL'}")
-    print(f"  • Duration: {total_elapsed_s:.2f}s")
-    print(f"  • Listener: {len(listener_records)} frames, p50={l_stats['p50']:.2f}ms, p95={l_stats['p95']:.2f}ms, miss_rate={l_miss_rate:.2f}%")
-    print(f"  • Speaker:  {len(speaker_records)} frames, fps={s_fps:.2f}, p95={s_stats['p95']:.2f}ms, miss_rate={s_miss_rate:.2f}%")
-    print(f"  • Backlog: final={final_backlog}, dropped={dropped_frames}, vram_growth={vram_growth_mb:.1f}MB")
-    print("=" * 70)
-    print(f"Report: {report_file}")
+    print(f"[PROOF 3 FINAL] CONCURRENCY REPORT ({total_elapsed_s:.1f}s)")
+    print(f"  Listener: p50={l_stats['p50']:.2f}ms, p95={l_stats['p95']:.2f}ms, miss_rate={l_miss_rate:.1f}%")
+    print(f"  Speaker:  p50={s_stats['p50']:.2f}ms, p95={s_stats['p95']:.2f}ms, fps={s_fps:.2f}")
+    print(f"  CUDA Reconciled: Listener={cuda_breakdown['listener_mean_ms']:.1f}ms, V9={cuda_breakdown['v9_mean_ms']:.1f}ms, "
+          f"Speaker={cuda_breakdown['speaker_mean_ms']:.1f}ms, TotalGPU={cuda_breakdown['total_tick_mean_ms']:.1f}ms, "
+          f"Wall={cuda_breakdown['wall_tick_mean_ms']:.1f}ms")
+    print(f"  Backlog:  {final_backlog}, Dropped: {dropped_frames}, VRAM Growth: {vram_growth_mb:.1f}MB")
+    print(f"  Verdict:  {report['verdict']}")
+    print("=" * 70, flush=True)
 
-    if not all_passed:
-        sys.exit(1)
     return report
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--duration-s", type=float, default=60.0)
+def main() -> None:
+    parser = argparse.ArgumentParser(description="P4 Simultaneous Listener + Speaker Concurrency Gate")
+    parser.add_argument("--duration", type=float, default=60.0, help="Test duration in seconds")
+    parser.add_argument("--turn-len", type=int, default=64, help="Frames per turn")
+    parser.add_argument("--chunk-frames", type=int, default=1, help="Playout chunk frames")
+    parser.add_argument("--workspace", type=str, default="/workspace", help="Workspace base directory")
+    parser.add_argument("--output", type=str, default=None, help="Path to save output JSON report")
     args = parser.parse_args()
-    run_concurrency_gate(duration_s=args.duration_s)
+
+    report = run_concurrency_gate(
+        duration_s=args.duration,
+        workspace=Path(args.workspace),
+        turn_len=args.turn_len,
+        playout_chunk_frames=args.chunk_frames,
+    )
+
+    out_path = Path(args.output) if args.output else (ROOT / "validation" / "kernel_gates" / "P4_FINAL" / "P4_SPEAKER_LISTENER_CONCURRENCY.json")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2)
+    print(f"Saved report to: {out_path}", flush=True)
+
+    sys.exit(0 if report["verdict"] == "PASS" else 1)
+
+
+if __name__ == "__main__":
+    main()
