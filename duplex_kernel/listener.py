@@ -8,6 +8,7 @@ returns the last valid Gemma audio embedding for that context.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from collections import deque
@@ -19,6 +20,7 @@ import numpy as np
 from duplex_kernel.gemma_representation import (
     AUDIO_FEATURES_PER_FRAME,
     AUDIO_START_AFTER_TEXT,
+    CANONICAL_LM_PREFILL_TARGET_LEN,
     TEXT_BLOCK_LEN,
     build_audio_placeholder_inputs,
     interleave_duplex_mel,
@@ -35,6 +37,9 @@ MEL_PER_LISTENER_FRAME = 8
 LISTENER_MEL_CHANNELS = 2
 LISTENER_FEATURES_PER_FRAME = AUDIO_FEATURES_PER_FRAME
 LISTENER_TEXT_BLOCK_LEN = TEXT_BLOCK_LEN
+NATIVE_LM_MAX_SEQ_LEN = 2048
+NATIVE_LM_PREFIX_LEN = AUDIO_START_AFTER_TEXT
+NATIVE_LM_FRAME_CAPACITY = (NATIVE_LM_MAX_SEQ_LEN - NATIVE_LM_PREFIX_LEN) // AUDIO_FEATURES_PER_FRAME
 NANOSECONDS = 1_000_000_000
 
 
@@ -69,9 +74,13 @@ class GemmaListenerState:
     # listener frame.  These fields are backend-owned but session-lifetime.
     gemma_lm_cache: Any | None = field(default=None, repr=False, compare=False)
     gemma_lm_shared_kv_states: Any | None = field(default=None, repr=False, compare=False)
+    gemma_lm_native: Any | None = field(default=None, repr=False, compare=False)
     gemma_lm_audio_frames: int = 0
+    # Start of the rolling audio-feature window; never used to reset LM KV.
     gemma_lm_context_start_frame: int = 0
     gemma_lm_text_context: tuple[int, ...] = field(default_factory=tuple, repr=False)
+    gemma_lm_terminal_error: str | None = field(default=None, repr=False, compare=False)
+    native_last_hidden: Any | None = field(default=None, repr=False, compare=False)
     user_pcm_history: deque[np.ndarray] = field(default_factory=deque, repr=False)
     assistant_pcm_history: deque[np.ndarray] = field(default_factory=deque, repr=False)
     user_mel_history: deque[np.ndarray] = field(default_factory=deque, repr=False)
@@ -125,6 +134,22 @@ class GemmaListenerState:
     def invalidate_gemma_lm_state(self) -> None:
         """Discard a partial LM transaction; history will be replayed next tick."""
         with self._lock:
+            native = self.gemma_lm_native
+            native_reusable = native is not None
+            if native is not None:
+                try:
+                    native.reset()
+                except BaseException:
+                    # A failed stream drain means the CUDA context is not safe
+                    # to reuse. Close it best-effort, then preserve the
+                    # original backend exception while leaving state replayable.
+                    native_reusable = False
+                    logger.exception("native Gemma reset fallito; contesto scartato")
+                    try:
+                        native.close()
+                    except BaseException:
+                        logger.exception("chiusura contesto nativo fallita")
+            self.gemma_lm_native = native if native_reusable else None
             self.gemma_lm_cache = None
             self.gemma_lm_shared_kv_states = None
             self.gemma_lm_audio_frames = 0
@@ -136,8 +161,20 @@ class GemmaListenerState:
             self._closed = True
             self.user_pcm_history.clear()
             self.assistant_pcm_history.clear()
-            self.gemma_lm_cache = None
-            self.gemma_lm_shared_kv_states = None
+            self.user_mel_history.clear()
+            self.assistant_mel_history.clear()
+            self.user_pcm_tail = None
+            self.assistant_pcm_tail = None
+            native = self.gemma_lm_native
+            try:
+                if native is not None:
+                    native.close()
+            finally:
+                self.gemma_lm_cache = None
+                self.gemma_lm_shared_kv_states = None
+                self.gemma_lm_native = None
+                self.gemma_lm_terminal_error = None
+                self.native_last_hidden = None
             self.gemma_lm_audio_frames = 0
             self.gemma_lm_context_start_frame = 0
             self.gemma_lm_text_context = ()
@@ -157,14 +194,26 @@ class GemmaListenerState:
             self.last_audio_timestamp = 0
             self.last_reference_frame_id = None
             self.text_token_ids = ()
-            self.gemma_lm_cache = None
-            self.gemma_lm_shared_kv_states = None
+            native = self.gemma_lm_native
+            try:
+                if native is not None:
+                    native.close()
+            finally:
+                self.gemma_lm_cache = None
+                self.gemma_lm_shared_kv_states = None
+                self.gemma_lm_native = None
+                self.gemma_lm_terminal_error = None
+                self.native_last_hidden = None
             self.gemma_lm_audio_frames = 0
             self.gemma_lm_context_start_frame = 0
             self.gemma_lm_text_context = ()
             self.last_hidden = None
             self.user_pcm_history.clear()
             self.assistant_pcm_history.clear()
+            self.user_mel_history.clear()
+            self.assistant_mel_history.clear()
+            self.user_pcm_tail = None
+            self.assistant_pcm_tail = None
             self._closed = False
 
 
@@ -205,6 +254,7 @@ class GemmaAudioTowerBackend:
         processor: Any | None = None,
         device: str | None = None,
         text_token_ids: tuple[int, ...] | list[int] | None = None,
+        use_native_lm: bool | None = None,
     ) -> None:
         wrapper = thinker
         model = getattr(wrapper, "model", wrapper)
@@ -234,13 +284,20 @@ class GemmaAudioTowerBackend:
             for layer in getattr(language_model, "layers", ())
         )
         self._shape_stable_lm = None
+        self._use_native_lm = (
+            bool(use_native_lm)
+            if use_native_lm is not None
+            else os.environ.get("GEMMA4_NATIVE_LISTENER", "0") == "1"
+        )
         self._frame_pad_ple: Any | None = None
         if language_model is not None:
             from duplex_kernel.shape_stable_listener import ShapeStableGemmaListenerLM
 
             # This is a zero-weight-copy functional view.  Its cache/workspace
             # is listener-owned; the normal Thinker keeps its native forward.
-            self._shape_stable_lm = ShapeStableGemmaListenerLM(language_model, target_length=291)
+            self._shape_stable_lm = ShapeStableGemmaListenerLM(
+                language_model, target_length=CANONICAL_LM_PREFILL_TARGET_LEN
+            )
         try:
             import torch
             parameter = next(self.gemma_model.audio_tower.parameters())
@@ -248,6 +305,8 @@ class GemmaAudioTowerBackend:
             self.dtype = parameter.dtype
             self._cuda_graph: Any | None = None
             self._static_features: Any | None = None
+            self._static_shift: Any | None = None
+            self._static_new_slice: Any | None = None
             self._static_mask: Any | None = None
             self._graph_output: Any | None = None
             self._graph_stream: Any | None = None
@@ -269,6 +328,8 @@ class GemmaAudioTowerBackend:
         import torch
         if self._cuda_graph is None and self.multimodal_model is not None:
             self._static_features = torch.zeros((1, 1024, 128), device=self.device, dtype=self.dtype)
+            self._static_shift = torch.empty((1, 1008, 128), device=self.device, dtype=self.dtype)
+            self._static_new_slice = torch.empty((1, 16, 128), device=self.device, dtype=self.dtype)
             self._static_mask = torch.ones((1, 1024), device=self.device, dtype=torch.bool)
             self._graph_stream = torch.cuda.Stream()
             self._graph_stream.wait_stream(torch.cuda.current_stream())
@@ -395,9 +456,86 @@ class GemmaAudioTowerBackend:
         attention: Any,
         positions: Any,
         state: GemmaListenerState,
+        input_ids: Any | None = None,
     ) -> Any:
-        """Run one shape-stable listener-only Gemma LM chunk and commit its KV."""
+        """Run one listener-only Gemma LM chunk and commit its KV.
+
+        The canonical ShapeStable implementation is the default. Set
+        ``GEMMA4_NATIVE_LISTENER=1`` (or pass ``use_native_lm=True``) only
+        after the native BF16 parity gate has been accepted for the deployed
+        checkpoint.
+        """
         import torch
+
+        lm = self.gemma_model.language_model
+        if self._use_native_lm:
+            if state.gemma_lm_terminal_error is not None:
+                raise RuntimeError(
+                    "executor Gemma nativo in stato terminale; chiamare state.reset() "
+                    f"({state.gemma_lm_terminal_error})"
+                )
+            from duplex_kernel.native_listener import NativeGemmaListenerLM
+
+            native = state.gemma_lm_native
+            if native is None:
+                try:
+                    native = NativeGemmaListenerLM(
+                        lm,
+                        max_seq_len=NATIVE_LM_MAX_SEQ_LEN,
+                        stream_q_len=AUDIO_FEATURES_PER_FRAME,
+                    )
+                except BaseException as exc:
+                    state.gemma_lm_terminal_error = str(exc)
+                    raise
+                state.gemma_lm_native = native
+            q_len = int(embeds.shape[1])
+            if q_len == AUDIO_START_AFTER_TEXT:
+                if input_ids is None or attention is None:
+                    raise RuntimeError("prime nativo richiede input_ids e mask canonici")
+                if (
+                    input_ids.ndim != 2
+                    or input_ids.shape[0] != 1
+                    or input_ids.shape[1] < AUDIO_START_AFTER_TEXT
+                    or input_ids.dtype != torch.long
+                    or input_ids.device != embeds.device
+                ):
+                    raise ValueError("input_ids nativi non hanno il prefisso canonico")
+                prefix_ids = input_ids[:, :AUDIO_START_AFTER_TEXT]
+                if int(prefix_ids[0, 0].item()) != self.bos_token_id or int(prefix_ids[0, -1].item()) != self.boa_token_id:
+                    raise ValueError("prefisso nativo privo di BOS/BOA canonici")
+                prefix_attention = attention[:, :AUDIO_START_AFTER_TEXT]
+                expected_mask = torch.zeros_like(prefix_attention, dtype=torch.bool)
+                expected_mask[:, 0] = True
+                expected_mask[:, -1] = True
+                if not bool(torch.equal(prefix_attention.to(dtype=torch.bool), expected_mask)):
+                    raise ValueError("mask nativa non coincide con BOS + 32 slot + BOA")
+                try:
+                    native.reset()
+                    prefix_attention_contiguous = torch.empty(
+                        tuple(prefix_attention.shape), device=self.device, dtype=torch.int64
+                    )
+                    prefix_attention_contiguous.copy_(prefix_attention)
+                    native.prime_async(
+                        embeds,
+                        per_layer,
+                        prefix_attention_contiguous,
+                    )
+                except BaseException as exc:
+                    state.gemma_lm_terminal_error = str(exc)
+                    raise
+                state.gemma_lm_cache = native
+                state.gemma_lm_shared_kv_states = None
+                return native.output_tensor
+            if q_len != AUDIO_FEATURES_PER_FRAME or state.gemma_lm_cache is None:
+                raise RuntimeError("stato nativo Gemma non inizializzato o query non canonica")
+            try:
+                output = native.step_async(embeds)
+            except BaseException as exc:
+                state.gemma_lm_terminal_error = str(exc)
+                raise
+            state.gemma_lm_cache = native
+            state.gemma_lm_shared_kv_states = None
+            return output
 
         if self._shape_stable_lm is None:
             raise RuntimeError("runtime LM shape-stable non disponibile")
@@ -461,8 +599,11 @@ class GemmaAudioTowerBackend:
             attention=stable_attention,
             positions=torch.arange(AUDIO_START_AFTER_TEXT, device=self.device, dtype=torch.long),
             state=state,
+            input_ids=input_ids,
         )
         state.gemma_lm_text_context = text_ids
+        state.gemma_lm_terminal_error = None
+        state.gemma_lm_context_start_frame = 0
         state.next_frame_id = 0
 
     def _run_incremental_lm(
@@ -480,8 +621,8 @@ class GemmaAudioTowerBackend:
         its output is a complete fixed context.  The expensive LM stage can
         therefore consume only the newly available four audio soft tokens;
         its DynamicCache and shared-KV side state live in the listener state.
-        A context rollover replays the bounded window frame-by-frame, keeping
-        the same numerical state machine as the offline representation path.
+        The rolling audio feature window does not reset or replay the LM KV:
+        the decoder remains continuous across frame 63/64/65.
         """
         import torch
 
@@ -491,11 +632,14 @@ class GemmaAudioTowerBackend:
         context_start = state.next_frame_id - frame_index
         context_changed = (
             state.gemma_lm_cache is None
+            or (self._use_native_lm and state.gemma_lm_native is None)
             or state.gemma_lm_text_context != text_ids
             or state.gemma_lm_audio_frames != state.next_frame_id
         )
-        stable_attention = attention_mask[:, :AUDIO_START_AFTER_TEXT].to(
-            device=self.device, dtype=torch.long
+        stable_attention = (
+            attention_mask[:, :AUDIO_START_AFTER_TEXT].to(device=self.device, dtype=torch.long)
+            if not (self._use_native_lm and not context_changed)
+            else None
         )
         frame_rows = AUDIO_FEATURES_PER_FRAME
 
@@ -515,6 +659,7 @@ class GemmaAudioTowerBackend:
                 attention=stable_attention,
                 positions=torch.arange(AUDIO_START_AFTER_TEXT, device=self.device, dtype=torch.long),
                 state=state,
+                input_ids=input_ids,
             )
             frame_ple = self._frame_pad_per_layer_inputs(lm)
             for cached_frame in range(frame_index + 1):
@@ -542,18 +687,28 @@ class GemmaAudioTowerBackend:
             state.gemma_lm_text_context = text_ids
             return current_hidden
 
-        start = frame_index * frame_rows
-        frame_audio = audio_soft[:, start:start + frame_rows, :].to(dtype=lm_dtype)
+        if self._use_native_lm and not context_changed:
+            frame_audio = audio_soft
+        else:
+            start = frame_index * frame_rows
+            frame_audio = audio_soft[:, start:start + frame_rows, :]
+        frame_audio = frame_audio.to(dtype=lm_dtype)
+        if tuple(frame_audio.shape) != (1, frame_rows, self.hidden_size):
+            raise RuntimeError(f"frame audio nativo inatteso: {tuple(frame_audio.shape)}")
         frame_ple = self._frame_pad_per_layer_inputs(lm)
-        start_position = AUDIO_START_AFTER_TEXT + state.gemma_lm_audio_frames * frame_rows
-        positions = torch.arange(
-            start_position, start_position + frame_rows,
-            device=self.device, dtype=torch.long,
-        )
-        attention = torch.ones(
-            (1, start_position + frame_rows), device=self.device, dtype=torch.long
-        )
-        attention[:, :AUDIO_START_AFTER_TEXT] = stable_attention
+        if self._use_native_lm:
+            # The C executor owns absolute position and persistent mask state.
+            positions = attention = None
+        else:
+            start_position = AUDIO_START_AFTER_TEXT + state.gemma_lm_audio_frames * frame_rows
+            positions = torch.arange(
+                start_position, start_position + frame_rows,
+                device=self.device, dtype=torch.long,
+            )
+            attention = torch.ones(
+                (1, start_position + frame_rows), device=self.device, dtype=torch.long
+            )
+            attention[:, :AUDIO_START_AFTER_TEXT] = stable_attention
         hidden = self._forward_incremental_lm(
             embeds=frame_audio,
             per_layer=frame_ple,
@@ -578,6 +733,13 @@ class GemmaAudioTowerBackend:
             raise ValueError(
                 f"contesto listener Gemma oltre il massimo attestato di {DEFAULT_CONTEXT_FRAMES} frame"
             )
+        if getattr(self, "_use_native_lm", False) and state.next_frame_id >= NATIVE_LM_FRAME_CAPACITY:
+            message = (
+                "capacità LM nativa esaurita: "
+                f"{NATIVE_LM_FRAME_CAPACITY} frame dopo il prefisso; chiamare state.reset()"
+            )
+            state.gemma_lm_terminal_error = message
+            raise RuntimeError(message)
         target_rows = state.context_frames * MEL_PER_LISTENER_FRAME if canonical else None
         import torch
 
@@ -598,10 +760,20 @@ class GemmaAudioTowerBackend:
             state.user_mel_history.append(u_mel_8)
             state.assistant_mel_history.append(a_mel_8)
             interleaved_8 = interleave_duplex_mel(u_mel_8, a_mel_8)
-            new_slice = torch.from_numpy(interleaved_8).unsqueeze(0).to(self.device, dtype=self.dtype)
-            self._static_features[:, :-16, :] = self._static_features[:, 16:, :].clone()
-            self._static_features[:, -16:, :].copy_(new_slice)
+            if self._static_shift is None or self._static_new_slice is None or self._graph_stream is None:
+                raise RuntimeError("CUDA graph feature workspace non inizializzato")
+            current_stream = torch.cuda.current_stream(device=self.device)
+            # Reuse the fixed feature workspace only after the previous graph
+            # replay has finished, then fence the graph consumer after the
+            # current-stream updates. Both edges are device-side waits.
+            current_stream.wait_stream(self._graph_stream)
+            self._static_shift.copy_(self._static_features[:, 16:, :])
+            self._static_features[:, :-16, :].copy_(self._static_shift)
+            self._static_new_slice.copy_(torch.from_numpy(interleaved_8).unsqueeze(0), non_blocking=True)
+            self._static_features[:, -16:, :].copy_(self._static_new_slice)
+            self._graph_stream.wait_stream(current_stream)
             self._cuda_graph.replay()
+            current_stream.wait_stream(self._graph_stream)
             audio_output = self._graph_output
             interleaved_rows = 1024
         elif canonical and hasattr(state, "user_mel_history") and len(state.user_pcm_history) > 0:
@@ -622,8 +794,14 @@ class GemmaAudioTowerBackend:
             if interleaved.shape[0] == 1024 and self.device.type == "cuda":
                 if self._cuda_graph is None:
                     self._warmup_cuda_graph()
+                if self._graph_stream is None:
+                    raise RuntimeError("CUDA graph stream non inizializzato")
+                current_stream = torch.cuda.current_stream(device=self.device)
+                current_stream.wait_stream(self._graph_stream)
                 self._static_features.copy_(features)
+                self._graph_stream.wait_stream(current_stream)
                 self._cuda_graph.replay()
+                current_stream.wait_stream(self._graph_stream)
                 audio_output = self._graph_output
             else:
                 with torch.inference_mode():
@@ -662,15 +840,37 @@ class GemmaAudioTowerBackend:
             return ListenerBackendOutput(gemma_hidden_t=hidden, audio_tower_hidden=hidden)
 
         text_ids = tuple(getattr(state, "text_token_ids", ())) or self.text_token_ids
-        ids, attention = self._build_multimodal_inputs(text_ids, interleaved_rows, device=self.device)
+        native_session_steady = bool(
+            self._use_native_lm
+            and state.gemma_lm_native is not None
+            and state.gemma_lm_cache is not None
+            and state.gemma_lm_text_context == text_ids
+            and state.gemma_lm_audio_frames == state.next_frame_id
+        )
+        if native_session_steady:
+            # The native incremental path consumes only the newest Q=4 rows;
+            # avoid rebuilding full GPU multimodal IDs/masks and boolean-index
+            # temporaries once the persistent LM transaction is established.
+            ids = attention = None
+        else:
+            ids, attention = self._build_multimodal_inputs(
+                text_ids, interleaved_rows, device=self.device
+            )
         pooled = getattr(audio_output, "pooler_output", None)
         valid_mask = getattr(audio_output, "attention_mask", None)
         if pooled is None or valid_mask is None:
             raise RuntimeError("Gemma audio tower non ha restituito pooler_output/mask")
-        valid = pooled[0][valid_mask[0].to(pooled.device)]
-        if valid.numel() == 0 or valid.shape[-1] != self.hidden_size:
-            raise RuntimeError("Gemma audio tower ha restituito hidden vuoto/incompatibile")
-        audio_soft = valid.unsqueeze(0).to(device=self.device, dtype=self.dtype)
+        if native_session_steady:
+            if pooled.ndim != 3 or pooled.shape[1] < AUDIO_FEATURES_PER_FRAME:
+                raise RuntimeError("Gemma audio tower native ha restituito shape inattesa")
+            audio_soft = pooled[:, -AUDIO_FEATURES_PER_FRAME:, :].to(
+                device=self.device, dtype=self.dtype
+            )
+        else:
+            valid = pooled[0][valid_mask[0].to(pooled.device)]
+            if valid.numel() == 0 or valid.shape[-1] != self.hidden_size:
+                raise RuntimeError("Gemma audio tower ha restituito hidden vuoto/incompatibile")
+            audio_soft = valid.unsqueeze(0).to(device=self.device, dtype=self.dtype)
 
         # 3. Multimodal LM forward (inside lock with dedicated GPU)
         t_before_lock = time.perf_counter()
@@ -689,8 +889,6 @@ class GemmaAudioTowerBackend:
             self._lock.release()
         if hidden.shape[-1] != self.hidden_size:
             raise RuntimeError(f"hidden Gemma multimodale inatteso: {tuple(hidden.shape)}")
-        if not bool(torch.isfinite(hidden.sum()).item()):
-            raise RuntimeError("hidden Gemma multimodale non finito")
         return ListenerBackendOutput(
             gemma_hidden_t=hidden,
             audio_tower_hidden=audio_soft[0].detach(),
@@ -855,6 +1053,28 @@ class GemmaListener:
                         state.wrong_reference_frames += 1
                     raise
 
+                # Snapshot all rolling histories because encode() advances them
+                # before the LM transaction is known to succeed. This also
+                # restores a frame evicted by a full deque on failure.
+                user_pcm_before = tuple(state.user_pcm_history)
+                assistant_pcm_before = tuple(state.assistant_pcm_history)
+                user_mel_before = tuple(state.user_mel_history)
+                assistant_mel_before = tuple(state.assistant_mel_history)
+                user_tail_before = None if state.user_pcm_tail is None else state.user_pcm_tail.copy()
+                assistant_tail_before = None if state.assistant_pcm_tail is None else state.assistant_pcm_tail.copy()
+
+                def restore_feature_state() -> None:
+                    state.user_pcm_history.clear()
+                    state.user_pcm_history.extend(user_pcm_before)
+                    state.assistant_pcm_history.clear()
+                    state.assistant_pcm_history.extend(assistant_pcm_before)
+                    state.user_mel_history.clear()
+                    state.user_mel_history.extend(user_mel_before)
+                    state.assistant_mel_history.clear()
+                    state.assistant_mel_history.extend(assistant_mel_before)
+                    state.user_pcm_tail = user_tail_before
+                    state.assistant_pcm_tail = assistant_tail_before
+
                 # Commit the causal input context before calling the backend.  The
                 # state is locked, so the backend sees a coherent aligned pair.
                 state.user_pcm_history.append(user)
@@ -871,26 +1091,34 @@ class GemmaListener:
                         hidden = encoded
                         audio_tower_hidden = None
                 except BaseException:
-                    state.user_pcm_history.pop()
-                    state.assistant_pcm_history.pop()
+                    restore_feature_state()
                     # The functional LM may have appended part of the failing
                     # chunk before an exception.  Never reuse that partial cache:
                     # the next valid tick will deterministically replay history.
                     state.invalidate_gemma_lm_state()
                     state.dropped_listener_frames += 1
                     raise
-                finite, nonempty = self._hidden_health(hidden)
+                native_fast_path = bool(
+                    getattr(self.backend, "_use_native_lm", False)
+                    and state.gemma_lm_native is not None
+                )
+                if native_fast_path:
+                    # Native step_async has a persistent output tensor. Avoid a
+                    # scalar GPU reduction/readback in the frame hot path;
+                    # native launch/lifecycle errors remain fail-closed.
+                    finite = True
+                    nonempty = int(hidden.numel()) > 0
+                else:
+                    finite, nonempty = self._hidden_health(hidden)
                 if not nonempty:
                     state.empty_hidden_count += 1
-                    state.user_pcm_history.pop()
-                    state.assistant_pcm_history.pop()
+                    restore_feature_state()
                     state.invalidate_gemma_lm_state()
                     state.dropped_listener_frames += 1
                     raise RuntimeError("listener hidden vuoto")
                 if not finite:
                     state.nonfinite_hidden_count += 1
-                    state.user_pcm_history.pop()
-                    state.assistant_pcm_history.pop()
+                    restore_feature_state()
                     state.invalidate_gemma_lm_state()
                     state.dropped_listener_frames += 1
                     raise RuntimeError("listener hidden non finito")
@@ -902,7 +1130,20 @@ class GemmaListener:
                 state.last_audio_timestamp = state.next_frame_id * self.frame_duration_ms * 1_000_000
                 state.last_reference_frame_id = None if reference is None else reference.frame_id
                 if hasattr(hidden, "detach"):
-                    state.last_hidden = hidden.detach().clone()
+                    detached_hidden = hidden.detach()
+                    if native_fast_path:
+                        import torch
+                        if (
+                            state.native_last_hidden is None
+                            or state.native_last_hidden.shape != detached_hidden.shape
+                            or state.native_last_hidden.device != detached_hidden.device
+                            or state.native_last_hidden.dtype != detached_hidden.dtype
+                        ):
+                            state.native_last_hidden = torch.empty_like(detached_hidden)
+                        state.native_last_hidden.copy_(detached_hidden, non_blocking=True)
+                        state.last_hidden = state.native_last_hidden
+                    else:
+                        state.last_hidden = detached_hidden.clone()
                 else:
                     state.last_hidden = np.array(hidden, copy=True)
                 return ListenerOutput(

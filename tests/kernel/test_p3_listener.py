@@ -97,6 +97,53 @@ def test_canonical_gemma_listener_rejects_context_above_attested_window() -> Non
         backend.encode(zero, None, state)
 
 
+def test_state_reset_clears_audio_feature_history_and_tails() -> None:
+    state = GemmaListenerState()
+    feature = np.ones((8, 128), dtype=np.float32)
+    state.user_mel_history.append(feature)
+    state.assistant_mel_history.append(feature)
+    state.user_pcm_tail = np.ones(160, dtype=np.float32)
+    state.assistant_pcm_tail = np.ones(160, dtype=np.float32)
+
+    state.reset()
+
+    assert not state.user_mel_history
+    assert not state.assistant_mel_history
+    assert state.user_pcm_tail is None
+    assert state.assistant_pcm_tail is None
+
+
+def test_listener_failure_restores_audio_feature_history() -> None:
+    class _FailingAfterFeatureBackend:
+        def encode(self, _user_pcm, _assistant_reference, state):
+            state.user_mel_history.append(np.full((8, 128), 2.0, dtype=np.float32))
+            state.assistant_mel_history.append(np.full((8, 128), 3.0, dtype=np.float32))
+            state.user_pcm_tail = np.full(160, 4.0, dtype=np.float32)
+            state.assistant_pcm_tail = np.full(160, 5.0, dtype=np.float32)
+            raise RuntimeError("errore dopo feature")
+
+    state = GemmaListenerState(context_frames=2)
+    state.user_pcm_history.extend((np.full(FRAME_SAMPLES, 0.0, dtype=np.float32), np.full(FRAME_SAMPLES, 1.0, dtype=np.float32)))
+    state.assistant_pcm_history.extend((np.full(FRAME_SAMPLES, 10.0, dtype=np.float32), np.full(FRAME_SAMPLES, 11.0, dtype=np.float32)))
+    original_user = np.full((8, 128), 6.0, dtype=np.float32)
+    original_assistant = np.full((8, 128), 7.0, dtype=np.float32)
+    state.user_mel_history.append(original_user)
+    state.assistant_mel_history.append(original_assistant)
+    state.user_pcm_tail = np.full(160, 8.0, dtype=np.float32)
+    state.assistant_pcm_tail = np.full(160, 9.0, dtype=np.float32)
+    listener = GemmaListener(backend=_FailingAfterFeatureBackend())
+
+    with pytest.raises(RuntimeError, match="errore dopo feature"):
+        listener.step(np.zeros(FRAME_SAMPLES, dtype=np.float32), None, state)
+
+    np.testing.assert_array_equal(list(state.user_pcm_history), [np.full(FRAME_SAMPLES, 0.0), np.full(FRAME_SAMPLES, 1.0)])
+    np.testing.assert_array_equal(list(state.assistant_pcm_history), [np.full(FRAME_SAMPLES, 10.0), np.full(FRAME_SAMPLES, 11.0)])
+    np.testing.assert_array_equal(state.user_mel_history[0], original_user)
+    np.testing.assert_array_equal(state.assistant_mel_history[0], original_assistant)
+    np.testing.assert_array_equal(state.user_pcm_tail, np.full(160, 8.0, dtype=np.float32))
+    np.testing.assert_array_equal(state.assistant_pcm_tail, np.full(160, 9.0, dtype=np.float32))
+
+
 def test_listener_failure_discards_partial_listener_lm_cache() -> None:
     class _FailingBackend:
         def encode(self, _user_pcm, _assistant_reference, state):

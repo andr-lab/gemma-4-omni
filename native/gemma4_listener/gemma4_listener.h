@@ -1,0 +1,195 @@
+/*
+ * gemma4_listener.h — C ABI for DS4-style Gemma 4 Native Listener Executor.
+ *
+ * Model-specific, device-resident, zero-allocation native GPU execution for Gemma 4 E2B.
+ * Conforms to P4-NATIVE Implementation Plan §6 & §7.
+ */
+#ifndef GEMMA4_LISTENER_H
+#define GEMMA4_LISTENER_H
+
+#include <stdint.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <cuda_runtime.h>
+#include "generated_topology.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Opaque context handle */
+typedef struct gemma4_listener_ctx gemma4_listener_ctx;
+
+#define GEMMA4_MAX_STREAM_SCORE_KEYS 4096
+#define GEMMA4_TENSOR_META_MAX_RANK 4
+#define GEMMA4_GLOBAL_WEIGHT_META_COUNT 3
+#define GEMMA4_LAYER_WEIGHT_META_COUNT 17
+#define GEMMA4_WEIGHT_META_COUNT (GEMMA4_GLOBAL_WEIGHT_META_COUNT + GEMMA4_NUM_LAYERS * GEMMA4_LAYER_WEIGHT_META_COUNT)
+
+typedef enum {
+    GEMMA4_META_BF16 = 1,
+    GEMMA4_META_INT64 = 2,
+} gemma4_tensor_dtype;
+
+/* Host-side descriptor used only for synchronous preflight.  The native
+ * executor copies no caller-owned descriptor and never retains this pointer. */
+typedef struct {
+    const void *ptr;
+    uint32_t dtype;
+    uint32_t ndim;
+    uint32_t contiguous;
+    uint32_t reserved;
+    uint64_t dims[GEMMA4_TENSOR_META_MAX_RANK];
+    uint64_t strides[GEMMA4_TENSOR_META_MAX_RANK];
+} gemma4_tensor_meta;
+
+/* Configuration for context creation */
+typedef struct {
+    uint32_t max_seq_len;         /* e.g. 2048 or 4096 (bounded by score workspace) */
+    uint32_t stream_q_len;        /* exactly 4 soft tokens per frame */
+    bool enable_cuda_graph;       /* capture & replay steady-state graph islands */
+    void *output_tensor_ptr;      /* optional preallocated [1, stream_q_len, hidden_size] BF16 */
+    const void *frame_pad_ple_ptr;/* precomputed [1, stream_q_len, num_layers, ple_dim] BF16 token identities */
+    const gemma4_tensor_meta *weight_meta; /* exactly GEMMA4_WEIGHT_META_COUNT host descriptors */
+    uint32_t weight_meta_count;
+    const gemma4_tensor_meta *output_meta; /* descriptor for output_tensor_ptr, or NULL with NULL output */
+    const gemma4_tensor_meta *frame_pad_ple_meta;
+} gemma4_listener_config;
+
+/* Per-layer weights registered from PyTorch (BF16, device pointers, zero duplication) */
+typedef struct {
+    const void *input_norm_w;         /* [hidden_size] */
+    const void *post_attn_norm_w;     /* [hidden_size] */
+    const void *pre_ff_norm_w;        /* [hidden_size] */
+    const void *post_ff_norm_w;       /* [hidden_size] */
+
+    const void *q_proj_w;             /* [num_heads * head_dim, hidden_size] */
+    const void *k_proj_w;             /* [num_kv_heads * head_dim, hidden_size] or NULL */
+    const void *v_proj_w;             /* [num_kv_heads * head_dim, hidden_size] or NULL */
+    const void *o_proj_w;             /* [hidden_size, num_heads * head_dim] */
+
+    const void *q_norm_w;             /* [head_dim] */
+    const void *k_norm_w;             /* [head_dim] or NULL */
+    const void *v_norm_w;             /* [head_dim] or NULL */
+
+    const void *gate_proj_w;          /* [intermediate_size, hidden_size] */
+    const void *up_proj_w;            /* [intermediate_size, hidden_size] */
+    const void *down_proj_w;          /* [hidden_size, intermediate_size] */
+
+    const void *ple_gate_w;           /* [ple_dim, hidden_size] */
+    const void *ple_proj_w;           /* [hidden_size, ple_dim] */
+    const void *ple_norm_w;           /* [hidden_size] */
+} gemma4_layer_weights;
+
+/* Global model weights */
+typedef struct {
+    const void *final_norm_w;                 /* [hidden_size] */
+    const void *per_layer_model_proj_w;       /* [num_layers * ple_dim, hidden_size] */
+    const void *per_layer_proj_norm_w;        /* [ple_dim] */
+    float per_layer_model_proj_scale;
+    float per_layer_input_scale;
+
+    gemma4_layer_weights layers[GEMMA4_NUM_LAYERS];
+} gemma4_listener_weights;
+
+/* Context Lifecycle API */
+int gemma4_listener_create(
+    const gemma4_listener_config *config,
+    const gemma4_listener_weights *weights,
+    gemma4_listener_ctx **out_ctx
+);
+
+/* Asynchronously prime canonical prompt / prefix (34 tokens: BOS + 32 text slots + BOA). */
+int gemma4_listener_prime_async(
+    gemma4_listener_ctx *ctx,
+    const void *prefix_embeds,       /* [1, prefix_len, hidden_size] BF16 */
+    const gemma4_tensor_meta *prefix_embeds_meta,
+    const void *prefix_ple,          /* [1, prefix_len, num_layers, ple_dim] BF16 */
+    const gemma4_tensor_meta *prefix_ple_meta,
+    const int64_t *prefix_attention, /* [1, prefix_len], CUDA int64 0/1 mask */
+    const gemma4_tensor_meta *prefix_attention_meta,
+    uint32_t prefix_len,             /* exactly GEMMA4_CANONICAL_PREFIX_LEN */
+    cudaStream_t stream
+);
+
+int gemma4_listener_prime_debug(
+    gemma4_listener_ctx *ctx,
+    const void *prefix_embeds,
+    const gemma4_tensor_meta *prefix_embeds_meta,
+    const void *prefix_ple,
+    const gemma4_tensor_meta *prefix_ple_meta,
+    const int64_t *prefix_attention,
+    const gemma4_tensor_meta *prefix_attention_meta,
+    uint32_t prefix_len,
+    uint32_t num_layers,
+    bool apply_final_norm,
+    cudaStream_t stream
+);
+
+/* Asynchronously execute one 80 ms audio frame (Q=4 soft tokens).
+ * Calls in one primed context must use the same CUDA stream; reset() is the
+ * explicit boundary for switching streams.  This avoids implicit sync while
+ * keeping ordering fail-closed. */
+int gemma4_listener_step_async(
+    gemma4_listener_ctx *ctx,
+    const void *frame_audio_soft, /* [1, 4, hidden_size] BF16 (dynamic pointer, copied D2D) */
+    const gemma4_tensor_meta *frame_audio_soft_meta,
+    cudaStream_t stream
+);
+
+/* Debug execution of first num_layers layers (writes ctx->d_hidden_a directly to output_tensor if !apply_final_norm) */
+int gemma4_listener_step_debug(
+    gemma4_listener_ctx *ctx,
+    const void *frame_audio_soft,
+    const gemma4_tensor_meta *frame_audio_soft_meta,
+    uint32_t num_layers,
+    bool apply_final_norm,
+    cudaStream_t stream
+);
+
+
+/* Returns pointer to stable device output tensor [1, 4, hidden_size] BF16 */
+const void *gemma4_listener_output_ptr(
+    gemma4_listener_ctx *ctx
+);
+
+/* Returns pointer to named internal device scratch buffer for debugging */
+const void *gemma4_listener_debug_ptr(
+    gemma4_listener_ctx *ctx,
+    const char *name
+);
+
+
+/* Reset KV cache and state to frame 0 without destroying preallocated memory */
+int gemma4_listener_reset(
+    gemma4_listener_ctx *ctx
+);
+
+/* Destroy context and free preallocated arena */
+void gemma4_listener_destroy(
+    gemma4_listener_ctx *ctx
+);
+
+/* Manifest & ABI validation */
+const char *gemma4_listener_manifest_sha256(void);
+int gemma4_listener_abi_version(void);
+size_t gemma4_listener_abi_config_size(void);
+size_t gemma4_listener_abi_tensor_meta_size(void);
+size_t gemma4_listener_abi_layer_weights_size(void);
+size_t gemma4_listener_abi_weights_size(void);
+/* Returns the number of field offsets and optionally fills a host array. */
+size_t gemma4_listener_abi_config_offsets(size_t *out_offsets, size_t capacity);
+size_t gemma4_listener_abi_tensor_meta_offsets(size_t *out_offsets, size_t capacity);
+size_t gemma4_listener_abi_layer_weights_offsets(size_t *out_offsets, size_t capacity);
+size_t gemma4_listener_abi_weights_offsets(size_t *out_offsets, size_t capacity);
+uint32_t gemma4_listener_current_position(const gemma4_listener_ctx *ctx);
+const void *gemma4_listener_get_cached_k(const gemma4_listener_ctx *ctx, int layer_idx);
+const void *gemma4_listener_get_cached_v(const gemma4_listener_ctx *ctx, int layer_idx);
+/* Explicit lifecycle/diagnostic check; synchronizes last_stream by contract. */
+int gemma4_listener_output_health(gemma4_listener_ctx *ctx, int *out_nonfinite);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* GEMMA4_LISTENER_H */

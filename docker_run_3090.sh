@@ -28,6 +28,8 @@ if [ -t 0 ]; then
     INTERACTIVE_FLAG="-it"
 fi
 
+CUDA_HOST_DIR="$(readlink -f /usr/local/cuda 2>/dev/null || echo /usr/local/cuda)"
+
 # 3. Base Docker arguments
 # Enforcing safety: ipc=host for PyTorch dataloader, non-root user matching host, unprivileged mode, isolated network
 DOCKER_BASE_ARGS=(
@@ -37,7 +39,11 @@ DOCKER_BASE_ARGS=(
     --ipc=host
     --user "$(id -u):$(id -g)"
     -v "${PROJECT_DIR}:/workspace"
+    -v "${CUDA_HOST_DIR}:/usr/local/cuda:ro"
     -e "PIPELINE_ENV=local3090"
+    -e "CUDA_HOME=/usr/local/cuda"
+    -e "PATH=/usr/local/cuda/bin:/opt/conda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    -e "LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
     -e "HF_TOKEN=${HF_TOKEN:-}"
     -e "HF_HOME=/workspace/hf_cache"
     -e "HF_HUB_CACHE=/workspace/hf_cache/hub"
@@ -74,8 +80,17 @@ elif [ "$1" == "serve" ]; then
     echo "[docker_run_3090] Starting Serving API on port 8000..."
     docker run "${DOCKER_BASE_ARGS[@]}" -p 8000:8000 "${IMAGE_NAME}" python run_3090.py --phase serve --port 8000 "$@"
 elif [ "$1" == "bash" ] || [ "$1" == "sh" ]; then
-    echo "[docker_run_3090] Opening interactive bash inside container..."
-    docker run "${DOCKER_BASE_ARGS[@]}" "${IMAGE_NAME}" /bin/bash
+    if [ $# -eq 1 ]; then
+        echo "[docker_run_3090] Opening interactive bash inside container..."
+        docker run "${DOCKER_BASE_ARGS[@]}" "${IMAGE_NAME}" /bin/bash
+    else
+        docker run "${DOCKER_BASE_ARGS[@]}" "${IMAGE_NAME}" "$@"
+    fi
+elif [ "$1" == "python" ] || [ "$1" == "python3" ] || [ "$1" == "exec" ]; then
+    if [ "$1" == "exec" ]; then
+        shift
+    fi
+    docker run "${DOCKER_BASE_ARGS[@]}" "${IMAGE_NAME}" "$@"
 else
     # Forward all custom args directly to run_3090.py
     docker run "${DOCKER_BASE_ARGS[@]}" "${IMAGE_NAME}" python run_3090.py "$@"

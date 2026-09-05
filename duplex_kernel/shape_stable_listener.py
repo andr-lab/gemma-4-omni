@@ -247,7 +247,6 @@ class ShapeStableGemmaListenerLM:
             scaling=attention.scaling,
             sliding_window=attention.sliding_window,
             position_ids=position_ids,
-            is_causal=False,
         )
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         return self._padded_linear(attention.o_proj, attn_output)

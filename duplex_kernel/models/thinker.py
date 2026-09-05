@@ -131,6 +131,16 @@ def load_thinker(
         trust_remote_code=True,
     )
     model.eval()
+    # Preserve the exact source path for native listener checkpoint
+    # attestation; Transformers does not reliably retain `_name_or_path` on
+    # the nested Gemma language model after loading.
+    setattr(model, "_gemma4_checkpoint_path", os.path.abspath(path))
+    nested_model = getattr(model, "model", None)
+    if nested_model is not None:
+        setattr(nested_model, "_gemma4_checkpoint_path", os.path.abspath(path))
+        language_model = getattr(nested_model, "language_model", None)
+        if language_model is not None:
+            setattr(language_model, "_gemma4_checkpoint_path", os.path.abspath(path))
     for p in model.parameters():
         p.requires_grad = False
     logger.info("[thinker] caricato (%.2f GB)", sum(p.numel() for p in model.parameters()) * 2 / 1e9)

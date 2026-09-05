@@ -20,6 +20,9 @@ import torch
 TEXT_BLOCK_LEN = 32
 AUDIO_FEATURES_PER_FRAME = 4
 AUDIO_START_AFTER_TEXT = 2 + TEXT_BLOCK_LEN  # BOA is position 1+TEXT_BLOCK_LEN
+# The listener's canonical shape-stable prefill workspace is part of the
+# numerical contract: changing its GEMM M-shape changes BF16 rounding.
+CANONICAL_LM_PREFILL_TARGET_LEN = 291
 CANONICAL_RAW_STAGE = "pre_causal_conv"
 MEL_BINS = 128
 MEL_PER_FRAME = 8
@@ -197,6 +200,40 @@ def canonical_incremental_lm_hidden(
     hidden_chunks: list[torch.Tensor] = []
     frame_rows = AUDIO_FEATURES_PER_FRAME
 
+    # Prime the canonical prefix as its own transaction. Concatenating the
+    # first frame would change the GEMM M-shape from the attested prefill
+    # contract and would not represent the production listener state machine.
+    from duplex_kernel.shape_stable_listener import ShapeStableGemmaListenerLM
+    from transformers.models.gemma4.modeling_gemma4 import create_masks_for_generate
+
+    shape_stable = ShapeStableGemmaListenerLM(
+        lm,
+        target_length=CANONICAL_LM_PREFILL_TARGET_LEN,
+        stream_length=AUDIO_FEATURES_PER_FRAME,
+    )
+    prefix_positions = torch.arange(audio_start, device=input_ids.device, dtype=torch.long)
+    prefix_position_ids = prefix_positions.view(1, -1).expand(batch_size, -1)
+    prefix_masks = create_masks_for_generate(
+        lm.config,
+        stable_embeds,
+        stable_attention,
+        past_key_values=None,
+        position_ids=prefix_position_ids,
+    )
+    prefix_output = shape_stable.forward(
+        inputs_embeds=stable_embeds,
+        per_layer_inputs=stable_ple,
+        attention_mask=prefix_masks,
+        position_ids=prefix_position_ids,
+        past_key_values=None,
+        shared_kv_states=None,
+    )
+    past = prefix_output.past_key_values
+    shared = prefix_output.shared_kv_states
+    if shared_enabled and shared is None:
+        raise RuntimeError("Gemma LM non ha restituito shared_kv_states")
+    hidden_chunks.append(prefix_output.last_hidden_state)
+
     for frame_index in range(audio_rows // frame_rows):
         start = frame_index * frame_rows
         frame_audio = audio_soft[:, start:start + frame_rows, :].to(dtype=lm_dtype)
@@ -209,28 +246,18 @@ def canonical_incremental_lm_hidden(
         )
         pad_embeds = lm.embed_tokens(pad_ids)
         frame_ple = lm.get_per_layer_inputs(pad_ids, pad_embeds)
-        if frame_index == 0:
-            embeds = torch.cat((stable_embeds, frame_audio), dim=1)
-            per_layer = torch.cat((stable_ple, frame_ple), dim=1)
-            positions = torch.arange(embeds.shape[1], device=input_ids.device, dtype=torch.long)
-            chunk_attention = torch.ones(
-                (batch_size, embeds.shape[1]), device=input_ids.device, dtype=torch.long
-            )
-            chunk_attention[:, :audio_start] = stable_attention
-        else:
-            embeds = frame_audio
-            per_layer = frame_ple
-            start_position = audio_start + start
-            positions = torch.arange(
-                start_position, start_position + frame_rows,
-                device=input_ids.device, dtype=torch.long,
-            )
-            chunk_attention = torch.ones(
-                (batch_size, start_position + frame_rows),
-                device=input_ids.device, dtype=torch.long,
-            )
-            chunk_attention[:, :audio_start] = stable_attention
-        from transformers.models.gemma4.modeling_gemma4 import create_masks_for_generate
+        embeds = frame_audio
+        per_layer = frame_ple
+        start_position = audio_start + start
+        positions = torch.arange(
+            start_position, start_position + frame_rows,
+            device=input_ids.device, dtype=torch.long,
+        )
+        chunk_attention = torch.ones(
+            (batch_size, start_position + frame_rows),
+            device=input_ids.device, dtype=torch.long,
+        )
+        chunk_attention[:, :audio_start] = stable_attention
         position_ids = positions.view(1, -1).expand(batch_size, -1)
         # Gemma4Model.forward constructs this mapping before entering the LM;
         # pass the same native 4-D sliding/full masks instead of asking a
@@ -242,29 +269,21 @@ def canonical_incremental_lm_hidden(
             past_key_values=past,
             position_ids=position_ids,
         )
-        kwargs: dict[str, Any] = {
-            "inputs_embeds": embeds,
-            "per_layer_inputs": per_layer,
-            "attention_mask": mask_mapping,
-            "position_ids": position_ids,
-            "past_key_values": past,
-            "use_cache": True,
-            "return_dict": True,
-        }
-        if shared_enabled:
-            kwargs["return_shared_kv_states"] = True
-            if shared is not None:
-                kwargs["shared_kv_states"] = shared
-        output = lm(**kwargs)
-        next_shared = getattr(output, "shared_kv_states", None)
-        if next_shared is None:
-            next_shared = getattr(output.past_key_values, "shared_layers", None)
+        output = shape_stable.forward(
+            inputs_embeds=embeds,
+            per_layer_inputs=per_layer,
+            attention_mask=mask_mapping,
+            position_ids=position_ids,
+            past_key_values=past,
+            shared_kv_states=shared,
+        )
+        next_shared = output.shared_kv_states
         if shared_enabled and next_shared is None:
             raise RuntimeError("Gemma LM non ha restituito shared_kv_states")
         past = output.past_key_values
         shared = next_shared
-        # The first chunk includes stable text/BOA states for h_text; later
-        # chunks contain only the newly appended audio states.
+        # Prefix and every audio frame remain separate cache transactions;
+        # each chunk contains only the rows produced by that transaction.
         hidden_chunks.append(output.last_hidden_state)
 
     # EOA is causal-after-all-audio and is returned only for shape-compatible
@@ -277,17 +296,23 @@ def canonical_incremental_lm_hidden(
         (batch_size, eoa_position + 1), device=input_ids.device, dtype=torch.long
     )
     eoa_attention[:, :audio_start] = stable_attention
-    eoa_output = lm(
+    eoa_position_ids = torch.full(
+        (batch_size, 1), eoa_position, device=input_ids.device, dtype=torch.long
+    )
+    eoa_masks = create_masks_for_generate(
+        lm.config,
+        eoa_embeds,
+        eoa_attention,
+        past_key_values=past,
+        position_ids=eoa_position_ids,
+    )
+    eoa_output = shape_stable.forward(
         inputs_embeds=eoa_embeds,
         per_layer_inputs=eoa_ple,
-        attention_mask=eoa_attention,
-        position_ids=torch.full(
-            (batch_size, 1), eoa_position, device=input_ids.device, dtype=torch.long
-        ),
+        attention_mask=eoa_masks,
+        position_ids=eoa_position_ids,
         past_key_values=past,
-        use_cache=True,
-        return_dict=True,
-        **({"return_shared_kv_states": True, "shared_kv_states": shared} if shared_enabled else {}),
+        shared_kv_states=shared,
     )
     hidden_chunks.append(eoa_output.last_hidden_state[:, :1, :])
     return torch.cat(hidden_chunks, dim=1), audio_soft
@@ -417,6 +442,7 @@ def select_audio_frame_hidden(
 __all__ = [
     "AUDIO_FEATURES_PER_FRAME",
     "AUDIO_START_AFTER_TEXT",
+    "CANONICAL_LM_PREFILL_TARGET_LEN",
     "CANONICAL_RAW_STAGE",
     "MEL_BINS",
     "MEL_PER_FRAME",
