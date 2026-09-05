@@ -111,6 +111,34 @@ int gemma4_cache_append_async(
 }
 
 /* Advance position counter after all layers finish current step */
+/* Import exact canonical DynamicCache source layers. The caller has already
+ * validated descriptors and device ownership; this function only enqueues
+ * device-to-device copies and updates host-side logical counters. */
+int gemma4_cache_import_async(
+    gemma4_cache *c,
+    const gemma4_imported_cache *imported,
+    uint32_t current_position,
+    cudaStream_t stream
+) {
+    if (!c || !imported || current_position > c->max_seq_len) return -1;
+    for (int layer_idx = 0; layer_idx < GEMMA4_NUM_LAYERS; ++layer_idx) {
+        const GemmaLayerSpec *spec = &gemma4_layers[layer_idx];
+        if (spec->is_kv_shared) continue;
+        const gemma4_imported_kv *source = &imported->layers[layer_idx];
+        const int head_dim = (int)spec->head_dim;
+        const size_t bytes = (size_t)current_position * head_dim * sizeof(__nv_bfloat16);
+        if (cudaMemcpyAsync(
+                c->layers[layer_idx].k_data, source->k_ptr, bytes,
+                cudaMemcpyDeviceToDevice, stream) != cudaSuccess) return -2;
+        if (cudaMemcpyAsync(
+                c->layers[layer_idx].v_data, source->v_ptr, bytes,
+                cudaMemcpyDeviceToDevice, stream) != cudaSuccess) return -2;
+    }
+    c->valid_kv_len = current_position;
+    c->current_pos = current_position;
+    return 0;
+}
+
 int gemma4_cache_advance_position(gemma4_cache *c, int q_len) {
     if (!c || q_len < 0 || c->valid_kv_len > c->max_seq_len ||
         (uint32_t)q_len > c->max_seq_len - c->valid_kv_len) return -1;

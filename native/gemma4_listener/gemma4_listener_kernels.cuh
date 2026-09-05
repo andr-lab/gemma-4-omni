@@ -73,6 +73,19 @@ __device__ __forceinline__ float block_reduce_max(float val) {
 }
 
 /* -------------------------------------------------------------------------
+ * Fixed canonical prefix mask used when importing a ShapeStable cache.
+ * ------------------------------------------------------------------------- */
+__global__ void kernel_set_canonical_prefix_mask(
+    int64_t *mask,
+    int length
+) {
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index < length) {
+        mask[index] = (index == 0 || index == length - 1) ? 1 : 0;
+    }
+}
+
+/* -------------------------------------------------------------------------
  * Exact FP32-Accumulation RMSNorm
  * ------------------------------------------------------------------------- */
 __global__ void kernel_finite_guard_bf16(
@@ -186,17 +199,21 @@ __global__ void kernel_rope_bf16(
     float pos = (float)(base_position + q_idx);
     float freq = pos * inv_freq[pair_idx];
 
-    float cos_val = cosf(freq) * scaling;
-    float sin_val = sinf(freq) * scaling;
+    /* modeling_gemma4 computes cos/sin in FP32, casts them to BF16, then
+     * applies the two pointwise BF16 multiplies and BF16 add/subtract.  Do
+     * not fuse the whole rotation through FP32: that creates a different
+     * rounding boundary and breaks strict parity at the first RoPE tap. */
+    const __nv_bfloat16 cos_bf16 = __float2bfloat16(cosf(freq) * scaling);
+    const __nv_bfloat16 sin_bf16 = __float2bfloat16(sinf(freq) * scaling);
+    const __nv_bfloat16 x1 = x[offset + pair_idx];
+    const __nv_bfloat16 x2 = x[offset + pair_idx + half_dim];
 
-    float x1 = __bfloat162float(x[offset + pair_idx]);
-    float x2 = __bfloat162float(x[offset + pair_idx + half_dim]);
-
-    float rot1 = x1 * cos_val - x2 * sin_val;
-    float rot2 = x2 * cos_val + x1 * sin_val;
-
-    x[offset + pair_idx] = __float2bfloat16(rot1);
-    x[offset + pair_idx + half_dim] = __float2bfloat16(rot2);
+    const __nv_bfloat16 x1_cos = __hmul(x1, cos_bf16);
+    const __nv_bfloat16 x2_sin = __hmul(x2, sin_bf16);
+    const __nv_bfloat16 x2_cos = __hmul(x2, cos_bf16);
+    const __nv_bfloat16 x1_sin = __hmul(x1, sin_bf16);
+    x[offset + pair_idx] = __hsub(x1_cos, x2_sin);
+    x[offset + pair_idx + half_dim] = __hadd(x2_cos, x1_sin);
 }
 
 /* -------------------------------------------------------------------------
@@ -421,11 +438,11 @@ __global__ void kernel_stream_sdpa_q4_bf16(
     for (int qi = 0; qi < 4; ++qi) {
         float inv_s = (s_sum[qi] > 0.0f) ? (1.0f / s_sum[qi]) : 0.0f;
         for (int ki = threadIdx.x; ki < k_visible_len; ki += blockDim.x) {
-            /* The attested Gemma BF16 path rounds softmax probabilities
-             * before the weighted V reduction. */
-            scores[qi * score_capacity + ki] = __bfloat162float(
-                __float2bfloat16(scores[qi * score_capacity + ki] * inv_s)
-            );
+            /* Keep the probability in FP32. PyTorch SDPA's BF16 input path
+             * accumulates softmax and the weighted-V reduction in FP32; a
+             * BF16 probability round here is an extra boundary. */
+            scores[qi * score_capacity + ki] =
+                scores[qi * score_capacity + ki] * inv_s;
         }
     }
     __syncthreads();
@@ -541,8 +558,8 @@ __global__ void kernel_prefill_sdpa_bf16(
     __syncthreads();
 
     for (int i = threadIdx.x; i < visible_keys; i += blockDim.x) {
-        /* Match the attested BF16 probability boundary. */
-        s_scores[i] = __bfloat162float(__float2bfloat16(s_scores[i] * s_inv_sum));
+        /* Keep the probability in FP32 for the weighted-V reduction. */
+        s_scores[i] = s_scores[i] * s_inv_sum;
     }
     __syncthreads();
 

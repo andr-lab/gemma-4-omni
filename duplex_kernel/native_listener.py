@@ -146,6 +146,19 @@ class Gemma4ListenerWeights(ctypes.Structure):
     ]
 
 
+class Gemma4ImportedKV(ctypes.Structure):
+    _fields_ = [
+        ("k_ptr", ctypes.c_void_p),
+        ("k_meta", ctypes.POINTER(Gemma4TensorMeta)),
+        ("v_ptr", ctypes.c_void_p),
+        ("v_meta", ctypes.POINTER(Gemma4TensorMeta)),
+    ]
+
+
+class Gemma4ImportedCache(ctypes.Structure):
+    _fields_ = [("layers", Gemma4ImportedKV * GEMMA4_NUM_LAYERS)]
+
+
 def _find_library() -> str:
     candidates = [
         Path("/workspace/native/gemma4_listener/libgemma4_listener.so"),
@@ -184,6 +197,7 @@ class NativeGemmaListenerLM:
         if self.max_seq_len > 4096:
             raise ValueError("max_seq_len oltre la capacità del kernel SDPA nativo")
         self._pinned_tensors: list[torch.Tensor] = []
+        self._cache_import_tensors: list[torch.Tensor] = []
         self._last_execution_stream: torch.cuda.Stream | None = None
 
         lib_path = _find_library()
@@ -200,12 +214,16 @@ class NativeGemmaListenerLM:
             "tensor_meta": int(self._lib.gemma4_listener_abi_tensor_meta_size()),
             "layer_weights": int(self._lib.gemma4_listener_abi_layer_weights_size()),
             "weights": int(self._lib.gemma4_listener_abi_weights_size()),
+            "imported_kv": int(self._lib.gemma4_listener_abi_imported_kv_size()),
+            "imported_cache": int(self._lib.gemma4_listener_abi_imported_cache_size()),
         }
         expected_abi_sizes = {
             "config": ctypes.sizeof(Gemma4ListenerConfig),
             "tensor_meta": ctypes.sizeof(Gemma4TensorMeta),
             "layer_weights": ctypes.sizeof(Gemma4LayerWeights),
             "weights": ctypes.sizeof(Gemma4ListenerWeights),
+            "imported_kv": ctypes.sizeof(Gemma4ImportedKV),
+            "imported_cache": ctypes.sizeof(Gemma4ImportedCache),
         }
         if abi_sizes != expected_abi_sizes:
             raise RuntimeError(f"layout ABI nativa incompatibile: {abi_sizes} != {expected_abi_sizes}")
@@ -228,6 +246,8 @@ class NativeGemmaListenerLM:
                 "final_norm_w", "per_layer_model_proj_w", "per_layer_proj_norm_w",
                 "per_layer_model_proj_scale", "per_layer_input_scale", "layers",
             )),
+            "imported_kv": (Gemma4ImportedKV, ("k_ptr", "k_meta", "v_ptr", "v_meta")),
+            "imported_cache": (Gemma4ImportedCache, ("layers",)),
         }
         for kind, (struct_type, fields) in abi_fields.items():
             offsets = (ctypes.c_size_t * len(fields))()
@@ -479,6 +499,8 @@ class NativeGemmaListenerLM:
             "gemma4_listener_abi_tensor_meta_size",
             "gemma4_listener_abi_layer_weights_size",
             "gemma4_listener_abi_weights_size",
+            "gemma4_listener_abi_imported_kv_size",
+            "gemma4_listener_abi_imported_cache_size",
         ):
             function = getattr(self._lib, name)
             function.restype = ctypes.c_size_t
@@ -488,6 +510,8 @@ class NativeGemmaListenerLM:
             "gemma4_listener_abi_tensor_meta_offsets",
             "gemma4_listener_abi_layer_weights_offsets",
             "gemma4_listener_abi_weights_offsets",
+            "gemma4_listener_abi_imported_kv_offsets",
+            "gemma4_listener_abi_imported_cache_offsets",
         ):
             function = getattr(self._lib, name)
             function.restype = ctypes.c_size_t
@@ -498,6 +522,28 @@ class NativeGemmaListenerLM:
             ctypes.POINTER(Gemma4ListenerConfig),
             ctypes.POINTER(Gemma4ListenerWeights),
             ctypes.POINTER(ctypes.c_void_p),
+        ]
+
+        self._lib.gemma4_listener_import_cache_async.restype = ctypes.c_int
+        self._lib.gemma4_listener_import_cache_async.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(Gemma4ImportedCache),
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+
+        self._lib.gemma4_listener_debug_execute_layer.restype = ctypes.c_int
+        self._lib.gemma4_listener_debug_execute_layer.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.POINTER(Gemma4TensorMeta),
+            ctypes.c_void_p,
+            ctypes.POINTER(Gemma4TensorMeta),
+            ctypes.POINTER(Gemma4ImportedCache),
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
         ]
 
         self._lib.gemma4_listener_prime_async.restype = ctypes.c_int
@@ -791,6 +837,165 @@ class NativeGemmaListenerLM:
         self._prefix_attention_meta = self._tensor_meta(prefix_attention, dtype_code=2)
         return prefix_len, self._cuda_stream(None)
 
+    def _prepare_imported_cache(
+        self,
+        past_key_values: Any,
+        current_position: int,
+    ) -> tuple[Gemma4ImportedCache, list[Gemma4TensorMeta], list[torch.Tensor]]:
+        layers = getattr(past_key_values, "layers", None)
+        source_layer_count = sum(
+            not bool(getattr(layer.self_attn, "is_kv_shared_layer", False))
+            for layer in self.language_model.layers[:GEMMA4_NUM_LAYERS]
+        )
+        if layers is None or len(layers) < source_layer_count:
+            raise ValueError(
+                "DynamicCache canonica priva dei layer KV sorgente richiesti: "
+                f"{len(layers) if layers is not None else 0} < {source_layer_count}"
+            )
+        get_seq_length = getattr(past_key_values, "get_seq_length", None)
+        if callable(get_seq_length) and int(get_seq_length(0)) != current_position:
+            raise ValueError("DynamicCache canonica con lunghezza inattesa")
+
+        imported = Gemma4ImportedCache()
+        descriptors: list[Gemma4TensorMeta] = []
+        imported_tensors: list[torch.Tensor] = []
+        shared_layers = getattr(past_key_values, "shared_layers", None)
+        for layer_idx in range(GEMMA4_NUM_LAYERS):
+            attention = self.language_model.layers[layer_idx].self_attn
+            if bool(getattr(attention, "is_kv_shared_layer", False)):
+                continue
+            source = None
+            if shared_layers is not None and hasattr(shared_layers, "get"):
+                source = shared_layers.get(layer_idx)
+            if source is None:
+                source_layer = layers[layer_idx]
+                keys = getattr(source_layer, "keys", None)
+                values = getattr(source_layer, "values", None)
+            else:
+                keys, values = source
+            head_dim = int(attention.head_dim)
+            expected_shape = (1, 1, current_position, head_dim)
+            keys = self._canonicalize_cuda_tensor(
+                keys, name=f"cache K layer {layer_idx}", dtype=torch.bfloat16
+            )
+            values = self._canonicalize_cuda_tensor(
+                values, name=f"cache V layer {layer_idx}", dtype=torch.bfloat16
+            )
+            if tuple(keys.shape) != expected_shape or tuple(values.shape) != expected_shape:
+                raise ValueError(
+                    f"cache KV layer {layer_idx} inattesa: "
+                    f"{tuple(keys.shape)}/{tuple(values.shape)} != {expected_shape}"
+                )
+            k_meta = self._tensor_meta(keys, dtype_code=1)
+            v_meta = self._tensor_meta(values, dtype_code=1)
+            descriptors.extend((k_meta, v_meta))
+            entry = imported.layers[layer_idx]
+            entry.k_ptr = int(keys.data_ptr())
+            entry.k_meta = ctypes.pointer(descriptors[-2])
+            entry.v_ptr = int(values.data_ptr())
+            entry.v_meta = ctypes.pointer(descriptors[-1])
+            imported_tensors.extend((keys, values))
+        return imported, descriptors, imported_tensors
+
+    def import_cache_async(
+        self,
+        past_key_values: Any,
+        current_position: int = AUDIO_START_AFTER_TEXT,
+        stream: torch.cuda.Stream | None = None,
+        producer_stream: torch.cuda.Stream | None = None,
+    ) -> None:
+        """Import an exact ShapeStable DynamicCache with D2D K/V copies.
+
+        Only the non-shared source layers are described. Native shared layers
+        already alias sources 13 and 14, matching Gemma's shared-KV topology.
+        Descriptor validation is synchronous, while every K/V payload transfer
+        is device-to-device and ordered on ``stream``.
+        """
+        current_position = int(current_position)
+        if current_position != AUDIO_START_AFTER_TEXT:
+            raise ValueError(
+                f"cache import richiede posizione canonica {AUDIO_START_AFTER_TEXT}, "
+                f"ottenuta {current_position}"
+            )
+        imported, descriptors, imported_tensors = self._prepare_imported_cache(
+            past_key_values, current_position
+        )
+        active_stream = self._resolve_stream(stream, producer_stream)
+        for tensor in imported_tensors:
+            tensor.record_stream(active_stream)
+        c_stream = ctypes.c_void_p(active_stream.cuda_stream)
+        ret = self._lib.gemma4_listener_import_cache_async(
+            self._ctx,
+            ctypes.byref(imported),
+            ctypes.c_uint32(current_position),
+            c_stream,
+        )
+        if ret != 0:
+            raise RuntimeError(f"gemma4_listener_import_cache_async failed with code {ret}")
+        self._cache_import_tensors = imported_tensors
+        self._last_execution_stream = active_stream
+
+    def debug_execute_layer(
+        self,
+        layer_idx: int,
+        hidden_input: torch.Tensor,
+        projected_ple: torch.Tensor,
+        past_key_values: Any,
+        current_position: int = AUDIO_START_AFTER_TEXT,
+        query_position: int = AUDIO_START_AFTER_TEXT,
+        stream: torch.cuda.Stream | None = None,
+        producer_stream: torch.cuda.Stream | None = None,
+    ) -> torch.Tensor:
+        """Execute one layer from exact oracle hidden/PLE/KV tensors.
+
+        This is diagnostic only: it does not advance ``current_position`` or
+        mark the context primed. Reset the context between independent probes.
+        """
+        layer_idx = int(layer_idx)
+        if not 0 <= layer_idx < GEMMA4_NUM_LAYERS:
+            raise ValueError(f"layer_idx inatteso: {layer_idx}")
+        hidden_input = self._canonicalize_cuda_tensor(
+            hidden_input, name="debug hidden_input", dtype=torch.bfloat16
+        )
+        projected_ple = self._canonicalize_cuda_tensor(
+            projected_ple, name="debug projected_ple", dtype=torch.bfloat16
+        )
+        if tuple(hidden_input.shape) != (1, self.stream_q_len, GEMMA4_HIDDEN_SIZE):
+            raise ValueError(f"debug hidden_input inatteso: {tuple(hidden_input.shape)}")
+        expected_ple = (
+            1, self.stream_q_len, GEMMA4_NUM_LAYERS, GEMMA4_PLE_DIM
+        )
+        if tuple(projected_ple.shape) != expected_ple:
+            raise ValueError(f"debug projected_ple inatteso: {tuple(projected_ple.shape)}")
+        imported, descriptors, imported_tensors = self._prepare_imported_cache(
+            past_key_values, int(current_position)
+        )
+        # Keep descriptor storage alive until the C ABI call returns.
+        active_stream = self._resolve_stream(stream, producer_stream)
+        for tensor in (*imported_tensors, hidden_input, projected_ple):
+            tensor.record_stream(active_stream)
+        hidden_meta = self._tensor_meta(hidden_input, dtype_code=1)
+        ple_meta = self._tensor_meta(projected_ple, dtype_code=1)
+        c_stream = ctypes.c_void_p(active_stream.cuda_stream)
+        ret = self._lib.gemma4_listener_debug_execute_layer(
+            self._ctx,
+            ctypes.c_uint32(layer_idx),
+            ctypes.c_void_p(hidden_input.data_ptr()),
+            ctypes.byref(hidden_meta),
+            ctypes.c_void_p(projected_ple.data_ptr()),
+            ctypes.byref(ple_meta),
+            ctypes.byref(imported),
+            ctypes.c_uint32(int(current_position)),
+            ctypes.c_uint32(int(query_position)),
+            c_stream,
+        )
+        if ret != 0:
+            raise RuntimeError(f"gemma4_listener_debug_execute_layer failed with code {ret}")
+        self._cache_import_tensors = imported_tensors
+        self._last_execution_stream = active_stream
+        self.output_tensor.record_stream(active_stream)
+        return self.output_tensor
+
     def prime_async(
         self,
         prefix_embeds: torch.Tensor,
@@ -1018,6 +1223,7 @@ class NativeGemmaListenerLM:
         ret = self._lib.gemma4_listener_reset(self._ctx)
         if ret != 0:
             raise RuntimeError(f"gemma4_listener_reset failed with code {ret}")
+        self._cache_import_tensors = []
         self._last_execution_stream = None
 
     def verify_output_health(self) -> bool:
@@ -1041,6 +1247,7 @@ class NativeGemmaListenerLM:
             self._lib.gemma4_listener_destroy(ctx)
             self._ctx = None
         self._pinned_tensors.clear()
+        self._cache_import_tensors.clear()
         self._last_execution_stream = None
 
     def __del__(self) -> None:
@@ -1052,4 +1259,11 @@ class NativeGemmaListenerLM:
             self._ctx = None
 
 
-__all__ = ["NativeGemmaListenerLM", "Gemma4TensorMeta", "Gemma4ListenerConfig", "Gemma4ListenerWeights"]
+__all__ = [
+    "NativeGemmaListenerLM",
+    "Gemma4TensorMeta",
+    "Gemma4ListenerConfig",
+    "Gemma4ListenerWeights",
+    "Gemma4ImportedKV",
+    "Gemma4ImportedCache",
+]

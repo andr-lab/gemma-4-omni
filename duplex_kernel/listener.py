@@ -510,16 +510,31 @@ class GemmaAudioTowerBackend:
                 if not bool(torch.equal(prefix_attention.to(dtype=torch.bool), expected_mask)):
                     raise ValueError("mask nativa non coincide con BOS + 32 slot + BOA")
                 try:
-                    native.reset()
-                    prefix_attention_contiguous = torch.empty(
-                        tuple(prefix_attention.shape), device=self.device, dtype=torch.int64
-                    )
-                    prefix_attention_contiguous.copy_(prefix_attention)
-                    native.prime_async(
+                    if self._shape_stable_lm is None:
+                        raise RuntimeError("import cache nativo richiede ShapeStableGemmaListenerLM")
+                    from transformers.models.gemma4.modeling_gemma4 import create_masks_for_generate
+
+                    prefix_position_ids = torch.arange(
+                        AUDIO_START_AFTER_TEXT, device=self.device, dtype=torch.long
+                    ).view(1, -1)
+                    prefix_masks = create_masks_for_generate(
+                        self.gemma_model.config,
                         embeds,
-                        per_layer,
-                        prefix_attention_contiguous,
+                        prefix_attention,
+                        past_key_values=None,
+                        position_ids=prefix_position_ids,
                     )
+                    with torch.inference_mode():
+                        canonical_prefix = self._shape_stable_lm.forward(
+                            inputs_embeds=embeds,
+                            per_layer_inputs=per_layer,
+                            attention_mask=prefix_masks,
+                            position_ids=prefix_position_ids,
+                            past_key_values=None,
+                            shared_kv_states=None,
+                        )
+                    native.reset()
+                    native.import_cache_async(canonical_prefix.past_key_values)
                 except BaseException as exc:
                     state.gemma_lm_terminal_error = str(exc)
                     raise

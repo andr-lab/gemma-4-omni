@@ -30,8 +30,16 @@ def main():
     samples = np.asarray([start.elapsed_time(end) for start, end in zip(starts, ends)])
     print({
         "mean_ms": float(samples.mean()),
+        "p50_ms": float(np.percentile(samples, 50)),
         "p95_ms": float(np.percentile(samples, 95)),
+        "p99_ms": float(np.percentile(samples, 99)),
         "frames": len(samples),
         "final_position": native.current_position,
+        # Static launch accounting for one Q=4 step in the current executor:
+        # 15 non-shared layers * 27 + 20 shared layers * 22, plus four PLE
+        # projection launches, final norm, health memset, finite guard and
+        # persistent input copy. D2D KV append copies are reported separately.
+        "kernel_launches_per_frame": 853,
+        "d2d_copy_ops_per_frame": 31,
     })
 if __name__=="__main__": main()

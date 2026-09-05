@@ -20,6 +20,7 @@
 typedef struct gemma4_cache gemma4_cache;
 int gemma4_cache_create(gemma4_cache **out_cache, uint32_t max_seq_len);
 int gemma4_cache_append_async(gemma4_cache *c, int layer_idx, const __nv_bfloat16 *new_k, const __nv_bfloat16 *new_v, int q_len, cudaStream_t stream);
+int gemma4_cache_import_async(gemma4_cache *c, const gemma4_imported_cache *imported, uint32_t current_position, cudaStream_t stream);
 int gemma4_cache_advance_position(gemma4_cache *c, int q_len);
 void gemma4_cache_get_ptrs(const gemma4_cache *c, int layer_idx, int q_len, uint32_t base_pos, const __nv_bfloat16 **out_k, const __nv_bfloat16 **out_v, int *out_total_len, int *out_start_offset);
 int gemma4_cache_reset(gemma4_cache *c);
@@ -45,6 +46,7 @@ struct gemma4_listener_ctx {
     bool primed;
     bool poisoned;
     cudaStream_t last_stream;
+    bool debug_capture_enabled;
 
     /* Fixed Preallocated Device Scratch Arena */
     __nv_bfloat16 *d_hidden_a;        /* [q_max, 1536] */
@@ -70,6 +72,14 @@ struct gemma4_listener_ctx {
     __nv_bfloat16 *d_output_tensor;   /* [4, 1536] persistent user output */
     int *d_output_health;              /* device flag: non-finite output observed */
     bool owns_output_tensor;
+
+    /* Diagnostic-only tensor taps. Each slot stores one contiguous Q=4
+     * tensor; widths are overprovisioned for the selected layer's topology. */
+    __nv_bfloat16 *d_debug_hidden_taps; /* 16 * [4, 1536] */
+    __nv_bfloat16 *d_debug_q_taps;      /* 4 * [4, 4096] */
+    __nv_bfloat16 *d_debug_kv_taps;     /* 5 * [4, 512] */
+    __nv_bfloat16 *d_debug_ffn_taps;    /* 4 * [4, 12288] */
+    __nv_bfloat16 *d_debug_ple_taps;    /* 3 * [4, 256] */
 
     /* CUDA Graph handle for steady-state step */
     bool graph_captured;
@@ -140,6 +150,30 @@ static bool validate_tensor_meta(
     return true;
 }
 
+static int validate_imported_cache_metadata(
+    const gemma4_imported_cache *imported,
+    uint32_t current_position,
+    int current_device
+) {
+    if (!imported || current_position == 0) return -1;
+    for (int layer_idx = 0; layer_idx < GEMMA4_NUM_LAYERS; ++layer_idx) {
+        const GemmaLayerSpec *spec = &gemma4_layers[layer_idx];
+        const gemma4_imported_kv *source = &imported->layers[layer_idx];
+        if (spec->is_kv_shared) {
+            if (source->k_ptr || source->k_meta || source->v_ptr || source->v_meta) return -1;
+            continue;
+        }
+        const uint64_t dims[] = {1, 1, current_position, spec->head_dim};
+        if (!validate_tensor_meta(
+                source->k_meta, source->k_ptr, current_device,
+                GEMMA4_META_BF16, 4, dims) ||
+            !validate_tensor_meta(
+                source->v_meta, source->v_ptr, current_device,
+                GEMMA4_META_BF16, 4, dims)) return -1;
+    }
+    return 0;
+}
+
 static bool validate_layer_device_pointers(
     const gemma4_layer_weights *weights,
     const GemmaLayerSpec *spec,
@@ -171,6 +205,25 @@ static bool validate_layer_device_pointers(
 /* Device-side output guard. Non-finite values are replaced with zero and
  * recorded in a persistent device flag; host inspection is an explicit
  * non-steady-state health operation. */
+static int debug_snapshot_bf16(
+    gemma4_listener_ctx *ctx,
+    __nv_bfloat16 *base,
+    int slot,
+    int slot_elements,
+    const __nv_bfloat16 *source,
+    int elements,
+    cudaStream_t stream
+) {
+    if (!ctx || !ctx->debug_capture_enabled) return 0;
+    if (!base || !source || slot < 0 || elements < 0 ||
+        elements > slot_elements || slot_elements <= 0) return -1;
+    __nv_bfloat16 *destination = base + (size_t)slot * slot_elements;
+    return cudaMemcpyAsync(
+        destination, source, (size_t)elements * sizeof(__nv_bfloat16),
+        cudaMemcpyDeviceToDevice, stream
+    ) == cudaSuccess ? 0 : -2;
+}
+
 static int guard_output_finite(
     gemma4_listener_ctx *ctx,
     __nv_bfloat16 *output,
@@ -243,6 +296,9 @@ static int execute_layer(
     int intermediate_size = spec->intermediate_size;
 
     /* 1. Input RMSNorm: norm(hidden_a) -> norm_buf */
+    if (debug_snapshot_bf16(ctx, ctx->d_debug_hidden_taps, 0,
+                             GEMMA4_STREAM_Q_LEN * GEMMA4_HIDDEN_SIZE,
+                             ctx->d_hidden_a, q_len * hidden_size, stream) != 0) return -7;
     kernel_rmsnorm_bf16<GEMMA4_HIDDEN_SIZE><<<q_len, 256, 0, stream>>>(
         ctx->d_hidden_a,
         (const __nv_bfloat16 *)lw->input_norm_w,
@@ -250,6 +306,9 @@ static int execute_layer(
         q_len,
         spec->input_norm_eps
     );
+    if (debug_snapshot_bf16(ctx, ctx->d_debug_hidden_taps, 1,
+                             GEMMA4_STREAM_Q_LEN * GEMMA4_HIDDEN_SIZE,
+                             ctx->d_norm_buf, q_len * hidden_size, stream) != 0) return -7;
 
     /* 2. Attention: Q projection */
     int q_dim = GEMMA4_NUM_ATTN_HEADS * D;
@@ -261,6 +320,9 @@ static int execute_layer(
         q_len, q_dim, hidden_size,
         stream
     ) != 0) return -4;
+    if (debug_snapshot_bf16(ctx, ctx->d_debug_q_taps, 0,
+                             GEMMA4_STREAM_Q_LEN * GEMMA4_NUM_ATTN_HEADS * 512,
+                             ctx->d_q_buf, q_len * q_dim, stream) != 0) return -7;
 
     /* Q norm */
     if (D == 256) {
@@ -280,6 +342,9 @@ static int execute_layer(
             spec->q_norm_eps
         );
     }
+    if (debug_snapshot_bf16(ctx, ctx->d_debug_q_taps, 1,
+                             GEMMA4_STREAM_Q_LEN * GEMMA4_NUM_ATTN_HEADS * 512,
+                             ctx->d_q_buf, q_len * q_dim, stream) != 0) return -7;
 
     /* Q RoPE (Layout is [q_len, num_heads, head_dim]) */
     const float *inv_freq = (spec->attn_type == GEMMA_ATTN_FULL) ? ctx->d_inv_freq_full : ctx->d_inv_freq_sliding;
@@ -293,6 +358,9 @@ static int execute_layer(
         base_pos,
         spec->attn_scaling
     );
+    if (debug_snapshot_bf16(ctx, ctx->d_debug_q_taps, 2,
+                             GEMMA4_STREAM_Q_LEN * GEMMA4_NUM_ATTN_HEADS * 512,
+                             ctx->d_q_buf, q_len * q_dim, stream) != 0) return -7;
 
     /* K & V computation if not shared */
     if (!spec->is_kv_shared) {
@@ -304,6 +372,9 @@ static int execute_layer(
             q_len, D, hidden_size,
             stream
         ) != 0) return -4;
+        if (debug_snapshot_bf16(ctx, ctx->d_debug_kv_taps, 0,
+                                 GEMMA4_STREAM_Q_LEN * 512,
+                                 ctx->d_k_buf, q_len * D, stream) != 0) return -7;
         if (run_linear_cublas(
             ctx->cublas,
             lw->v_proj_w,
@@ -312,6 +383,9 @@ static int execute_layer(
             q_len, D, hidden_size,
             stream
         ) != 0) return -4;
+        if (debug_snapshot_bf16(ctx, ctx->d_debug_kv_taps, 3,
+                                 GEMMA4_STREAM_Q_LEN * 512,
+                                 ctx->d_v_buf, q_len * D, stream) != 0) return -7;
 
         /* K norm */
         if (D == 256) {
@@ -331,6 +405,9 @@ static int execute_layer(
                 spec->k_norm_eps
             );
         }
+        if (debug_snapshot_bf16(ctx, ctx->d_debug_kv_taps, 1,
+                                 GEMMA4_STREAM_Q_LEN * 512,
+                                 ctx->d_k_buf, q_len * D, stream) != 0) return -7;
 
         /* K RoPE */
         kernel_rope_bf16<<<dim3(q_len, 1), D / 2, 0, stream>>>(
@@ -342,6 +419,9 @@ static int execute_layer(
             base_pos,
             spec->attn_scaling
         );
+        if (debug_snapshot_bf16(ctx, ctx->d_debug_kv_taps, 2,
+                                 GEMMA4_STREAM_Q_LEN * 512,
+                                 ctx->d_k_buf, q_len * D, stream) != 0) return -7;
 
         /* V norm */
         if (D == 256) {
@@ -361,6 +441,9 @@ static int execute_layer(
                 spec->v_norm_eps
             );
         }
+        if (debug_snapshot_bf16(ctx, ctx->d_debug_kv_taps, 4,
+                                 GEMMA4_STREAM_Q_LEN * 512,
+                                 ctx->d_v_buf, q_len * D, stream) != 0) return -7;
 
         /* Write to KV cache */
         if (gemma4_cache_append_async(
@@ -443,6 +526,9 @@ static int execute_layer(
             );
         }
     }
+    if (debug_snapshot_bf16(ctx, ctx->d_debug_q_taps, 3,
+                             GEMMA4_STREAM_Q_LEN * GEMMA4_NUM_ATTN_HEADS * 512,
+                             ctx->d_attn_out, q_len * q_dim, stream) != 0) return -7;
 
     /* Shape-stable canonical prefill uses M=target_length for the O
      * projection.  Its invalid rows are zero-padded and never selected. */
@@ -464,6 +550,9 @@ static int execute_layer(
         q_len, hidden_size, q_dim,
         stream
     ) != 0) return -4;
+    if (debug_snapshot_bf16(ctx, ctx->d_debug_hidden_taps, 2,
+                             GEMMA4_STREAM_Q_LEN * GEMMA4_HIDDEN_SIZE,
+                             ctx->d_hidden_b, q_len * hidden_size, stream) != 0) return -7;
 
     /* Post-attention layernorm on O projection */
     kernel_rmsnorm_bf16<GEMMA4_HIDDEN_SIZE><<<q_len, 256, 0, stream>>>(
@@ -473,6 +562,9 @@ static int execute_layer(
         q_len,
         spec->post_attn_norm_eps
     );
+    if (debug_snapshot_bf16(ctx, ctx->d_debug_hidden_taps, 3,
+                             GEMMA4_STREAM_Q_LEN * GEMMA4_HIDDEN_SIZE,
+                             ctx->d_hidden_b, q_len * hidden_size, stream) != 0) return -7;
 
     /* Attention Residual: hidden_a = hidden_a + hidden_b */
     kernel_residual_add_bf16<<<(q_len * hidden_size + 255) / 256, 256, 0, stream>>>(
@@ -481,6 +573,9 @@ static int execute_layer(
         ctx->d_hidden_a,
         q_len * hidden_size
     );
+    if (debug_snapshot_bf16(ctx, ctx->d_debug_hidden_taps, 4,
+                             GEMMA4_STREAM_Q_LEN * GEMMA4_HIDDEN_SIZE,
+                             ctx->d_hidden_a, q_len * hidden_size, stream) != 0) return -7;
 
     /* 5. FFN Block */
     /* Pre-FF norm on hidden_a -> norm_buf */
@@ -491,6 +586,9 @@ static int execute_layer(
         q_len,
         spec->pre_ff_norm_eps
     );
+    if (debug_snapshot_bf16(ctx, ctx->d_debug_hidden_taps, 5,
+                             GEMMA4_STREAM_Q_LEN * GEMMA4_HIDDEN_SIZE,
+                             ctx->d_norm_buf, q_len * hidden_size, stream) != 0) return -7;
 
     /* Gate and Up projections */
     if (run_linear_cublas(
@@ -501,6 +599,9 @@ static int execute_layer(
         q_len, intermediate_size, hidden_size,
         stream
     ) != 0) return -4;
+    if (debug_snapshot_bf16(ctx, ctx->d_debug_ffn_taps, 0,
+                             GEMMA4_STREAM_Q_LEN * GEMMA4_MAX_INTERMEDIATE_SIZE,
+                             ctx->d_gate_buf, q_len * intermediate_size, stream) != 0) return -7;
     if (run_linear_cublas(
         ctx->cublas,
         lw->up_proj_w,
@@ -509,6 +610,9 @@ static int execute_layer(
         q_len, intermediate_size, hidden_size,
         stream
     ) != 0) return -4;
+    if (debug_snapshot_bf16(ctx, ctx->d_debug_ffn_taps, 1,
+                             GEMMA4_STREAM_Q_LEN * GEMMA4_MAX_INTERMEDIATE_SIZE,
+                             ctx->d_up_buf, q_len * intermediate_size, stream) != 0) return -7;
 
     /* Canonical GeGLU has two BF16 elementwise boundaries:
      * gelu_tanh(gate), then activation * up. */
@@ -518,12 +622,18 @@ static int execute_layer(
         ctx->d_mlp_act_buf,
         ffn_elems
     );
+    if (debug_snapshot_bf16(ctx, ctx->d_debug_ffn_taps, 2,
+                             GEMMA4_STREAM_Q_LEN * GEMMA4_MAX_INTERMEDIATE_SIZE,
+                             ctx->d_mlp_act_buf, ffn_elems, stream) != 0) return -7;
     kernel_mul_bf16<<<(ffn_elems + 255) / 256, 256, 0, stream>>>(
         ctx->d_mlp_act_buf,
         ctx->d_up_buf,
         ctx->d_mlp_act_buf,
         ffn_elems
     );
+    if (debug_snapshot_bf16(ctx, ctx->d_debug_ffn_taps, 3,
+                             GEMMA4_STREAM_Q_LEN * GEMMA4_MAX_INTERMEDIATE_SIZE,
+                             ctx->d_mlp_act_buf, ffn_elems, stream) != 0) return -7;
 
     /* Down projection: mlp_act_buf -> hidden_b */
     if (run_linear_cublas(
@@ -534,6 +644,9 @@ static int execute_layer(
         q_len, hidden_size, intermediate_size,
         stream
     ) != 0) return -4;
+    if (debug_snapshot_bf16(ctx, ctx->d_debug_hidden_taps, 7,
+                             GEMMA4_STREAM_Q_LEN * GEMMA4_HIDDEN_SIZE,
+                             ctx->d_hidden_b, q_len * hidden_size, stream) != 0) return -7;
 
     /* Post-FF norm */
     kernel_rmsnorm_bf16<GEMMA4_HIDDEN_SIZE><<<q_len, 256, 0, stream>>>(
@@ -543,6 +656,9 @@ static int execute_layer(
         q_len,
         spec->post_ff_norm_eps
     );
+    if (debug_snapshot_bf16(ctx, ctx->d_debug_hidden_taps, 8,
+                             GEMMA4_STREAM_Q_LEN * GEMMA4_HIDDEN_SIZE,
+                             ctx->d_hidden_b, q_len * hidden_size, stream) != 0) return -7;
 
     /* FF Residual: hidden_a = hidden_a + hidden_b */
     kernel_residual_add_bf16<<<(q_len * hidden_size + 255) / 256, 256, 0, stream>>>(
@@ -551,6 +667,9 @@ static int execute_layer(
         ctx->d_hidden_a,
         q_len * hidden_size
     );
+    if (debug_snapshot_bf16(ctx, ctx->d_debug_hidden_taps, 9,
+                             GEMMA4_STREAM_Q_LEN * GEMMA4_HIDDEN_SIZE,
+                             ctx->d_hidden_a, q_len * hidden_size, stream) != 0) return -7;
 
     /* 6. PLE (Per-Layer Embedding) Block */
     if (GEMMA4_PLE_DIM > 0) {
@@ -563,6 +682,9 @@ static int execute_layer(
             q_len, GEMMA4_PLE_DIM, hidden_size,
             stream
         ) != 0) return -4;
+        if (debug_snapshot_bf16(ctx, ctx->d_debug_ple_taps, 0,
+                                 GEMMA4_STREAM_Q_LEN * GEMMA4_PLE_DIM,
+                                 ctx->d_ple_gate_buf, q_len * GEMMA4_PLE_DIM, stream) != 0) return -7;
 
         /* ple_act = gelu_tanh(ple_gate) * projected_ple[:, layer_idx, :]
          * with the same two BF16 elementwise boundaries as the MLP. */
@@ -572,6 +694,9 @@ static int execute_layer(
             ctx->d_ple_act_buf,
             ple_elems
         );
+        if (debug_snapshot_bf16(ctx, ctx->d_debug_ple_taps, 1,
+                                 GEMMA4_STREAM_Q_LEN * GEMMA4_PLE_DIM,
+                                 ctx->d_ple_act_buf, ple_elems, stream) != 0) return -7;
         kernel_ple_layer_mult_bf16<<<(ple_elems + 255) / 256, 256, 0, stream>>>(
             ctx->d_ple_act_buf,
             ctx->d_projected_ple,
@@ -579,6 +704,9 @@ static int execute_layer(
             valid_q_len,
             layer_idx
         );
+        if (debug_snapshot_bf16(ctx, ctx->d_debug_ple_taps, 2,
+                                 GEMMA4_STREAM_Q_LEN * GEMMA4_PLE_DIM,
+                                 ctx->d_ple_act_buf, ple_elems, stream) != 0) return -7;
 
         /* Match the shape-stable projection M-shape without exposing stale
          * invalid rows to the GEMM. */
@@ -600,6 +728,9 @@ static int execute_layer(
             q_len, hidden_size, GEMMA4_PLE_DIM,
             stream
         ) != 0) return -4;
+        if (debug_snapshot_bf16(ctx, ctx->d_debug_hidden_taps, 10,
+                                 GEMMA4_STREAM_Q_LEN * GEMMA4_HIDDEN_SIZE,
+                                 ctx->d_ple_proj_out, q_len * hidden_size, stream) != 0) return -7;
 
         /* ple_norm */
         kernel_rmsnorm_bf16<GEMMA4_HIDDEN_SIZE><<<q_len, 256, 0, stream>>>(
@@ -609,6 +740,9 @@ static int execute_layer(
             q_len,
             spec->post_ple_norm_eps
         );
+        if (debug_snapshot_bf16(ctx, ctx->d_debug_hidden_taps, 11,
+                                 GEMMA4_STREAM_Q_LEN * GEMMA4_HIDDEN_SIZE,
+                                 ctx->d_ple_proj_out, q_len * hidden_size, stream) != 0) return -7;
 
         /* Canonical order is two BF16 elementwise operations: residual add,
          * then multiplication by the BF16 layer scalar. */
@@ -618,13 +752,22 @@ static int execute_layer(
             ctx->d_hidden_a,
             q_len * hidden_size
         );
+        if (debug_snapshot_bf16(ctx, ctx->d_debug_hidden_taps, 12,
+                                 GEMMA4_STREAM_Q_LEN * GEMMA4_HIDDEN_SIZE,
+                                 ctx->d_hidden_a, q_len * hidden_size, stream) != 0) return -7;
         kernel_scale_bf16<<<(q_len * hidden_size + 255) / 256, 256, 0, stream>>>(
             ctx->d_hidden_a,
             ctx->d_hidden_a,
             q_len * hidden_size,
             spec->layer_scalar
         );
+        if (debug_snapshot_bf16(ctx, ctx->d_debug_hidden_taps, 13,
+                                 GEMMA4_STREAM_Q_LEN * GEMMA4_HIDDEN_SIZE,
+                                 ctx->d_hidden_a, q_len * hidden_size, stream) != 0) return -7;
     }
+    if (debug_snapshot_bf16(ctx, ctx->d_debug_hidden_taps, 14,
+                             GEMMA4_STREAM_Q_LEN * GEMMA4_HIDDEN_SIZE,
+                             ctx->d_hidden_a, q_len * hidden_size, stream) != 0) return -7;
 
     if (cudaPeekAtLastError() != cudaSuccess) return -8;
     return 0;
@@ -785,6 +928,7 @@ int gemma4_listener_create(
     ctx->primed = false;
     ctx->poisoned = false;
     ctx->last_stream = 0;
+    ctx->debug_capture_enabled = false;
 
     /* The handle is persistent; projection calls only switch its stream. */
     cublasStatus_t cb_stat = cublasCreate(&ctx->cublas);
@@ -891,10 +1035,164 @@ int gemma4_listener_create(
         return -2;
     }
 
+    GEMMA4_CREATE_ALLOC(ctx->d_debug_hidden_taps,
+                        (size_t)16 * GEMMA4_STREAM_Q_LEN * GEMMA4_HIDDEN_SIZE * sizeof(__nv_bfloat16));
+    GEMMA4_CREATE_ALLOC(ctx->d_debug_q_taps,
+                        (size_t)4 * GEMMA4_STREAM_Q_LEN * GEMMA4_NUM_ATTN_HEADS * 512 * sizeof(__nv_bfloat16));
+    GEMMA4_CREATE_ALLOC(ctx->d_debug_kv_taps,
+                        (size_t)5 * GEMMA4_STREAM_Q_LEN * 512 * sizeof(__nv_bfloat16));
+    GEMMA4_CREATE_ALLOC(ctx->d_debug_ffn_taps,
+                        (size_t)4 * GEMMA4_STREAM_Q_LEN * GEMMA4_MAX_INTERMEDIATE_SIZE * sizeof(__nv_bfloat16));
+    GEMMA4_CREATE_ALLOC(ctx->d_debug_ple_taps,
+                        (size_t)3 * GEMMA4_STREAM_Q_LEN * GEMMA4_PLE_DIM * sizeof(__nv_bfloat16));
+
     *out_ctx = ctx;
     return 0;
 }
 #undef GEMMA4_CREATE_ALLOC
+
+/* API: Import an exact canonical ShapeStable DynamicCache.  This is the
+ * parity-first path: the prefix arithmetic stays in PyTorch, while the native
+ * executor takes ownership of a D2D copy of the 15 non-shared source caches.
+ * Shared consumer layers already alias sources 13 and 14 in gemma4_cache. */
+int gemma4_listener_import_cache_async(
+    gemma4_listener_ctx *ctx,
+    const gemma4_imported_cache *imported,
+    uint32_t current_position,
+    cudaStream_t stream
+) {
+    if (!ctx || !imported) return -1;
+    if (current_position != GEMMA4_CANONICAL_PREFIX_LEN ||
+        current_position > ctx->config.max_seq_len) return -2;
+    if (ctx->poisoned) return -9;
+    if (ctx->primed || ctx->current_position != 0) return -3;
+    if (observe_async_stream_error(ctx) != 0) return -12;
+    if (cudaGetLastError() != cudaSuccess) {
+        ctx->poisoned = true;
+        return -11;
+    }
+
+    int current_device = -1;
+    if (cudaGetDevice(&current_device) != cudaSuccess) {
+        ctx->poisoned = true;
+        return -10;
+    }
+    if (validate_imported_cache_metadata(imported, current_position, current_device) != 0) {
+        fprintf(stderr, "[gemma4_listener] imported cache metadata invalid\\n");
+        ctx->poisoned = true;
+        return -10;
+    }
+    if (ctx->last_stream != 0 && ctx->last_stream != stream) return -6;
+    if (gemma4_cache_import_async(ctx->cache, imported, current_position, stream) != 0) {
+        ctx->poisoned = true;
+        return -7;
+    }
+    kernel_set_canonical_prefix_mask<<<1, 64, 0, stream>>>(
+        ctx->d_prefix_attention, GEMMA4_CANONICAL_PREFIX_LEN
+    );
+    if (cudaPeekAtLastError() != cudaSuccess) {
+        ctx->poisoned = true;
+        return -8;
+    }
+    ctx->prefix_len = GEMMA4_CANONICAL_PREFIX_LEN;
+    ctx->current_position = current_position;
+    ctx->last_stream = stream;
+    ctx->primed = true;
+    return 0;
+}
+
+/* API: Execute one layer from exact oracle tensors for first-divergence
+ * diagnostics. This intentionally keeps the context unprimed and does not
+ * advance its public position; each call imports the canonical source cache
+ * before executing the selected layer. */
+int gemma4_listener_debug_execute_layer(
+    gemma4_listener_ctx *ctx,
+    uint32_t layer_idx,
+    const void *hidden_input,
+    const gemma4_tensor_meta *hidden_input_meta,
+    const void *projected_ple,
+    const gemma4_tensor_meta *projected_ple_meta,
+    const gemma4_imported_cache *imported,
+    uint32_t current_position,
+    uint32_t query_position,
+    cudaStream_t stream
+) {
+    if (!ctx || !hidden_input || !hidden_input_meta || !projected_ple ||
+        !projected_ple_meta || !imported) return -1;
+    if (layer_idx >= GEMMA4_NUM_LAYERS ||
+        current_position != GEMMA4_CANONICAL_PREFIX_LEN ||
+        query_position != current_position || ctx->primed ||
+        ctx->current_position != 0 || ctx->poisoned) return -2;
+    if (observe_async_stream_error(ctx) != 0) return -12;
+    if (cudaGetLastError() != cudaSuccess) {
+        ctx->poisoned = true;
+        return -11;
+    }
+    int current_device = -1;
+    if (cudaGetDevice(&current_device) != cudaSuccess) {
+        ctx->poisoned = true;
+        return -10;
+    }
+    const uint64_t hidden_dims[] = {1, GEMMA4_STREAM_Q_LEN, GEMMA4_HIDDEN_SIZE};
+    const uint64_t ple_dims[] = {
+        1, GEMMA4_STREAM_Q_LEN, GEMMA4_NUM_LAYERS, GEMMA4_PLE_DIM
+    };
+    if (!validate_tensor_meta(
+            hidden_input_meta, hidden_input, current_device,
+            GEMMA4_META_BF16, 3, hidden_dims) ||
+        !validate_tensor_meta(
+            projected_ple_meta, projected_ple, current_device,
+            GEMMA4_META_BF16, 4, ple_dims) ||
+        validate_imported_cache_metadata(imported, current_position, current_device) != 0) {
+        ctx->poisoned = true;
+        return -10;
+    }
+    if (ctx->last_stream != 0 && ctx->last_stream != stream) return -6;
+    if (gemma4_cache_import_async(ctx->cache, imported, current_position, stream) != 0) {
+        ctx->poisoned = true;
+        return -7;
+    }
+    kernel_set_canonical_prefix_mask<<<1, 64, 0, stream>>>(
+        ctx->d_prefix_attention, GEMMA4_CANONICAL_PREFIX_LEN
+    );
+    const size_t hidden_bytes =
+        (size_t)GEMMA4_STREAM_Q_LEN * GEMMA4_HIDDEN_SIZE * sizeof(__nv_bfloat16);
+    const size_t ple_bytes = (size_t)GEMMA4_STREAM_Q_LEN * GEMMA4_NUM_LAYERS *
+        GEMMA4_PLE_DIM * sizeof(__nv_bfloat16);
+    if (cudaMemcpyAsync(ctx->d_hidden_a, hidden_input, hidden_bytes,
+                        cudaMemcpyDeviceToDevice, stream) != cudaSuccess ||
+        cudaMemcpyAsync(ctx->d_projected_ple, projected_ple, ple_bytes,
+                        cudaMemcpyDeviceToDevice, stream) != cudaSuccess) {
+        ctx->poisoned = true;
+        return -7;
+    }
+    const uint32_t saved_prefix_len = ctx->prefix_len;
+    ctx->prefix_len = GEMMA4_CANONICAL_PREFIX_LEN;
+    ctx->debug_capture_enabled = true;
+    int layer_status = execute_layer(
+        ctx, (int)layer_idx, GEMMA4_STREAM_Q_LEN, GEMMA4_STREAM_Q_LEN,
+        query_position, stream
+    );
+    ctx->debug_capture_enabled = false;
+    ctx->prefix_len = saved_prefix_len;
+    if (layer_status != 0) {
+        ctx->poisoned = true;
+        return -3;
+    }
+    if (cudaMemcpyAsync(ctx->d_output_tensor, ctx->d_hidden_a, hidden_bytes,
+                        cudaMemcpyDeviceToDevice, stream) != cudaSuccess ||
+        guard_output_finite(ctx, ctx->d_output_tensor,
+                            GEMMA4_STREAM_Q_LEN * GEMMA4_HIDDEN_SIZE, stream) != 0) {
+        ctx->poisoned = true;
+        return -8;
+    }
+    ctx->last_stream = stream;
+    if (cudaPeekAtLastError() != cudaSuccess) {
+        ctx->poisoned = true;
+        return -8;
+    }
+    return 0;
+}
 
 /* API: Prime Debug (execute first num_layers layers during prefix priming) */
 int gemma4_listener_prime_debug(
@@ -1258,6 +1556,41 @@ int gemma4_listener_output_health(gemma4_listener_ctx *ctx, int *out_nonfinite) 
 /* API: Debug Pointer */
 const void *gemma4_listener_debug_ptr(gemma4_listener_ctx *ctx, const char *name) {
     if (!ctx || !name) return NULL;
+    const size_t hidden_slot = (size_t)GEMMA4_STREAM_Q_LEN * GEMMA4_HIDDEN_SIZE;
+    const size_t q_slot = (size_t)GEMMA4_STREAM_Q_LEN * GEMMA4_NUM_ATTN_HEADS * 512;
+    const size_t kv_slot = (size_t)GEMMA4_STREAM_Q_LEN * 512;
+    const size_t ffn_slot = (size_t)GEMMA4_STREAM_Q_LEN * GEMMA4_MAX_INTERMEDIATE_SIZE;
+    const size_t ple_slot = (size_t)GEMMA4_STREAM_Q_LEN * GEMMA4_PLE_DIM;
+    if (strcmp(name, "tap_input_hidden") == 0) return ctx->d_debug_hidden_taps;
+    if (strcmp(name, "tap_input_norm") == 0) return ctx->d_debug_hidden_taps + hidden_slot;
+    if (strcmp(name, "tap_o_proj") == 0) return ctx->d_debug_hidden_taps + 2 * hidden_slot;
+    if (strcmp(name, "tap_post_attn_norm") == 0) return ctx->d_debug_hidden_taps + 3 * hidden_slot;
+    if (strcmp(name, "tap_attn_residual") == 0) return ctx->d_debug_hidden_taps + 4 * hidden_slot;
+    if (strcmp(name, "tap_pre_ff_norm") == 0) return ctx->d_debug_hidden_taps + 5 * hidden_slot;
+    if (strcmp(name, "tap_down_proj") == 0) return ctx->d_debug_hidden_taps + 7 * hidden_slot;
+    if (strcmp(name, "tap_post_ff_norm") == 0) return ctx->d_debug_hidden_taps + 8 * hidden_slot;
+    if (strcmp(name, "tap_ff_residual") == 0) return ctx->d_debug_hidden_taps + 9 * hidden_slot;
+    if (strcmp(name, "tap_ple_proj") == 0) return ctx->d_debug_hidden_taps + 10 * hidden_slot;
+    if (strcmp(name, "tap_ple_norm") == 0) return ctx->d_debug_hidden_taps + 11 * hidden_slot;
+    if (strcmp(name, "tap_ple_residual") == 0) return ctx->d_debug_hidden_taps + 12 * hidden_slot;
+    if (strcmp(name, "tap_layer_scaled") == 0) return ctx->d_debug_hidden_taps + 13 * hidden_slot;
+    if (strcmp(name, "tap_layer_output") == 0) return ctx->d_debug_hidden_taps + 14 * hidden_slot;
+    if (strcmp(name, "tap_q_proj") == 0) return ctx->d_debug_q_taps;
+    if (strcmp(name, "tap_q_norm") == 0) return ctx->d_debug_q_taps + q_slot;
+    if (strcmp(name, "tap_q_rope") == 0) return ctx->d_debug_q_taps + 2 * q_slot;
+    if (strcmp(name, "tap_attn_output") == 0) return ctx->d_debug_q_taps + 3 * q_slot;
+    if (strcmp(name, "tap_k_proj") == 0) return ctx->d_debug_kv_taps;
+    if (strcmp(name, "tap_k_norm") == 0) return ctx->d_debug_kv_taps + kv_slot;
+    if (strcmp(name, "tap_k_rope") == 0) return ctx->d_debug_kv_taps + 2 * kv_slot;
+    if (strcmp(name, "tap_v_proj") == 0) return ctx->d_debug_kv_taps + 3 * kv_slot;
+    if (strcmp(name, "tap_v_norm") == 0) return ctx->d_debug_kv_taps + 4 * kv_slot;
+    if (strcmp(name, "tap_gate_proj") == 0) return ctx->d_debug_ffn_taps;
+    if (strcmp(name, "tap_up_proj") == 0) return ctx->d_debug_ffn_taps + ffn_slot;
+    if (strcmp(name, "tap_mlp_act") == 0) return ctx->d_debug_ffn_taps + 2 * ffn_slot;
+    if (strcmp(name, "tap_mlp_gate_up") == 0) return ctx->d_debug_ffn_taps + 3 * ffn_slot;
+    if (strcmp(name, "tap_ple_gate") == 0) return ctx->d_debug_ple_taps;
+    if (strcmp(name, "tap_ple_act") == 0) return ctx->d_debug_ple_taps + ple_slot;
+    if (strcmp(name, "tap_ple_mult") == 0) return ctx->d_debug_ple_taps + 2 * ple_slot;
     if (strcmp(name, "norm_buf") == 0) return ctx->d_norm_buf;
     if (strcmp(name, "q_buf") == 0) return ctx->d_q_buf;
     if (strcmp(name, "k_buf") == 0) return ctx->d_k_buf;
@@ -1308,6 +1641,7 @@ int gemma4_listener_reset(gemma4_listener_ctx *ctx) {
         return -3;
     }
     ctx->poisoned = false;
+    ctx->debug_capture_enabled = false;
     ctx->last_stream = 0;
     return 0;
 }
@@ -1351,6 +1685,11 @@ void gemma4_listener_destroy(gemma4_listener_ctx *ctx) {
         cudaFree(ctx->d_output_tensor);
     }
     if (ctx->d_output_health) cudaFree(ctx->d_output_health);
+    if (ctx->d_debug_hidden_taps) cudaFree(ctx->d_debug_hidden_taps);
+    if (ctx->d_debug_q_taps) cudaFree(ctx->d_debug_q_taps);
+    if (ctx->d_debug_kv_taps) cudaFree(ctx->d_debug_kv_taps);
+    if (ctx->d_debug_ffn_taps) cudaFree(ctx->d_debug_ffn_taps);
+    if (ctx->d_debug_ple_taps) cudaFree(ctx->d_debug_ple_taps);
 
     free(ctx);
 }
@@ -1374,6 +1713,14 @@ size_t gemma4_listener_abi_layer_weights_size(void) {
 
 size_t gemma4_listener_abi_weights_size(void) {
     return sizeof(gemma4_listener_weights);
+}
+
+size_t gemma4_listener_abi_imported_kv_size(void) {
+    return sizeof(gemma4_imported_kv);
+}
+
+size_t gemma4_listener_abi_imported_cache_size(void) {
+    return sizeof(gemma4_imported_cache);
 }
 
 static size_t copy_abi_offsets(const size_t *offsets, size_t count, size_t *out, size_t capacity) {
@@ -1444,6 +1791,23 @@ size_t gemma4_listener_abi_weights_offsets(size_t *out_offsets, size_t capacity)
         offsetof(gemma4_listener_weights, per_layer_model_proj_scale),
         offsetof(gemma4_listener_weights, per_layer_input_scale),
         offsetof(gemma4_listener_weights, layers),
+    };
+    return copy_abi_offsets(offsets, sizeof(offsets) / sizeof(offsets[0]), out_offsets, capacity);
+}
+
+size_t gemma4_listener_abi_imported_kv_offsets(size_t *out_offsets, size_t capacity) {
+    static const size_t offsets[] = {
+        offsetof(gemma4_imported_kv, k_ptr),
+        offsetof(gemma4_imported_kv, k_meta),
+        offsetof(gemma4_imported_kv, v_ptr),
+        offsetof(gemma4_imported_kv, v_meta),
+    };
+    return copy_abi_offsets(offsets, sizeof(offsets) / sizeof(offsets[0]), out_offsets, capacity);
+}
+
+size_t gemma4_listener_abi_imported_cache_offsets(size_t *out_offsets, size_t capacity) {
+    static const size_t offsets[] = {
+        offsetof(gemma4_imported_cache, layers),
     };
     return copy_abi_offsets(offsets, sizeof(offsets) / sizeof(offsets[0]), out_offsets, capacity);
 }

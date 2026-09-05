@@ -38,7 +38,8 @@ produzione.
 | Cache | `native/gemma4_listener/gemma4_listener_cache.cu` | KV device-resident, layer sharing attestato |
 | Topologia | `native/gemma4_listener/generated_topology.h` | 35 layer, manifest SHA attestato |
 | Integrazione | `duplex_kernel/listener.py` | opt-in, prefix separato, frame Q=4 persistenti |
-| Test/gate | `tools/kernel_gates/` e `tools/tests/` | smoke, parity, diagnostica, steady-state |
+| Test/gate | `tools/kernel_gates/` e `tools/tests/` | smoke, parity, diagnostica, steady-state; bisect layer-local strict |
+| Bisect diagnostico | `tools/kernel_gates/test_native_layer_local_parity.py` | cache prefix exact, tap per-op CUDA, first-divergence + future-leak gate |
 
 Contratto numerico: prefix esatto `BOS + 32 slot testo + BOA = 34`, prefill
 shape-stable `M=291` con sole 34 righe valide in cache, mask CUDA `int64`
@@ -61,6 +62,9 @@ copia dei pesi.
 - Steady-state end-to-end `GemmaListener.encode()`: 10 frame dopo 65 frame di
   warm-up, allocazioni `0`, memoria riservata `0`, sync Python `0`: **PASS**.
 - Benchmark corrente: `10.47 ms` medi, `11.69 ms` p95 su RTX 3090.
+- Import cache ShapeStable esatto: K/V importati bit-identici e posizione nativa `34 -> 38` dopo il probe Q=4.
+- Bisect layer-local su RTX 3090: input norm, Q projection/norm/RoPE e K/V boundary precedono il primo failure strict; il primo drift è `layer 0 / attn_output`, MAE `2.0633e-4`, max `0.0625`, cosine `0.99999899`.
+- Future-leak numerico sul prefisso mascherato: max abs `0.0` (gate `<=1e-5`).
 - Test locali mirati: `16 passed`; `py_compile` e `git diff --check`: **PASS**.
 - `pytest -q` completo locale: non gate valido; collection interrotta da 73 moduli
   legacy che richiedono checkpoint/GPU/dipendenze non disponibili.
@@ -107,17 +111,25 @@ topologia generata nel codice C;
    resta la barriera esplicita per una certificazione immediata. Non è possibile
    restituire dal metodo asincrono un errore di esecuzione che non è ancora avvenuto
    senza attendere lo stream.
-2. Il native executor usa CUBLAS e kernel CUDA propri: le differenze di
-   accumulazione/ordine rispetto al percorso PyTorch SDPA/CUBLAS producono drift
-   BF16 che il final RMSNorm amplifica. La parity strict non è ancora raggiunta.
-3. La cache append-only ha capacità configurabile ma limitata a `4096` token
+2. Il bisect component-wise ora localizza il primo drift a `layer 0 / attn_output`.
+   Su RTX 3090 il percorso ShapeStable/PyTorch seleziona il kernel
+   `aten::_scaled_dot_product_efficient_attention` CUTLASS
+   (`fmha_cutlassF_bf16_aligned_32x128_gmem_sm80`), mentre il native usa il
+   kernel SDPA scalar custom: anche con input Q/K/V già strict, l'ordine di
+   accumulazione produce MAE `2.0633e-4` e rompe la soglia `1e-4`. Il final
+   RMSNorm amplifica poi il drift nei layer successivi. La parity strict non è
+   ancora raggiunta e il native resta NO-GO.
+3. Il debug layer-local cattura copie D2D solo quando l'entrypoint diagnostico è
+   attivo; le allocazioni dei tap sono create una volta nel contesto e non
+   entrano nello steady-state production path.
+4. La cache append-only ha capacità configurabile ma limitata a `4096` token
    dal kernel score; il percorso listener istanzia `max_seq_len=2048` (503 frame
    dopo il prefix). A capacità esaurita l’integrazione fallisce chiusa e richiede
    `GemmaListenerState.reset()`; non esiste rollover/reprime implicito.
-4. Gli output e gli input sono borrowed; i consumatori su stream diversi devono
+5. Gli output e gli input sono borrowed; i consumatori su stream diversi devono
    usare `producer_stream`/`wait_for_output()` e consumare l’output prima della
    chiamata successiva.
-5. L’attestazione copre manifest, topologia, parametri strutturali e gli hash dei
+6. L’attestazione copre manifest, topologia, parametri strutturali e gli hash dei
    file del checkpoint dichiarati nel manifest; non può provare capacità/ownership
    del raw CUDA pointer oltre la validazione del device e del descriptor.
 

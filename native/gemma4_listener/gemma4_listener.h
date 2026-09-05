@@ -92,6 +92,22 @@ typedef struct {
     gemma4_layer_weights layers[GEMMA4_NUM_LAYERS];
 } gemma4_listener_weights;
 
+/* Canonical DynamicCache import descriptor. Only non-shared source layers
+ * carry pointers; shared consumer layers must be zeroed and alias their
+ * attested source layer in the native cache. Descriptors are host-side and
+ * are consumed synchronously during API validation; K/V payloads are copied
+ * device-to-device on the supplied stream. */
+typedef struct {
+    const void *k_ptr;
+    const gemma4_tensor_meta *k_meta;
+    const void *v_ptr;
+    const gemma4_tensor_meta *v_meta;
+} gemma4_imported_kv;
+
+typedef struct {
+    gemma4_imported_kv layers[GEMMA4_NUM_LAYERS];
+} gemma4_imported_cache;
+
 /* Context Lifecycle API */
 int gemma4_listener_create(
     const gemma4_listener_config *config,
@@ -100,6 +116,30 @@ int gemma4_listener_create(
 );
 
 /* Asynchronously prime canonical prompt / prefix (34 tokens: BOS + 32 text slots + BOA). */
+int gemma4_listener_import_cache_async(
+    gemma4_listener_ctx *ctx,
+    const gemma4_imported_cache *cache,
+    uint32_t current_position,
+    cudaStream_t stream
+);
+
+/* Execute one selected layer from exact oracle-provided hidden, projected PLE
+ * and canonical source KV. This diagnostic entrypoint does not advance the
+ * listener position or mark the context primed; callers should use a reset or
+ * dedicated context between independent probes. */
+int gemma4_listener_debug_execute_layer(
+    gemma4_listener_ctx *ctx,
+    uint32_t layer_idx,
+    const void *hidden_input,
+    const gemma4_tensor_meta *hidden_input_meta,
+    const void *projected_ple,
+    const gemma4_tensor_meta *projected_ple_meta,
+    const gemma4_imported_cache *cache,
+    uint32_t current_position,
+    uint32_t query_position,
+    cudaStream_t stream
+);
+
 int gemma4_listener_prime_async(
     gemma4_listener_ctx *ctx,
     const void *prefix_embeds,       /* [1, prefix_len, hidden_size] BF16 */
@@ -177,11 +217,15 @@ size_t gemma4_listener_abi_config_size(void);
 size_t gemma4_listener_abi_tensor_meta_size(void);
 size_t gemma4_listener_abi_layer_weights_size(void);
 size_t gemma4_listener_abi_weights_size(void);
+size_t gemma4_listener_abi_imported_kv_size(void);
+size_t gemma4_listener_abi_imported_cache_size(void);
 /* Returns the number of field offsets and optionally fills a host array. */
 size_t gemma4_listener_abi_config_offsets(size_t *out_offsets, size_t capacity);
 size_t gemma4_listener_abi_tensor_meta_offsets(size_t *out_offsets, size_t capacity);
 size_t gemma4_listener_abi_layer_weights_offsets(size_t *out_offsets, size_t capacity);
 size_t gemma4_listener_abi_weights_offsets(size_t *out_offsets, size_t capacity);
+size_t gemma4_listener_abi_imported_kv_offsets(size_t *out_offsets, size_t capacity);
+size_t gemma4_listener_abi_imported_cache_offsets(size_t *out_offsets, size_t capacity);
 uint32_t gemma4_listener_current_position(const gemma4_listener_ctx *ctx);
 const void *gemma4_listener_get_cached_k(const gemma4_listener_ctx *ctx, int layer_idx);
 const void *gemma4_listener_get_cached_v(const gemma4_listener_ctx *ctx, int layer_idx);
