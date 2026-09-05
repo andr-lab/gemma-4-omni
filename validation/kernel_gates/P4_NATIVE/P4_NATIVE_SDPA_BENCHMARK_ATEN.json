@@ -1,0 +1,13 @@
+{
+  "attention_backend": "ATen SDPA bridge",
+  "torch_version": "2.12.1+cu130",
+  "torch_cuda_version": "13.0",
+  "mean_ms": 10.279559020996095,
+  "p50_ms": 10.268671989440918,
+  "p95_ms": 10.351206493377685,
+  "p99_ms": 10.47058439254761,
+  "frames": 100,
+  "final_position": 474,
+  "kernel_launches_per_frame": 853,
+  "d2d_copy_ops_per_frame": 31
+}

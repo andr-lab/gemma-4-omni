@@ -13,6 +13,7 @@
 #include <cublas_v2.h>
 
 #include "gemma4_listener.h"
+#include "gemma4_listener_aten.h"
 #include "generated_topology.h"
 #include "gemma4_listener_kernels.cuh"
 
@@ -57,6 +58,8 @@ struct gemma4_listener_ctx {
     __nv_bfloat16 *d_k_buf;           /* [q_max, 1 * 512] */
     __nv_bfloat16 *d_v_buf;           /* [q_max, 1 * 512] */
     __nv_bfloat16 *d_attn_out;        /* [q_max, 8 * 512] */
+    bool *d_sdpa_mask;                 /* diagnostic ATen bridge [q_max, max_seq_len] */
+    bool use_aten_sdpa_bridge;         /* explicit opt-in; default native kernel */
 
     __nv_bfloat16 *d_gate_buf;        /* [q_max, 6144] */
     __nv_bfloat16 *d_up_buf;          /* [q_max, 6144] */
@@ -279,6 +282,26 @@ static int run_linear_cublas(
     return status == CUBLAS_STATUS_SUCCESS ? 0 : -3;
 }
 
+static gemma4_tensor_meta make_bridge_meta(
+    const void *ptr,
+    uint32_t dtype,
+    uint32_t ndim,
+    const uint64_t *dims,
+    const uint64_t *strides,
+    uint32_t contiguous
+) {
+    gemma4_tensor_meta meta = {};
+    meta.ptr = ptr;
+    meta.dtype = dtype;
+    meta.ndim = ndim;
+    meta.contiguous = contiguous;
+    for (uint32_t index = 0; index < ndim && index < GEMMA4_TENSOR_META_MAX_RANK; ++index) {
+        meta.dims[index] = dims[index];
+        meta.strides[index] = strides[index];
+    }
+    return meta;
+}
+
 /* Execute 1 layer of Gemma 4 text decoder */
 static int execute_layer(
     gemma4_listener_ctx *ctx,
@@ -460,6 +483,66 @@ static int execute_layer(
     float sm_scale = spec->attn_scaling; /* Exactly 1.0 in Gemma 4 */
     size_t smem_bytes = 4 * (size_t)ctx->config.max_seq_len * sizeof(float);
 
+    if (ctx->use_aten_sdpa_bridge) {
+        const int visible_k_len = total_k_len - k_start_offset;
+        if (!ctx->d_sdpa_mask || visible_k_len <= 0) return -8;
+        kernel_build_explicit_sdpa_mask<<<
+            ((q_len * visible_k_len) + 255) / 256, 256, 0, stream
+        >>>(
+            ctx->d_sdpa_mask,
+            q_len,
+            visible_k_len,
+            k_start_offset,
+            base_pos,
+            spec->sliding_window,
+            ctx->d_prefix_attention,
+            ctx->prefix_len
+        );
+        if (cudaPeekAtLastError() != cudaSuccess) return -8;
+
+        const uint64_t q_dims[] = {1, GEMMA4_NUM_ATTN_HEADS, (uint64_t)q_len, (uint64_t)D};
+        const uint64_t q_strides[] = {
+            (uint64_t)GEMMA4_NUM_ATTN_HEADS * (uint64_t)q_len * (uint64_t)D,
+            (uint64_t)D,
+            (uint64_t)GEMMA4_NUM_ATTN_HEADS * (uint64_t)D,
+            1,
+        };
+        const uint64_t kv_dims[] = {1, GEMMA4_NUM_KV_HEADS, (uint64_t)visible_k_len, (uint64_t)D};
+        const uint64_t kv_strides[] = {
+            (uint64_t)ctx->config.max_seq_len * (uint64_t)D,
+            (uint64_t)ctx->config.max_seq_len * (uint64_t)D,
+            (uint64_t)D,
+            1,
+        };
+        const uint64_t mask_dims[] = {1, 1, (uint64_t)q_len, (uint64_t)visible_k_len};
+        const uint64_t mask_strides[] = {
+            (uint64_t)q_len * (uint64_t)visible_k_len,
+            (uint64_t)q_len * (uint64_t)visible_k_len,
+            (uint64_t)visible_k_len,
+            1,
+        };
+        gemma4_tensor_meta q_meta = make_bridge_meta(
+            ctx->d_q_buf, GEMMA4_META_BF16, 4, q_dims, q_strides, 0);
+        gemma4_tensor_meta k_meta = make_bridge_meta(
+            k_data + (size_t)k_start_offset * (size_t)D,
+            GEMMA4_META_BF16, 4, kv_dims, kv_strides, 0);
+        gemma4_tensor_meta v_meta = make_bridge_meta(
+            v_data + (size_t)k_start_offset * (size_t)D,
+            GEMMA4_META_BF16, 4, kv_dims, kv_strides, 0);
+        gemma4_tensor_meta mask_meta = make_bridge_meta(
+            ctx->d_sdpa_mask, GEMMA4_META_BOOL, 4, mask_dims, mask_strides, 1);
+        gemma4_tensor_meta out_meta = make_bridge_meta(
+            ctx->d_attn_out, GEMMA4_META_BF16, 4, q_dims, q_strides, 0);
+        if (gemma4_listener_debug_attention(
+                ctx->d_q_buf, &q_meta,
+                k_data + (size_t)k_start_offset * (size_t)D, &k_meta,
+                v_data + (size_t)k_start_offset * (size_t)D, &v_meta,
+                ctx->d_sdpa_mask, &mask_meta,
+                ctx->d_attn_out, &out_meta,
+                (double)sm_scale, stream) != 0) {
+            return -8;
+        }
+    } else
     if (valid_q_len == 4) {
         if (D == 256) {
             kernel_stream_sdpa_q4_bf16<256><<<GEMMA4_NUM_ATTN_HEADS, 256, smem_bytes, stream>>>(
@@ -929,6 +1012,8 @@ int gemma4_listener_create(
     ctx->poisoned = false;
     ctx->last_stream = 0;
     ctx->debug_capture_enabled = false;
+    const char *aten_bridge_env = getenv("GEMMA4_ATEN_SDPA_BRIDGE");
+    ctx->use_aten_sdpa_bridge = aten_bridge_env && strcmp(aten_bridge_env, "0") != 0;
 
     /* The handle is persistent; projection calls only switch its stream. */
     cublasStatus_t cb_stat = cublasCreate(&ctx->cublas);
@@ -1010,6 +1095,10 @@ int gemma4_listener_create(
     GEMMA4_CREATE_ALLOC(ctx->d_k_buf, q_max * 512 * sizeof(__nv_bfloat16));
     GEMMA4_CREATE_ALLOC(ctx->d_v_buf, q_max * 512 * sizeof(__nv_bfloat16));
     GEMMA4_CREATE_ALLOC(ctx->d_attn_out, GEMMA4_NUM_ATTN_HEADS * q_max * 512 * sizeof(__nv_bfloat16));
+    if (ctx->use_aten_sdpa_bridge) {
+        GEMMA4_CREATE_ALLOC(ctx->d_sdpa_mask,
+                            q_max * (size_t)config->max_seq_len * sizeof(bool));
+    }
 
     GEMMA4_CREATE_ALLOC(ctx->d_gate_buf, q_max * GEMMA4_MAX_INTERMEDIATE_SIZE * sizeof(__nv_bfloat16));
     GEMMA4_CREATE_ALLOC(ctx->d_up_buf, q_max * GEMMA4_MAX_INTERMEDIATE_SIZE * sizeof(__nv_bfloat16));
@@ -1669,6 +1758,7 @@ void gemma4_listener_destroy(gemma4_listener_ctx *ctx) {
     if (ctx->d_k_buf) cudaFree(ctx->d_k_buf);
     if (ctx->d_v_buf) cudaFree(ctx->d_v_buf);
     if (ctx->d_attn_out) cudaFree(ctx->d_attn_out);
+    if (ctx->d_sdpa_mask) cudaFree(ctx->d_sdpa_mask);
 
     if (ctx->d_gate_buf) cudaFree(ctx->d_gate_buf);
     if (ctx->d_up_buf) cudaFree(ctx->d_up_buf);

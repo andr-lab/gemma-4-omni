@@ -1,0 +1,13 @@
+{
+  "attention_backend": "native custom SDPA",
+  "torch_version": "2.12.1+cu130",
+  "torch_cuda_version": "13.0",
+  "mean_ms": 10.469513902664184,
+  "p50_ms": 10.703968048095703,
+  "p95_ms": 11.697868919372558,
+  "p99_ms": 11.794636487960815,
+  "frames": 100,
+  "final_position": 474,
+  "kernel_launches_per_frame": 853,
+  "d2d_copy_ops_per_frame": 31
+}

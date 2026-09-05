@@ -1,0 +1,122 @@
+{
+  "torch_version": "2.12.1+cu130",
+  "torch_cuda_version": "13.0",
+  "aten_schema": "aten::scaled_dot_product_attention(Tensor query, Tensor key, Tensor value, Tensor? attn_mask=None, float dropout_p=0., bool is_causal=False, *, float? scale=None, bool enable_gqa=False) -> Tensor",
+  "device": "cuda:0",
+  "layer": 0,
+  "layer_type": "sliding_attention",
+  "query": {
+    "shape": [
+      1,
+      8,
+      4,
+      256
+    ],
+    "strides": [
+      8192,
+      1024,
+      256,
+      1
+    ],
+    "dtype": "torch.bfloat16",
+    "device": "cuda:0",
+    "contiguous": true
+  },
+  "key": {
+    "shape": [
+      1,
+      1,
+      38,
+      256
+    ],
+    "strides": [
+      9728,
+      9728,
+      256,
+      1
+    ],
+    "dtype": "torch.bfloat16",
+    "device": "cuda:0",
+    "contiguous": true
+  },
+  "value": {
+    "shape": [
+      1,
+      1,
+      38,
+      256
+    ],
+    "strides": [
+      9728,
+      9728,
+      256,
+      1
+    ],
+    "dtype": "torch.bfloat16",
+    "device": "cuda:0",
+    "contiguous": true
+  },
+  "attn_mask": {
+    "shape": [
+      1,
+      1,
+      4,
+      38
+    ],
+    "strides": [
+      152,
+      152,
+      38,
+      1
+    ],
+    "dtype": "torch.bool",
+    "device": "cuda:0",
+    "contiguous": true
+  },
+  "oracle_output": {
+    "shape": [
+      1,
+      4,
+      8,
+      256
+    ],
+    "strides": [
+      8192,
+      2048,
+      256,
+      1
+    ],
+    "dtype": "torch.bfloat16",
+    "device": "cuda:0",
+    "contiguous": true
+  },
+  "repeat_kv": {
+    "source": "transformers.integrations.sdpa_attention.repeat_kv",
+    "expand_shape": [
+      1,
+      1,
+      1,
+      38,
+      256
+    ],
+    "result_shape": [
+      1,
+      8,
+      38,
+      256
+    ],
+    "enable_gqa": false
+  },
+  "dropout_p": 0.0,
+  "is_causal": false,
+  "scale": 1.0,
+  "mask_semantics": "explicit mask passed unchanged to public ATen SDPA; bool True=allowed",
+  "source_references": {
+    "transformers_repeat_kv": "https://github.com/huggingface/transformers/blob/main/src/transformers/integrations/sdpa_attention.py",
+    "pytorch_sdpa": "https://pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html"
+  },
+  "tensor_artifact": {
+    "path": "/workspace/validation/kernel_gates/P4_NATIVE/P4_NATIVE_SDPA_TENSORS.pt",
+    "sha256": "69a77661ebbc35586d4d331044d41d1412c5e11d7460102a66b53b38faf18628"
+  }
+}

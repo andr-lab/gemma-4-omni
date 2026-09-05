@@ -29,6 +29,8 @@ typedef struct gemma4_listener_ctx gemma4_listener_ctx;
 typedef enum {
     GEMMA4_META_BF16 = 1,
     GEMMA4_META_INT64 = 2,
+    GEMMA4_META_FP32 = 3, /* diagnostic ATen bridge masks only */
+    GEMMA4_META_BOOL = 4, /* diagnostic ATen bridge masks only */
 } gemma4_tensor_dtype;
 
 /* Host-side descriptor used only for synchronous preflight.  The native

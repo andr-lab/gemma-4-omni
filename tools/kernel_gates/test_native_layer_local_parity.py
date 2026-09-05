@@ -8,6 +8,7 @@ execution order and stops at the first strict parity failure.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -36,6 +37,12 @@ from transformers.models.gemma4.modeling_gemma4 import create_masks_for_generate
 STRICT_MAE_MAX = 1e-4
 STRICT_COSINE_MIN = 0.9999
 OUTPUT_PATH = Path("/workspace/validation/kernel_gates/P4_NATIVE/P4_NATIVE_LAYER_LOCAL_BISECT.json")
+PREATTENTION_TENSOR_PATH = Path("/workspace/validation/kernel_gates/P4_NATIVE/P4_NATIVE_PREATTENTION_TENSORS.pt")
+PREATTENTION_OPERATIONS = {
+    "input_hidden", "input_norm", "q_proj", "q_norm", "q_rope",
+    "k_proj", "k_norm", "k_rope", "v_proj", "v_norm",
+    "kv_write_key", "kv_write_val",
+}
 
 
 def metrics(reference: torch.Tensor, candidate: torch.Tensor) -> dict[str, float]:
@@ -238,6 +245,30 @@ def main() -> int:
 
     first: dict[str, Any] | None = None
     rows: list[dict[str, Any]] = []
+    divergence_markers: dict[str, dict[str, Any]] = {}
+    pre_attention_tensors: dict[str, torch.Tensor] = {}
+
+    def observe(row: dict[str, Any], reference: torch.Tensor, candidate: torch.Tensor) -> None:
+        """Record the first exact/threshold crossing without changing execution."""
+        if row["operation"] in PREATTENTION_OPERATIONS:
+            prefix = f"layer_{row['layer']}/{row['operation']}"
+            pre_attention_tensors[f"{prefix}/oracle"] = reference.detach().to("cpu").clone()
+            pre_attention_tensors[f"{prefix}/native"] = candidate.detach().to("cpu").clone()
+        # Layout views may differ at this boundary (e.g. [1,Q,H,D] vs
+        # [Q,H,D]); exactness is over the ordered BF16 element stream.
+        if "first_nonzero_difference" not in divergence_markers and not torch.equal(
+            reference.reshape(-1), candidate.reshape(-1)
+        ):
+            divergence_markers["first_nonzero_difference"] = dict(row)
+        if "first_mae_gt_1e-7" not in divergence_markers and row["mae"] > 1e-7:
+            divergence_markers["first_mae_gt_1e-7"] = dict(row)
+        if "first_mae_gt_1e-6" not in divergence_markers and row["mae"] > 1e-6:
+            divergence_markers["first_mae_gt_1e-6"] = dict(row)
+        if "first_formal_failure" not in divergence_markers and (
+            row["mae"] > STRICT_MAE_MAX or row["cosine"] < STRICT_COSINE_MIN
+        ):
+            divergence_markers["first_formal_failure"] = dict(row)
+
     try:
         for layer_idx in range(GEMMA4_NUM_LAYERS):
             attention_layer = lm.layers[layer_idx].self_attn
@@ -267,19 +298,28 @@ def main() -> int:
                 candidate = native.copy_debug_tensor(spec[1], shape)
                 row = {"layer": layer_idx, "operation": operation, **metrics(reference, candidate)}
                 layer_rows.append(row)
-                if first is None and (row["mae"] > STRICT_MAE_MAX or row["cosine"] < STRICT_COSINE_MIN):
+                observe(row, reference, candidate)
+                if first is None and (
+                    row["mae"] > STRICT_MAE_MAX or row["cosine"] < STRICT_COSINE_MIN
+                ):
                     first = row
                     print("[FIRST DIVERGENCE]", json.dumps(row, sort_keys=True), flush=True)
                     break
 
             # KV writes are a separate cache boundary, not a scratch tap.
-            if first is None and not bool(getattr(attention_layer, "is_kv_shared_layer", False)):
+            # Capture them for the exact pre-attention artifact even when the
+            # attention output is already the first formal failure.
+            if not bool(getattr(attention_layer, "is_kv_shared_layer", False)):
                 for which, operation in (("k", "kv_write_key"), ("v", "kv_write_val")):
                     ref = canonical_oracle_tensor(operation, taps[(layer_idx, operation)])
                     candidate = copy_native_cache(native, layer_idx, which, AUDIO_START_AFTER_TEXT + 4, head_dim)
                     row = {"layer": layer_idx, "operation": operation, **metrics(ref, candidate)}
-                    layer_rows.append(row)
-                    if first is None and (row["mae"] > STRICT_MAE_MAX or row["cosine"] < STRICT_COSINE_MIN):
+                    if first is None:
+                        layer_rows.append(row)
+                    observe(row, ref, candidate)
+                    if first is None and (
+                        row["mae"] > STRICT_MAE_MAX or row["cosine"] < STRICT_COSINE_MIN
+                    ):
                         first = row
                         print("[FIRST DIVERGENCE]", json.dumps(row, sort_keys=True), flush=True)
                         break
@@ -288,6 +328,10 @@ def main() -> int:
                 break
     finally:
         native.close()
+
+    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(pre_attention_tensors, PREATTENTION_TENSOR_PATH)
+    tensor_sha256 = hashlib.sha256(PREATTENTION_TENSOR_PATH.read_bytes()).hexdigest()
 
     result = {
         "status": "PASS" if first is None and future_leak <= 1e-5 else "NO-GO",
@@ -300,9 +344,15 @@ def main() -> int:
         },
         "future_leak_max_abs": future_leak,
         "first_divergence": first,
+        "first_divergence_markers": divergence_markers,
+        "pre_attention_tensor_values": {
+            "path": str(PREATTENTION_TENSOR_PATH),
+            "sha256": tensor_sha256,
+            "keys": sorted(pre_attention_tensors),
+            "note": "Exact CPU BF16 oracle/native tensors captured before the first formal failure; use torch.load(..., weights_only=True).",
+        },
         "rows_checked": len(rows),
     }
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     OUTPUT_PATH.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(result, indent=2), flush=True)
     return 0 if result["status"] == "PASS" else 2

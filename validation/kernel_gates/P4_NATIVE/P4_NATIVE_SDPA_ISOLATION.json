@@ -1,0 +1,50 @@
+{
+  "status": "PASS",
+  "strict_thresholds": {
+    "mae_max": 0.0001,
+    "cosine_min": 0.9999
+  },
+  "frames_checked": 3,
+  "rows": [
+    {
+      "frame": 0,
+      "layer": 0,
+      "operation": "sdpa_output",
+      "mae": 0.0,
+      "max_abs": 0.0,
+      "cosine": 1.0000001192092896,
+      "exact_element_stream": true
+    },
+    {
+      "frame": 1,
+      "layer": 0,
+      "operation": "sdpa_output",
+      "mae": 0.0,
+      "max_abs": 0.0,
+      "cosine": 0.9999999403953552,
+      "exact_element_stream": true
+    },
+    {
+      "frame": 2,
+      "layer": 0,
+      "operation": "sdpa_output",
+      "mae": 0.0,
+      "max_abs": 0.0,
+      "cosine": 1.0000001192092896,
+      "exact_element_stream": true
+    }
+  ],
+  "first_divergence_markers": {
+    "first_nonzero_difference": null,
+    "first_mae_gt_1e-7": null,
+    "first_mae_gt_1e-6": null,
+    "first_formal_failure": null
+  },
+  "contract_artifact": {
+    "path": "/workspace/validation/kernel_gates/P4_NATIVE/P4_NATIVE_SDPA_CONTRACT.json"
+  },
+  "tensor_artifact": {
+    "path": "/workspace/validation/kernel_gates/P4_NATIVE/P4_NATIVE_SDPA_TENSORS.pt",
+    "sha256": "69a77661ebbc35586d4d331044d41d1412c5e11d7460102a66b53b38faf18628"
+  }
+}

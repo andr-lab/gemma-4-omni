@@ -1,0 +1,74 @@
+{
+  "status": "NO-GO",
+  "attention_backend": "public ATen SDPA bridge (GEMMA4_ATEN_SDPA_BRIDGE=1)",
+  "frames_checked": 3,
+  "strict_thresholds": {
+    "mae_max": 0.0001,
+    "cosine_min": 0.9999
+  },
+  "rows": [
+    {
+      "frame": 0,
+      "operation": "layer_output",
+      "mae": 0.2688753604888916,
+      "max_abs": 4.125,
+      "cosine": 0.991516649723053,
+      "exact_element_stream": false
+    },
+    {
+      "frame": 1,
+      "operation": "layer_output",
+      "mae": 0.5545628070831299,
+      "max_abs": 7.0,
+      "cosine": 0.9859955310821533,
+      "exact_element_stream": false
+    },
+    {
+      "frame": 2,
+      "operation": "layer_output",
+      "mae": 0.6143077611923218,
+      "max_abs": 13.51171875,
+      "cosine": 0.9805474877357483,
+      "exact_element_stream": false
+    }
+  ],
+  "first_divergence_markers": {
+    "first_nonzero_difference": {
+      "frame": 0,
+      "operation": "layer_output",
+      "mae": 0.2688753604888916,
+      "max_abs": 4.125,
+      "cosine": 0.991516649723053,
+      "exact_element_stream": false
+    },
+    "first_mae_gt_1e-7": {
+      "frame": 0,
+      "operation": "layer_output",
+      "mae": 0.2688753604888916,
+      "max_abs": 4.125,
+      "cosine": 0.991516649723053,
+      "exact_element_stream": false
+    },
+    "first_mae_gt_1e-6": {
+      "frame": 0,
+      "operation": "layer_output",
+      "mae": 0.2688753604888916,
+      "max_abs": 4.125,
+      "cosine": 0.991516649723053,
+      "exact_element_stream": false
+    },
+    "first_formal_failure": {
+      "frame": 0,
+      "operation": "layer_output",
+      "mae": 0.2688753604888916,
+      "max_abs": 4.125,
+      "cosine": 0.991516649723053,
+      "exact_element_stream": false
+    }
+  },
+  "tensor_artifact": {
+    "path": "/workspace/validation/kernel_gates/P4_NATIVE/P4_NATIVE_ATEN_BRIDGE_MULTIFRAME_TENSORS.pt",
+    "sha256": "f98f1ee8b5b84169e77b0e7b4852adbfa51e2a8b9f8c818b817af82bbb44d085"
+  },
+  "note": "This validates the opt-in bridge path only; it does not certify native production parity."
+}

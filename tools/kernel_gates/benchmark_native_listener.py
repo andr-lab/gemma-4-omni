@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 from __future__ import annotations
+import argparse
 import sys
 if "/workspace" not in sys.path: sys.path.insert(0,"/workspace")
+import json
+import os
+from pathlib import Path
+
 import numpy as np
 import torch
 from duplex_kernel.models.thinker import load_thinker
@@ -10,6 +15,9 @@ from duplex_kernel.listener import GemmaAudioTowerBackend
 from duplex_kernel.gemma_representation import AUDIO_START_AFTER_TEXT
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--output", type=Path)
+    args = parser.parse_args()
     dev=torch.device("cuda:0"); dt=torch.bfloat16
     th=load_thinker("/workspace",device=dev,dtype=dt); lm=th.model.model.language_model
     backend=GemmaAudioTowerBackend(th,device=str(dev)); native=NativeGemmaListenerLM(lm,max_seq_len=2048,stream_q_len=4)
@@ -28,7 +36,10 @@ def main():
         end.record()
     ends[-1].synchronize()
     samples = np.asarray([start.elapsed_time(end) for start, end in zip(starts, ends)])
-    print({
+    result = {
+        "attention_backend": "ATen SDPA bridge" if os.environ.get("GEMMA4_ATEN_SDPA_BRIDGE") not in (None, "", "0") else "native custom SDPA",
+        "torch_version": torch.__version__,
+        "torch_cuda_version": torch.version.cuda,
         "mean_ms": float(samples.mean()),
         "p50_ms": float(np.percentile(samples, 50)),
         "p95_ms": float(np.percentile(samples, 95)),
@@ -41,5 +52,10 @@ def main():
         # persistent input copy. D2D KV append copies are reported separately.
         "kernel_launches_per_frame": 853,
         "d2d_copy_ops_per_frame": 31,
-    })
+    }
+    rendered = json.dumps(result, indent=2) + "\n"
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(rendered, encoding="utf-8")
+    print(rendered, end="")
 if __name__=="__main__": main()

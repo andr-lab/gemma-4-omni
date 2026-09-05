@@ -333,6 +333,37 @@ __global__ void kernel_ple_layer_mult_bf16(
 }
 
 /* -------------------------------------------------------------------------
+ * Explicit bool mask for the diagnostic ATen SDPA bridge.
+ * Layout: compact [q_len, visible_k_len], with absolute K positions derived
+ * from k_start_offset.  This is not used by the default native kernel path.
+ * ------------------------------------------------------------------------- */
+__global__ void kernel_build_explicit_sdpa_mask(
+    bool * __restrict__ mask,
+    int q_len,
+    int visible_k_len,
+    int k_start_offset,
+    uint32_t base_position,
+    uint32_t sliding_window,
+    const int64_t * __restrict__ prefix_attention,
+    uint32_t prefix_len
+) {
+    const int index = blockIdx.x * blockDim.x + threadIdx.x;
+    const int elements = q_len * visible_k_len;
+    if (index >= elements) return;
+    const int query_index = index / visible_k_len;
+    const int key_index = index % visible_k_len;
+    const uint32_t key_position = static_cast<uint32_t>(k_start_offset + key_index);
+    const uint32_t query_position = base_position + static_cast<uint32_t>(query_index);
+    const bool prefix_valid = key_position >= prefix_len ||
+        prefix_attention == NULL || prefix_attention[key_position] != 0;
+    const bool causal_valid = key_position <= query_position;
+    const bool window_valid = sliding_window == 0 ||
+        static_cast<int32_t>(key_position) >=
+            static_cast<int32_t>(query_position) - static_cast<int32_t>(sliding_window) + 1;
+    mask[index] = prefix_valid && causal_valid && window_valid;
+}
+
+/* -------------------------------------------------------------------------
  * Small-Q Stream SDPA Kernel (Q_LEN = 4, num_heads = 8, num_kv_heads = 1)
  *   Q:   [4, num_heads, D]
  *   K:   [total_k_len, D]

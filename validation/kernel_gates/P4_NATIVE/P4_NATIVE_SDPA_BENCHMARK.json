@@ -1,0 +1,32 @@
+{
+  "status": "MEASURED_NOT_CERTIFIED",
+  "environment": {
+    "gpu": "NVIDIA GeForce RTX 3090 sm_86",
+    "torch_version": "2.12.1+cu130",
+    "torch_cuda_version": "13.0",
+    "frames_per_run": 100,
+    "warmup_frames": 10
+  },
+  "paths": {
+    "custom": "P4_NATIVE_SDPA_BENCHMARK_CUSTOM.json",
+    "aten_bridge": "P4_NATIVE_SDPA_BENCHMARK_ATEN.json"
+  },
+  "custom_native_sdpa": {
+    "mean_ms": 10.469513902664184,
+    "p50_ms": 10.703968048095703,
+    "p95_ms": 11.697868919372558,
+    "p99_ms": 11.794636487960815
+  },
+  "aten_sdpa_bridge": {
+    "mean_ms": 10.279559020996095,
+    "p50_ms": 10.268671989440918,
+    "p95_ms": 10.351206493377685,
+    "p99_ms": 10.47058439254761
+  },
+  "comparison": {
+    "mean_delta_ms_aten_minus_custom": -0.18995488262176514,
+    "mean_ratio_aten_over_custom": 0.9818518048137677,
+    "warning": "The bridge is diagnostic-only: ATen contiguous materialization may allocate through the PyTorch caching allocator and is not zero-allocation steady-state evidence."
+  },
+  "gate": "Do not consider a native CUTLASS replacement until the remaining non-SDPA parity failures are resolved and this benchmark is repeated under an allocation-audited harness."
+}

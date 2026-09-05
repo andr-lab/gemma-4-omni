@@ -546,6 +546,22 @@ class NativeGemmaListenerLM:
             ctypes.c_void_p,
         ]
 
+        self._lib.gemma4_listener_debug_attention.restype = ctypes.c_int
+        self._lib.gemma4_listener_debug_attention.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(Gemma4TensorMeta),
+            ctypes.c_void_p,
+            ctypes.POINTER(Gemma4TensorMeta),
+            ctypes.c_void_p,
+            ctypes.POINTER(Gemma4TensorMeta),
+            ctypes.c_void_p,
+            ctypes.POINTER(Gemma4TensorMeta),
+            ctypes.c_void_p,
+            ctypes.POINTER(Gemma4TensorMeta),
+            ctypes.c_double,
+            ctypes.c_void_p,
+        ]
+
         self._lib.gemma4_listener_prime_async.restype = ctypes.c_int
         self._lib.gemma4_listener_prime_async.argtypes = [
             ctypes.c_void_p,
@@ -626,7 +642,12 @@ class NativeGemmaListenerLM:
             return meta
         if not isinstance(tensor, torch.Tensor) or tensor.device.type != "cuda":
             raise ValueError("metadata nativo richiede tensor CUDA")
-        expected_dtype = {1: torch.bfloat16, 2: torch.int64}.get(int(dtype_code))
+        expected_dtype = {
+            1: torch.bfloat16,
+            2: torch.int64,
+            3: torch.float32,
+            4: torch.bool,
+        }.get(int(dtype_code))
         if expected_dtype is None or tensor.dtype != expected_dtype:
             raise ValueError(f"dtype metadata nativo inatteso: {tensor.dtype} != {expected_dtype}")
         shape = tuple(int(value) for value in tensor.shape)
@@ -995,6 +1016,80 @@ class NativeGemmaListenerLM:
         self._last_execution_stream = active_stream
         self.output_tensor.record_stream(active_stream)
         return self.output_tensor
+
+    def debug_attention(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_mask: torch.Tensor,
+        scale: float = 1.0,
+        stream: torch.cuda.Stream | None = None,
+        producer_stream: torch.cuda.Stream | None = None,
+    ) -> torch.Tensor:
+        """Run the public ATen SDPA parity bridge on borrowed CUDA tensors.
+
+        This is diagnostic-only.  It deliberately mirrors Transformers'
+        explicit-mask path: K/V are repeated before calling SDPA with
+        ``enable_gqa=False``.  The bridge writes into a fresh BF16 output and
+        does not alter the native listener position or cache.
+        """
+        tensors = (("query", query), ("key", key), ("value", value))
+        for name, tensor in tensors:
+            self._require_cuda_tensor(tensor, name=name, dtype=torch.bfloat16)
+            if not tensor.is_contiguous() or tensor.ndim != 4:
+                raise ValueError(f"{name} deve essere CUDA BF16 contiguo rank-4")
+        if not isinstance(attn_mask, torch.Tensor):
+            raise TypeError("attn_mask deve essere un torch.Tensor")
+        self._require_cuda_tensor(attn_mask, name="attn_mask", dtype=attn_mask.dtype)
+        if attn_mask.dtype not in (torch.bfloat16, torch.float32, torch.bool):
+            raise ValueError("attn_mask deve essere BF16, FP32 o BOOL")
+        if not attn_mask.is_contiguous() or attn_mask.ndim != 4:
+            raise ValueError("attn_mask deve essere contiguo rank-4")
+        batch, query_heads, query_len, head_dim = (int(v) for v in query.shape)
+        if tuple(int(v) for v in key.shape[:1]) != (batch,) or tuple(int(v) for v in value.shape[:1]) != (batch,):
+            raise ValueError("batch Q/K/V incompatibile")
+        if tuple(key.shape) != tuple(value.shape) or int(key.shape[3]) != head_dim:
+            raise ValueError("shape K/V incompatibile con Q")
+        if query_heads % int(key.shape[1]) != 0:
+            raise ValueError("Q heads devono essere multipli dei KV heads")
+        if tuple(int(v) for v in attn_mask.shape[2:]) != (query_len, int(key.shape[2])):
+            raise ValueError("shape attn_mask incompatibile con Q/K")
+        if int(attn_mask.shape[0]) not in (1, batch) or int(attn_mask.shape[1]) not in (1, query_heads):
+            raise ValueError("attn_mask non broadcastable sulle teste")
+
+        active_stream = self._resolve_stream(stream, producer_stream)
+        output = torch.empty_like(query)
+        for tensor in (query, key, value, attn_mask, output):
+            tensor.record_stream(active_stream)
+        query_meta = self._tensor_meta(query, dtype_code=1)
+        key_meta = self._tensor_meta(key, dtype_code=1)
+        value_meta = self._tensor_meta(value, dtype_code=1)
+        mask_dtype_code = {
+            torch.bfloat16: 1,
+            torch.float32: 3,
+            torch.bool: 4,
+        }[attn_mask.dtype]
+        mask_meta = self._tensor_meta(attn_mask, dtype_code=mask_dtype_code)
+        output_meta = self._tensor_meta(output, dtype_code=1)
+        ret = self._lib.gemma4_listener_debug_attention(
+            ctypes.c_void_p(query.data_ptr()),
+            ctypes.byref(query_meta),
+            ctypes.c_void_p(key.data_ptr()),
+            ctypes.byref(key_meta),
+            ctypes.c_void_p(value.data_ptr()),
+            ctypes.byref(value_meta),
+            ctypes.c_void_p(attn_mask.data_ptr()),
+            ctypes.byref(mask_meta),
+            ctypes.c_void_p(output.data_ptr()),
+            ctypes.byref(output_meta),
+            ctypes.c_double(float(scale)),
+            ctypes.c_void_p(active_stream.cuda_stream),
+        )
+        if ret != 0:
+            raise RuntimeError(f"gemma4_listener_debug_attention failed with code {ret}")
+        output.record_stream(active_stream)
+        return output
 
     def prime_async(
         self,

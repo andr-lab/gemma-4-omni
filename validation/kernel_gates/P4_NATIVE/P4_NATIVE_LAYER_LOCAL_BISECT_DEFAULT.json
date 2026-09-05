@@ -1,0 +1,80 @@
+{
+  "status": "NO-GO",
+  "prefix_len": 34,
+  "layers_checked": 1,
+  "strict_thresholds": {
+    "mae_max": 0.0001,
+    "cosine_min": 0.9999,
+    "future_leak_max_abs": 1e-05
+  },
+  "future_leak_max_abs": 0.0,
+  "first_divergence": {
+    "layer": 0,
+    "operation": "attn_output",
+    "mae": 0.00020633134408853948,
+    "max_abs": 0.0625,
+    "cosine": 0.9999989867210388
+  },
+  "first_divergence_markers": {
+    "first_nonzero_difference": {
+      "layer": 0,
+      "operation": "attn_output",
+      "mae": 0.00020633134408853948,
+      "max_abs": 0.0625,
+      "cosine": 0.9999989867210388
+    },
+    "first_mae_gt_1e-7": {
+      "layer": 0,
+      "operation": "attn_output",
+      "mae": 0.00020633134408853948,
+      "max_abs": 0.0625,
+      "cosine": 0.9999989867210388
+    },
+    "first_mae_gt_1e-6": {
+      "layer": 0,
+      "operation": "attn_output",
+      "mae": 0.00020633134408853948,
+      "max_abs": 0.0625,
+      "cosine": 0.9999989867210388
+    },
+    "first_formal_failure": {
+      "layer": 0,
+      "operation": "attn_output",
+      "mae": 0.00020633134408853948,
+      "max_abs": 0.0625,
+      "cosine": 0.9999989867210388
+    }
+  },
+  "pre_attention_tensor_values": {
+    "path": "/workspace/validation/kernel_gates/P4_NATIVE/P4_NATIVE_PREATTENTION_TENSORS_DEFAULT.pt",
+    "sha256": "f80203d5e53aeea9b57b04ecb748f3a15e3e872cf99d438e5896984ac235f47b",
+    "keys": [
+      "layer_0/input_hidden/native",
+      "layer_0/input_hidden/oracle",
+      "layer_0/input_norm/native",
+      "layer_0/input_norm/oracle",
+      "layer_0/k_norm/native",
+      "layer_0/k_norm/oracle",
+      "layer_0/k_proj/native",
+      "layer_0/k_proj/oracle",
+      "layer_0/k_rope/native",
+      "layer_0/k_rope/oracle",
+      "layer_0/kv_write_key/native",
+      "layer_0/kv_write_key/oracle",
+      "layer_0/kv_write_val/native",
+      "layer_0/kv_write_val/oracle",
+      "layer_0/q_norm/native",
+      "layer_0/q_norm/oracle",
+      "layer_0/q_proj/native",
+      "layer_0/q_proj/oracle",
+      "layer_0/q_rope/native",
+      "layer_0/q_rope/oracle",
+      "layer_0/v_norm/native",
+      "layer_0/v_norm/oracle",
+      "layer_0/v_proj/native",
+      "layer_0/v_proj/oracle"
+    ],
+    "note": "Exact CPU BF16 oracle/native tensors captured before the first formal failure; use torch.load(..., weights_only=True)."
+  },
+  "rows_checked": 11
+}
