@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ STRICT_MAE_MAX = 1e-4
 STRICT_COSINE_MIN = 0.9999
 REPORT_PATH = Path("/workspace/validation/kernel_gates/P4_NATIVE/P4_NATIVE_ATEN_BRIDGE_MULTIFRAME.json")
 TENSOR_PATH = Path("/workspace/validation/kernel_gates/P4_NATIVE/P4_NATIVE_ATEN_BRIDGE_MULTIFRAME_TENSORS.pt")
+EXPECTED_TORCH_VERSION = "2.12.1+cu130"
 
 
 def metrics(reference: torch.Tensor, candidate: torch.Tensor) -> dict[str, float | bool]:
@@ -42,6 +44,11 @@ def metrics(reference: torch.Tensor, candidate: torch.Tensor) -> dict[str, float
 
 
 def main() -> int:
+    if torch.__version__ != EXPECTED_TORCH_VERSION:
+        raise RuntimeError(
+            f"ATen bridge gate richiede PyTorch {EXPECTED_TORCH_VERSION}, "
+            f"trovato {torch.__version__}"
+        )
     device = torch.device("cuda:0")
     dtype = torch.bfloat16
     frames = 3
@@ -123,7 +130,13 @@ def main() -> int:
     )
     result = {
         "status": "PASS" if first_formal_failure is None else "NO-GO",
+        "torch_version": torch.__version__,
         "attention_backend": "public ATen SDPA bridge (GEMMA4_ATEN_SDPA_BRIDGE=1)",
+        "rmsnorm_backend": (
+            "literal ATen pre_feedforward_layernorm bridge (GEMMA4_ATEN_RMSNORM_BRIDGE=1)"
+            if os.environ.get("GEMMA4_ATEN_RMSNORM_BRIDGE", "0") != "0"
+            else "custom RMSNorm kernels (GEMMA4_ATEN_RMSNORM_BRIDGE unset/0)"
+        ),
         "frames_checked": len(rows),
         "strict_thresholds": {"mae_max": STRICT_MAE_MAX, "cosine_min": STRICT_COSINE_MIN},
         "rows": rows,

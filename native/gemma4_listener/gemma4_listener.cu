@@ -14,6 +14,7 @@
 
 #include "gemma4_listener.h"
 #include "gemma4_listener_aten.h"
+#include "gemma4_listener_aten_norm.h"
 #include "generated_topology.h"
 #include "gemma4_listener_kernels.cuh"
 
@@ -60,6 +61,7 @@ struct gemma4_listener_ctx {
     __nv_bfloat16 *d_attn_out;        /* [q_max, 8 * 512] */
     bool *d_sdpa_mask;                 /* diagnostic ATen bridge [q_max, max_seq_len] */
     bool use_aten_sdpa_bridge;         /* explicit opt-in; default native kernel */
+    bool use_aten_rmsnorm_bridge;      /* explicit opt-in; pre-FF norm only */
 
     __nv_bfloat16 *d_gate_buf;        /* [q_max, 6144] */
     __nv_bfloat16 *d_up_buf;          /* [q_max, 6144] */
@@ -661,14 +663,27 @@ static int execute_layer(
                              ctx->d_hidden_a, q_len * hidden_size, stream) != 0) return -7;
 
     /* 5. FFN Block */
-    /* Pre-FF norm on hidden_a -> norm_buf */
-    kernel_rmsnorm_bf16<GEMMA4_HIDDEN_SIZE><<<q_len, 256, 0, stream>>>(
-        ctx->d_hidden_a,
-        (const __nv_bfloat16 *)lw->pre_ff_norm_w,
-        ctx->d_norm_buf,
-        q_len,
-        spec->pre_ff_norm_eps
-    );
+    /* Pre-FF norm on hidden_a -> norm_buf.  The ATen branch is a diagnostic
+     * numerical island selected only by explicit opt-in; every other norm
+     * remains on the current custom kernel. */
+    if (ctx->use_aten_rmsnorm_bridge) {
+        if (gemma4_aten_rmsnorm_parity_async(
+                ctx->d_hidden_a,
+                lw->pre_ff_norm_w,
+                ctx->d_norm_buf,
+                (uint32_t)q_len,
+                GEMMA4_HIDDEN_SIZE,
+                (double)spec->pre_ff_norm_eps,
+                stream) != 0) return -8;
+    } else {
+        kernel_rmsnorm_bf16<GEMMA4_HIDDEN_SIZE><<<q_len, 256, 0, stream>>>(
+            ctx->d_hidden_a,
+            (const __nv_bfloat16 *)lw->pre_ff_norm_w,
+            ctx->d_norm_buf,
+            q_len,
+            spec->pre_ff_norm_eps
+        );
+    }
     if (debug_snapshot_bf16(ctx, ctx->d_debug_hidden_taps, 5,
                              GEMMA4_STREAM_Q_LEN * GEMMA4_HIDDEN_SIZE,
                              ctx->d_norm_buf, q_len * hidden_size, stream) != 0) return -7;
@@ -1014,6 +1029,8 @@ int gemma4_listener_create(
     ctx->debug_capture_enabled = false;
     const char *aten_bridge_env = getenv("GEMMA4_ATEN_SDPA_BRIDGE");
     ctx->use_aten_sdpa_bridge = aten_bridge_env && strcmp(aten_bridge_env, "0") != 0;
+    const char *aten_rmsnorm_env = getenv("GEMMA4_ATEN_RMSNORM_BRIDGE");
+    ctx->use_aten_rmsnorm_bridge = aten_rmsnorm_env && strcmp(aten_rmsnorm_env, "0") != 0;
 
     /* The handle is persistent; projection calls only switch its stream. */
     cublasStatus_t cb_stat = cublasCreate(&ctx->cublas);
@@ -1596,6 +1613,253 @@ int gemma4_listener_step_debug(
         return -4;
     }
     ctx->current_position += q_len;
+    return 0;
+}
+
+/* Diagnostic API: expose the current custom RMSNorm's intermediate FP32
+ * boundaries without changing the production kernel or executor state. */
+int gemma4_listener_debug_rmsnorm_trace(
+    gemma4_listener_ctx *ctx,
+    const void *input,
+    const gemma4_tensor_meta *input_meta,
+    const void *weight,
+    const gemma4_tensor_meta *weight_meta,
+    void *output,
+    const gemma4_tensor_meta *output_meta,
+    uint32_t rows,
+    uint32_t dim,
+    double eps,
+    float *input_fp32,
+    float *x_squared_fp32,
+    float *row_sum_fp32,
+    float *row_mean_fp32,
+    float *mean_plus_eps_fp32,
+    float *pow_neg_half_fp32,
+    float *normalized_fp32,
+    float *weighted_fp32,
+    cudaStream_t stream
+) {
+    if (!ctx || !input || !input_meta || !weight || !weight_meta ||
+        !output || !output_meta || !input_fp32 || !x_squared_fp32 ||
+        !row_sum_fp32 || !row_mean_fp32 || !mean_plus_eps_fp32 ||
+        !pow_neg_half_fp32 || !normalized_fp32 || !weighted_fp32 ||
+        rows == 0 || rows > GEMMA4_STREAM_Q_LEN ||
+        (dim != 256 && dim != 512 && dim != GEMMA4_HIDDEN_SIZE) ||
+        eps != eps || eps < 0.0 || eps > 3.402823466e38) return -1;
+    if (ctx->poisoned) return -9;
+    if (observe_async_stream_error(ctx) != 0) return -12;
+    if (cudaGetLastError() != cudaSuccess) {
+        ctx->poisoned = true;
+        return -11;
+    }
+
+    int current_device = -1;
+    if (cudaGetDevice(&current_device) != cudaSuccess) {
+        ctx->poisoned = true;
+        return -10;
+    }
+    const uint64_t input_dims[] = {1, rows, dim, 0};
+    const uint64_t weight_dims[] = {dim, 0, 0, 0};
+    const bool metadata_ok =
+        validate_tensor_meta(input_meta, input, current_device,
+                             GEMMA4_META_BF16, 3, input_dims) &&
+        validate_tensor_meta(weight_meta, weight, current_device,
+                             GEMMA4_META_BF16, 1, weight_dims) &&
+        validate_tensor_meta(output_meta, output, current_device,
+                             GEMMA4_META_BF16, 3, input_dims);
+    const bool trace_ok =
+        is_current_device_pointer(input_fp32, current_device) &&
+        is_current_device_pointer(x_squared_fp32, current_device) &&
+        is_current_device_pointer(row_sum_fp32, current_device) &&
+        is_current_device_pointer(row_mean_fp32, current_device) &&
+        is_current_device_pointer(mean_plus_eps_fp32, current_device) &&
+        is_current_device_pointer(pow_neg_half_fp32, current_device) &&
+        is_current_device_pointer(normalized_fp32, current_device) &&
+        is_current_device_pointer(weighted_fp32, current_device);
+    if (!metadata_ok || !trace_ok) {
+        ctx->poisoned = true;
+        return -10;
+    }
+    if (ctx->last_stream != 0 && ctx->last_stream != stream) return -6;
+
+    const float eps_f = (float)eps;
+    if (dim == 256) {
+        kernel_rmsnorm_bf16<256><<<rows, 256, 0, stream>>>(
+            (const __nv_bfloat16 *)input, (const __nv_bfloat16 *)weight,
+            (__nv_bfloat16 *)output, (int)rows, eps_f);
+        kernel_rmsnorm_bf16_trace<256><<<rows, 256, 0, stream>>>(
+            (const __nv_bfloat16 *)input, (const __nv_bfloat16 *)weight,
+            input_fp32, x_squared_fp32, row_sum_fp32, row_mean_fp32,
+            mean_plus_eps_fp32, pow_neg_half_fp32, normalized_fp32,
+            weighted_fp32, (int)rows, eps_f);
+    } else if (dim == 512) {
+        kernel_rmsnorm_bf16<512><<<rows, 256, 0, stream>>>(
+            (const __nv_bfloat16 *)input, (const __nv_bfloat16 *)weight,
+            (__nv_bfloat16 *)output, (int)rows, eps_f);
+        kernel_rmsnorm_bf16_trace<512><<<rows, 256, 0, stream>>>(
+            (const __nv_bfloat16 *)input, (const __nv_bfloat16 *)weight,
+            input_fp32, x_squared_fp32, row_sum_fp32, row_mean_fp32,
+            mean_plus_eps_fp32, pow_neg_half_fp32, normalized_fp32,
+            weighted_fp32, (int)rows, eps_f);
+    } else {
+        kernel_rmsnorm_bf16<GEMMA4_HIDDEN_SIZE><<<rows, 256, 0, stream>>>(
+            (const __nv_bfloat16 *)input, (const __nv_bfloat16 *)weight,
+            (__nv_bfloat16 *)output, (int)rows, eps_f);
+        kernel_rmsnorm_bf16_trace<GEMMA4_HIDDEN_SIZE><<<rows, 256, 0, stream>>>(
+            (const __nv_bfloat16 *)input, (const __nv_bfloat16 *)weight,
+            input_fp32, x_squared_fp32, row_sum_fp32, row_mean_fp32,
+            mean_plus_eps_fp32, pow_neg_half_fp32, normalized_fp32,
+            weighted_fp32, (int)rows, eps_f);
+    }
+    if (cudaPeekAtLastError() != cudaSuccess) {
+        ctx->poisoned = true;
+        return -8;
+    }
+    ctx->last_stream = stream;
+    return 0;
+}
+
+/* Diagnostic direct FFN primitives. These entrypoints deliberately reuse the
+ * production cuBLAS/kernel implementations with caller-provided oracle
+ * inputs; they do not alter the listener cache or public position. */
+int gemma4_listener_debug_linear(
+    gemma4_listener_ctx *ctx,
+    const void *input,
+    const gemma4_tensor_meta *input_meta,
+    const void *weight,
+    const gemma4_tensor_meta *weight_meta,
+    void *output,
+    const gemma4_tensor_meta *output_meta,
+    uint32_t rows,
+    uint32_t out_dim,
+    uint32_t in_dim,
+    cudaStream_t stream
+) {
+    if (!ctx || !input || !input_meta || !weight || !weight_meta ||
+        !output || !output_meta || rows == 0 || rows > GEMMA4_STREAM_Q_LEN ||
+        in_dim == 0 || out_dim == 0 || in_dim > GEMMA4_MAX_INTERMEDIATE_SIZE ||
+        out_dim > GEMMA4_MAX_INTERMEDIATE_SIZE || ctx->poisoned) return -1;
+    if (observe_async_stream_error(ctx) != 0) return -12;
+    if (cudaGetLastError() != cudaSuccess) {
+        ctx->poisoned = true;
+        return -11;
+    }
+    int current_device = -1;
+    if (cudaGetDevice(&current_device) != cudaSuccess) {
+        ctx->poisoned = true;
+        return -10;
+    }
+    const uint64_t input_dims[] = {1, rows, in_dim, 0};
+    const uint64_t weight_dims[] = {out_dim, in_dim, 0, 0};
+    const uint64_t output_dims[] = {1, rows, out_dim, 0};
+    if (!validate_tensor_meta(input_meta, input, current_device,
+                              GEMMA4_META_BF16, 3, input_dims) ||
+        !validate_tensor_meta(weight_meta, weight, current_device,
+                               GEMMA4_META_BF16, 2, weight_dims) ||
+        !validate_tensor_meta(output_meta, output, current_device,
+                              GEMMA4_META_BF16, 3, output_dims)) {
+        ctx->poisoned = true;
+        return -10;
+    }
+    if (ctx->last_stream != 0 && ctx->last_stream != stream) return -6;
+    if (run_linear_cublas(
+            ctx->cublas, weight, input, output,
+            (int)rows, (int)out_dim, (int)in_dim, stream) != 0) {
+        ctx->poisoned = true;
+        return -4;
+    }
+    if (cudaPeekAtLastError() != cudaSuccess) {
+        ctx->poisoned = true;
+        return -8;
+    }
+    ctx->last_stream = stream;
+    return 0;
+}
+
+int gemma4_listener_debug_gelu_tanh(
+    gemma4_listener_ctx *ctx,
+    const void *input,
+    const gemma4_tensor_meta *input_meta,
+    void *output,
+    const gemma4_tensor_meta *output_meta,
+    uint32_t rows,
+    uint32_t dim,
+    cudaStream_t stream
+) {
+    if (!ctx || !input || !input_meta || !output || !output_meta ||
+        rows == 0 || rows > GEMMA4_STREAM_Q_LEN || dim == 0 ||
+        dim > GEMMA4_MAX_INTERMEDIATE_SIZE || ctx->poisoned) return -1;
+    if (observe_async_stream_error(ctx) != 0) return -12;
+    if (cudaGetLastError() != cudaSuccess) {
+        ctx->poisoned = true;
+        return -11;
+    }
+    int current_device = -1;
+    if (cudaGetDevice(&current_device) != cudaSuccess) {
+        ctx->poisoned = true;
+        return -10;
+    }
+    const uint64_t dims[] = {1, rows, dim, 0};
+    if (!validate_tensor_meta(input_meta, input, current_device,
+                              GEMMA4_META_BF16, 3, dims) ||
+        !validate_tensor_meta(output_meta, output, current_device,
+                              GEMMA4_META_BF16, 3, dims)) {
+        ctx->poisoned = true;
+        return -10;
+    }
+    if (ctx->last_stream != 0 && ctx->last_stream != stream) return -6;
+    const int elements = (int)((size_t)rows * dim);
+    kernel_gelu_tanh_bf16<<<(elements + 255) / 256, 256, 0, stream>>>(
+        (const __nv_bfloat16 *)input, (__nv_bfloat16 *)output, elements);
+    if (cudaPeekAtLastError() != cudaSuccess) {
+        ctx->poisoned = true;
+        return -8;
+    }
+    ctx->last_stream = stream;
+    return 0;
+}
+
+int gemma4_listener_debug_mul(
+    gemma4_listener_ctx *ctx,
+    const void *lhs,
+    const gemma4_tensor_meta *lhs_meta,
+    const void *rhs,
+    const gemma4_tensor_meta *rhs_meta,
+    void *output,
+    const gemma4_tensor_meta *output_meta,
+    uint32_t rows,
+    uint32_t dim,
+    cudaStream_t stream
+) {
+    if (!ctx || !lhs || !lhs_meta || !rhs || !rhs_meta || !output ||
+        !output_meta || rows == 0 || rows > GEMMA4_STREAM_Q_LEN || dim == 0 ||
+        dim > GEMMA4_MAX_INTERMEDIATE_SIZE || ctx->poisoned) return -1;
+    if (observe_async_stream_error(ctx) != 0) return -12;
+    int current_device = -1;
+    if (cudaGetDevice(&current_device) != cudaSuccess) {
+        ctx->poisoned = true;
+        return -10;
+    }
+    const uint64_t dims[] = {1, rows, dim, 0};
+    if (!validate_tensor_meta(lhs_meta, lhs, current_device,
+                              GEMMA4_META_BF16, 3, dims) ||
+        !validate_tensor_meta(rhs_meta, rhs, current_device,
+                              GEMMA4_META_BF16, 3, dims) ||
+        !validate_tensor_meta(output_meta, output, current_device,
+                              GEMMA4_META_BF16, 3, dims)) {
+        ctx->poisoned = true;
+        return -10;
+    }
+    if (ctx->last_stream != 0 && ctx->last_stream != stream) return -6;
+    const int elements = (int)((size_t)rows * dim);
+    kernel_mul_bf16<<<(elements + 255) / 256, 256, 0, stream>>>(
+        (const __nv_bfloat16 *)lhs, (const __nv_bfloat16 *)rhs,
+        (__nv_bfloat16 *)output, elements);
+    if (cudaPeekAtLastError() != cudaSuccess) {
+        ctx->poisoned = true;
+        return -8;
+    }
+    ctx->last_stream = stream;
     return 0;
 }
 

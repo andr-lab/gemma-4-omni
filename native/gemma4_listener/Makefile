@@ -1,13 +1,13 @@
 # Makefile — Builds libgemma4_listener.so and gemma4_listener_test
 # Conforms to P4-NATIVE Implementation Plan §21
 
-NVCC ?= /usr/local/cuda/bin/nvcc
-CUDA_PATH ?= /usr/local/cuda
+CUDA_PATH ?= $(if $(wildcard /usr/local/cuda-13.1),/usr/local/cuda-13.1,/usr/local/cuda)
+NVCC ?= $(CUDA_PATH)/bin/nvcc
 
 # This executor is certified only for the RTX 3090 target and deliberately
 # does not enable --use_fast_math.
 override ARCH = -gencode arch=compute_86,code=sm_86
-NVCCFLAGS = -O3 $(ARCH) -lineinfo --compiler-options -fPIC -std=c++17 -I. -I$(CUDA_PATH)/include
+NVCCFLAGS = -O3 $(ARCH) -lineinfo --compiler-options -fPIC -Xcompiler -fno-exceptions -Xcompiler -U_GNU_SOURCE -std=c++17 -I. -I$(CUDA_PATH)/include
 CXXFLAGS = -O3 -fPIC -std=c++17 -I. -I$(CUDA_PATH)/include
 LDFLAGS = -L$(CUDA_PATH)/lib64 -lcudart -lcublas
 
@@ -21,7 +21,7 @@ TEST_TARGET = gemma4_listener_test
 
 CUDA_SRCS = gemma4_listener.cu gemma4_listener_cache.cu
 CUDA_OBJS = $(CUDA_SRCS:.cu=.o)
-ATEN_OBJS = gemma4_listener_aten.o
+ATEN_OBJS = gemma4_listener_aten.o gemma4_listener_aten_norm.o
 OBJS = $(CUDA_OBJS) $(ATEN_OBJS)
 
 all: $(TORCH_CONFIG) $(LIB_TARGET) $(TEST_TARGET)
@@ -33,6 +33,9 @@ $(TORCH_CONFIG): ../../tools/kernel_gates/export_torch_build_config.py
 	$(NVCC) $(NVCCFLAGS) -c $< -o $@
 
 gemma4_listener_aten.o: gemma4_listener_aten.cpp gemma4_listener_aten.h gemma4_listener.h $(TORCH_CONFIG)
+	$(CXX) $(CXXFLAGS) $(TORCH_CXXFLAGS) -c $< -o $@
+
+gemma4_listener_aten_norm.o: gemma4_listener_aten_norm.cpp gemma4_listener_aten_norm.h $(TORCH_CONFIG)
 	$(CXX) $(CXXFLAGS) $(TORCH_CXXFLAGS) -c $< -o $@
 
 $(LIB_TARGET): $(OBJS)

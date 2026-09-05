@@ -141,6 +141,65 @@ __global__ void kernel_rmsnorm_bf16(
     }
 }
 
+/* Diagnostic-only expansion of the current kernel.  It deliberately keeps
+ * the same block reduction and powf path as kernel_rmsnorm_bf16, while
+ * exposing its FP32 boundaries for first-difference diagnosis.  Production
+ * execution never launches this kernel. */
+template <int D>
+__global__ void kernel_rmsnorm_bf16_trace(
+    const __nv_bfloat16 * __restrict__ x,
+    const __nv_bfloat16 * __restrict__ w,
+    float * __restrict__ input_fp32,
+    float * __restrict__ x_squared,
+    float * __restrict__ row_sum,
+    float * __restrict__ row_mean,
+    float * __restrict__ mean_plus_eps,
+    float * __restrict__ pow_neg_half,
+    float * __restrict__ normalized,
+    float * __restrict__ weighted,
+    int num_rows,
+    float eps
+) {
+    int row = blockIdx.x;
+    if (row >= num_rows) return;
+
+    const __nv_bfloat16 *row_x = x + row * D;
+    float *row_input = input_fp32 + row * D;
+    float *row_squared = x_squared + row * D;
+    float *row_normalized = normalized + row * D;
+    float *row_weighted = weighted + row * D;
+
+    float sum_sq = 0.0f;
+    for (int i = threadIdx.x; i < D; i += blockDim.x) {
+        float value = __bfloat162float(row_x[i]);
+        row_input[i] = value;
+        row_squared[i] = value * value;
+        sum_sq += row_squared[i];
+    }
+
+    __shared__ float s_rsqrt;
+    float block_sum = block_reduce_sum(sum_sq);
+    if (threadIdx.x == 0) {
+        const float mean = block_sum / (float)D;
+        const float with_eps = mean + eps;
+        const float scale = powf(with_eps, -0.5f);
+        row_sum[row] = block_sum;
+        row_mean[row] = mean;
+        mean_plus_eps[row] = with_eps;
+        pow_neg_half[row] = scale;
+        s_rsqrt = scale;
+    }
+    __syncthreads();
+
+    const float scale = s_rsqrt;
+    for (int i = threadIdx.x; i < D; i += blockDim.x) {
+        const float normalized_value = row_input[i] * scale;
+        const float weight = w ? __bfloat162float(w[i]) : 1.0f;
+        row_normalized[i] = normalized_value;
+        row_weighted[i] = normalized_value * weight;
+    }
+}
+
 /* -------------------------------------------------------------------------
  * Fused GeGLU Activation with GELUTanh
  *   out = gelu_tanh(gate) * up

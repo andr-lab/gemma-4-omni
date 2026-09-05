@@ -546,6 +546,79 @@ class NativeGemmaListenerLM:
             ctypes.c_void_p,
         ]
 
+        self._lib.gemma4_listener_debug_rmsnorm_trace.restype = ctypes.c_int
+        self._lib.gemma4_listener_debug_rmsnorm_trace.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.POINTER(Gemma4TensorMeta),
+            ctypes.c_void_p,
+            ctypes.POINTER(Gemma4TensorMeta),
+            ctypes.c_void_p,
+            ctypes.POINTER(Gemma4TensorMeta),
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_double,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+
+        self._lib.gemma4_listener_debug_linear.restype = ctypes.c_int
+        self._lib.gemma4_listener_debug_linear.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.POINTER(Gemma4TensorMeta),
+            ctypes.c_void_p,
+            ctypes.POINTER(Gemma4TensorMeta),
+            ctypes.c_void_p,
+            ctypes.POINTER(Gemma4TensorMeta),
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        self._lib.gemma4_listener_debug_gelu_tanh.restype = ctypes.c_int
+        self._lib.gemma4_listener_debug_gelu_tanh.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.POINTER(Gemma4TensorMeta),
+            ctypes.c_void_p,
+            ctypes.POINTER(Gemma4TensorMeta),
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        self._lib.gemma4_listener_debug_mul.restype = ctypes.c_int
+        self._lib.gemma4_listener_debug_mul.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.POINTER(Gemma4TensorMeta),
+            ctypes.c_void_p,
+            ctypes.POINTER(Gemma4TensorMeta),
+            ctypes.c_void_p,
+            ctypes.POINTER(Gemma4TensorMeta),
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+
+        self._lib.gemma4_aten_rmsnorm_parity_async.restype = ctypes.c_int
+        self._lib.gemma4_aten_rmsnorm_parity_async.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_double,
+            ctypes.c_void_p,
+        ]
+
         self._lib.gemma4_listener_debug_attention.restype = ctypes.c_int
         self._lib.gemma4_listener_debug_attention.argtypes = [
             ctypes.c_void_p,
@@ -1016,6 +1089,231 @@ class NativeGemmaListenerLM:
         self._last_execution_stream = active_stream
         self.output_tensor.record_stream(active_stream)
         return self.output_tensor
+
+    def debug_rmsnorm_trace(
+        self,
+        input_tensor: torch.Tensor,
+        weight: torch.Tensor,
+        *,
+        eps: float,
+        stream: torch.cuda.Stream | None = None,
+        producer_stream: torch.cuda.Stream | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """Trace the current custom RMSNorm on a borrowed exact input.
+
+        Diagnostic-only: the custom production kernel is launched unchanged
+        and its FP32 intermediates are copied into caller-owned CUDA buffers.
+        """
+        self._require_cuda_contiguous(input_tensor, name="rmsnorm input", dtype=torch.bfloat16)
+        self._require_cuda_contiguous(weight, name="rmsnorm weight", dtype=torch.bfloat16)
+        if input_tensor.ndim != 3 or int(input_tensor.shape[0]) != 1:
+            raise ValueError("rmsnorm input deve avere shape [1, rows, dim]")
+        rows = int(input_tensor.shape[1])
+        dim = int(input_tensor.shape[2])
+        if rows <= 0 or rows > self.stream_q_len or tuple(weight.shape) != (dim,):
+            raise ValueError("shape RMSNorm inattesa")
+        if not math.isfinite(float(eps)) or float(eps) < 0:
+            raise ValueError("eps RMSNorm deve essere finito e non negativo")
+
+        active_stream = self._resolve_stream(stream, producer_stream)
+        output = torch.empty_like(input_tensor)
+        input_fp32 = torch.empty((rows, dim), dtype=torch.float32, device=input_tensor.device)
+        x_squared_fp32 = torch.empty_like(input_fp32)
+        normalized_fp32 = torch.empty_like(input_fp32)
+        weighted_fp32 = torch.empty_like(input_fp32)
+        row_sum_fp32 = torch.empty((rows,), dtype=torch.float32, device=input_tensor.device)
+        row_mean_fp32 = torch.empty_like(row_sum_fp32)
+        mean_plus_eps_fp32 = torch.empty_like(row_sum_fp32)
+        pow_neg_half_fp32 = torch.empty_like(row_sum_fp32)
+        for tensor in (
+            input_tensor, weight, output, input_fp32, x_squared_fp32,
+            normalized_fp32, weighted_fp32, row_sum_fp32, row_mean_fp32,
+            mean_plus_eps_fp32, pow_neg_half_fp32,
+        ):
+            tensor.record_stream(active_stream)
+
+        input_meta = self._tensor_meta(input_tensor, dtype_code=1)
+        weight_meta = self._tensor_meta(weight, dtype_code=1)
+        output_meta = self._tensor_meta(output, dtype_code=1)
+        ret = self._lib.gemma4_listener_debug_rmsnorm_trace(
+            self._ctx,
+            ctypes.c_void_p(input_tensor.data_ptr()),
+            ctypes.byref(input_meta),
+            ctypes.c_void_p(weight.data_ptr()),
+            ctypes.byref(weight_meta),
+            ctypes.c_void_p(output.data_ptr()),
+            ctypes.byref(output_meta),
+            ctypes.c_uint32(rows),
+            ctypes.c_uint32(dim),
+            ctypes.c_double(float(eps)),
+            ctypes.c_void_p(input_fp32.data_ptr()),
+            ctypes.c_void_p(x_squared_fp32.data_ptr()),
+            ctypes.c_void_p(row_sum_fp32.data_ptr()),
+            ctypes.c_void_p(row_mean_fp32.data_ptr()),
+            ctypes.c_void_p(mean_plus_eps_fp32.data_ptr()),
+            ctypes.c_void_p(pow_neg_half_fp32.data_ptr()),
+            ctypes.c_void_p(normalized_fp32.data_ptr()),
+            ctypes.c_void_p(weighted_fp32.data_ptr()),
+            ctypes.c_void_p(active_stream.cuda_stream),
+        )
+        if ret != 0:
+            raise RuntimeError(f"gemma4_listener_debug_rmsnorm_trace failed with code {ret}")
+        return {
+            "input_bf16": input_tensor,
+            "input_fp32": input_fp32,
+            "x_squared_fp32": x_squared_fp32,
+            "row_sum_fp32": row_sum_fp32,
+            "row_mean_fp32": row_mean_fp32,
+            "mean_plus_eps_fp32": mean_plus_eps_fp32,
+            "pow_neg_half_fp32": pow_neg_half_fp32,
+            "normalized_fp32": normalized_fp32,
+            "weighted_fp32": weighted_fp32,
+            "final_bf16": output,
+        }
+
+    def debug_linear(
+        self,
+        input_tensor: torch.Tensor,
+        weight: torch.Tensor,
+        *,
+        stream: torch.cuda.Stream | None = None,
+        producer_stream: torch.cuda.Stream | None = None,
+    ) -> torch.Tensor:
+        """Run the native cuBLAS linear primitive on exact diagnostic inputs."""
+        self._require_cuda_contiguous(input_tensor, name="linear input", dtype=torch.bfloat16)
+        self._require_cuda_contiguous(weight, name="linear weight", dtype=torch.bfloat16)
+        if input_tensor.ndim != 3 or int(input_tensor.shape[0]) != 1 or weight.ndim != 2:
+            raise ValueError("linear tensors devono avere shape [1, rows, in] e [out, in]")
+        rows, in_dim = (int(input_tensor.shape[1]), int(input_tensor.shape[2]))
+        out_dim = int(weight.shape[0])
+        if rows <= 0 or rows > self.stream_q_len or tuple(weight.shape) != (out_dim, in_dim):
+            raise ValueError("shape linear inattesa")
+        active_stream = self._resolve_stream(stream, producer_stream)
+        output = torch.empty((1, rows, out_dim), dtype=torch.bfloat16, device=input_tensor.device)
+        for tensor in (input_tensor, weight, output):
+            tensor.record_stream(active_stream)
+        input_meta = self._tensor_meta(input_tensor, dtype_code=1)
+        weight_meta = self._tensor_meta(weight, dtype_code=1)
+        output_meta = self._tensor_meta(output, dtype_code=1)
+        ret = self._lib.gemma4_listener_debug_linear(
+            self._ctx,
+            ctypes.c_void_p(input_tensor.data_ptr()), ctypes.byref(input_meta),
+            ctypes.c_void_p(weight.data_ptr()), ctypes.byref(weight_meta),
+            ctypes.c_void_p(output.data_ptr()), ctypes.byref(output_meta),
+            ctypes.c_uint32(rows), ctypes.c_uint32(out_dim), ctypes.c_uint32(in_dim),
+            ctypes.c_void_p(active_stream.cuda_stream),
+        )
+        if ret != 0:
+            raise RuntimeError(f"gemma4_listener_debug_linear failed with code {ret}")
+        return output
+
+    def debug_gelu_tanh(
+        self,
+        input_tensor: torch.Tensor,
+        *,
+        stream: torch.cuda.Stream | None = None,
+        producer_stream: torch.cuda.Stream | None = None,
+    ) -> torch.Tensor:
+        """Run the native GELU-tanh primitive on an exact diagnostic input."""
+        self._require_cuda_contiguous(input_tensor, name="GELU input", dtype=torch.bfloat16)
+        if input_tensor.ndim != 3 or int(input_tensor.shape[0]) != 1:
+            raise ValueError("GELU input deve avere shape [1, rows, dim]")
+        rows, dim = (int(input_tensor.shape[1]), int(input_tensor.shape[2]))
+        if rows <= 0 or rows > self.stream_q_len or dim <= 0:
+            raise ValueError("shape GELU inattesa")
+        active_stream = self._resolve_stream(stream, producer_stream)
+        output = torch.empty_like(input_tensor)
+        input_meta = self._tensor_meta(input_tensor, dtype_code=1)
+        output_meta = self._tensor_meta(output, dtype_code=1)
+        for tensor in (input_tensor, output):
+            tensor.record_stream(active_stream)
+        ret = self._lib.gemma4_listener_debug_gelu_tanh(
+            self._ctx,
+            ctypes.c_void_p(input_tensor.data_ptr()), ctypes.byref(input_meta),
+            ctypes.c_void_p(output.data_ptr()), ctypes.byref(output_meta),
+            ctypes.c_uint32(rows), ctypes.c_uint32(dim),
+            ctypes.c_void_p(active_stream.cuda_stream),
+        )
+        if ret != 0:
+            raise RuntimeError(f"gemma4_listener_debug_gelu_tanh failed with code {ret}")
+        return output
+
+    def debug_mul(
+        self,
+        lhs: torch.Tensor,
+        rhs: torch.Tensor,
+        *,
+        stream: torch.cuda.Stream | None = None,
+        producer_stream: torch.cuda.Stream | None = None,
+    ) -> torch.Tensor:
+        """Run the native BF16 elementwise multiply on exact inputs."""
+        for name, tensor in (("mul lhs", lhs), ("mul rhs", rhs)):
+            self._require_cuda_contiguous(tensor, name=name, dtype=torch.bfloat16)
+        if lhs.ndim != 3 or tuple(lhs.shape) != tuple(rhs.shape) or int(lhs.shape[0]) != 1:
+            raise ValueError("mul tensors devono avere stessa shape [1, rows, dim]")
+        rows, dim = (int(lhs.shape[1]), int(lhs.shape[2]))
+        if rows <= 0 or rows > self.stream_q_len or dim <= 0:
+            raise ValueError("shape mul inattesa")
+        active_stream = self._resolve_stream(stream, producer_stream)
+        output = torch.empty_like(lhs)
+        lhs_meta = self._tensor_meta(lhs, dtype_code=1)
+        rhs_meta = self._tensor_meta(rhs, dtype_code=1)
+        output_meta = self._tensor_meta(output, dtype_code=1)
+        for tensor in (lhs, rhs, output):
+            tensor.record_stream(active_stream)
+        ret = self._lib.gemma4_listener_debug_mul(
+            self._ctx,
+            ctypes.c_void_p(lhs.data_ptr()), ctypes.byref(lhs_meta),
+            ctypes.c_void_p(rhs.data_ptr()), ctypes.byref(rhs_meta),
+            ctypes.c_void_p(output.data_ptr()), ctypes.byref(output_meta),
+            ctypes.c_uint32(rows), ctypes.c_uint32(dim),
+            ctypes.c_void_p(active_stream.cuda_stream),
+        )
+        if ret != 0:
+            raise RuntimeError(f"gemma4_listener_debug_mul failed with code {ret}")
+        return output
+
+    def aten_rmsnorm_parity(
+        self,
+        input_tensor: torch.Tensor,
+        weight: torch.Tensor,
+        *,
+        eps: float,
+        stream: torch.cuda.Stream | None = None,
+        producer_stream: torch.cuda.Stream | None = None,
+    ) -> torch.Tensor:
+        """Run the literal installed-PyTorch ATen RMSNorm sequence.
+
+        Diagnostic-only and intentionally allocation-per-call. The C bridge
+        borrows the BF16 input/weight/output storage and orders ATen work on
+        the caller's CUDA stream.
+        """
+        self._require_cuda_contiguous(input_tensor, name="ATen RMSNorm input", dtype=torch.bfloat16)
+        self._require_cuda_contiguous(weight, name="ATen RMSNorm weight", dtype=torch.bfloat16)
+        if input_tensor.ndim != 3 or int(input_tensor.shape[0]) != 1:
+            raise ValueError("ATen RMSNorm input deve avere shape [1, rows, dim]")
+        rows = int(input_tensor.shape[1])
+        dim = int(input_tensor.shape[2])
+        if rows <= 0 or rows > self.max_seq_len or tuple(weight.shape) != (dim,):
+            raise ValueError("shape ATen RMSNorm inattesa")
+        if not math.isfinite(float(eps)) or float(eps) < 0:
+            raise ValueError("eps ATen RMSNorm deve essere finito e non negativo")
+        active_stream = self._resolve_stream(stream, producer_stream)
+        output = torch.empty_like(input_tensor)
+        for tensor in (input_tensor, weight, output):
+            tensor.record_stream(active_stream)
+        ret = self._lib.gemma4_aten_rmsnorm_parity_async(
+            ctypes.c_void_p(input_tensor.data_ptr()),
+            ctypes.c_void_p(weight.data_ptr()),
+            ctypes.c_void_p(output.data_ptr()),
+            ctypes.c_uint32(rows),
+            ctypes.c_uint32(dim),
+            ctypes.c_double(float(eps)),
+            ctypes.c_void_p(active_stream.cuda_stream),
+        )
+        if ret != 0:
+            raise RuntimeError(f"gemma4_aten_rmsnorm_parity_async failed with code {ret}")
+        return output
 
     def debug_attention(
         self,

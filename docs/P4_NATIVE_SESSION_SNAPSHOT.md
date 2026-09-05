@@ -1,6 +1,6 @@
 # P4-NATIVE — Stato sessione
 
-**Data:** 2026-09-05 04:40 UTC
+**Data:** 2026-09-05 17:35 UTC
 **Stato:** sperimentale / **NO-GO production** fino alla parity strict
 
 ## Sintesi
@@ -24,6 +24,9 @@ La parity numerica completa **non è certificata**. Risultati correnti:
 - step unprimed diagnostico: MAE circa `0.171`, cosine `0.9988`, max diff `4.0`;
 - prefill component-wise: cache K/V con cosine elevata, ma hidden finale
   post-RMSNorm circa MAE `0.543`, cosine `0.968`.
+- con il bridge diagnostico ATen SDPA + `pre_ff_norm`, il multi-frame resta
+  **NO-GO**: MAE `0.3115/0.6501/0.6796`, cosine
+  `0.9890/0.9768/0.9736`.
 
 Di conseguenza il native backend resta opt-in e non deve essere usato in
 produzione.
@@ -40,6 +43,8 @@ produzione.
 | Integrazione | `duplex_kernel/listener.py` | opt-in, prefix separato, frame Q=4 persistenti |
 | Test/gate | `tools/kernel_gates/` e `tools/tests/` | smoke, parity, diagnostica, steady-state; bisect layer-local strict |
 | Bisect diagnostico | `tools/kernel_gates/test_native_layer_local_parity.py` | cache prefix exact, tap per-op CUDA, first-divergence + future-leak gate |
+| ATen RMSNorm oracle | `native/gemma4_listener/gemma4_listener_aten_norm.*`, `GEMMA4_ATEN_RMSNORM_BRIDGE=1` | bridge literal opt-in, solo pre-FF norm |
+| FFN isolation | `tools/kernel_gates/test_native_ffn_primitives.py` | cuBLAS/GELU/mul/down exact con input oracle |
 
 Contratto numerico: prefix esatto `BOS + 32 slot testo + BOA = 34`, prefill
 shape-stable `M=291` con sole 34 righe valide in cache, mask CUDA `int64`
@@ -63,7 +68,15 @@ copia dei pesi.
   warm-up, allocazioni `0`, memoria riservata `0`, sync Python `0`: **PASS**.
 - Benchmark corrente: `10.47 ms` medi, `11.69 ms` p95 su RTX 3090.
 - Import cache ShapeStable esatto: K/V importati bit-identici e posizione nativa `34 -> 38` dopo il probe Q=4.
-- Bisect layer-local su RTX 3090: input norm, Q projection/norm/RoPE e K/V boundary precedono il primo failure strict; il primo drift è `layer 0 / attn_output`, MAE `2.0633e-4`, max `0.0625`, cosine `0.99999899`.
+- Bisect layer-local default: primo failure `layer 0 / attn_output`, MAE `2.0633e-4`, max `0.0625`, cosine `0.99999899`.
+- RMSNorm isolata layer 2: il custom kernel diverge prima a `row_sum_fp32`
+  (1–4 ULP), mentre il literal ATen è exact BF16; layer 4 `post_attn_norm`
+  riproduce lo stesso pattern.
+- FFN layer 2 isolata: gate/up, GELU-tanh, gate×up e down sono tutti exact
+  BF16 (`MAE=0`), quindi nessun bridge GEMM/attivazione è stato promosso.
+- Scan local ATen RMSNorm su tutti i 35 layer: 945 boundary, primo nuovo
+  nonzero layer 4/post-attn norm, primo failure formale layer 9/post-FF norm;
+  future-leak `0.0`. Report: `P4_NATIVE_LAYER_LOCAL_SCAN_ALL_ATEN_RMSNORM.json`.
 - Future-leak numerico sul prefisso mascherato: max abs `0.0` (gate `<=1e-5`).
 - Test locali mirati: `16 passed`; `py_compile` e `git diff --check`: **PASS**.
 - `pytest -q` completo locale: non gate valido; collection interrotta da 73 moduli
@@ -111,25 +124,26 @@ topologia generata nel codice C;
    resta la barriera esplicita per una certificazione immediata. Non è possibile
    restituire dal metodo asincrono un errore di esecuzione che non è ancora avvenuto
    senza attendere lo stream.
-2. Il bisect component-wise ora localizza il primo drift a `layer 0 / attn_output`.
-   Su RTX 3090 il percorso ShapeStable/PyTorch seleziona il kernel
-   `aten::_scaled_dot_product_efficient_attention` CUTLASS
-   (`fmha_cutlassF_bf16_aligned_32x128_gmem_sm80`), mentre il native usa il
-   kernel SDPA scalar custom: anche con input Q/K/V già strict, l'ordine di
-   accumulazione produce MAE `2.0633e-4` e rompe la soglia `1e-4`. Il final
-   RMSNorm amplifica poi il drift nei layer successivi. La parity strict non è
-   ancora raggiunta e il native resta NO-GO.
-3. Il debug layer-local cattura copie D2D solo quando l'entrypoint diagnostico è
+2. Il percorso default resta divergente a `layer 0 / attn_output` perché
+   ShapeStable/PyTorch seleziona CUTLASS mentre il native usa SDPA scalar
+   custom; l’ATen SDPA diagnostic-only elimina quel drift in isolamento. Con
+   il solo bridge `pre_ff_norm`, il nuovo scan local mostra il primo nonzero a
+   layer 4/post-attn norm e il primo failure formale a layer 9/post-FF norm.
+   La parity strict multi-frame non è raggiunta e il native resta NO-GO.
+3. Il prefill primed continua a essere un confine separato: il test cache
+   import è exact per K/V, ma il passo da cache identica resta NO-GO. Il bridge
+   RMSNorm non viene considerato certificato sul full path.
+4. Il debug layer-local cattura copie D2D solo quando l’entrypoint diagnostico è
    attivo; le allocazioni dei tap sono create una volta nel contesto e non
    entrano nello steady-state production path.
-4. La cache append-only ha capacità configurabile ma limitata a `4096` token
+5. La cache append-only ha capacità configurabile ma limitata a `4096` token
    dal kernel score; il percorso listener istanzia `max_seq_len=2048` (503 frame
    dopo il prefix). A capacità esaurita l’integrazione fallisce chiusa e richiede
    `GemmaListenerState.reset()`; non esiste rollover/reprime implicito.
-5. Gli output e gli input sono borrowed; i consumatori su stream diversi devono
+6. Gli output e gli input sono borrowed; i consumatori su stream diversi devono
    usare `producer_stream`/`wait_for_output()` e consumare l’output prima della
    chiamata successiva.
-6. L’attestazione copre manifest, topologia, parametri strutturali e gli hash dei
+7. L’attestazione copre manifest, topologia, parametri strutturali e gli hash dei
    file del checkpoint dichiarati nel manifest; non può provare capacità/ownership
    del raw CUDA pointer oltre la validazione del device e del descriptor.
 

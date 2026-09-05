@@ -1,6 +1,7 @@
 {
   "status": "NO-GO",
   "attention_backend": "public ATen SDPA bridge (GEMMA4_ATEN_SDPA_BRIDGE=1)",
+  "rmsnorm_backend": "literal ATen pre_feedforward_layernorm bridge (GEMMA4_ATEN_RMSNORM_BRIDGE=1)",
   "frames_checked": 3,
   "strict_thresholds": {
     "mae_max": 0.0001,
@@ -10,25 +11,25 @@
     {
       "frame": 0,
       "operation": "layer_output",
-      "mae": 0.2688753604888916,
-      "max_abs": 4.125,
-      "cosine": 0.991516649723053,
+      "mae": 0.31145650148391724,
+      "max_abs": 4.5,
+      "cosine": 0.9889963865280151,
       "exact_element_stream": false
     },
     {
       "frame": 1,
       "operation": "layer_output",
-      "mae": 0.5545628070831299,
-      "max_abs": 7.0,
-      "cosine": 0.9859955310821533,
+      "mae": 0.6501414775848389,
+      "max_abs": 7.8125,
+      "cosine": 0.9768052697181702,
       "exact_element_stream": false
     },
     {
       "frame": 2,
       "operation": "layer_output",
-      "mae": 0.6143077611923218,
-      "max_abs": 13.51171875,
-      "cosine": 0.9805474877357483,
+      "mae": 0.6796021461486816,
+      "max_abs": 14.5,
+      "cosine": 0.9735543727874756,
       "exact_element_stream": false
     }
   ],
@@ -36,39 +37,39 @@
     "first_nonzero_difference": {
       "frame": 0,
       "operation": "layer_output",
-      "mae": 0.2688753604888916,
-      "max_abs": 4.125,
-      "cosine": 0.991516649723053,
+      "mae": 0.31145650148391724,
+      "max_abs": 4.5,
+      "cosine": 0.9889963865280151,
       "exact_element_stream": false
     },
     "first_mae_gt_1e-7": {
       "frame": 0,
       "operation": "layer_output",
-      "mae": 0.2688753604888916,
-      "max_abs": 4.125,
-      "cosine": 0.991516649723053,
+      "mae": 0.31145650148391724,
+      "max_abs": 4.5,
+      "cosine": 0.9889963865280151,
       "exact_element_stream": false
     },
     "first_mae_gt_1e-6": {
       "frame": 0,
       "operation": "layer_output",
-      "mae": 0.2688753604888916,
-      "max_abs": 4.125,
-      "cosine": 0.991516649723053,
+      "mae": 0.31145650148391724,
+      "max_abs": 4.5,
+      "cosine": 0.9889963865280151,
       "exact_element_stream": false
     },
     "first_formal_failure": {
       "frame": 0,
       "operation": "layer_output",
-      "mae": 0.2688753604888916,
-      "max_abs": 4.125,
-      "cosine": 0.991516649723053,
+      "mae": 0.31145650148391724,
+      "max_abs": 4.5,
+      "cosine": 0.9889963865280151,
       "exact_element_stream": false
     }
   },
   "tensor_artifact": {
     "path": "/workspace/validation/kernel_gates/P4_NATIVE/P4_NATIVE_ATEN_BRIDGE_MULTIFRAME_TENSORS.pt",
-    "sha256": "f98f1ee8b5b84169e77b0e7b4852adbfa51e2a8b9f8c818b817af82bbb44d085"
+    "sha256": "c2a68c61a5a97d073af19750ce1cc43b485bb350c55bde91d741e26759c73448"
   },
   "note": "This validates the opt-in bridge path only; it does not certify native production parity."
 }

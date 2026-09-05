@@ -189,6 +189,72 @@ int gemma4_listener_step_debug(
     cudaStream_t stream
 );
 
+/* Diagnostic-only trace of the current custom RMSNorm kernel.  Input/output
+ * are contiguous CUDA BF16 [1, rows, dim], weight is CUDA BF16 [dim].  The
+ * FP32 trace buffers are device arrays [rows, dim] or [rows], owned by the
+ * caller and used only for the duration of the asynchronous operation. */
+int gemma4_listener_debug_rmsnorm_trace(
+    gemma4_listener_ctx *ctx,
+    const void *input,
+    const gemma4_tensor_meta *input_meta,
+    const void *weight,
+    const gemma4_tensor_meta *weight_meta,
+    void *output,
+    const gemma4_tensor_meta *output_meta,
+    uint32_t rows,
+    uint32_t dim,
+    double eps,
+    float *input_fp32,
+    float *x_squared_fp32,
+    float *row_sum_fp32,
+    float *row_mean_fp32,
+    float *mean_plus_eps_fp32,
+    float *pow_neg_half_fp32,
+    float *normalized_fp32,
+    float *weighted_fp32,
+    cudaStream_t stream
+);
+
+/* Diagnostic direct FFN primitive entrypoints.  All tensors are contiguous
+ * CUDA BF16 [1, rows, dim] except a linear weight [out_dim, in_dim]. */
+int gemma4_listener_debug_linear(
+    gemma4_listener_ctx *ctx,
+    const void *input,
+    const gemma4_tensor_meta *input_meta,
+    const void *weight,
+    const gemma4_tensor_meta *weight_meta,
+    void *output,
+    const gemma4_tensor_meta *output_meta,
+    uint32_t rows,
+    uint32_t out_dim,
+    uint32_t in_dim,
+    cudaStream_t stream
+);
+
+int gemma4_listener_debug_gelu_tanh(
+    gemma4_listener_ctx *ctx,
+    const void *input,
+    const gemma4_tensor_meta *input_meta,
+    void *output,
+    const gemma4_tensor_meta *output_meta,
+    uint32_t rows,
+    uint32_t dim,
+    cudaStream_t stream
+);
+
+int gemma4_listener_debug_mul(
+    gemma4_listener_ctx *ctx,
+    const void *lhs,
+    const gemma4_tensor_meta *lhs_meta,
+    const void *rhs,
+    const gemma4_tensor_meta *rhs_meta,
+    void *output,
+    const gemma4_tensor_meta *output_meta,
+    uint32_t rows,
+    uint32_t dim,
+    cudaStream_t stream
+);
+
 
 /* Returns pointer to stable device output tensor [1, 4, hidden_size] BF16 */
 const void *gemma4_listener_output_ptr(

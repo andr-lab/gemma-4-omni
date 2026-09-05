@@ -8,6 +8,7 @@ execution order and stops at the first strict parity failure.
 """
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import sys
@@ -36,12 +37,13 @@ from transformers.models.gemma4.modeling_gemma4 import create_masks_for_generate
 
 STRICT_MAE_MAX = 1e-4
 STRICT_COSINE_MIN = 0.9999
+EXPECTED_TORCH_VERSION = "2.12.1+cu130"
 OUTPUT_PATH = Path("/workspace/validation/kernel_gates/P4_NATIVE/P4_NATIVE_LAYER_LOCAL_BISECT.json")
 PREATTENTION_TENSOR_PATH = Path("/workspace/validation/kernel_gates/P4_NATIVE/P4_NATIVE_PREATTENTION_TENSORS.pt")
 PREATTENTION_OPERATIONS = {
     "input_hidden", "input_norm", "q_proj", "q_norm", "q_rope",
     "k_proj", "k_norm", "k_rope", "v_proj", "v_norm",
-    "kv_write_key", "kv_write_val",
+    "kv_write_key", "kv_write_val", "attn_residual", "pre_ff_norm",
 }
 
 
@@ -141,6 +143,20 @@ TAP_SPECS = (
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--output", type=Path, default=OUTPUT_PATH)
+    parser.add_argument("--tensor-output", type=Path, default=PREATTENTION_TENSOR_PATH)
+    parser.add_argument(
+        "--scan-all-local",
+        action="store_true",
+        help="continue after the first formal mismatch and execute all 35 layers",
+    )
+    args = parser.parse_args()
+    if torch.__version__ != EXPECTED_TORCH_VERSION:
+        raise RuntimeError(
+            f"layer-local gate richiede PyTorch {EXPECTED_TORCH_VERSION}, "
+            f"trovato {torch.__version__}"
+        )
     device = torch.device("cuda:0")
     dtype = torch.bfloat16
     thinker = load_thinker("/workspace", device=device, dtype=dtype)
@@ -246,6 +262,7 @@ def main() -> int:
     first: dict[str, Any] | None = None
     rows: list[dict[str, Any]] = []
     divergence_markers: dict[str, dict[str, Any]] = {}
+    per_layer_divergence_markers: dict[str, dict[str, dict[str, Any]]] = {}
     pre_attention_tensors: dict[str, torch.Tensor] = {}
 
     def observe(row: dict[str, Any], reference: torch.Tensor, candidate: torch.Tensor) -> None:
@@ -256,18 +273,19 @@ def main() -> int:
             pre_attention_tensors[f"{prefix}/native"] = candidate.detach().to("cpu").clone()
         # Layout views may differ at this boundary (e.g. [1,Q,H,D] vs
         # [Q,H,D]); exactness is over the ordered BF16 element stream.
-        if "first_nonzero_difference" not in divergence_markers and not torch.equal(
-            reference.reshape(-1), candidate.reshape(-1)
-        ):
-            divergence_markers["first_nonzero_difference"] = dict(row)
-        if "first_mae_gt_1e-7" not in divergence_markers and row["mae"] > 1e-7:
-            divergence_markers["first_mae_gt_1e-7"] = dict(row)
-        if "first_mae_gt_1e-6" not in divergence_markers and row["mae"] > 1e-6:
-            divergence_markers["first_mae_gt_1e-6"] = dict(row)
-        if "first_formal_failure" not in divergence_markers and (
-            row["mae"] > STRICT_MAE_MAX or row["cosine"] < STRICT_COSINE_MIN
-        ):
-            divergence_markers["first_formal_failure"] = dict(row)
+        layer_markers = per_layer_divergence_markers.setdefault(str(row["layer"]), {})
+        if not torch.equal(reference.reshape(-1), candidate.reshape(-1)):
+            layer_markers.setdefault("first_nonzero_difference", dict(row))
+            divergence_markers.setdefault("first_nonzero_difference", dict(row))
+        if row["mae"] > 1e-7:
+            layer_markers.setdefault("first_mae_gt_1e-7", dict(row))
+            divergence_markers.setdefault("first_mae_gt_1e-7", dict(row))
+        if row["mae"] > 1e-6:
+            layer_markers.setdefault("first_mae_gt_1e-6", dict(row))
+            divergence_markers.setdefault("first_mae_gt_1e-6", dict(row))
+        if row["mae"] > STRICT_MAE_MAX or row["cosine"] < STRICT_COSINE_MIN:
+            layer_markers.setdefault("first_formal_failure", dict(row))
+            divergence_markers.setdefault("first_formal_failure", dict(row))
 
     try:
         for layer_idx in range(GEMMA4_NUM_LAYERS):
@@ -304,7 +322,8 @@ def main() -> int:
                 ):
                     first = row
                     print("[FIRST DIVERGENCE]", json.dumps(row, sort_keys=True), flush=True)
-                    break
+                    if not args.scan_all_local:
+                        break
 
             # KV writes are a separate cache boundary, not a scratch tap.
             # Capture them for the exact pre-attention artifact even when the
@@ -314,7 +333,7 @@ def main() -> int:
                     ref = canonical_oracle_tensor(operation, taps[(layer_idx, operation)])
                     candidate = copy_native_cache(native, layer_idx, which, AUDIO_START_AFTER_TEXT + 4, head_dim)
                     row = {"layer": layer_idx, "operation": operation, **metrics(ref, candidate)}
-                    if first is None:
+                    if args.scan_all_local or first is None:
                         layer_rows.append(row)
                     observe(row, ref, candidate)
                     if first is None and (
@@ -322,21 +341,25 @@ def main() -> int:
                     ):
                         first = row
                         print("[FIRST DIVERGENCE]", json.dumps(row, sort_keys=True), flush=True)
-                        break
+                        if not args.scan_all_local:
+                            break
             rows.extend(layer_rows)
-            if first is not None:
+            if first is not None and not args.scan_all_local:
                 break
     finally:
         native.close()
 
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(pre_attention_tensors, PREATTENTION_TENSOR_PATH)
-    tensor_sha256 = hashlib.sha256(PREATTENTION_TENSOR_PATH.read_bytes()).hexdigest()
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.tensor_output.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(pre_attention_tensors, args.tensor_output)
+    tensor_sha256 = hashlib.sha256(args.tensor_output.read_bytes()).hexdigest()
 
     result = {
         "status": "PASS" if first is None and future_leak <= 1e-5 else "NO-GO",
+        "torch_version": torch.__version__,
+        "mode": "scan_all_local" if args.scan_all_local else "stop_at_first_formal_failure",
         "prefix_len": AUDIO_START_AFTER_TEXT,
-        "layers_checked": (first["layer"] + 1) if first is not None else GEMMA4_NUM_LAYERS,
+        "layers_checked": GEMMA4_NUM_LAYERS if args.scan_all_local else ((first["layer"] + 1) if first is not None else GEMMA4_NUM_LAYERS),
         "strict_thresholds": {
             "mae_max": STRICT_MAE_MAX,
             "cosine_min": STRICT_COSINE_MIN,
@@ -345,15 +368,17 @@ def main() -> int:
         "future_leak_max_abs": future_leak,
         "first_divergence": first,
         "first_divergence_markers": divergence_markers,
+        "per_layer_divergence_markers": per_layer_divergence_markers,
+        "rows": rows,
         "pre_attention_tensor_values": {
-            "path": str(PREATTENTION_TENSOR_PATH),
+            "path": str(args.tensor_output),
             "sha256": tensor_sha256,
             "keys": sorted(pre_attention_tensors),
             "note": "Exact CPU BF16 oracle/native tensors captured before the first formal failure; use torch.load(..., weights_only=True).",
         },
         "rows_checked": len(rows),
     }
-    OUTPUT_PATH.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    args.output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(result, indent=2), flush=True)
     return 0 if result["status"] == "PASS" else 2
 
