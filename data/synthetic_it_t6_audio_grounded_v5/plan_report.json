@@ -1,0 +1,65 @@
+{
+  "assistant_target_count": 192,
+  "audio_generated": 0,
+  "audio_generation_deferred": true,
+  "dialogue_count": 48,
+  "dialogue_counts_by_split": {
+    "test": 8,
+    "train": 32,
+    "validation": 8
+  },
+  "plan_path": "data\\synthetic_it_t6_audio_grounded_v5\\dialogue_plan.json",
+  "profile": "audio_grounded_v5",
+  "profile_version": "synthetic-it-t6-audio-grounded-v5-plan.1",
+  "schema_version": 1,
+  "split_assignment_hash_certified": false,
+  "status": "TEXT_PLAN_READY",
+  "template_ids_by_split": {
+    "test": [
+      "evening_course__plan_a",
+      "evening_course__plan_b",
+      "neighborhood_mobility__plan_a",
+      "neighborhood_mobility__plan_b"
+    ],
+    "train": [
+      "community_garden__plan_a",
+      "community_garden__plan_b",
+      "hiking_group__plan_a",
+      "hiking_group__plan_b",
+      "local_market__plan_a",
+      "local_market__plan_b",
+      "neighborhood_library__plan_a",
+      "neighborhood_library__plan_b",
+      "school_workshop__plan_a",
+      "school_workshop__plan_b",
+      "small_museum__plan_a",
+      "small_museum__plan_b"
+    ],
+    "validation": [
+      "shared_kitchen__plan_a",
+      "shared_kitchen__plan_b",
+      "volunteer_handoff__plan_a",
+      "volunteer_handoff__plan_b"
+    ]
+  },
+  "topic_groups_by_split": {
+    "test": [
+      "evening_course",
+      "neighborhood_mobility"
+    ],
+    "train": [
+      "community_garden",
+      "neighborhood_library",
+      "school_workshop",
+      "local_market",
+      "hiking_group",
+      "small_museum"
+    ],
+    "validation": [
+      "volunteer_handoff",
+      "shared_kitchen"
+    ]
+  },
+  "unique_assistant_targets": 150,
+  "warning": "Scripts and supervision metadata only; no TTS audio, acoustic quality, or behavior result is included."
+}

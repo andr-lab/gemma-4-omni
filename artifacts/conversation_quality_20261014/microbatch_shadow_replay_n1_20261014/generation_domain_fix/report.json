@@ -1,0 +1,115 @@
+{
+  "started_utc": "2026-10-14T21:44:18.399893+00:00",
+  "mode": "single_realtime_stream",
+  "ws_url": "ws://127.0.0.1:8000/v1/realtime?duplex=1",
+  "session_id": "63b3aee2030641028eb4d85d3291ed3a",
+  "input_wav": "/workspace/artifacts/conversation_quality_20261014/inputs/clean_initial.wav",
+  "followup_wav": "/workspace/artifacts/conversation_quality_20261014/inputs/clean_followup.wav",
+  "followup_timing": {
+    "mode": "after_first_response_done",
+    "configured_delay_ms": 1000,
+    "first_response_done_ns": 4798057496834381,
+    "first_followup_input_frame_index": 129,
+    "first_followup_sent_at_ns": 4798063842353888,
+    "actual_delay_ms": 6345.52,
+    "last_followup_sent_at_ns": 4798070293613250,
+    "followup_frames_sent": 81
+  },
+  "requested_input_duration_s": 90.0,
+  "source_timing_basis": "prerecorded_wav_scheduled_at_80ms_intervals",
+  "requested_input_frames": 1125,
+  "tts_quality_diagnostics": false,
+  "diagnostic_seed_sha256": null,
+  "ack_capacity_frames": 6,
+  "input_frames_sent": 1125,
+  "input_frames_not_dispatched": 0,
+  "source_playback_complete": true,
+  "input_frames_acked": 1125,
+  "ack_ids_unique": true,
+  "missing_ack_ids": [],
+  "duplicate_acks": 0,
+  "out_of_order_acks": 0,
+  "capacity_overflow": false,
+  "pending_high_water_frames": 6,
+  "pending_after_close": 0,
+  "final_ack_drain_complete": true,
+  "final_ack_drain_timed_out": false,
+  "ack_credit_timeout_count": 0,
+  "ack_latency_ms": {
+    "p50": 157.55,
+    "p95": 450.26,
+    "max": 1339.61
+  },
+  "ack_capacity_backpressure_ms": {
+    "wait_count": 103,
+    "p50": 46.83,
+    "p95": 77.87,
+    "max": 932.81
+  },
+  "server_listener_queue_ms": {
+    "p50": 146.28,
+    "p95": 436.56,
+    "max": 1329.45
+  },
+  "server_listener_step_ms": {
+    "p50": 37.85,
+    "p95": 43.51,
+    "max": 99.45
+  },
+  "server_ack_queue_ms": {
+    "p50": 0.28,
+    "p95": 0.56,
+    "max": 1030.95
+  },
+  "input_send_interval_ms": {
+    "p50": 80.7,
+    "p95": 81.84,
+    "max": 933.74,
+    "deadline_misses_gt_100ms": 2
+  },
+  "input_send_lag_ms": {
+    "p50": 1945.27,
+    "p95": 2331.38,
+    "max": 2373.09,
+    "frames_over_80ms": 1112
+  },
+  "input_frames_during_response": 63,
+  "non_silent_input_frames_during_response": 50,
+  "input_frames_during_audio_generation": 37,
+  "non_silent_input_frames_during_audio_generation": 26,
+  "responses": [
+    {
+      "response_id": "resp_f85934b6dc43",
+      "action": "SPEAK",
+      "created_ns": 4798053013769741,
+      "first_audio_ns": 4798054464956590,
+      "last_audio_ns": 4798057495029652,
+      "done_ns": 4798057496833081,
+      "text": "Certo, come posso aiutarti a pianificare la tua visita?",
+      "packets": 31,
+      "audio_samples": 117120,
+      "audio_duration_s": 4.88,
+      "first_audio_ms": 1451.2,
+      "response_wall_ms": 4483.1,
+      "wav_path": "/workspace/artifacts/conversation_quality_20261014/microbatch_shadow_replay_n1_20261014/generation_domain_fix/response_resp_f85934b6dc43.wav"
+    },
+    {
+      "response_id": "resp_cdeff7d5562e",
+      "action": "BACKCHANNEL",
+      "created_ns": 4798061829297061,
+      "first_audio_ns": null,
+      "last_audio_ns": null,
+      "done_ns": 4798063150824723,
+      "text": "",
+      "packets": 0,
+      "audio_samples": 0,
+      "audio_duration_s": 0.0,
+      "first_audio_ms": null,
+      "response_wall_ms": 1321.5,
+      "wav_path": null
+    }
+  ],
+  "response_completion_timed_out": true,
+  "errors": [],
+  "sender_error": null
+}

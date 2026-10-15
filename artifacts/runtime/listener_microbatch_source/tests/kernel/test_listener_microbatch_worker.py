@@ -1,0 +1,1808 @@
+from __future__ import annotations
+
+import asyncio
+import ctypes
+from concurrent.futures import Future
+from dataclasses import dataclass, replace
+import threading
+import time
+from types import SimpleNamespace
+from typing import Any
+
+import numpy as np
+import pytest
+import torch
+
+import duplex_kernel.native_listener_microbatch as native_binding
+from duplex_kernel.gemma_native_control6_batch_policy import GemmaNativeControl6BatchPolicy
+from duplex_kernel.listener import FairModelLock
+from duplex_kernel.listener_microbatch import ListenerMicrobatchCoordinator
+from duplex_kernel.listener_microbatch_frontend import ListenerMicrobatchAudioFrontend
+from duplex_kernel.microbatch_contract import (
+    BatchRowDescriptor,
+    ListenerFrame,
+    ListenerSessionState,
+    NativeBatchCapability,
+    RuntimeSignature,
+)
+from duplex_kernel.native_listener_microbatch import NativeBatchOutput, NativeBatchOutputHealth
+from duplex_kernel.turn_policy import PolicyInput
+from training.duplex_qlora.native_control6 import ACTIONS, HIDDEN_WIDTH, NativeControl6LoRA
+
+from duplex_kernel.listener_microbatch_worker import (
+    PreparedInitialPrefix,
+    ListenerMicrobatchRuntime,
+    ListenerMicrobatchWorker,
+    PrefixCacheImport,
+    SemanticPrefixShadowRuntime,
+    SemanticPrefixShadowWorker,
+    ShadowQ4Frame,
+    WorkerStopReport,
+)
+
+
+def _allocator_reclaim_native_binding(monkeypatch, *, capacity: int, status: int = 0):
+    events: list[str] = []
+    binding = object.__new__(native_binding.NativeGemmaListenerMicrobatch)
+    binding.capability = SimpleNamespace(max_seq_len=16_384)
+    binding._full_repeat_capacity_high_water = capacity
+    binding._model_device = torch.device("cuda:0")
+    binding._ctx = ctypes.c_void_p(1)
+    binding._poisoned = False
+    binding._stream_ptr = lambda: ctypes.c_void_p(2)
+    binding._lib = SimpleNamespace(
+        gemma4_listener_batch_step_async=lambda *args: events.append("native") or status
+    )
+    monkeypatch.setattr(native_binding.torch.cuda, "memory_allocated", lambda _device: 100)
+    monkeypatch.setattr(native_binding.torch.cuda, "memory_reserved", lambda _device: 200)
+    monkeypatch.setattr(native_binding.torch.cuda, "mem_get_info", lambda _device: (300, 400))
+    monkeypatch.setattr(
+        native_binding.torch.cuda,
+        "empty_cache",
+        lambda: events.append("empty_cache"),
+    )
+    return binding, events
+
+
+def _run_allocator_reclaim_step(binding, required_visible: int) -> int:
+    return binding._step_with_repeat_allocator_reclaim(
+        required_visible=required_visible,
+        c_rows_array=object(),
+        row_count=1,
+        audio_soft=torch.empty((1,), dtype=torch.bfloat16),
+        audio_meta=ctypes.c_int(0),
+    )
+
+
+def test_native_repeat_allocator_reclaim_only_at_capacity_growth_and_before_forward(monkeypatch) -> None:
+    binding, events = _allocator_reclaim_native_binding(monkeypatch, capacity=2048)
+
+    assert _run_allocator_reclaim_step(binding, 2046) == 0
+    assert events == ["native"]
+    assert binding._full_repeat_capacity_high_water == 2048
+
+    events.clear()
+    assert _run_allocator_reclaim_step(binding, 2050) == 0
+    assert events == ["empty_cache", "native"]
+    assert binding._full_repeat_capacity_high_water == 4096
+
+    events.clear()
+    assert _run_allocator_reclaim_step(binding, 4097) == 0
+    assert events == ["empty_cache", "native"]
+    assert binding._full_repeat_capacity_high_water == 8192
+
+    events.clear()
+    assert _run_allocator_reclaim_step(binding, 16_385) == 0
+    assert events == ["native"]
+    assert binding._full_repeat_capacity_high_water == 8192
+
+
+def test_native_repeat_allocator_capacity_is_per_context_and_failure_does_not_advance(monkeypatch) -> None:
+    first, _first_events = _allocator_reclaim_native_binding(monkeypatch, capacity=2048)
+
+    assert _run_allocator_reclaim_step(first, 2050) == 0
+    assert first._full_repeat_capacity_high_water == 4096
+
+    second, events = _allocator_reclaim_native_binding(monkeypatch, capacity=2048, status=-8)
+    assert second._full_repeat_capacity_high_water == 2048
+
+    assert _run_allocator_reclaim_step(second, 2050) == -8
+    assert events == ["empty_cache", "native"]
+    assert second._full_repeat_capacity_high_water == 2048
+
+
+def test_native_repeat_allocator_initial_capacity_matches_native_header() -> None:
+    from pathlib import Path
+    import re
+
+    repository = Path(__file__).resolve().parents[5]
+    header = repository / ".tmp/listener_batch_source_overlay/native/gemma4_listener_microbatch/full_repeat_capacity.h"
+    match = re.search(r"kInitialCapacity\s*=\s*(\d+)u", header.read_text(encoding="utf-8"))
+    assert match is not None
+    assert int(match.group(1)) == native_binding.FULL_REPEAT_INITIAL_CAPACITY
+
+
+def _signature() -> RuntimeSignature:
+    return RuntimeSignature(
+        model_id="google/gemma-4-E2B-it",
+        model_config_sha256="a" * 64,
+        checkpoint_sha256="b" * 64,
+        topology_sha256="c" * 64,
+        native_library_sha256="d" * 64,
+        native_abi_version=3,
+        batch_api_version=2,
+        attention_backend_id=3,
+        rmsnorm_backend_id=2,
+        max_seq_len=16_384,
+        stream_q_len=4,
+    )
+
+
+def _capability() -> NativeBatchCapability:
+    return NativeBatchCapability(
+        api_version=2,
+        native_abi_version=3,
+        attention_backend_id=3,
+        rmsnorm_backend_id=2,
+        max_seq_len=16_384,
+        stream_q_len=4,
+        supports_arbitrary_batch_size=True,
+        stream_priority=-1,
+        stream_identity="cuda:0:stream:0x17",
+    )
+
+
+def _state(signature: RuntimeSignature, sid: str, *, generation: int = 7) -> ListenerSessionState:
+    return ListenerSessionState(
+        session_id=sid,
+        generation_id=generation,
+        state_epoch_id=f"epoch-{sid}-{generation}",
+        runtime_signature=signature,
+        cache_position=34,
+        valid_history_tokens=34,
+        native_context_id=10_000 + sum(ord(char) for char in sid) + generation,
+    )
+
+
+def _frame(
+    state: ListenerSessionState,
+    *,
+    frame_id: int = 0,
+    value: float = 0.25,
+    ready_at_ns: int | None = None,
+) -> ListenerFrame:
+    return ListenerFrame(
+        session_id=state.session_id,
+        generation_id=state.generation_id,
+        state_epoch_id=state.state_epoch_id,
+        frame_id=frame_id,
+        ready_at_ns=time.monotonic_ns() if ready_at_ns is None else ready_at_ns,
+        pcm=np.full(1280, value, dtype=np.float32),
+    )
+
+
+class _FakeStream:
+    device = torch.device("cpu")
+    cuda_stream = 23
+
+    def __init__(self) -> None:
+        self.waited_events: list[Any] = []
+
+    def wait_event(self, event: Any) -> None:
+        self.waited_events.append(event)
+
+
+class _FakeMelExtractor:
+    def __call__(self, pcm: np.ndarray, previous: np.ndarray | None) -> tuple[np.ndarray, np.ndarray]:
+        mel = np.full((8, 128), float(np.mean(pcm)), dtype=np.float32)
+        prefix = np.zeros(160, dtype=np.float32) if previous is None else previous
+        tail = np.concatenate((prefix, np.asarray(pcm, dtype=np.float32)))[-160:]
+        return mel, tail.copy()
+
+
+class _FakeAudioModel:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.call_shapes: list[tuple[int, ...]] = []
+        self.call_inputs: list[torch.Tensor] = []
+        self.thread_ids: list[int] = []
+
+    def get_audio_features(self, *, input_features, input_features_mask, return_dict):
+        self.calls += 1
+        self.thread_ids.append(threading.get_ident())
+        self.call_shapes.append(tuple(input_features.shape))
+        self.call_inputs.append(input_features.detach().clone())
+        assert return_dict is True
+        n = input_features.shape[0]
+        pooled = torch.empty((n, 256, HIDDEN_WIDTH), dtype=torch.bfloat16, device=input_features.device)
+        tokens = input_features.float().reshape(n, 256, 4, 128).mean(dim=(2, 3))
+        for row in range(n):
+            for token in range(256):
+                pooled[row, token].fill_(float(tokens[row, token] + token))
+        mask = torch.ones((n, 256), dtype=torch.bool, device=input_features.device)
+        return SimpleNamespace(pooler_output=pooled, attention_mask=mask)
+
+
+class _FakeCompletionEvent:
+    def __init__(self) -> None:
+        self.waited = False
+
+    def wait(self, _stream: Any) -> None:
+        self.waited = True
+
+
+class _FakeNativeBatch:
+    def __init__(self, signature: RuntimeSignature, capability: NativeBatchCapability, stream: _FakeStream) -> None:
+        self.creation_thread_id = threading.get_ident()
+        self.runtime_signature = signature
+        self.capability = capability
+        self.listener_stream = stream
+        self.max_batch_size = 4
+        self.capacity_requests: list[int] = []
+        self.event_order: list[tuple[str, object]] = []
+        self.fail_capacity_at: int | None = None
+        self.imports: list[tuple[int, str, int]] = []
+        self.steps: list[tuple[tuple[str, ...], int]] = []
+        self.releases: list[tuple[str, int, int]] = []
+        self.release_waited_event_counts: list[int] = []
+        self.close_thread_id: int | None = None
+        self.owner_thread_id: int | None = None
+        self.fail_step: BaseException | None = None
+        self.nonfinite_health = False
+        self.health_generations: list[int] = []
+        self.model_lock: Any | None = None
+        self.lock_owners_at_import: list[dict[str, Any] | None] = []
+
+    def _claim(self) -> None:
+        current = threading.get_ident()
+        if self.owner_thread_id is None:
+            self.owner_thread_id = current
+        assert self.owner_thread_id == current
+
+    def import_session(self, row, past_key_values, prefix_attention, *, prefix_len, producer_stream=None):
+        self._claim()
+        assert past_key_values is not None
+        assert tuple(prefix_attention.shape) == (1, prefix_len)
+        assert producer_stream is self.listener_stream
+        snapshot = getattr(self.model_lock, "host_timeline_snapshot", None)
+        self.lock_owners_at_import.append(
+            None if not callable(snapshot) else snapshot().get("current_owner")
+        )
+        self.imports.append((row.native_context_id, row.session_id, row.frame_id))
+        self.event_order.append(("import", row.session_id))
+
+    def ensure_capacity(self, requested_capacity: int) -> int:
+        self._claim()
+        self.capacity_requests.append(requested_capacity)
+        self.event_order.append(("ensure_capacity", requested_capacity))
+        if self.fail_capacity_at == requested_capacity:
+            raise RuntimeError("native listener capacity allocation failed: CUDA out of memory")
+        self.max_batch_size = max(self.max_batch_size, requested_capacity)
+        return self.max_batch_size
+
+    def step_async(self, manifest, audio_soft, *, producer_stream=None):
+        self._claim()
+        if self.fail_step is not None:
+            raise self.fail_step
+        assert producer_stream is self.listener_stream
+        assert tuple(audio_soft.shape) == (manifest.batch_size, 4, HIDDEN_WIDTH)
+        assert audio_soft.dtype == torch.bfloat16
+        self.steps.append((tuple(row.session_id for row in manifest.rows), threading.get_ident()))
+        self.event_order.append(("step", manifest.batch_size))
+        return NativeBatchOutput(
+            manifest_id=manifest.manifest_id,
+            generation=len(self.steps),
+            rows=manifest.rows,
+            tensor=audio_soft.detach().clone(),
+            completion_event=_FakeCompletionEvent(),
+        )
+
+    def verify_output_health(self, output):
+        self._claim()
+        self.health_generations.append(output.generation)
+        self.event_order.append(("health", output.generation))
+        status = "nonfinite_guard" if self.nonfinite_health else "healthy"
+        return tuple(
+            NativeBatchOutputHealth(
+                generation=output.generation,
+                row=row,
+                checked=True,
+                nonfinite=self.nonfinite_health,
+                status=status,
+            )
+            for row in output.rows
+        )
+
+    def release_session_async(self, row) -> None:
+        self._claim()
+        self.releases.append((row.session_id, row.frame_id, row.cache_position))
+        self.release_waited_event_counts.append(len(self.listener_stream.waited_events))
+
+    def prepare_cache_copy_source(self, row):
+        self._claim()
+        return SimpleNamespace(row=row)
+
+    def close(self) -> None:
+        self._claim()
+        self.close_thread_id = threading.get_ident()
+
+
+class _RecordingAdapter(NativeControl6LoRA):
+    def __init__(self) -> None:
+        super().__init__(torch.zeros((len(ACTIONS), HIDDEN_WIDTH), dtype=torch.float32))
+        self.creation_thread_id = threading.get_ident()
+        self.thread_ids: list[int] = []
+        self.hidden_rows: list[torch.Tensor] = []
+
+    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+        self.thread_ids.append(threading.get_ident())
+        self.hidden_rows.append(hidden.detach().clone())
+        return super().forward(hidden)
+
+
+class _OwnerRecordingCoordinator(ListenerMicrobatchCoordinator):
+    def __init__(self, signature: RuntimeSignature, capability: NativeBatchCapability) -> None:
+        super().__init__(signature, capability)
+        self.operation_threads: list[tuple[str, int]] = []
+
+    def register_session(self, state: ListenerSessionState) -> None:
+        self.operation_threads.append(("register", threading.get_ident()))
+        return super().register_session(state)
+
+    def enqueue(self, frame: ListenerFrame) -> None:
+        self.operation_threads.append(("enqueue", threading.get_ident()))
+        return super().enqueue(frame)
+
+    def close_session(self, session_id: str):
+        self.operation_threads.append(("close", threading.get_ident()))
+        return super().close_session(session_id)
+
+    def session_state(self, session_id: str):
+        self.operation_threads.append(("snapshot", threading.get_ident()))
+        return super().session_state(session_id)
+
+
+@dataclass
+class _Rig:
+    worker: ListenerMicrobatchWorker
+    coordinator: ListenerMicrobatchCoordinator
+    model: _FakeAudioModel
+    native: _FakeNativeBatch | None
+    adapter: _RecordingAdapter | None
+    runtime_factory_threads: list[int]
+    prefix_import_threads: list[int]
+    prefix_import: Any
+    completion_barrier: Any
+    results: list[tuple[Any, ...]]
+    errors: list[tuple[Any, BaseException]]
+    result_event: threading.Event
+    error_event: threading.Event
+
+
+def _rig(
+    *,
+    completion_barrier=None,
+    model_lock: Any | None = None,
+    fail_step=None,
+    nonfinite_health: bool = False,
+    auto_start=True,
+    runtime_factory_entered=None,
+    runtime_factory_continue=None,
+) -> _Rig:
+    signature = _signature()
+    capability = _capability()
+    coordinator = _OwnerRecordingCoordinator(signature, capability)
+    model = _FakeAudioModel()
+    native_holder: list[_FakeNativeBatch] = []
+    adapter_holder: list[_RecordingAdapter] = []
+    factory_threads: list[int] = []
+    prefix_threads: list[int] = []
+
+    def runtime_factory() -> ListenerMicrobatchRuntime:
+        factory_threads.append(threading.get_ident())
+        if runtime_factory_entered is not None:
+            runtime_factory_entered.set()
+        if runtime_factory_continue is not None:
+            assert runtime_factory_continue.wait(4)
+        stream = _FakeStream()
+        native = _FakeNativeBatch(signature, capability, stream)
+        native.fail_step = fail_step
+        native.nonfinite_health = nonfinite_health
+        native.model_lock = model_lock
+        adapter = _RecordingAdapter()
+        policy = GemmaNativeControl6BatchPolicy(adapter, checkpoint_path="fixture://control6")
+        native_holder.append(native)
+        adapter_holder.append(adapter)
+        frontend = ListenerMicrobatchAudioFrontend(
+            model,
+            _FakeMelExtractor(),
+            device="cpu",
+            dtype=torch.bfloat16,
+        )
+        return ListenerMicrobatchRuntime(
+            listener_stream=stream,
+            frontend=frontend,
+            native=native,
+            policy=policy,
+            policy_inputs=lambda batch, states: tuple(
+                PolicyInput(
+                    session_id=row.session_id,
+                    frame_id=row.frame_id,
+                    user_pcm=frame.pcm,
+                    speaker_active=False,
+                    generation_id=row.session_generation,
+                    legal_actions=tuple(ACTIONS),
+                )
+                for row, frame in zip(batch.manifest.rows, batch.frames, strict=True)
+            ),
+            completion_barrier=completion_barrier,
+            listener_model_lock=model_lock,
+        )
+
+    def prefix_import(state, row) -> PrefixCacheImport:
+        del state, row
+        prefix_threads.append(threading.get_ident())
+        return PrefixCacheImport(
+            past_key_values=object(),
+            prefix_attention=torch.ones((1, 34), dtype=torch.int64),
+            prefix_len=34,
+        )
+
+    results: list[tuple[Any, ...]] = []
+    errors: list[tuple[Any, BaseException]] = []
+    result_event = threading.Event()
+    error_event = threading.Event()
+
+    def on_result(batch, decisions) -> None:
+        results.append((batch, decisions))
+        result_event.set()
+
+    def on_error(batch, error) -> None:
+        errors.append((batch, error))
+        error_event.set()
+
+    worker = ListenerMicrobatchWorker(
+        coordinator,
+        runtime_factory=runtime_factory,
+        on_result=on_result,
+        on_error=on_error,
+    )
+    if auto_start:
+        worker.start().result(timeout=3)
+    return _Rig(
+        worker, coordinator,
+        model,
+        native_holder[0] if native_holder else None,
+        adapter_holder[0] if adapter_holder else None,
+        factory_threads,
+        prefix_threads, prefix_import, completion_barrier, results, errors, result_event, error_event,
+    )
+
+
+def _register(rig: _Rig, *states: ListenerSessionState) -> None:
+    for state in states:
+        rig.worker.register_session(state, prefix_import=rig.prefix_import).result(timeout=3)
+
+
+def _shadow_request(session_id: str, revision: int, frame_id: int) -> SimpleNamespace:
+    return SimpleNamespace(
+        session_id=session_id,
+        state_epoch_id=f"epoch-{session_id}-7",
+        current_frame_id=frame_id,
+        listener_state_version=frame_id,
+        semantic_context_revision=revision,
+        prefix_token_ids=(1, 2),
+        prefix_len=50,
+        replay_q4=(),
+        replay_frame_ids=(),
+        cache_position=50,
+        fallback_reason=None,
+    )
+
+
+def _shadow_row(session_id: str, frame_id: int, *, cache_position: int = 50) -> BatchRowDescriptor:
+    return BatchRowDescriptor(
+        session_id=session_id,
+        session_generation=7,
+        state_epoch_id=f"epoch-{session_id}-7",
+        frame_id=frame_id,
+        listener_state_version=frame_id,
+        sequence_position=frame_id,
+        cache_position=cache_position,
+        valid_history_tokens=cache_position,
+        native_context_id=90_000 + frame_id,
+        input_frame_sha256="a" * 64,
+        reference_pcm_sha256=None,
+        frame_ready_at_ns=1,
+        reference_frame_id=None,
+    )
+
+
+def _start_shadow_worker(builder=None, native_factory=None):
+    signature = _signature()
+    stream = _FakeStream()
+    capability = replace(
+        _capability(),
+        stream_priority=0,
+        stream_identity="cuda:0:shadow-stream",
+    )
+    native = (
+        _FakeNativeBatch(signature, capability, stream)
+        if native_factory is None
+        else native_factory(signature, capability, stream)
+    )
+
+    def prefix_builder(request, _stream):
+        if builder is not None:
+            return builder(request)
+        return PrefixCacheImport(
+            past_key_values=object(),
+            prefix_attention=torch.ones((1, request.prefix_len), dtype=torch.int64),
+            prefix_len=request.prefix_len,
+            cache_position=request.cache_position,
+            semantic_context_revision=request.semantic_context_revision,
+        )
+
+    shadow = SemanticPrefixShadowWorker(
+        lambda: SemanticPrefixShadowRuntime(native=native, listener_stream=stream),
+        prefix_builder,
+        runtime_signature=signature,
+    )
+    shadow.start().result(timeout=3)
+    return shadow, native, stream
+
+
+def test_shadow_diagnostic_snapshot_tracks_stage_q4_and_cursor_rejection() -> None:
+    def builder(request):
+        return PrefixCacheImport(
+            past_key_values=object(),
+            prefix_attention=torch.ones((1, request.prefix_len), dtype=torch.int64),
+            prefix_len=request.prefix_len,
+            cache_position=request.cache_position,
+            semantic_context_revision=request.semantic_context_revision,
+            prefix_build_ms=1.25,
+            replay_ms=2.5,
+            fair_lock_wait_ms=0.75,
+            teacher_prefix_fenced_wall_ms=5.0,
+        )
+
+    shadow, _native, _stream = _start_shadow_worker(builder=builder)
+    session_id = "shadow-diagnostic-contract"
+    request = _shadow_request(session_id, 12, 0)
+    try:
+        assert shadow.stage(
+            request,
+            listener_generation_id=7,
+            sequence_position=0,
+        )
+        deadline = time.monotonic() + 2
+        candidate = None
+        while time.monotonic() < deadline:
+            candidate = shadow._candidate
+            diagnostics = shadow.status["diagnostics"]
+            if candidate is not None and diagnostics["current_job"]["phase"] == "candidate_ready":
+                break
+            time.sleep(0.005)
+        assert candidate is not None
+        diagnostics = shadow.status["diagnostics"]
+        current_job = diagnostics["current_job"]
+        assert current_job["session_id"] == session_id
+        assert current_job["listener_generation_id"] == 7
+        assert current_job["state_epoch_id"] == request.state_epoch_id
+        assert current_job["semantic_context_revision"] == 12
+        assert current_job["request_base_frame_id"] == 0
+        assert current_job["phase"] == "candidate_ready"
+        assert current_job["stage_requested_at_ns"] <= current_job["stage_queued_at_ns"]
+        assert current_job["stage_queued_at_ns"] <= current_job["stage_execution_started_at_ns"]
+        assert current_job["fair_lock_wait_ms"] == 0.75
+        assert current_job["teacher_prefix_build_wall_ms"] == 1.25
+        assert current_job["teacher_prefix_replay_wall_ms"] == 2.5
+        assert current_job["teacher_prefix_fenced_wall_ms"] == 5.0
+        assert current_job["shadow_native_prefix_import_ms"] is not None
+
+        assert shadow.candidate_for(replace(candidate.row, frame_id=1)) is None
+        diagnostics = shadow.status["diagnostics"]
+        assert diagnostics["candidate_cursor_rejections"] == 1
+        assert diagnostics["candidate_last_rejection_reason"] == "listener_cursor_mismatch"
+
+        state = _state(_signature(), session_id, generation=7)
+        assert shadow.publish_q4(ShadowQ4Frame(
+            frame=_frame(state, frame_id=0),
+            row=candidate.row,
+            audio_soft=torch.zeros((4, HIDDEN_WIDTH), dtype=torch.bfloat16),
+            ready_event=None,
+        ))
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            q4 = shadow.status["diagnostics"]["q4"]
+            if q4["completed_count"] == 1:
+                break
+            time.sleep(0.005)
+        q4 = shadow.status["diagnostics"]["q4"]
+        assert q4["submitted_count"] == 1
+        assert q4["completed_count"] == 1
+        assert q4["last_submitted_frame_id"] == 0
+        assert q4["last_completed_frame_id"] == 0
+        assert q4["pending_depth"] == 0
+        assert q4["max_pending_depth"] == 1
+        assert q4["timings"]["fence"]["count"] == 1
+        assert q4["timings"]["output_health_validation"]["count"] == 1
+    finally:
+        shadow.stop().result(timeout=3)
+
+
+def test_shadow_discards_stale_queued_watermark_then_accepts_fresh_q4_suffix() -> None:
+    shadow, native, _stream = _start_shadow_worker()
+    holder_id = "stale-shadow-holder"
+    session_id = "stale-shadow-watermark"
+    try:
+        # The shadow worker has one native slot. Keep it occupied so the
+        # second SID's snapshot remains queued while its next real Q4 arrives.
+        assert shadow.stage(
+            _shadow_request(holder_id, 1, 0),
+            listener_generation_id=7,
+            sequence_position=0,
+        )
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            candidate = shadow._candidate
+            if candidate is not None and candidate.row.session_id == holder_id:
+                break
+            time.sleep(0.005)
+        assert candidate is not None and candidate.row.session_id == holder_id
+
+        assert shadow.stage(
+            _shadow_request(session_id, 3, 3),
+            listener_generation_id=7,
+            sequence_position=3,
+        )
+        state = ListenerSessionState(
+            session_id=session_id,
+            generation_id=7,
+            state_epoch_id=f"epoch-{session_id}-7",
+            runtime_signature=_signature(),
+            native_context_id=77,
+        )
+        assert shadow.publish_q4(ShadowQ4Frame(
+            frame=_frame(state, frame_id=4),
+            row=_shadow_row(session_id, 4),
+            audio_soft=torch.zeros((4, HIDDEN_WIDTH), dtype=torch.bfloat16),
+            ready_event=None,
+        ))
+        shadow.invalidate_session(holder_id)
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and "watermark stale" not in str(shadow.status["latest_error"]):
+            time.sleep(0.005)
+        assert "watermark stale" in str(shadow.status["latest_error"])
+        assert shadow._thread is not None and shadow._thread.is_alive()
+        assert [sid for _context_id, sid, _frame_id in native.imports] == [holder_id]
+
+        assert shadow.stage(
+            _shadow_request(session_id, 3, 4),
+            listener_generation_id=7,
+            sequence_position=4,
+        )
+        assert shadow.publish_q4(ShadowQ4Frame(
+            frame=_frame(state, frame_id=4),
+            row=_shadow_row(session_id, 4),
+            audio_soft=torch.zeros((4, HIDDEN_WIDTH), dtype=torch.bfloat16),
+            ready_event=None,
+        ))
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and not native.steps:
+            time.sleep(0.005)
+        if not native.steps:
+            debug_state = {
+                "status": dict(shadow.status),
+                "active_row": shadow._active_row,
+                "candidate_row": None if shadow._candidate is None else shadow._candidate.row,
+                "q4_processing": shadow._q4_processing,
+                "q4_rows": {
+                    sid: [row.frame.frame_id for row in rows]
+                    for sid, rows in shadow._q4.items()
+                },
+                "native_imports": native.imports,
+            }
+        assert native.steps, repr(debug_state) if not native.steps else None
+        assert native.imports[-1][1:] == (session_id, 4)
+        assert native.steps == [((session_id,), native.owner_thread_id)]
+    finally:
+        shadow.stop().result(timeout=3)
+
+
+def test_shadow_claim_pins_source_across_new_revision_until_copy_fence() -> None:
+    shadow, native, stream = _start_shadow_worker()
+    session_id = "claimed-shadow-copy"
+    try:
+        assert shadow.stage(
+            _shadow_request(session_id, 1, 0),
+            listener_generation_id=7,
+            sequence_position=0,
+        )
+        deadline = time.monotonic() + 2
+        candidate = None
+        while time.monotonic() < deadline:
+            candidate = shadow._candidate
+            if candidate is not None:
+                break
+            time.sleep(0.005)
+        assert candidate is not None
+        claimed = shadow.candidate_for(candidate.row)
+        assert claimed is candidate
+
+        # A new semantic revision makes the source obsolete while the primary
+        # copy is in flight. The shadow owner must retain its native slot.
+        assert shadow.stage(
+            _shadow_request(session_id, 2, 0),
+            listener_generation_id=7,
+            sequence_position=0,
+        )
+        with shadow._condition:
+            assert shadow._stage_obsolete_locked(candidate.stage)
+        with pytest.raises(RuntimeError, match="claimed shadow source"):
+            shadow._release_active_row(candidate.row)
+        time.sleep(0.04)
+        assert not native.releases
+        assert shadow._candidate is candidate
+
+        copy_event = object()
+        shadow.finish_promotion(
+            candidate,
+            SimpleNamespace(destination_row=candidate.row, completion_event=copy_event),
+        )
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and not native.releases:
+            time.sleep(0.005)
+        assert native.releases
+        assert copy_event in stream.waited_events
+        assert native.release_waited_event_counts[0] >= 1
+
+        # Promotion applies revision 1 at the matched cursor, then the queued
+        # revision 2 is allowed to build in the same private slot.
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and (
+            shadow._candidate is None
+            or shadow._candidate.stage.request.semantic_context_revision != 2
+        ):
+            time.sleep(0.005)
+        assert shadow._candidate is not None
+        assert shadow._candidate.stage.request.semantic_context_revision == 2
+        shadow.invalidate_session(session_id)
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and len(native.releases) < 2:
+            time.sleep(0.005)
+        assert len(native.releases) == 2
+    finally:
+        shadow.stop().result(timeout=3)
+
+
+def test_primary_applied_initial_revision_cancels_queued_stage_and_q4_backlog() -> None:
+    shadow, native, _stream = _start_shadow_worker()
+    holder_id = "primary-applied-shadow-holder"
+    session_id = "primary-applied-initial"
+    try:
+        assert shadow.stage(
+            _shadow_request(holder_id, 1, 0),
+            listener_generation_id=7,
+            sequence_position=0,
+        )
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            candidate = shadow._candidate
+            if candidate is not None and candidate.row.session_id == holder_id:
+                break
+            time.sleep(0.005)
+        assert candidate is not None and candidate.row.session_id == holder_id
+
+        request = _shadow_request(session_id, 4, 0)
+        assert shadow.stage(
+            request,
+            listener_generation_id=7,
+            sequence_position=0,
+        )
+        shadow.mark_primary_applied(request, listener_generation_id=7)
+
+        state = ListenerSessionState(
+            session_id=session_id,
+            generation_id=7,
+            state_epoch_id=request.state_epoch_id,
+            runtime_signature=_signature(),
+            native_context_id=78,
+        )
+        for frame_id in range(65):
+            assert not shadow.publish_q4(ShadowQ4Frame(
+                frame=_frame(state, frame_id=frame_id),
+                row=_shadow_row(session_id, frame_id),
+                audio_soft=torch.zeros((4, HIDDEN_WIDTH), dtype=torch.bfloat16),
+                ready_event=None,
+            ))
+        status = shadow.status
+        assert status["latest_error"] is None
+        assert status["pending_q4"] == 0
+        assert status["queued_sessions"] == 0
+        assert session_id not in shadow._desired
+        assert all(imported_session != session_id for _ctx, imported_session, _frame in native.imports)
+        candidate_status = status["candidate_stage"]
+        assert candidate_status["session_id"] == holder_id
+        assert candidate_status["listener_generation_id"] == 7
+        assert candidate_status["state_epoch_id"] == f"epoch-{holder_id}-7"
+        assert candidate_status["semantic_context_revision"] == 1
+        assert candidate_status["request_current_frame_id"] == 0
+        assert candidate_status["current_frame_id"] == 0
+        assert candidate_status["listener_state_version"] == 0
+        assert candidate_status["prefix_len"] == 50
+        assert candidate_status["replay_count"] == 0
+        assert candidate_status["replay_first_q4_frame_id"] is None
+        assert candidate_status["replay_last_q4_frame_id"] is None
+        applied = status["primary_applied"]
+        assert applied[0]["session_id"] == session_id
+        assert applied[0]["semantic_context_revision"] == 4
+        assert applied[0]["request_current_frame_id"] == 0
+        assert applied[0]["current_frame_id"] == 0
+        assert applied[0]["listener_state_version"] == 0
+        assert applied[0]["prefix_len"] == 50
+        assert applied[0]["replay_count"] == 0
+        assert applied[0]["replay_first_q4_frame_id"] is None
+        assert applied[0]["replay_last_q4_frame_id"] is None
+    finally:
+        shadow.invalidate_session(holder_id)
+        shadow.stop().result(timeout=3)
+
+
+def test_primary_applied_revision_does_not_suppress_next_revision() -> None:
+    shadow, _native, _stream = _start_shadow_worker()
+    session_id = "primary-applied-next-revision"
+    try:
+        applied = _shadow_request(session_id, 8, 0)
+        assert shadow.stage(applied, listener_generation_id=7, sequence_position=0)
+        shadow.mark_primary_applied(applied, listener_generation_id=7)
+
+        next_request = _shadow_request(session_id, 9, 0)
+        assert shadow.stage(next_request, listener_generation_id=7, sequence_position=0)
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            candidate = shadow._candidate
+            if candidate is not None and candidate.stage.request.semantic_context_revision == 9:
+                break
+            time.sleep(0.005)
+        assert candidate is not None
+        assert candidate.stage.request.semantic_context_revision == 9
+    finally:
+        shadow.invalidate_session(session_id)
+        shadow.stop().result(timeout=3)
+
+
+def test_committing_old_prefix_does_not_cancel_newer_staged_revision() -> None:
+    shadow, _native, _stream = _start_shadow_worker()
+    session_id = "primary-applied-old-row-keeps-new-stage"
+    try:
+        newer = _shadow_request(session_id, 2, 4)
+        assert shadow.stage(newer, listener_generation_id=7, sequence_position=4)
+        old_row = SimpleNamespace(
+            session_id=session_id,
+            state_epoch_id=newer.state_epoch_id,
+            semantic_context_revision=1,
+            semantic_prefix_len=50,
+            semantic_prefix_replay_frame_ids=(),
+            frame_id=9,
+        )
+        shadow.mark_primary_applied(
+            old_row,
+            listener_generation_id=7,
+            current_frame_id=10,
+            listener_state_version=10,
+        )
+
+        deadline = time.monotonic() + 2
+        candidate = None
+        while time.monotonic() < deadline:
+            candidate = shadow._candidate
+            if candidate is not None and candidate.stage.request.semantic_context_revision == 2:
+                break
+            time.sleep(0.005)
+        assert candidate is not None
+        assert candidate.stage.request.semantic_context_revision == 2
+        assert shadow.status["primary_applied"][0]["semantic_context_revision"] == 1
+    finally:
+        shadow.invalidate_session(session_id)
+        shadow.stop().result(timeout=3)
+
+
+def test_primary_applied_row_keeps_unknown_prefix_base_separate_from_commit_frame() -> None:
+    shadow, _native, _stream = _start_shadow_worker()
+    try:
+        row_output = SimpleNamespace(
+            session_id="primary-applied-row-metadata",
+            state_epoch_id="epoch-primary-applied-row-metadata-7",
+            semantic_context_revision=4,
+            semantic_prefix_len=50,
+            semantic_prefix_replay_frame_ids=(8, 9),
+            frame_id=9,
+        )
+        shadow.mark_primary_applied(
+            row_output,
+            listener_generation_id=7,
+            current_frame_id=10,
+            listener_state_version=11,
+        )
+
+        applied = shadow.status["primary_applied"][0]
+        assert applied["request_current_frame_id"] is None
+        assert applied["request_current_frame_source"] == "unknown"
+        assert applied["current_frame_id"] == 10
+        assert applied["listener_state_version"] == 11
+        assert applied["replay_first_q4_frame_id"] == 8
+        assert applied["replay_last_q4_frame_id"] == 9
+    finally:
+        shadow.stop().result(timeout=3)
+
+
+def test_primary_applied_revision_is_scoped_to_generation_and_epoch() -> None:
+    shadow, _native, _stream = _start_shadow_worker()
+    session_id = "primary-applied-new-identity"
+    try:
+        old_request = _shadow_request(session_id, 5, 0)
+        shadow.mark_primary_applied(old_request, listener_generation_id=7)
+
+        new_request = SimpleNamespace(
+            **{**vars(old_request), "state_epoch_id": "epoch-after-reset"}
+        )
+        assert shadow.stage(new_request, listener_generation_id=8, sequence_position=0)
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            candidate = shadow._candidate
+            if candidate is not None:
+                break
+            time.sleep(0.005)
+        assert candidate is not None
+        assert candidate.stage.listener_generation_id == 8
+        assert candidate.stage.request.state_epoch_id == "epoch-after-reset"
+        assert candidate.stage.request.semantic_context_revision == 5
+    finally:
+        shadow.invalidate_session(session_id)
+        shadow.stop().result(timeout=3)
+
+
+def test_primary_applied_notification_preserves_claimed_copy_until_fence() -> None:
+    shadow, native, stream = _start_shadow_worker()
+    session_id = "primary-applied-claimed-copy"
+    release_fence = threading.Event()
+    try:
+        request = _shadow_request(session_id, 6, 0)
+        assert shadow.stage(request, listener_generation_id=7, sequence_position=0)
+        deadline = time.monotonic() + 2
+        candidate = None
+        while time.monotonic() < deadline:
+            candidate = shadow._candidate
+            if candidate is not None:
+                break
+            time.sleep(0.005)
+        assert candidate is not None
+        assert shadow.candidate_for(candidate.row) is candidate
+
+        copy_event = object()
+        fence_entered = threading.Event()
+        wait_event = stream.wait_event
+
+        def wait_for_copy_fence(event: Any) -> None:
+            if event is copy_event:
+                fence_entered.set()
+                assert release_fence.wait(2)
+            wait_event(event)
+
+        stream.wait_event = wait_for_copy_fence
+        shadow.finish_promotion(
+            candidate,
+            SimpleNamespace(destination_row=candidate.row, completion_event=copy_event),
+        )
+        assert fence_entered.wait(2)
+        shadow.mark_primary_applied(request, listener_generation_id=7)
+        assert shadow._candidate is candidate
+        assert not native.releases
+
+        release_fence.set()
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and not native.releases:
+            time.sleep(0.005)
+        assert copy_event in stream.waited_events
+        assert native.releases
+        assert native.release_waited_event_counts[0] >= 1
+        assert shadow._candidate is None
+    finally:
+        release_fence.set()
+        shadow.invalidate_session(session_id)
+        shadow.stop().result(timeout=3)
+
+
+def test_shadow_candidate_cannot_be_claimed_while_a_real_q4_step_is_inflight() -> None:
+    class BlockingNative(_FakeNativeBatch):
+        def __init__(self, signature, capability, stream):
+            super().__init__(signature, capability, stream)
+            self.step_entered = threading.Event()
+            self.release_step = threading.Event()
+
+        def step_async(self, manifest, audio_soft, *, producer_stream=None):
+            self._claim()
+            self.step_entered.set()
+            assert self.release_step.wait(3)
+            return super().step_async(manifest, audio_soft, producer_stream=producer_stream)
+
+    shadow, native, _stream = _start_shadow_worker(native_factory=BlockingNative)
+    session_id = "q4-inflight-shadow"
+    try:
+        assert shadow.stage(
+            _shadow_request(session_id, 1, 0),
+            listener_generation_id=7,
+            sequence_position=0,
+        )
+        deadline = time.monotonic() + 2
+        candidate = None
+        while time.monotonic() < deadline:
+            candidate = shadow._candidate
+            if candidate is not None:
+                break
+            time.sleep(0.005)
+        assert candidate is not None
+        state = ListenerSessionState(
+            session_id=session_id,
+            generation_id=7,
+            state_epoch_id=f"epoch-{session_id}-7",
+            runtime_signature=_signature(),
+            native_context_id=78,
+        )
+        assert shadow.publish_q4(ShadowQ4Frame(
+            frame=_frame(state, frame_id=0),
+            row=candidate.row,
+            audio_soft=torch.zeros((4, HIDDEN_WIDTH), dtype=torch.bfloat16),
+            ready_event=None,
+        ))
+        entered = native.step_entered.wait(2)
+        if not entered:
+            with shadow._condition:
+                debug_state = {
+                    "status": dict(shadow.status),
+                    "active_row": shadow._active_row,
+                    "q4_processing": shadow._q4_processing,
+                    "q4_rows": {
+                        sid: [row.frame.frame_id for row in rows]
+                        for sid, rows in shadow._q4.items()
+                    },
+                    "candidate_claimed": shadow._candidate_claimed,
+                    "native_steps": native.steps,
+                    "native_imports": native.imports,
+                }
+        assert entered, repr(debug_state) if not entered else None
+        assert shadow.candidate_for(candidate.row) is None
+        native.release_step.set()
+
+        deadline = time.monotonic() + 2
+        advanced = None
+        while time.monotonic() < deadline:
+            advanced = shadow._candidate
+            if advanced is not None and advanced.row.frame_id == 1:
+                break
+            time.sleep(0.005)
+        assert advanced is not None and advanced.row.frame_id == 1
+        claimed = shadow.candidate_for(advanced.row)
+        assert claimed is advanced
+        shadow.discard_candidate(advanced, "test teardown", copy_not_enqueued=True)
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and not native.releases:
+            time.sleep(0.005)
+        assert native.releases
+    finally:
+        native.release_step.set()
+        shadow.stop().result(timeout=3)
+
+
+def test_private_listener_pipeline_runs_while_compute_owns_shared_model_lock() -> None:
+    lock = FairModelLock(host_timeline_enabled=True)
+    compute_acquired = threading.Event()
+    release_compute = threading.Event()
+    compute_thread_id: list[int] = []
+    completion_while_compute_owned = threading.Event()
+
+    def hold_compute_lock() -> None:
+        assert lock.acquire_fair("compute")
+        compute_thread_id.append(threading.get_ident())
+        compute_acquired.set()
+        assert release_compute.wait(4)
+        lock.release()
+
+    def completion_barrier(_stream) -> None:
+        owner = lock.host_timeline_snapshot()["current_owner"]
+        assert owner is not None and owner["priority"] == "compute"
+        assert owner["thread_id"] == compute_thread_id[0]
+        completion_while_compute_owned.set()
+
+    rig = _rig(model_lock=lock, completion_barrier=completion_barrier)
+    state = _state(rig.coordinator.runtime_signature, "private-lock-scope")
+    _register(rig, state)
+    compute_thread = threading.Thread(target=hold_compute_lock, daemon=True)
+    compute_thread.start()
+    try:
+        assert compute_acquired.wait(2)
+        output = rig.worker.submit_tick((_frame(state),)).result(timeout=4)
+        assert completion_while_compute_owned.is_set()
+        assert tuple(output) == (state.session_id,)
+        row_output = output[state.session_id]
+        assert row_output.listener_model_lock_wait_ms is None
+        assert row_output.listener_model_lock_hold_ms is None
+        assert row_output.capacity_growth_ms is not None
+        assert row_output.frontend_encode_ms is not None
+        assert row_output.mel_prepare_ms is not None and row_output.mel_prepare_ms >= 0.0
+        assert row_output.frontend_copy_ms is not None and row_output.frontend_copy_ms >= 0.0
+        assert row_output.frontend_copy_cuda_ms is None
+        assert row_output.audio_tower_lock_wait_ms is not None
+        assert row_output.audio_tower_lock_hold_ms is not None
+        assert row_output.audio_tower_cuda_ms is None
+        assert row_output.native_submit_ms is not None
+        assert row_output.native_output_health_ms is not None
+        assert row_output.native_output_health_ms >= 0.0
+        assert row_output.control6_policy_ms is not None
+        assert row_output.cuda_completion_wait_ms is not None
+        assert row_output.native_output_health is not None
+        assert row_output.native_output_health.status == "healthy"
+        assert row_output.native_output_health.checked
+        assert rig.native is not None
+        assert rig.native.lock_owners_at_import == [
+            {"thread_id": compute_thread_id[0], "priority": "compute", "ticket": 0, "depth": 1}
+        ]
+    finally:
+        release_compute.set()
+        compute_thread.join(timeout=3)
+        rig.worker.stop(drain=True).result(timeout=3)
+    assert not compute_thread.is_alive()
+
+
+def test_shared_model_lock_wraps_only_prefix_importer_that_requires_it() -> None:
+    lock = FairModelLock(host_timeline_enabled=True)
+    rig = _rig(model_lock=lock)
+    state = _state(rig.coordinator.runtime_signature, "semantic-lock-scope")
+    _register(rig, state)
+    first = rig.worker.submit_tick((_frame(state),)).result(timeout=4)[state.session_id]
+    assert first.listener_model_lock_wait_ms is None
+    assert first.listener_model_lock_hold_ms is None
+
+    importer_owner: list[dict[str, Any] | None] = []
+
+    def semantic_import(_state, _row):
+        importer_owner.append(lock.host_timeline_snapshot()["current_owner"])
+        return PrefixCacheImport(
+            past_key_values=object(),
+            prefix_attention=torch.ones((1, 50), dtype=torch.int64),
+            prefix_len=50,
+            cache_position=50,
+        )
+
+    setattr(semantic_import, "requires_shared_lm_lock", True)
+    rig.worker.refresh_session_prefix(
+        state.session_id,
+        expected_frame_id=1,
+        expected_state_version=1,
+        cache_position=50,
+        prefix_import=semantic_import,
+    ).result(timeout=3)
+    second = rig.worker.submit_tick((_frame(state, frame_id=1),)).result(timeout=4)[state.session_id]
+
+    assert importer_owner and importer_owner[0] is not None
+    assert importer_owner[0]["priority"] == "listener"
+    assert importer_owner[0]["thread_id"] == rig.native.owner_thread_id
+    assert rig.native.lock_owners_at_import[-1] is None
+    assert second.listener_model_lock_wait_ms is not None
+    assert second.listener_model_lock_hold_ms is not None
+    assert second.semantic_prefix_import_ms is not None
+    events = lock.host_timeline_snapshot()["events"]
+    assert [event["event"] for event in events].count("request") == 1
+    assert [event["priority"] for event in events if event["event"] == "request"] == ["listener"]
+    rig.worker.stop(drain=True).result(timeout=3)
+
+
+def test_dynamic_capacity_growth_failure_rejects_new_session_without_fixed_limit() -> None:
+    rig = _rig()
+    states = tuple(
+        _state(rig.coordinator.runtime_signature, f"capacity-{index}")
+        for index in range(4)
+    )
+    _register(rig, *states)
+    assert rig.native is not None
+    assert rig.native.max_batch_size == 4
+    rig.native.fail_capacity_at = 5
+
+    fifth = _state(rig.coordinator.runtime_signature, "capacity-4")
+    with pytest.raises(RuntimeError, match="capacity allocation failed: CUDA out of memory"):
+        rig.worker.register_session(fifth, prefix_import=rig.prefix_import).result(timeout=3)
+    with pytest.raises(KeyError, match="unknown listener session"):
+        rig.worker.session_state(fifth.session_id).result(timeout=3)
+    assert rig.native.max_batch_size == 4
+    assert rig.native.capacity_requests[-1] == 5
+    rig.worker.stop(drain=True).result(timeout=3)
+
+
+@pytest.mark.parametrize("batch_size", (1, 2, 3, 4, 5, 8, 12))
+def test_worker_uses_one_frontend_native_step_and_control6_forward_per_batch(batch_size: int) -> None:
+    rig = _rig()
+    signature = rig.coordinator.runtime_signature
+    states = tuple(_state(signature, f"sid-{row}") for row in range(batch_size))
+    _register(rig, *states)
+    aligned_ready_at_ns = time.monotonic_ns() + 25_000_000
+    tick_output = rig.worker.submit_tick(tuple(
+        _frame(state, value=0.125 + row, ready_at_ns=aligned_ready_at_ns)
+        for row, state in enumerate(states)
+    )).result(timeout=4)
+    assert rig.result_event.wait(4)
+
+    batch, decisions = rig.results[0]
+    assert tuple(tick_output) == tuple(state.session_id for state in states)
+    for row_output in tick_output.values():
+        assert row_output.capacity_growth_ms is not None
+        assert row_output.frontend_encode_ms is not None
+        assert row_output.mel_prepare_ms is not None
+        assert row_output.frontend_copy_ms is not None
+        assert row_output.frontend_copy_cuda_ms is None
+        assert row_output.audio_tower_lock_wait_ms is not None
+        assert row_output.audio_tower_lock_hold_ms is not None
+        assert row_output.audio_tower_cuda_ms is None
+        assert row_output.native_submit_ms is not None
+        assert row_output.control6_policy_ms is not None
+        assert row_output.cuda_completion_wait_ms is not None
+    assert batch.manifest.batch_size == batch_size
+    assert len(rig.model.call_shapes) == 1
+    assert rig.model.call_shapes == [(batch_size, 1024, 128)]
+    assert len(rig.native.steps) == 1
+    assert rig.native.health_generations == [1]
+    assert rig.native.event_order.index(("health", 1)) < rig.native.event_order.index(("step", batch_size)) + 2
+    assert rig.native.steps[0][0] == tuple(state.session_id for state in states)
+    assert len(rig.adapter.hidden_rows) == 1
+    assert len(decisions) == batch_size
+    assert len(rig.native.imports) == batch_size
+    assert rig.native.max_batch_size >= batch_size
+    assert rig.native.capacity_requests[-1] == batch_size
+    capacity_index = max(
+        index for index, event in enumerate(rig.native.event_order)
+        if event == ("ensure_capacity", batch_size)
+    )
+    first_import_index = next(
+        index for index, event in enumerate(rig.native.event_order)
+        if event[0] == "import"
+    )
+    assert capacity_index < first_import_index
+    expected_first_queries = torch.tensor(
+        [
+            float(rig.model.call_inputs[0][row].float().reshape(256, 4, 128)[0].mean())
+            for row in range(batch_size)
+        ],
+        dtype=torch.float32,
+    )
+    torch.testing.assert_close(
+        rig.adapter.hidden_rows[0][:, 0],
+        expected_first_queries,
+        rtol=0,
+        atol=0,
+    )
+
+    worker_thread = rig.runtime_factory_threads[0]
+    assert worker_thread == rig.native.owner_thread_id
+    assert worker_thread == rig.native.creation_thread_id
+    assert worker_thread == rig.adapter.creation_thread_id
+    assert worker_thread == rig.model.thread_ids[0]
+    assert worker_thread == rig.adapter.thread_ids[0]
+    assert rig.prefix_import_threads == [worker_thread] * batch_size
+    assert {thread_id for _, thread_id in rig.coordinator.operation_threads} == {worker_thread}
+    assert all(decision.session == state.session_id for decision, state in zip(decisions, states, strict=True))
+    for state in states:
+        snapshot = rig.worker.session_state(state.session_id).result(timeout=3)
+        assert snapshot.next_frame_id == 1
+        assert snapshot.state_version == 1
+        assert snapshot.cache_position == 38
+        assert snapshot.valid_history_tokens == 38
+        assert state.user_pcm_tail is not None
+        assert len(state.user_mel_history) == 1
+
+    report = rig.worker.stop(drain=True).result(timeout=3)
+    assert isinstance(report, WorkerStopReport)
+    assert report.stopped_cleanly
+    assert report.processed_batches == 1
+    assert rig.native.close_thread_id == worker_thread
+
+
+def test_failed_pipeline_aborts_frontend_and_poison_commits_no_cursor() -> None:
+    rig = _rig(fail_step=RuntimeError("synthetic native batch failure"))
+    states = tuple(
+        _state(rig.coordinator.runtime_signature, f"faulted-{index}")
+        for index in range(2)
+    )
+    _register(rig, *states)
+    ready_at_ns = time.monotonic_ns() + 25_000_000
+    accepted = [
+        rig.worker.submit_frame(_frame(state, ready_at_ns=ready_at_ns))
+        for state in states
+    ]
+    for future in accepted:
+        future.result(timeout=3)
+
+    assert rig.error_event.wait(4)
+    for state in states:
+        snapshot = rig.worker.session_state(state.session_id).result(timeout=3)
+        assert snapshot.poisoned_reason is not None
+        assert "synthetic native batch failure" in snapshot.poisoned_reason
+        assert snapshot.next_frame_id == 0
+        assert snapshot.state_version == 0
+        assert snapshot.cache_position == 34
+        assert snapshot.user_pcm_tail is None
+        assert snapshot.user_mel_history == ()
+    assert rig.model.calls == 1
+    assert rig.native.steps == []
+    assert len(rig.errors) == 1
+
+    report = rig.worker.stop(drain=True).result(timeout=3)
+    assert not report.stopped_cleanly
+    assert report.fatal_error is not None
+
+
+def test_native_nonfinite_guard_quarantines_all_rows_before_policy_or_cursor_commit() -> None:
+    rig = _rig(nonfinite_health=True)
+    state = _state(rig.coordinator.runtime_signature, "nonfinite")
+    _register(rig, state)
+    with pytest.raises(RuntimeError, match="all rows quarantined"):
+        rig.worker.submit_tick((_frame(state),)).result(timeout=4)
+    assert rig.error_event.wait(3)
+    assert rig.native is not None
+    assert rig.native.health_generations == [1]
+    assert rig.adapter is not None
+    assert rig.adapter.hidden_rows == []
+    snapshot = rig.worker.session_state(state.session_id).result(timeout=3)
+    assert snapshot.next_frame_id == 0
+    assert snapshot.state_version == 0
+    assert snapshot.poisoned_reason is not None
+    assert "finite guard" in snapshot.poisoned_reason
+    report = rig.worker.stop(drain=False).result(timeout=3)
+    assert not report.stopped_cleanly
+
+
+def test_result_notification_failure_is_reported_after_committed_batch() -> None:
+    rig = _rig()
+    notified = threading.Event()
+
+    def fail_notification(_batch, _decisions) -> None:
+        notified.set()
+        raise RuntimeError("synthetic event-loop dispatch failure")
+
+    rig.worker._on_result = fail_notification
+    state = _state(rig.coordinator.runtime_signature, "dispatch-failure")
+    _register(rig, state)
+    ready_at_ns = time.monotonic_ns() + 50_000_000
+    rig.worker.submit_frame(_frame(state, ready_at_ns=ready_at_ns)).result(timeout=3)
+    rig.worker.submit_frame(
+        _frame(state, frame_id=1, ready_at_ns=ready_at_ns)
+    ).result(timeout=3)
+
+    report = rig.worker.stop(drain=True).result(timeout=4)
+    assert notified.is_set()
+    assert state.next_frame_id == 1
+    assert report.status == "failed"
+    assert not report.stopped_cleanly
+    assert report.pending_frames == 1
+    assert report.processed_batches == 1
+    assert "result dispatch failed after state commit" in (report.fatal_error or "")
+    assert "synthetic event-loop dispatch failure" in (report.notification_error or "")
+
+
+def test_startup_done_callback_cannot_block_on_queued_owner_command() -> None:
+    runtime_factory_entered = threading.Event()
+    runtime_factory_continue = threading.Event()
+    callback_finished = threading.Event()
+    callback_errors: list[BaseException] = []
+    rig = _rig(
+        auto_start=False,
+        runtime_factory_entered=runtime_factory_entered,
+        runtime_factory_continue=runtime_factory_continue,
+    )
+    startup = rig.worker.start()
+    try:
+        assert runtime_factory_entered.wait(3)
+        state = _state(rig.coordinator.runtime_signature, "queued-before-startup")
+        queued_command = rig.worker.register_session(state, prefix_import=rig.prefix_import)
+
+        def wait_for_queued_command(_future: Future[Any]) -> None:
+            assert _future.result() is None
+            assert _future.exception() is None
+            try:
+                queued_command.result(timeout=1)
+            except RuntimeError as exc:
+                callback_errors.append(exc)
+            try:
+                queued_command.exception(timeout=1)
+            except RuntimeError as exc:
+                callback_errors.append(exc)
+            try:
+                rig.worker.session_state(state.session_id)
+            except RuntimeError as exc:
+                callback_errors.append(exc)
+            try:
+                rig.worker.stop(drain=True)
+            except RuntimeError as exc:
+                callback_errors.append(exc)
+            finally:
+                callback_finished.set()
+
+        startup.add_done_callback(wait_for_queued_command)
+        runtime_factory_continue.set()
+        startup.result(timeout=3)
+        assert callback_finished.wait(3)
+        assert len(callback_errors) == 4
+        assert "owner thread cannot wait on its own pending Future.result()" in str(
+            callback_errors[0]
+        )
+        assert "owner thread cannot wait on its own pending Future.exception()" in str(
+            callback_errors[1]
+        )
+        assert "owner thread cannot submit 'snapshot'" in str(callback_errors[2])
+        assert "owner thread cannot submit 'stop'" in str(callback_errors[3])
+        queued_command.result(timeout=3)
+        assert rig.worker.session_state(state.session_id).result(timeout=3).next_frame_id == 0
+        assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
+    finally:
+        runtime_factory_continue.set()
+        if not rig.worker._stopped.done():
+            rig.worker.stop(drain=False)
+            rig.worker._stopped.result(timeout=3)
+
+
+def test_reset_retires_old_native_generation_and_rejects_stale_frame() -> None:
+    rig = _rig()
+    signature = rig.coordinator.runtime_signature
+    old = _state(signature, "reset-me", generation=7)
+    _register(rig, old)
+    rig.worker.submit_frame(_frame(old)).result(timeout=3)
+    assert rig.result_event.wait(4)
+
+    new = _state(signature, "reset-me", generation=8)
+    rig.worker.reset_session(old.session_id, new, prefix_import=rig.prefix_import).result(timeout=3)
+    stale = ListenerFrame(
+        session_id=old.session_id,
+        generation_id=old.generation_id,
+        state_epoch_id=old.state_epoch_id,
+        frame_id=1,
+        ready_at_ns=time.monotonic_ns(),
+        pcm=np.zeros(1280, dtype=np.float32),
+    )
+    with pytest.raises(ValueError, match="generation or epoch"):
+        rig.worker.submit_frame(stale).result(timeout=3)
+
+    rig.worker.submit_frame(_frame(new)).result(timeout=3)
+    deadline = time.monotonic() + 4
+    while len(rig.results) < 2 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert len(rig.results) == 2
+    assert len(rig.native.imports) == 2
+    assert rig.native.releases == [(old.session_id, 1, 38)]
+    current = rig.worker.session_state(new.session_id).result(timeout=3)
+    assert current.generation_id == 8
+    assert current.next_frame_id == 1
+    assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
+
+
+def test_semantic_prefix_refresh_rebases_only_kv_cursor_and_imports_before_next_row() -> None:
+    rig = _rig()
+    state = _state(rig.coordinator.runtime_signature, "semantic-refresh")
+    _register(rig, state)
+    first = rig.worker.submit_tick((_frame(state),)).result(timeout=4)[state.session_id]
+    assert first.frame_id == 0
+    before = rig.worker.session_state(state.session_id).result(timeout=3)
+    assert (before.next_frame_id, before.state_version, before.sequence_position) == (1, 1, 1)
+    assert before.cache_position == 38
+
+    imported_rows = []
+
+    def revised_prefix(_state, row):
+        imported_rows.append(row)
+        return PrefixCacheImport(
+            past_key_values=object(),
+            prefix_attention=torch.ones((1, 50), dtype=torch.int64),
+            prefix_len=50,
+            cache_position=50,
+            semantic_context_revision=9,
+            prefix_build_ms=2.0,
+            replay_ms=3.0,
+        )
+
+    rig.worker.refresh_session_prefix(
+        state.session_id,
+        expected_frame_id=1,
+        expected_state_version=1,
+        cache_position=50,
+        prefix_import=revised_prefix,
+    ).result(timeout=3)
+    rebased = rig.worker.session_state(state.session_id).result(timeout=3)
+    assert (rebased.next_frame_id, rebased.state_version, rebased.sequence_position) == (1, 1, 1)
+    assert rebased.generation_id == state.generation_id
+    assert rebased.state_epoch_id == state.state_epoch_id
+    assert rebased.cache_position == rebased.valid_history_tokens == 50
+
+    second = rig.worker.submit_tick((_frame(state, frame_id=1, value=0.75),)).result(timeout=4)
+    row_output = second[state.session_id]
+    assert row_output.frame_id == 1
+    assert row_output.semantic_context_revision == 9
+    assert row_output.semantic_prefix_len == 50
+    assert row_output.semantic_prefix_build_ms == 2.0
+    assert row_output.semantic_prefix_replay_ms == 3.0
+    assert row_output.semantic_prefix_import_ms is not None
+    assert row_output.semantic_prefix_refresh_event is True
+    assert row_output.semantic_prefix_refresh_event_id
+    assert row_output.semantic_prefix_refresh_revision == 9
+    assert imported_rows[0].frame_id == 1
+    assert imported_rows[0].cache_position == 50
+    assert rig.native is not None
+    assert rig.native.releases == [(state.session_id, 1, 38)]
+    assert len(rig.native.imports) == 2
+    assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
+
+
+def test_initial_semantic_prefix_import_waits_for_prepare_and_keeps_frame_zero_unadvanced() -> None:
+    rig = _rig()
+    state = _state(rig.coordinator.runtime_signature, "initial-semantic")
+    _register(rig, state)
+    event = _FakeCompletionEvent()
+    prepared = PreparedInitialPrefix(
+        prefix=PrefixCacheImport(
+            past_key_values=object(),
+            prefix_attention=torch.ones((1, 47), dtype=torch.int64),
+            prefix_len=47,
+            cache_position=47,
+            semantic_context_revision=12,
+            prefix_build_ms=81.5,
+            replay_ms=0.0,
+        ),
+        ready_event=event,
+        session_id=state.session_id,
+        listener_generation_id=state.generation_id,
+        state_epoch_id=state.state_epoch_id,
+        semantic_context_revision=12,
+        expected_cache_position=34,
+    )
+
+    admission = rig.worker.prime_initial_prefix(state.session_id, prepared).result(timeout=3)
+
+    assert admission.status == "primed"
+    assert admission.prefix_len == 47
+    assert admission.semantic_context_revision == 12
+    assert len(rig.native.imports) == 1
+    assert rig.native.imports[0][2] == 0  # import identity, not an input frame
+    assert rig.native.steps == []
+    assert event in rig.native.listener_stream.waited_events
+    snapshot = rig.worker.session_state(state.session_id).result(timeout=3)
+    assert (snapshot.next_frame_id, snapshot.state_version, snapshot.sequence_position) == (0, 0, 0)
+    assert snapshot.cache_position == snapshot.valid_history_tokens == 47
+
+    output = rig.worker.submit_tick((_frame(state),)).result(timeout=4)[state.session_id]
+    assert output.frame_id == 0
+    assert output.semantic_context_revision == 12
+    assert len(rig.native.imports) == 1
+    assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
+
+
+def test_initial_semantic_prefix_replacement_retires_only_frame_zero_native_slot() -> None:
+    rig = _rig()
+    state = _state(rig.coordinator.runtime_signature, "initial-semantic-replace")
+    _register(rig, state)
+
+    def prepared(length: int, revision: int, expected_cache_position: int) -> PreparedInitialPrefix:
+        return PreparedInitialPrefix(
+            prefix=PrefixCacheImport(
+                past_key_values=object(),
+                prefix_attention=torch.ones((1, length), dtype=torch.int64),
+                prefix_len=length,
+                cache_position=length,
+                semantic_context_revision=revision,
+            ),
+            ready_event=_FakeCompletionEvent(),
+            session_id=state.session_id,
+            listener_generation_id=state.generation_id,
+            state_epoch_id=state.state_epoch_id,
+            semantic_context_revision=revision,
+            expected_cache_position=expected_cache_position,
+        )
+
+    first = rig.worker.prime_initial_prefix(
+        state.session_id, prepared(41, 3, 34)
+    ).result(timeout=3)
+    second = rig.worker.prime_initial_prefix(
+        state.session_id, prepared(53, 4, 41)
+    ).result(timeout=3)
+
+    assert first.status == second.status == "primed"
+    assert rig.native.releases == [(state.session_id, 0, 41)]
+    assert [item[2] for item in rig.native.imports] == [0, 0]
+    snapshot = rig.worker.session_state(state.session_id).result(timeout=3)
+    assert (snapshot.next_frame_id, snapshot.state_version, snapshot.sequence_position) == (0, 0, 0)
+    assert snapshot.cache_position == 53
+    assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
+
+
+def test_initial_semantic_prefix_cas_rejects_a_frame_that_arrived_during_preparation() -> None:
+    rig = _rig()
+    state = _state(rig.coordinator.runtime_signature, "initial-semantic-stale")
+    _register(rig, state)
+    state.next_frame_id = 1
+    prepared = PreparedInitialPrefix(
+        prefix=PrefixCacheImport(
+            past_key_values=object(),
+            prefix_attention=torch.ones((1, 47), dtype=torch.int64),
+            prefix_len=47,
+            cache_position=47,
+            semantic_context_revision=12,
+        ),
+        ready_event=_FakeCompletionEvent(),
+        session_id=state.session_id,
+        listener_generation_id=state.generation_id,
+        state_epoch_id=state.state_epoch_id,
+        semantic_context_revision=12,
+        expected_cache_position=34,
+    )
+
+    admission = rig.worker.prime_initial_prefix(state.session_id, prepared).result(timeout=3)
+
+    assert admission.status == "ineligible"
+    assert admission.reason == "listener_state_changed_before_initial_prefix_import"
+    assert rig.native.imports == []
+    assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
+
+
+def test_native_tick_progresses_while_initial_prefix_preparation_holds_fair_model_lock(monkeypatch) -> None:
+    from duplex_kernel.listener_microbatch_serving import (
+        prepare_initial_semantic_prefix_async,
+    )
+
+    model_lock = FairModelLock()
+    preparation_started = threading.Event()
+    finish_preparation = threading.Event()
+
+    def blocked_preparation(*_args, **_kwargs):
+        assert model_lock.acquire_fair("listener")
+        preparation_started.set()
+        try:
+            assert finish_preparation.wait(4)
+            return "prepared"
+        finally:
+            model_lock.release()
+
+    monkeypatch.setattr(
+        "duplex_kernel.listener_microbatch_serving.prepare_initial_semantic_prefix",
+        blocked_preparation,
+    )
+    rig = _rig(model_lock=model_lock)
+    state = _state(rig.coordinator.runtime_signature, "tick-during-initial-prefix")
+    _register(rig, state)
+
+    async def exercise() -> None:
+        preparation = asyncio.create_task(prepare_initial_semantic_prefix_async())
+        assert await asyncio.to_thread(preparation_started.wait, 2)
+        try:
+            outputs = await asyncio.wait_for(
+                asyncio.wrap_future(rig.worker.submit_tick((_frame(state),))),
+                timeout=3,
+            )
+        finally:
+            finish_preparation.set()
+        assert outputs[state.session_id].frame_id == 0
+        assert await preparation == "prepared"
+
+    asyncio.run(exercise())
+    assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
+
+
+def test_prefix_phase_timings_are_batch_local_for_mixed_rows_and_refresh_provenance_persists() -> None:
+    rig = _rig()
+    state_a = _state(rig.coordinator.runtime_signature, "prefix-steady")
+    state_b = _state(rig.coordinator.runtime_signature, "prefix-refresh")
+
+    def initial_prefix(_state, _row):
+        return PrefixCacheImport(
+            past_key_values=object(),
+            prefix_attention=torch.ones((1, 34), dtype=torch.int64),
+            prefix_len=34,
+            semantic_context_revision=4,
+            prefix_build_ms=7.0,
+            replay_ms=11.0,
+        )
+
+    rig.worker.register_session(state_a, prefix_import=rig.prefix_import).result(timeout=3)
+    rig.worker.register_session(state_b, prefix_import=initial_prefix).result(timeout=3)
+    rig.worker.submit_tick((_frame(state_a),)).result(timeout=4)
+    initial_b = rig.worker.submit_tick((_frame(state_b),)).result(timeout=4)[state_b.session_id]
+    assert initial_b.semantic_prefix_build_ms == 7.0
+    assert initial_b.semantic_prefix_replay_ms == 11.0
+    assert initial_b.semantic_prefix_import_ms is not None
+    assert initial_b.semantic_prefix_refresh_event is False
+
+    def revised_prefix(_state, _row):
+        return PrefixCacheImport(
+            past_key_values=object(),
+            prefix_attention=torch.ones((1, 50), dtype=torch.int64),
+            prefix_len=50,
+            cache_position=50,
+            semantic_context_revision=9,
+            prefix_build_ms=2.0,
+            replay_ms=3.0,
+        )
+
+    rig.worker.refresh_session_prefix(
+        state_b.session_id,
+        expected_frame_id=1,
+        expected_state_version=1,
+        cache_position=50,
+        prefix_import=revised_prefix,
+    ).result(timeout=3)
+    mixed = rig.worker.submit_tick((
+        _frame(state_a, frame_id=1),
+        _frame(state_b, frame_id=1, value=0.75),
+    )).result(timeout=4)
+
+    steady_row = mixed[state_a.session_id]
+    refreshed_row = mixed[state_b.session_id]
+    assert steady_row.semantic_prefix_build_ms is None
+    assert steady_row.semantic_prefix_replay_ms is None
+    assert steady_row.semantic_prefix_import_ms is None
+    assert steady_row.semantic_prefix_refresh_event is False
+    assert steady_row.semantic_prefix_refresh_event_id is None
+    assert refreshed_row.semantic_prefix_build_ms == 2.0
+    assert refreshed_row.semantic_prefix_replay_ms == 3.0
+    assert refreshed_row.semantic_prefix_import_ms is not None
+    assert refreshed_row.semantic_prefix_refresh_event is True
+    assert refreshed_row.semantic_prefix_refresh_event_id
+    assert refreshed_row.semantic_prefix_refresh_revision == 9
+
+    later = rig.worker.submit_tick((
+        _frame(state_a, frame_id=2),
+        _frame(state_b, frame_id=2, value=0.5),
+    )).result(timeout=4)
+    for output in later.values():
+        assert output.semantic_prefix_build_ms is None
+        assert output.semantic_prefix_replay_ms is None
+        assert output.semantic_prefix_import_ms is None
+        assert output.semantic_prefix_refresh_event is False
+        assert output.semantic_prefix_refresh_event_id is None
+    assert later[state_b.session_id].semantic_context_revision == 9
+    assert later[state_b.session_id].semantic_prefix_len == 50
+    assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
+
+
+def test_close_command_waits_for_inflight_completion_event_before_release() -> None:
+    completion_started = threading.Event()
+    completion_continue = threading.Event()
+
+    def completion_barrier(_stream) -> None:
+        completion_started.set()
+        assert completion_continue.wait(3)
+
+    rig = _rig(completion_barrier=completion_barrier)
+    state = _state(rig.coordinator.runtime_signature, "close-me")
+    _register(rig, state)
+    rig.worker.submit_frame(_frame(state)).result(timeout=3)
+    assert completion_started.wait(4)
+
+    close_future: Future[Any] = rig.worker.close_session(state.session_id)
+    assert not close_future.done()
+    assert rig.native.releases == []
+    completion_continue.set()
+    assert rig.result_event.wait(4)
+    retired = close_future.result(timeout=4)
+    assert retired.state.session_id == state.session_id
+    assert rig.native.releases == [(state.session_id, 1, 38)]
+    assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
+
+
+def test_bounded_stop_reports_accepted_but_not_yet_ready_frames() -> None:
+    rig = _rig()
+    state = _state(rig.coordinator.runtime_signature, "future-frame")
+    _register(rig, state)
+    rig.worker.submit_frame(
+        _frame(state, ready_at_ns=time.monotonic_ns() + 2_000_000_000)
+    ).result(timeout=3)
+
+    report = rig.worker.stop(drain=True, drain_timeout_s=0.02).result(timeout=3)
+    assert report.status == "drain_timeout"
+    assert not report.stopped_cleanly
+    assert not report.drained
+    assert report.pending_frames == 1

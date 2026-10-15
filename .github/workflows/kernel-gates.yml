@@ -1,0 +1,86 @@
+name: Kernel gate verification
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-legacy-kernel-gates:
+    name: Verify P0/P1/P2/P3/P4 baseline/P4D reports
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install verifier dependency
+        run: python -m pip install --disable-pip-version-check numpy
+
+      - name: Verify published P0 run1/run2 and P1
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha_p01="$(tr -d '\r\n' < validation/kernel_gates/ACTIVE_SHA)"
+          root_p01="validation/kernel_gates/${sha_p01}"
+          test -f "${root_p01}/P0/run1/P0_report.json"
+          test -f "${root_p01}/P0/run2/P0_report.json"
+          test -f "${root_p01}/P1/run1/P1_report.json"
+          python tools/kernel_gates/verify_report.py \
+            "${root_p01}/P0/run1/P0_report.json" \
+            --compare "${root_p01}/P0/run2/P0_report.json"
+          python tools/kernel_gates/verify_report.py \
+            "${root_p01}/P1/run1/P1_report.json"
+
+          sha_p2="$(tr -d '\r\n' < validation/kernel_gates/P2_ACTIVE_SHA)"
+          root_p2="validation/kernel_gates/${sha_p2}"
+          test -f "${root_p2}/P2/run1/P2_report.json"
+          python tools/kernel_gates/verify_report.py \
+            "${root_p2}/P2/run1/P2_report.json"
+
+          sha_p3="$(tr -d '\r\n' < validation/kernel_gates/P3_ACTIVE_SHA)"
+          root_p3="validation/kernel_gates/${sha_p3}"
+          test -f "${root_p3}/P3/run3/P3_report.json"
+          python tools/kernel_gates/verify_report.py \
+            "${root_p3}/P3/run3/P3_report.json"
+
+          sha_p4="$(tr -d '\r\n' < validation/kernel_gates/P4_BASELINE_SHA)"
+          root_p4="validation/kernel_gates/${sha_p4}"
+          test -f "${root_p4}/P4/run8/P4_report.json"
+          P4_REPORT="${root_p4}/P4/run8/P4_report.json" python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          report = json.loads(Path(os.environ["P4_REPORT"]).read_text())
+          assert report["passed"] is False, "P4 baseline deve restare FAIL fino al P4D"
+          assert report["metrics"]["qwen_ablation"]["ce_ratio"] > 1.10
+          assert report["metrics"]["qwen_ablation"]["top5_drop"] > 0.03
+          PY
+
+          sha_p4d="$(tr -d '\r\n' < validation/kernel_gates/P4D_ACTIVE_SHA)"
+          root_p4d="validation/kernel_gates/${sha_p4d}"
+          test -f "${root_p4d}/P4D/run1/P4D_report.json"
+          python tools/kernel_gates/verify_p4d_report.py \
+            "${root_p4d}/P4D/run1/P4D_report.json"
+
+  verify-p4-native:
+    name: Verify P4-NATIVE exact certification bundle
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Verify committed P4-NATIVE certification
+        run: python tools/kernel_gates/verify_p4_native_certification.py

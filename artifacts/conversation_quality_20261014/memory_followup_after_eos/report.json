@@ -1,0 +1,84 @@
+{
+  "started_utc": "2026-10-14T18:18:25.718544+00:00",
+  "mode": "single_realtime_stream",
+  "ws_url": "ws://127.0.0.1:8000/v1/realtime?duplex=1",
+  "session_id": "c7ef270656f3495f997a8ce80a1f2eef",
+  "input_wav": "/workspace/artifacts/conversation_quality_20261014/inputs/clean_initial.wav",
+  "followup_wav": "/workspace/artifacts/conversation_quality_20261014/inputs/clean_followup.wav",
+  "followup_timing": {
+    "mode": "after_first_response_done",
+    "configured_delay_ms": 1000,
+    "first_response_done_ns": null,
+    "first_followup_input_frame_index": null,
+    "first_followup_sent_at_ns": null,
+    "actual_delay_ms": null,
+    "last_followup_sent_at_ns": null,
+    "followup_frames_sent": 0
+  },
+  "requested_input_duration_s": 120.0,
+  "source_timing_basis": "prerecorded_wav_scheduled_at_80ms_intervals",
+  "requested_input_frames": 1500,
+  "tts_quality_diagnostics": false,
+  "diagnostic_seed_sha256": null,
+  "ack_capacity_frames": 6,
+  "input_frames_sent": 1500,
+  "input_frames_not_dispatched": 0,
+  "source_playback_complete": true,
+  "input_frames_acked": 1500,
+  "ack_ids_unique": true,
+  "missing_ack_ids": [],
+  "duplicate_acks": 0,
+  "out_of_order_acks": 0,
+  "capacity_overflow": false,
+  "pending_high_water_frames": 3,
+  "pending_after_close": 0,
+  "final_ack_drain_complete": true,
+  "final_ack_drain_timed_out": false,
+  "ack_credit_timeout_count": 0,
+  "ack_latency_ms": {
+    "p50": 50.68,
+    "p95": 81.73,
+    "max": 204.3
+  },
+  "ack_capacity_backpressure_ms": {
+    "wait_count": 0,
+    "p50": 0.0,
+    "p95": 0.0,
+    "max": 0.0
+  },
+  "server_listener_queue_ms": {
+    "p50": 48.83,
+    "p95": 79.3,
+    "max": 201.77
+  },
+  "server_listener_step_ms": {
+    "p50": 2.64,
+    "p95": 3.23,
+    "max": 28.54
+  },
+  "server_ack_queue_ms": {
+    "p50": 0.19,
+    "p95": 0.22,
+    "max": 0.88
+  },
+  "input_send_interval_ms": {
+    "p50": 80.97,
+    "p95": 81.99,
+    "max": 82.15,
+    "deadline_misses_gt_100ms": 0
+  },
+  "input_send_lag_ms": {
+    "p50": 704.37,
+    "p95": 1294.99,
+    "max": 1361.83,
+    "frames_over_80ms": 1415
+  },
+  "input_frames_during_response": 0,
+  "non_silent_input_frames_during_response": 0,
+  "input_frames_during_audio_generation": 0,
+  "non_silent_input_frames_during_audio_generation": 0,
+  "responses": [],
+  "response_completion_timed_out": false,
+  "errors": [],
+  "sender_error": null
+}

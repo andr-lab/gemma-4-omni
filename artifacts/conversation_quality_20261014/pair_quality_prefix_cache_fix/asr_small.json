@@ -1,0 +1,917 @@
+{
+  "model": "faster-whisper small",
+  "device": "cpu",
+  "compute_type": "int8",
+  "results": [
+    {
+      "file": "A_input.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/pair_quality_prefix_cache_fix/A_input.wav",
+      "language": "it",
+      "language_probability": 1,
+      "media": {
+        "sample_rate": 16000,
+        "channels": 1,
+        "frames": 2776320,
+        "duration_s": 173.52
+      },
+      "segments": [
+        {
+          "start_s": 0.0,
+          "end_s": 0.9,
+          "text": " Inizia pure.",
+          "words": [
+            {
+              "start_s": 0.0,
+              "end_s": 0.68,
+              "text": " Inizia",
+              "probability": 0.973201314608256
+            },
+            {
+              "start_s": 0.68,
+              "end_s": 0.9,
+              "text": " pure.",
+              "probability": 0.9663320779800415
+            }
+          ]
+        },
+        {
+          "start_s": 32.98,
+          "end_s": 38.9,
+          "text": " Ciao Elena, sarò felice di aiutarti a organizzare la tua visita a Torino con un budget di 120",
+          "words": [
+            {
+              "start_s": 32.98,
+              "end_s": 33.34,
+              "text": " Ciao",
+              "probability": 0.9546899795532227
+            },
+            {
+              "start_s": 33.34,
+              "end_s": 33.6,
+              "text": " Elena,",
+              "probability": 0.9508761167526245
+            },
+            {
+              "start_s": 34.08,
+              "end_s": 34.44,
+              "text": " sarò",
+              "probability": 0.9806105196475983
+            },
+            {
+              "start_s": 34.44,
+              "end_s": 34.82,
+              "text": " felice",
+              "probability": 0.9930791854858398
+            },
+            {
+              "start_s": 34.82,
+              "end_s": 34.94,
+              "text": " di",
+              "probability": 0.9976164102554321
+            },
+            {
+              "start_s": 34.94,
+              "end_s": 35.42,
+              "text": " aiutarti",
+              "probability": 0.9584277073542277
+            },
+            {
+              "start_s": 35.42,
+              "end_s": 35.52,
+              "text": " a",
+              "probability": 0.9816275238990784
+            },
+            {
+              "start_s": 35.52,
+              "end_s": 36.06,
+              "text": " organizzare",
+              "probability": 0.986702541510264
+            },
+            {
+              "start_s": 36.06,
+              "end_s": 36.2,
+              "text": " la",
+              "probability": 0.996249258518219
+            },
+            {
+              "start_s": 36.2,
+              "end_s": 36.34,
+              "text": " tua",
+              "probability": 0.98587566614151
+            },
+            {
+              "start_s": 36.34,
+              "end_s": 36.78,
+              "text": " visita",
+              "probability": 0.9876927733421326
+            },
+            {
+              "start_s": 36.78,
+              "end_s": 36.86,
+              "text": " a",
+              "probability": 0.9929565191268921
+            },
+            {
+              "start_s": 36.86,
+              "end_s": 37.22,
+              "text": " Torino",
+              "probability": 0.9671548008918762
+            },
+            {
+              "start_s": 37.22,
+              "end_s": 37.68,
+              "text": " con",
+              "probability": 0.7488048672676086
+            },
+            {
+              "start_s": 37.68,
+              "end_s": 37.84,
+              "text": " un",
+              "probability": 0.9987035989761353
+            },
+            {
+              "start_s": 37.84,
+              "end_s": 38.08,
+              "text": " budget",
+              "probability": 0.9699511528015137
+            },
+            {
+              "start_s": 38.08,
+              "end_s": 38.38,
+              "text": " di",
+              "probability": 0.9986404776573181
+            },
+            {
+              "start_s": 38.38,
+              "end_s": 38.9,
+              "text": " 120",
+              "probability": 0.9908247590065002
+            }
+          ]
+        },
+        {
+          "start_s": 38.9,
+          "end_s": 39.38,
+          "text": " euro.",
+          "words": [
+            {
+              "start_s": 38.9,
+              "end_s": 39.38,
+              "text": " euro.",
+              "probability": 0.6991627812385559
+            }
+          ]
+        },
+        {
+          "start_s": 40.04,
+          "end_s": 43.7,
+          "text": " Fammi sapere quali sono i tuoi interessi per suggerirti le migliori attività.",
+          "words": [
+            {
+              "start_s": 40.04,
+              "end_s": 40.48,
+              "text": " Fammi",
+              "probability": 0.8814259171485901
+            },
+            {
+              "start_s": 40.48,
+              "end_s": 40.78,
+              "text": " sapere",
+              "probability": 0.9983905851840973
+            },
+            {
+              "start_s": 40.78,
+              "end_s": 41.18,
+              "text": " quali",
+              "probability": 0.9961093962192535
+            },
+            {
+              "start_s": 41.18,
+              "end_s": 41.34,
+              "text": " sono",
+              "probability": 0.9972946047782898
+            },
+            {
+              "start_s": 41.34,
+              "end_s": 41.44,
+              "text": " i",
+              "probability": 0.9918709993362427
+            },
+            {
+              "start_s": 41.44,
+              "end_s": 41.62,
+              "text": " tuoi",
+              "probability": 0.9595317244529724
+            },
+            {
+              "start_s": 41.62,
+              "end_s": 42.16,
+              "text": " interessi",
+              "probability": 0.9889492094516754
+            },
+            {
+              "start_s": 42.16,
+              "end_s": 42.28,
+              "text": " per",
+              "probability": 0.9972313046455383
+            },
+            {
+              "start_s": 42.28,
+              "end_s": 42.86,
+              "text": " suggerirti",
+              "probability": 0.9825097322463989
+            },
+            {
+              "start_s": 42.86,
+              "end_s": 42.94,
+              "text": " le",
+              "probability": 0.9973589777946472
+            },
+            {
+              "start_s": 42.94,
+              "end_s": 43.3,
+              "text": " migliori",
+              "probability": 0.9990983605384827
+            },
+            {
+              "start_s": 43.3,
+              "end_s": 43.7,
+              "text": " attività.",
+              "probability": 0.997765064239502
+            }
+          ]
+        }
+      ],
+      "text": "Inizia pure. Ciao Elena, sarò felice di aiutarti a organizzare la tua visita a Torino con un budget di 120 euro. Fammi sapere quali sono i tuoi interessi per suggerirti le migliori attività."
+    },
+    {
+      "file": "B_input.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/pair_quality_prefix_cache_fix/B_input.wav",
+      "language": "it",
+      "language_probability": 1,
+      "media": {
+        "sample_rate": 16000,
+        "channels": 1,
+        "frames": 2775040,
+        "duration_s": 173.44
+      },
+      "segments": [
+        {
+          "start_s": 5.1,
+          "end_s": 11.72,
+          "text": " Ciao, mi chiamo Elena, il mio codice è 7SUNTER 3-1, sarai felice di aiutarti a organizzare",
+          "words": [
+            {
+              "start_s": 5.1,
+              "end_s": 5.74,
+              "text": " Ciao,",
+              "probability": 0.894167959690094
+            },
+            {
+              "start_s": 6.3,
+              "end_s": 6.5,
+              "text": " mi",
+              "probability": 0.9918009638786316
+            },
+            {
+              "start_s": 6.5,
+              "end_s": 6.74,
+              "text": " chiamo",
+              "probability": 0.9914728105068207
+            },
+            {
+              "start_s": 6.74,
+              "end_s": 7.04,
+              "text": " Elena,",
+              "probability": 0.9196079969406128
+            },
+            {
+              "start_s": 7.56,
+              "end_s": 7.68,
+              "text": " il",
+              "probability": 0.985610842704773
+            },
+            {
+              "start_s": 7.68,
+              "end_s": 7.8,
+              "text": " mio",
+              "probability": 0.9990667700767517
+            },
+            {
+              "start_s": 7.8,
+              "end_s": 8.22,
+              "text": " codice",
+              "probability": 0.9939680993556976
+            },
+            {
+              "start_s": 8.22,
+              "end_s": 8.38,
+              "text": " è",
+              "probability": 0.4476538598537445
+            },
+            {
+              "start_s": 8.38,
+              "end_s": 8.98,
+              "text": " 7SUNTER",
+              "probability": 0.367566354572773
+            },
+            {
+              "start_s": 8.98,
+              "end_s": 9.16,
+              "text": " 3",
+              "probability": 0.16747702658176422
+            },
+            {
+              "start_s": 9.16,
+              "end_s": 9.44,
+              "text": "-1,",
+              "probability": 0.7912895083427429
+            },
+            {
+              "start_s": 9.88,
+              "end_s": 10.22,
+              "text": " sarai",
+              "probability": 0.8762193024158478
+            },
+            {
+              "start_s": 10.22,
+              "end_s": 10.58,
+              "text": " felice",
+              "probability": 0.9949599504470825
+            },
+            {
+              "start_s": 10.58,
+              "end_s": 10.68,
+              "text": " di",
+              "probability": 0.9978024363517761
+            },
+            {
+              "start_s": 10.68,
+              "end_s": 11.12,
+              "text": " aiutarti",
+              "probability": 0.986751933892568
+            },
+            {
+              "start_s": 11.12,
+              "end_s": 11.2,
+              "text": " a",
+              "probability": 0.9803682565689087
+            },
+            {
+              "start_s": 11.2,
+              "end_s": 11.72,
+              "text": " organizzare",
+              "probability": 0.9876396854718527
+            }
+          ]
+        },
+        {
+          "start_s": 11.72,
+          "end_s": 16.64,
+          "text": " una visita a Torino. Avresti qualche proposta per un weekend lì con un budget di 120 euro?",
+          "words": [
+            {
+              "start_s": 11.72,
+              "end_s": 11.84,
+              "text": " una",
+              "probability": 0.9987082481384277
+            },
+            {
+              "start_s": 11.84,
+              "end_s": 12.22,
+              "text": " visita",
+              "probability": 0.9903104901313782
+            },
+            {
+              "start_s": 12.22,
+              "end_s": 12.32,
+              "text": " a",
+              "probability": 0.9942678213119507
+            },
+            {
+              "start_s": 12.32,
+              "end_s": 12.66,
+              "text": " Torino.",
+              "probability": 0.9672695398330688
+            },
+            {
+              "start_s": 13.24,
+              "end_s": 13.64,
+              "text": " Avresti",
+              "probability": 0.9614344437917074
+            },
+            {
+              "start_s": 13.64,
+              "end_s": 13.78,
+              "text": " qualche",
+              "probability": 0.9606768488883972
+            },
+            {
+              "start_s": 13.78,
+              "end_s": 14.3,
+              "text": " proposta",
+              "probability": 0.9974195063114166
+            },
+            {
+              "start_s": 14.3,
+              "end_s": 14.46,
+              "text": " per",
+              "probability": 0.9968717694282532
+            },
+            {
+              "start_s": 14.46,
+              "end_s": 14.58,
+              "text": " un",
+              "probability": 0.996148943901062
+            },
+            {
+              "start_s": 14.58,
+              "end_s": 14.78,
+              "text": " weekend",
+              "probability": 0.9732502102851868
+            },
+            {
+              "start_s": 14.78,
+              "end_s": 15.16,
+              "text": " lì",
+              "probability": 0.890269011259079
+            },
+            {
+              "start_s": 15.16,
+              "end_s": 15.28,
+              "text": " con",
+              "probability": 0.9927641749382019
+            },
+            {
+              "start_s": 15.28,
+              "end_s": 15.36,
+              "text": " un",
+              "probability": 0.9989340901374817
+            },
+            {
+              "start_s": 15.36,
+              "end_s": 15.6,
+              "text": " budget",
+              "probability": 0.9587833285331726
+            },
+            {
+              "start_s": 15.6,
+              "end_s": 15.88,
+              "text": " di",
+              "probability": 0.996812641620636
+            },
+            {
+              "start_s": 15.88,
+              "end_s": 16.3,
+              "text": " 120",
+              "probability": 0.9720304012298584
+            },
+            {
+              "start_s": 16.3,
+              "end_s": 16.64,
+              "text": " euro?",
+              "probability": 0.6686390042304993
+            }
+          ]
+        }
+      ],
+      "text": "Ciao, mi chiamo Elena, il mio codice è 7SUNTER 3-1, sarai felice di aiutarti a organizzare una visita a Torino. Avresti qualche proposta per un weekend lì con un budget di 120 euro?"
+    },
+    {
+      "file": "response_A_resp_14dc33e2512d.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/pair_quality_prefix_cache_fix/response_A_resp_14dc33e2512d.wav",
+      "language": "it",
+      "language_probability": 1,
+      "media": {
+        "sample_rate": 24000,
+        "channels": 1,
+        "frames": 280320,
+        "duration_s": 11.68
+      },
+      "segments": [
+        {
+          "start_s": 0.0,
+          "end_s": 6.36,
+          "text": " Ciao, mi chiamo Elena, il mio codice è 7CenterTrain1, sarai felice di aiutarti a organizzare",
+          "words": [
+            {
+              "start_s": 0.0,
+              "end_s": 0.38,
+              "text": " Ciao,",
+              "probability": 0.8982096314430237
+            },
+            {
+              "start_s": 0.92,
+              "end_s": 1.14,
+              "text": " mi",
+              "probability": 0.9926920533180237
+            },
+            {
+              "start_s": 1.14,
+              "end_s": 1.4,
+              "text": " chiamo",
+              "probability": 0.9892928898334503
+            },
+            {
+              "start_s": 1.4,
+              "end_s": 1.68,
+              "text": " Elena,",
+              "probability": 0.9480077624320984
+            },
+            {
+              "start_s": 2.18,
+              "end_s": 2.32,
+              "text": " il",
+              "probability": 0.9878224730491638
+            },
+            {
+              "start_s": 2.32,
+              "end_s": 2.44,
+              "text": " mio",
+              "probability": 0.9991833567619324
+            },
+            {
+              "start_s": 2.44,
+              "end_s": 2.88,
+              "text": " codice",
+              "probability": 0.994517594575882
+            },
+            {
+              "start_s": 2.88,
+              "end_s": 3.02,
+              "text": " è",
+              "probability": 0.40470629930496216
+            },
+            {
+              "start_s": 3.02,
+              "end_s": 4.1,
+              "text": " 7CenterTrain1,",
+              "probability": 0.4258317972222964
+            },
+            {
+              "start_s": 4.54,
+              "end_s": 4.88,
+              "text": " sarai",
+              "probability": 0.885173887014389
+            },
+            {
+              "start_s": 4.88,
+              "end_s": 5.22,
+              "text": " felice",
+              "probability": 0.9961930811405182
+            },
+            {
+              "start_s": 5.22,
+              "end_s": 5.34,
+              "text": " di",
+              "probability": 0.9978188276290894
+            },
+            {
+              "start_s": 5.34,
+              "end_s": 5.76,
+              "text": " aiutarti",
+              "probability": 0.9920960466066996
+            },
+            {
+              "start_s": 5.76,
+              "end_s": 5.84,
+              "text": " a",
+              "probability": 0.9760012626647949
+            },
+            {
+              "start_s": 5.84,
+              "end_s": 6.36,
+              "text": " organizzare",
+              "probability": 0.9797000885009766
+            }
+          ]
+        },
+        {
+          "start_s": 6.36,
+          "end_s": 11.26,
+          "text": " una visita a Torino. Avresti qualche proposta per un weekend lì con un budget di 120 euro?",
+          "words": [
+            {
+              "start_s": 6.36,
+              "end_s": 6.48,
+              "text": " una",
+              "probability": 0.9984839558601379
+            },
+            {
+              "start_s": 6.48,
+              "end_s": 6.86,
+              "text": " visita",
+              "probability": 0.9899395108222961
+            },
+            {
+              "start_s": 6.86,
+              "end_s": 6.94,
+              "text": " a",
+              "probability": 0.9950718283653259
+            },
+            {
+              "start_s": 6.94,
+              "end_s": 7.32,
+              "text": " Torino.",
+              "probability": 0.9687024652957916
+            },
+            {
+              "start_s": 7.78,
+              "end_s": 8.28,
+              "text": " Avresti",
+              "probability": 0.9689430793126425
+            },
+            {
+              "start_s": 8.28,
+              "end_s": 8.42,
+              "text": " qualche",
+              "probability": 0.9821678400039673
+            },
+            {
+              "start_s": 8.42,
+              "end_s": 8.96,
+              "text": " proposta",
+              "probability": 0.9974453449249268
+            },
+            {
+              "start_s": 8.96,
+              "end_s": 9.12,
+              "text": " per",
+              "probability": 0.9962009787559509
+            },
+            {
+              "start_s": 9.12,
+              "end_s": 9.22,
+              "text": " un",
+              "probability": 0.9961064457893372
+            },
+            {
+              "start_s": 9.22,
+              "end_s": 9.44,
+              "text": " weekend",
+              "probability": 0.9741841554641724
+            },
+            {
+              "start_s": 9.44,
+              "end_s": 9.82,
+              "text": " lì",
+              "probability": 0.8924955129623413
+            },
+            {
+              "start_s": 9.82,
+              "end_s": 9.9,
+              "text": " con",
+              "probability": 0.993624210357666
+            },
+            {
+              "start_s": 9.9,
+              "end_s": 10.0,
+              "text": " un",
+              "probability": 0.9984655380249023
+            },
+            {
+              "start_s": 10.0,
+              "end_s": 10.26,
+              "text": " budget",
+              "probability": 0.9542904496192932
+            },
+            {
+              "start_s": 10.26,
+              "end_s": 10.52,
+              "text": " di",
+              "probability": 0.9956414699554443
+            },
+            {
+              "start_s": 10.52,
+              "end_s": 10.92,
+              "text": " 120",
+              "probability": 0.9642997980117798
+            },
+            {
+              "start_s": 10.92,
+              "end_s": 11.26,
+              "text": " euro?",
+              "probability": 0.6234511137008667
+            }
+          ]
+        }
+      ],
+      "text": "Ciao, mi chiamo Elena, il mio codice è 7CenterTrain1, sarai felice di aiutarti a organizzare una visita a Torino. Avresti qualche proposta per un weekend lì con un budget di 120 euro?"
+    },
+    {
+      "file": "response_B_resp_cbc657bf477b.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/pair_quality_prefix_cache_fix/response_B_resp_cbc657bf477b.wav",
+      "language": "it",
+      "language_probability": 1,
+      "media": {
+        "sample_rate": 24000,
+        "channels": 1,
+        "frames": 266880,
+        "duration_s": 11.12
+      },
+      "segments": [
+        {
+          "start_s": 0.0,
+          "end_s": 6.44,
+          "text": " Ciao Elena, sarò felice di aiutarti a organizzare la tua visita a Torino con un budget di 120 euro.",
+          "words": [
+            {
+              "start_s": 0.0,
+              "end_s": 0.38,
+              "text": " Ciao",
+              "probability": 0.942508339881897
+            },
+            {
+              "start_s": 0.38,
+              "end_s": 0.62,
+              "text": " Elena,",
+              "probability": 0.9628316164016724
+            },
+            {
+              "start_s": 1.16,
+              "end_s": 1.48,
+              "text": " sarò",
+              "probability": 0.9793060123920441
+            },
+            {
+              "start_s": 1.48,
+              "end_s": 1.86,
+              "text": " felice",
+              "probability": 0.9915203750133514
+            },
+            {
+              "start_s": 1.86,
+              "end_s": 1.98,
+              "text": " di",
+              "probability": 0.9977847933769226
+            },
+            {
+              "start_s": 1.98,
+              "end_s": 2.48,
+              "text": " aiutarti",
+              "probability": 0.9542272686958313
+            },
+            {
+              "start_s": 2.48,
+              "end_s": 2.56,
+              "text": " a",
+              "probability": 0.9784737229347229
+            },
+            {
+              "start_s": 2.56,
+              "end_s": 3.12,
+              "text": " organizzare",
+              "probability": 0.9822075168291727
+            },
+            {
+              "start_s": 3.12,
+              "end_s": 3.24,
+              "text": " la",
+              "probability": 0.9958809614181519
+            },
+            {
+              "start_s": 3.24,
+              "end_s": 3.36,
+              "text": " tua",
+              "probability": 0.9830650091171265
+            },
+            {
+              "start_s": 3.36,
+              "end_s": 3.8,
+              "text": " visita",
+              "probability": 0.9838532209396362
+            },
+            {
+              "start_s": 3.8,
+              "end_s": 3.9,
+              "text": " a",
+              "probability": 0.991620659828186
+            },
+            {
+              "start_s": 3.9,
+              "end_s": 4.26,
+              "text": " Torino",
+              "probability": 0.970345139503479
+            },
+            {
+              "start_s": 4.26,
+              "end_s": 4.72,
+              "text": " con",
+              "probability": 0.7487277984619141
+            },
+            {
+              "start_s": 4.72,
+              "end_s": 4.86,
+              "text": " un",
+              "probability": 0.9986487030982971
+            },
+            {
+              "start_s": 4.86,
+              "end_s": 5.14,
+              "text": " budget",
+              "probability": 0.9743932485580444
+            },
+            {
+              "start_s": 5.14,
+              "end_s": 5.42,
+              "text": " di",
+              "probability": 0.9987071752548218
+            },
+            {
+              "start_s": 5.42,
+              "end_s": 5.94,
+              "text": " 120",
+              "probability": 0.9897884130477905
+            },
+            {
+              "start_s": 5.94,
+              "end_s": 6.44,
+              "text": " euro.",
+              "probability": 0.7191894054412842
+            }
+          ]
+        },
+        {
+          "start_s": 7.06,
+          "end_s": 10.76,
+          "text": " Fammi sapere quali sono i tuoi interessi per suggerirti le migliori attività.",
+          "words": [
+            {
+              "start_s": 7.06,
+              "end_s": 7.52,
+              "text": " Fammi",
+              "probability": 0.8972298800945282
+            },
+            {
+              "start_s": 7.52,
+              "end_s": 7.84,
+              "text": " sapere",
+              "probability": 0.9986052513122559
+            },
+            {
+              "start_s": 7.84,
+              "end_s": 8.2,
+              "text": " quali",
+              "probability": 0.9968195557594299
+            },
+            {
+              "start_s": 8.2,
+              "end_s": 8.38,
+              "text": " sono",
+              "probability": 0.9969774484634399
+            },
+            {
+              "start_s": 8.38,
+              "end_s": 8.48,
+              "text": " i",
+              "probability": 0.9936730861663818
+            },
+            {
+              "start_s": 8.48,
+              "end_s": 8.66,
+              "text": " tuoi",
+              "probability": 0.969946414232254
+            },
+            {
+              "start_s": 8.66,
+              "end_s": 9.2,
+              "text": " interessi",
+              "probability": 0.9939603507518768
+            },
+            {
+              "start_s": 9.2,
+              "end_s": 9.32,
+              "text": " per",
+              "probability": 0.9963834285736084
+            },
+            {
+              "start_s": 9.32,
+              "end_s": 9.9,
+              "text": " suggerirti",
+              "probability": 0.9773159921169281
+            },
+            {
+              "start_s": 9.9,
+              "end_s": 9.98,
+              "text": " le",
+              "probability": 0.9983293414115906
+            },
+            {
+              "start_s": 9.98,
+              "end_s": 10.34,
+              "text": " migliori",
+              "probability": 0.9990117400884628
+            },
+            {
+              "start_s": 10.34,
+              "end_s": 10.76,
+              "text": " attività.",
+              "probability": 0.997809112071991
+            }
+          ]
+        }
+      ],
+      "text": "Ciao Elena, sarò felice di aiutarti a organizzare la tua visita a Torino con un budget di 120 euro. Fammi sapere quali sono i tuoi interessi per suggerirti le migliori attività."
+    }
+  ]
+}

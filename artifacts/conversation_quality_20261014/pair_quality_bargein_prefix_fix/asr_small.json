@@ -1,0 +1,1834 @@
+{
+  "model": "faster-whisper small",
+  "device": "cpu",
+  "compute_type": "int8",
+  "results": [
+    {
+      "file": "A_input.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/pair_quality_bargein_prefix_fix/A_input.wav",
+      "language": "it",
+      "language_probability": 1,
+      "media": {
+        "sample_rate": 16000,
+        "channels": 1,
+        "frames": 938240,
+        "duration_s": 58.64
+      },
+      "segments": [
+        {
+          "start_s": 0.0,
+          "end_s": 27.1,
+          "text": " inizia pure ciao come posso aiutar ti oggi potresti considerare una gita in",
+          "words": [
+            {
+              "start_s": 0.0,
+              "end_s": 0.68,
+              "text": " inizia",
+              "probability": 0.6988223195075989
+            },
+            {
+              "start_s": 0.68,
+              "end_s": 0.94,
+              "text": " pure",
+              "probability": 0.9709978699684143
+            },
+            {
+              "start_s": 0.94,
+              "end_s": 1.82,
+              "text": " ciao",
+              "probability": 0.6504240036010742
+            },
+            {
+              "start_s": 8.92,
+              "end_s": 10.2,
+              "text": " come",
+              "probability": 0.8797969818115234
+            },
+            {
+              "start_s": 10.2,
+              "end_s": 10.58,
+              "text": " posso",
+              "probability": 0.9432192444801331
+            },
+            {
+              "start_s": 10.58,
+              "end_s": 11.18,
+              "text": " aiutar",
+              "probability": 0.9372038841247559
+            },
+            {
+              "start_s": 11.18,
+              "end_s": 11.56,
+              "text": " ti",
+              "probability": 0.18086017668247223
+            },
+            {
+              "start_s": 11.56,
+              "end_s": 11.96,
+              "text": " oggi",
+              "probability": 0.9023797512054443
+            },
+            {
+              "start_s": 24.6,
+              "end_s": 25.94,
+              "text": " potresti",
+              "probability": 0.8486254811286926
+            },
+            {
+              "start_s": 25.94,
+              "end_s": 26.5,
+              "text": " considerare",
+              "probability": 0.9978412985801697
+            },
+            {
+              "start_s": 26.5,
+              "end_s": 26.66,
+              "text": " una",
+              "probability": 0.9806143045425415
+            },
+            {
+              "start_s": 26.66,
+              "end_s": 26.98,
+              "text": " gita",
+              "probability": 0.8333291113376617
+            },
+            {
+              "start_s": 26.98,
+              "end_s": 27.1,
+              "text": " in",
+              "probability": 0.9914223551750183
+            }
+          ]
+        },
+        {
+          "start_s": 27.1,
+          "end_s": 36.14,
+          "text": " montagna o una città d'arte vicina per un weekend economico mi dispiace non ho",
+          "words": [
+            {
+              "start_s": 27.1,
+              "end_s": 27.66,
+              "text": " montagna",
+              "probability": 0.9932763874530792
+            },
+            {
+              "start_s": 27.66,
+              "end_s": 27.88,
+              "text": " o",
+              "probability": 0.9798810482025146
+            },
+            {
+              "start_s": 27.88,
+              "end_s": 28.02,
+              "text": " una",
+              "probability": 0.9903178215026855
+            },
+            {
+              "start_s": 28.02,
+              "end_s": 28.34,
+              "text": " città",
+              "probability": 0.9643354614575704
+            },
+            {
+              "start_s": 28.34,
+              "end_s": 28.5,
+              "text": " d",
+              "probability": 0.8599133491516113
+            },
+            {
+              "start_s": 28.5,
+              "end_s": 28.88,
+              "text": "'arte",
+              "probability": 0.9710568487644196
+            },
+            {
+              "start_s": 28.88,
+              "end_s": 29.44,
+              "text": " vicina",
+              "probability": 0.9918085634708405
+            },
+            {
+              "start_s": 29.44,
+              "end_s": 29.64,
+              "text": " per",
+              "probability": 0.9971442818641663
+            },
+            {
+              "start_s": 29.64,
+              "end_s": 29.78,
+              "text": " un",
+              "probability": 0.9971323013305664
+            },
+            {
+              "start_s": 29.78,
+              "end_s": 30.0,
+              "text": " weekend",
+              "probability": 0.9731833338737488
+            },
+            {
+              "start_s": 30.0,
+              "end_s": 30.9,
+              "text": " economico",
+              "probability": 0.9493076503276825
+            },
+            {
+              "start_s": 33.78,
+              "end_s": 34.48,
+              "text": " mi",
+              "probability": 0.937720775604248
+            },
+            {
+              "start_s": 34.48,
+              "end_s": 35.3,
+              "text": " dispiace",
+              "probability": 0.9825435678164164
+            },
+            {
+              "start_s": 35.3,
+              "end_s": 36.0,
+              "text": " non",
+              "probability": 0.7161866426467896
+            },
+            {
+              "start_s": 36.0,
+              "end_s": 36.14,
+              "text": " ho",
+              "probability": 0.9928218722343445
+            }
+          ]
+        },
+        {
+          "start_s": 36.14,
+          "end_s": 46.49,
+          "text": " capito cosa intendi potresti riformulare la tua richiesta per un budget di",
+          "words": [
+            {
+              "start_s": 36.14,
+              "end_s": 36.46,
+              "text": " capito",
+              "probability": 0.9971115589141846
+            },
+            {
+              "start_s": 36.46,
+              "end_s": 36.7,
+              "text": " cosa",
+              "probability": 0.9935095906257629
+            },
+            {
+              "start_s": 36.7,
+              "end_s": 37.22,
+              "text": " intendi",
+              "probability": 0.9170477986335754
+            },
+            {
+              "start_s": 37.22,
+              "end_s": 38.4,
+              "text": " potresti",
+              "probability": 0.950136144955953
+            },
+            {
+              "start_s": 38.4,
+              "end_s": 39.16,
+              "text": " riformulare",
+              "probability": 0.9368493258953094
+            },
+            {
+              "start_s": 39.16,
+              "end_s": 39.36,
+              "text": " la",
+              "probability": 0.9958879351615906
+            },
+            {
+              "start_s": 39.36,
+              "end_s": 39.5,
+              "text": " tua",
+              "probability": 0.9969362020492554
+            },
+            {
+              "start_s": 39.5,
+              "end_s": 40.06,
+              "text": " richiesta",
+              "probability": 0.9827711582183838
+            },
+            {
+              "start_s": 40.06,
+              "end_s": 41.04,
+              "text": " per",
+              "probability": 0.43939730525016785
+            },
+            {
+              "start_s": 45.75,
+              "end_s": 45.93,
+              "text": " un",
+              "probability": 0.9987533092498779
+            },
+            {
+              "start_s": 45.93,
+              "end_s": 46.23,
+              "text": " budget",
+              "probability": 0.8761894702911377
+            },
+            {
+              "start_s": 46.23,
+              "end_s": 46.49,
+              "text": " di",
+              "probability": 0.5998088121414185
+            }
+          ]
+        },
+        {
+          "start_s": 46.49,
+          "end_s": 52.71,
+          "text": " 120 euro potresti cercare agriturismi o campaggi economici in montagna",
+          "words": [
+            {
+              "start_s": 46.49,
+              "end_s": 47.09,
+              "text": " 120",
+              "probability": 0.767079770565033
+            },
+            {
+              "start_s": 47.09,
+              "end_s": 47.75,
+              "text": " euro",
+              "probability": 0.9698054790496826
+            },
+            {
+              "start_s": 47.75,
+              "end_s": 48.89,
+              "text": " potresti",
+              "probability": 0.9867620468139648
+            },
+            {
+              "start_s": 48.89,
+              "end_s": 49.39,
+              "text": " cercare",
+              "probability": 0.9865226447582245
+            },
+            {
+              "start_s": 49.39,
+              "end_s": 50.47,
+              "text": " agriturismi",
+              "probability": 0.87953679561615
+            },
+            {
+              "start_s": 50.47,
+              "end_s": 50.61,
+              "text": " o",
+              "probability": 0.9279903769493103
+            },
+            {
+              "start_s": 50.61,
+              "end_s": 51.25,
+              "text": " campaggi",
+              "probability": 0.6614438990751902
+            },
+            {
+              "start_s": 51.25,
+              "end_s": 52.01,
+              "text": " economici",
+              "probability": 0.9474948942661285
+            },
+            {
+              "start_s": 52.01,
+              "end_s": 52.13,
+              "text": " in",
+              "probability": 0.985124409198761
+            },
+            {
+              "start_s": 52.13,
+              "end_s": 52.71,
+              "text": " montagna",
+              "probability": 0.989808976650238
+            }
+          ]
+        }
+      ],
+      "text": "inizia pure ciao come posso aiutar ti oggi potresti considerare una gita in montagna o una città d'arte vicina per un weekend economico mi dispiace non ho capito cosa intendi potresti riformulare la tua richiesta per un budget di 120 euro potresti cercare agriturismi o campaggi economici in montagna"
+    },
+    {
+      "file": "B_input.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/pair_quality_bargein_prefix_fix/B_input.wav",
+      "language": "it",
+      "language_probability": 1,
+      "media": {
+        "sample_rate": 16000,
+        "channels": 1,
+        "frames": 933120,
+        "duration_s": 58.32
+      },
+      "segments": [
+        {
+          "start_s": 5.3,
+          "end_s": 7.24,
+          "text": " Ciao, mi chiamo Elena.",
+          "words": [
+            {
+              "start_s": 5.3,
+              "end_s": 5.88,
+              "text": " Ciao,",
+              "probability": 0.7129256725311279
+            },
+            {
+              "start_s": 6.44,
+              "end_s": 6.64,
+              "text": " mi",
+              "probability": 0.9876790642738342
+            },
+            {
+              "start_s": 6.64,
+              "end_s": 6.88,
+              "text": " chiamo",
+              "probability": 0.9844276010990143
+            },
+            {
+              "start_s": 6.88,
+              "end_s": 7.24,
+              "text": " Elena.",
+              "probability": 0.9221315979957581
+            }
+          ]
+        },
+        {
+          "start_s": 8.48,
+          "end_s": 12.14,
+          "text": " Aspetta, il budget è 80 euro, non 120.",
+          "words": [
+            {
+              "start_s": 8.48,
+              "end_s": 9.16,
+              "text": " Aspetta,",
+              "probability": 0.9763471086819967
+            },
+            {
+              "start_s": 9.56,
+              "end_s": 9.74,
+              "text": " il",
+              "probability": 0.9880567789077759
+            },
+            {
+              "start_s": 9.74,
+              "end_s": 10.04,
+              "text": " budget",
+              "probability": 0.729525625705719
+            },
+            {
+              "start_s": 10.04,
+              "end_s": 10.34,
+              "text": " è",
+              "probability": 0.9929282069206238
+            },
+            {
+              "start_s": 10.34,
+              "end_s": 10.66,
+              "text": " 80",
+              "probability": 0.9358974695205688
+            },
+            {
+              "start_s": 10.66,
+              "end_s": 11.12,
+              "text": " euro,",
+              "probability": 0.7024044394493103
+            },
+            {
+              "start_s": 11.46,
+              "end_s": 11.56,
+              "text": " non",
+              "probability": 0.9880781769752502
+            },
+            {
+              "start_s": 11.56,
+              "end_s": 12.14,
+              "text": " 120.",
+              "probability": 0.9948881268501282
+            }
+          ]
+        },
+        {
+          "start_s": 12.74,
+          "end_s": 14.54,
+          "text": " Il mio codice è 7.31.",
+          "words": [
+            {
+              "start_s": 12.74,
+              "end_s": 12.86,
+              "text": " Il",
+              "probability": 0.9498494863510132
+            },
+            {
+              "start_s": 12.86,
+              "end_s": 13.0,
+              "text": " mio",
+              "probability": 0.999108612537384
+            },
+            {
+              "start_s": 13.0,
+              "end_s": 13.46,
+              "text": " codice",
+              "probability": 0.9932604432106018
+            },
+            {
+              "start_s": 13.46,
+              "end_s": 13.72,
+              "text": " è",
+              "probability": 0.9672771096229553
+            },
+            {
+              "start_s": 13.72,
+              "end_s": 14.0,
+              "text": " 7",
+              "probability": 0.5399437546730042
+            },
+            {
+              "start_s": 14.0,
+              "end_s": 14.54,
+              "text": ".31.",
+              "probability": 0.6843342930078506
+            }
+          ]
+        },
+        {
+          "start_s": 15.46,
+          "end_s": 18.4,
+          "text": " Sarei felice di aiutarti a organizzare una visita a Torino.",
+          "words": [
+            {
+              "start_s": 15.46,
+              "end_s": 15.88,
+              "text": " Sarei",
+              "probability": 0.8170194029808044
+            },
+            {
+              "start_s": 15.88,
+              "end_s": 16.2,
+              "text": " felice",
+              "probability": 0.9932264387607574
+            },
+            {
+              "start_s": 16.2,
+              "end_s": 16.34,
+              "text": " di",
+              "probability": 0.997358500957489
+            },
+            {
+              "start_s": 16.34,
+              "end_s": 16.82,
+              "text": " aiutarti",
+              "probability": 0.9871854384740194
+            },
+            {
+              "start_s": 16.82,
+              "end_s": 16.94,
+              "text": " a",
+              "probability": 0.9772862792015076
+            },
+            {
+              "start_s": 16.94,
+              "end_s": 17.46,
+              "text": " organizzare",
+              "probability": 0.9798994859059652
+            },
+            {
+              "start_s": 17.46,
+              "end_s": 17.64,
+              "text": " una",
+              "probability": 0.997994065284729
+            },
+            {
+              "start_s": 17.64,
+              "end_s": 18.0,
+              "text": " visita",
+              "probability": 0.9905536472797394
+            },
+            {
+              "start_s": 18.0,
+              "end_s": 18.18,
+              "text": " a",
+              "probability": 0.9907981157302856
+            },
+            {
+              "start_s": 18.18,
+              "end_s": 18.4,
+              "text": " Torino.",
+              "probability": 0.9669379591941833
+            }
+          ]
+        },
+        {
+          "start_s": 19.4,
+          "end_s": 23.16,
+          "text": " Avresti qualche proposta per un weekend lì con un budget di 120 euro?",
+          "words": [
+            {
+              "start_s": 19.4,
+              "end_s": 19.94,
+              "text": " Avresti",
+              "probability": 0.9546093543370565
+            },
+            {
+              "start_s": 19.94,
+              "end_s": 20.12,
+              "text": " qualche",
+              "probability": 0.9864605665206909
+            },
+            {
+              "start_s": 20.12,
+              "end_s": 20.64,
+              "text": " proposta",
+              "probability": 0.9971982538700104
+            },
+            {
+              "start_s": 20.64,
+              "end_s": 20.84,
+              "text": " per",
+              "probability": 0.997907280921936
+            },
+            {
+              "start_s": 20.84,
+              "end_s": 20.96,
+              "text": " un",
+              "probability": 0.9964401125907898
+            },
+            {
+              "start_s": 20.96,
+              "end_s": 21.18,
+              "text": " weekend",
+              "probability": 0.9823542833328247
+            },
+            {
+              "start_s": 21.18,
+              "end_s": 21.52,
+              "text": " lì",
+              "probability": 0.9457642138004303
+            },
+            {
+              "start_s": 21.52,
+              "end_s": 21.68,
+              "text": " con",
+              "probability": 0.9897874593734741
+            },
+            {
+              "start_s": 21.68,
+              "end_s": 21.8,
+              "text": " un",
+              "probability": 0.9985840320587158
+            },
+            {
+              "start_s": 21.8,
+              "end_s": 22.12,
+              "text": " budget",
+              "probability": 0.9948062300682068
+            },
+            {
+              "start_s": 22.12,
+              "end_s": 22.3,
+              "text": " di",
+              "probability": 0.9989566802978516
+            },
+            {
+              "start_s": 22.3,
+              "end_s": 22.7,
+              "text": " 120",
+              "probability": 0.9963189363479614
+            },
+            {
+              "start_s": 22.7,
+              "end_s": 23.16,
+              "text": " euro?",
+              "probability": 0.9648461937904358
+            }
+          ]
+        },
+        {
+          "start_s": 27.02,
+          "end_s": 39.82,
+          "text": " Ascolto, una gita in montagna o una città d'arte vicina.",
+          "words": [
+            {
+              "start_s": 27.02,
+              "end_s": 27.7,
+              "text": " Ascolto,",
+              "probability": 0.9755691091219584
+            },
+            {
+              "start_s": 36.82,
+              "end_s": 37.02,
+              "text": " una",
+              "probability": 0.9440584778785706
+            },
+            {
+              "start_s": 37.02,
+              "end_s": 37.36,
+              "text": " gita",
+              "probability": 0.8692770600318909
+            },
+            {
+              "start_s": 37.36,
+              "end_s": 37.52,
+              "text": " in",
+              "probability": 0.9971585273742676
+            },
+            {
+              "start_s": 37.52,
+              "end_s": 38.08,
+              "text": " montagna",
+              "probability": 0.9544780254364014
+            },
+            {
+              "start_s": 38.08,
+              "end_s": 38.36,
+              "text": " o",
+              "probability": 0.9662100076675415
+            },
+            {
+              "start_s": 38.36,
+              "end_s": 38.58,
+              "text": " una",
+              "probability": 0.9894114136695862
+            },
+            {
+              "start_s": 38.58,
+              "end_s": 38.88,
+              "text": " città",
+              "probability": 0.9919581810633341
+            },
+            {
+              "start_s": 38.88,
+              "end_s": 39.0,
+              "text": " d",
+              "probability": 0.9022923111915588
+            },
+            {
+              "start_s": 39.0,
+              "end_s": 39.2,
+              "text": "'arte",
+              "probability": 0.9956026077270508
+            },
+            {
+              "start_s": 39.2,
+              "end_s": 39.82,
+              "text": " vicina.",
+              "probability": 0.9920185506343842
+            }
+          ]
+        },
+        {
+          "start_s": 41.38,
+          "end_s": 42.84,
+          "text": " Mi piace l'idea.",
+          "words": [
+            {
+              "start_s": 41.38,
+              "end_s": 41.62,
+              "text": " Mi",
+              "probability": 0.986642599105835
+            },
+            {
+              "start_s": 41.62,
+              "end_s": 41.96,
+              "text": " piace",
+              "probability": 0.9753668904304504
+            },
+            {
+              "start_s": 41.96,
+              "end_s": 42.3,
+              "text": " l",
+              "probability": 0.9896731376647949
+            },
+            {
+              "start_s": 42.3,
+              "end_s": 42.84,
+              "text": "'idea.",
+              "probability": 0.9954432646433512
+            }
+          ]
+        },
+        {
+          "start_s": 42.84,
+          "end_s": 49.6,
+          "text": " Con un budget di 120 euro per un weekend da Torino,",
+          "words": [
+            {
+              "start_s": 42.84,
+              "end_s": 43.76,
+              "text": " Con",
+              "probability": 0.266539067029953
+            },
+            {
+              "start_s": 46.32,
+              "end_s": 46.48,
+              "text": " un",
+              "probability": 0.9947957396507263
+            },
+            {
+              "start_s": 46.48,
+              "end_s": 46.82,
+              "text": " budget",
+              "probability": 0.9761285781860352
+            },
+            {
+              "start_s": 46.82,
+              "end_s": 47.12,
+              "text": " di",
+              "probability": 0.9945785999298096
+            },
+            {
+              "start_s": 47.12,
+              "end_s": 47.42,
+              "text": " 120",
+              "probability": 0.029481546953320503
+            },
+            {
+              "start_s": 47.42,
+              "end_s": 48.18,
+              "text": " euro",
+              "probability": 0.8572312593460083
+            },
+            {
+              "start_s": 48.18,
+              "end_s": 48.4,
+              "text": " per",
+              "probability": 0.9948811531066895
+            },
+            {
+              "start_s": 48.4,
+              "end_s": 48.58,
+              "text": " un",
+              "probability": 0.9864773750305176
+            },
+            {
+              "start_s": 48.58,
+              "end_s": 48.78,
+              "text": " weekend",
+              "probability": 0.9864891767501831
+            },
+            {
+              "start_s": 48.78,
+              "end_s": 49.08,
+              "text": " da",
+              "probability": 0.5220555067062378
+            },
+            {
+              "start_s": 49.08,
+              "end_s": 49.6,
+              "text": " Torino,",
+              "probability": 0.9479288160800934
+            }
+          ]
+        },
+        {
+          "start_s": 50.02,
+          "end_s": 52.44,
+          "text": " potremmo cercare qualcosa di interessante.",
+          "words": [
+            {
+              "start_s": 50.02,
+              "end_s": 50.64,
+              "text": " potremmo",
+              "probability": 0.9598105102777481
+            },
+            {
+              "start_s": 50.64,
+              "end_s": 51.1,
+              "text": " cercare",
+              "probability": 0.9848826825618744
+            },
+            {
+              "start_s": 51.1,
+              "end_s": 51.38,
+              "text": " qualcosa",
+              "probability": 0.9860519170761108
+            },
+            {
+              "start_s": 51.38,
+              "end_s": 51.8,
+              "text": " di",
+              "probability": 0.8816375732421875
+            },
+            {
+              "start_s": 51.8,
+              "end_s": 52.44,
+              "text": " interessante.",
+              "probability": 0.9691828489303589
+            }
+          ]
+        },
+        {
+          "start_s": 53.78,
+          "end_s": 57.82,
+          "text": " Che ne dici di esplorare qualche borgo medievale nelle vicinanze?",
+          "words": [
+            {
+              "start_s": 53.78,
+              "end_s": 54.58,
+              "text": " Che",
+              "probability": 0.9286563992500305
+            },
+            {
+              "start_s": 54.58,
+              "end_s": 55.14,
+              "text": " ne",
+              "probability": 0.6862598061561584
+            },
+            {
+              "start_s": 55.14,
+              "end_s": 55.38,
+              "text": " dici",
+              "probability": 0.9796273410320282
+            },
+            {
+              "start_s": 55.38,
+              "end_s": 55.5,
+              "text": " di",
+              "probability": 0.992917537689209
+            },
+            {
+              "start_s": 55.5,
+              "end_s": 56.0,
+              "text": " esplorare",
+              "probability": 0.9916697293519974
+            },
+            {
+              "start_s": 56.0,
+              "end_s": 56.18,
+              "text": " qualche",
+              "probability": 0.9946501851081848
+            },
+            {
+              "start_s": 56.18,
+              "end_s": 56.58,
+              "text": " borgo",
+              "probability": 0.8826762735843658
+            },
+            {
+              "start_s": 56.58,
+              "end_s": 57.02,
+              "text": " medievale",
+              "probability": 0.9241606593132019
+            },
+            {
+              "start_s": 57.02,
+              "end_s": 57.18,
+              "text": " nelle",
+              "probability": 0.9968407154083252
+            },
+            {
+              "start_s": 57.18,
+              "end_s": 57.82,
+              "text": " vicinanze?",
+              "probability": 0.9577783495187759
+            }
+          ]
+        }
+      ],
+      "text": "Ciao, mi chiamo Elena. Aspetta, il budget è 80 euro, non 120. Il mio codice è 7.31. Sarei felice di aiutarti a organizzare una visita a Torino. Avresti qualche proposta per un weekend lì con un budget di 120 euro? Ascolto, una gita in montagna o una città d'arte vicina. Mi piace l'idea. Con un budget di 120 euro per un weekend da Torino, potremmo cercare qualcosa di interessante. Che ne dici di esplorare qualche borgo medievale nelle vicinanze?"
+    },
+    {
+      "file": "response_A_resp_07d2d1cdf00a.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/pair_quality_bargein_prefix_fix/response_A_resp_07d2d1cdf00a.wav",
+      "language": "it",
+      "language_probability": 1,
+      "media": {
+        "sample_rate": 24000,
+        "channels": 1,
+        "frames": 320640,
+        "duration_s": 13.36
+      },
+      "segments": [
+        {
+          "start_s": 0.0,
+          "end_s": 8.2,
+          "text": " Ciao, mi chiamo Elena, il mio codice è 731, sarai felice di aiutarti a organizzare una visita a Torino.",
+          "words": [
+            {
+              "start_s": 0.0,
+              "end_s": 0.44,
+              "text": " Ciao,",
+              "probability": 0.8539242148399353
+            },
+            {
+              "start_s": 1.02,
+              "end_s": 1.2,
+              "text": " mi",
+              "probability": 0.9912592768669128
+            },
+            {
+              "start_s": 1.2,
+              "end_s": 1.46,
+              "text": " chiamo",
+              "probability": 0.9905203878879547
+            },
+            {
+              "start_s": 1.46,
+              "end_s": 1.78,
+              "text": " Elena,",
+              "probability": 0.9016394019126892
+            },
+            {
+              "start_s": 2.4,
+              "end_s": 2.6,
+              "text": " il",
+              "probability": 0.9841942191123962
+            },
+            {
+              "start_s": 2.6,
+              "end_s": 2.72,
+              "text": " mio",
+              "probability": 0.9992409944534302
+            },
+            {
+              "start_s": 2.72,
+              "end_s": 3.24,
+              "text": " codice",
+              "probability": 0.9923645853996277
+            },
+            {
+              "start_s": 3.24,
+              "end_s": 3.44,
+              "text": " è",
+              "probability": 0.8765447735786438
+            },
+            {
+              "start_s": 3.44,
+              "end_s": 4.32,
+              "text": " 731,",
+              "probability": 0.646015465259552
+            },
+            {
+              "start_s": 5.18,
+              "end_s": 5.58,
+              "text": " sarai",
+              "probability": 0.7505490183830261
+            },
+            {
+              "start_s": 5.58,
+              "end_s": 5.98,
+              "text": " felice",
+              "probability": 0.9939789175987244
+            },
+            {
+              "start_s": 5.98,
+              "end_s": 6.1,
+              "text": " di",
+              "probability": 0.9983546137809753
+            },
+            {
+              "start_s": 6.1,
+              "end_s": 6.58,
+              "text": " aiutarti",
+              "probability": 0.9850589434305826
+            },
+            {
+              "start_s": 6.58,
+              "end_s": 6.7,
+              "text": " a",
+              "probability": 0.9891589283943176
+            },
+            {
+              "start_s": 6.7,
+              "end_s": 7.24,
+              "text": " organizzare",
+              "probability": 0.9839188853899637
+            },
+            {
+              "start_s": 7.24,
+              "end_s": 7.4,
+              "text": " una",
+              "probability": 0.9983807802200317
+            },
+            {
+              "start_s": 7.4,
+              "end_s": 7.76,
+              "text": " visita",
+              "probability": 0.9900032877922058
+            },
+            {
+              "start_s": 7.76,
+              "end_s": 7.92,
+              "text": " a",
+              "probability": 0.9938955903053284
+            },
+            {
+              "start_s": 7.92,
+              "end_s": 8.2,
+              "text": " Torino.",
+              "probability": 0.9534887969493866
+            }
+          ]
+        },
+        {
+          "start_s": 9.06,
+          "end_s": 12.9,
+          "text": " Avresti qualche proposta per un weekend lì con un budget di 120 euro?",
+          "words": [
+            {
+              "start_s": 9.06,
+              "end_s": 9.7,
+              "text": " Avresti",
+              "probability": 0.9506219426790873
+            },
+            {
+              "start_s": 9.7,
+              "end_s": 9.86,
+              "text": " qualche",
+              "probability": 0.9857712984085083
+            },
+            {
+              "start_s": 9.86,
+              "end_s": 10.42,
+              "text": " proposta",
+              "probability": 0.9975184202194214
+            },
+            {
+              "start_s": 10.42,
+              "end_s": 10.6,
+              "text": " per",
+              "probability": 0.9978283047676086
+            },
+            {
+              "start_s": 10.6,
+              "end_s": 10.72,
+              "text": " un",
+              "probability": 0.9962005019187927
+            },
+            {
+              "start_s": 10.72,
+              "end_s": 10.94,
+              "text": " weekend",
+              "probability": 0.9626753926277161
+            },
+            {
+              "start_s": 10.94,
+              "end_s": 11.32,
+              "text": " lì",
+              "probability": 0.906538337469101
+            },
+            {
+              "start_s": 11.32,
+              "end_s": 11.44,
+              "text": " con",
+              "probability": 0.9977990984916687
+            },
+            {
+              "start_s": 11.44,
+              "end_s": 11.56,
+              "text": " un",
+              "probability": 0.9990121126174927
+            },
+            {
+              "start_s": 11.56,
+              "end_s": 11.84,
+              "text": " budget",
+              "probability": 0.6709209084510803
+            },
+            {
+              "start_s": 11.84,
+              "end_s": 12.06,
+              "text": " di",
+              "probability": 0.9979515671730042
+            },
+            {
+              "start_s": 12.06,
+              "end_s": 12.52,
+              "text": " 120",
+              "probability": 0.9667088389396667
+            },
+            {
+              "start_s": 12.52,
+              "end_s": 12.9,
+              "text": " euro?",
+              "probability": 0.6842296719551086
+            }
+          ]
+        }
+      ],
+      "text": "Ciao, mi chiamo Elena, il mio codice è 731, sarai felice di aiutarti a organizzare una visita a Torino. Avresti qualche proposta per un weekend lì con un budget di 120 euro?"
+    },
+    {
+      "file": "response_A_resp_1346e5b58c8c.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/pair_quality_bargein_prefix_fix/response_A_resp_1346e5b58c8c.wav",
+      "language": "it",
+      "language_probability": 1,
+      "media": {
+        "sample_rate": 24000,
+        "channels": 1,
+        "frames": 36480,
+        "duration_s": 1.52
+      },
+      "segments": [
+        {
+          "start_s": 0.08,
+          "end_s": 1.14,
+          "text": " Ascolto",
+          "words": [
+            {
+              "start_s": 0.08,
+              "end_s": 1.14,
+              "text": " Ascolto",
+              "probability": 0.8781604965527853
+            }
+          ]
+        }
+      ],
+      "text": "Ascolto"
+    },
+    {
+      "file": "response_A_resp_51dbe944bb57.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/pair_quality_bargein_prefix_fix/response_A_resp_51dbe944bb57.wav",
+      "language": "it",
+      "language_probability": 1,
+      "media": {
+        "sample_rate": 24000,
+        "channels": 1,
+        "frames": 449280,
+        "duration_s": 18.72
+      },
+      "segments": [
+        {
+          "start_s": 0.0,
+          "end_s": 9.44,
+          "text": " Mmm, una gita in montagna o una città d'arte vicina. Mi piace l'idea. Con un budget di",
+          "words": [
+            {
+              "start_s": 0.0,
+              "end_s": 0.48,
+              "text": " Mmm,",
+              "probability": 0.14736393094062805
+            },
+            {
+              "start_s": 1.04,
+              "end_s": 1.26,
+              "text": " una",
+              "probability": 0.9351481199264526
+            },
+            {
+              "start_s": 1.26,
+              "end_s": 1.6,
+              "text": " gita",
+              "probability": 0.923068106174469
+            },
+            {
+              "start_s": 1.6,
+              "end_s": 1.74,
+              "text": " in",
+              "probability": 0.9968221187591553
+            },
+            {
+              "start_s": 1.74,
+              "end_s": 2.34,
+              "text": " montagna",
+              "probability": 0.9712074398994446
+            },
+            {
+              "start_s": 2.34,
+              "end_s": 2.58,
+              "text": " o",
+              "probability": 0.9490895867347717
+            },
+            {
+              "start_s": 2.58,
+              "end_s": 2.74,
+              "text": " una",
+              "probability": 0.9818763136863708
+            },
+            {
+              "start_s": 2.74,
+              "end_s": 3.06,
+              "text": " città",
+              "probability": 0.9857943058013916
+            },
+            {
+              "start_s": 3.06,
+              "end_s": 3.18,
+              "text": " d",
+              "probability": 0.9748635292053223
+            },
+            {
+              "start_s": 3.18,
+              "end_s": 3.36,
+              "text": "'arte",
+              "probability": 0.9960735440254211
+            },
+            {
+              "start_s": 3.36,
+              "end_s": 3.86,
+              "text": " vicina.",
+              "probability": 0.9944622814655304
+            },
+            {
+              "start_s": 4.46,
+              "end_s": 4.82,
+              "text": " Mi",
+              "probability": 0.9828181266784668
+            },
+            {
+              "start_s": 4.82,
+              "end_s": 5.06,
+              "text": " piace",
+              "probability": 0.9918835163116455
+            },
+            {
+              "start_s": 5.06,
+              "end_s": 5.24,
+              "text": " l",
+              "probability": 0.9988164901733398
+            },
+            {
+              "start_s": 5.24,
+              "end_s": 5.62,
+              "text": "'idea.",
+              "probability": 0.9978301723798116
+            },
+            {
+              "start_s": 8.54,
+              "end_s": 8.74,
+              "text": " Con",
+              "probability": 0.9935157299041748
+            },
+            {
+              "start_s": 8.74,
+              "end_s": 8.88,
+              "text": " un",
+              "probability": 0.9986918568611145
+            },
+            {
+              "start_s": 8.88,
+              "end_s": 9.16,
+              "text": " budget",
+              "probability": 0.9883649349212646
+            },
+            {
+              "start_s": 9.16,
+              "end_s": 9.44,
+              "text": " di",
+              "probability": 0.9969694018363953
+            }
+          ]
+        },
+        {
+          "start_s": 9.44,
+          "end_s": 13.8,
+          "text": " senden 20 euro per un weekend a Torino, potremmo cercare qualcosa di interessante.",
+          "words": [
+            {
+              "start_s": 9.44,
+              "end_s": 9.76,
+              "text": " senden",
+              "probability": 0.2992713302373886
+            },
+            {
+              "start_s": 9.76,
+              "end_s": 9.92,
+              "text": " 20",
+              "probability": 0.4847230911254883
+            },
+            {
+              "start_s": 9.92,
+              "end_s": 10.34,
+              "text": " euro",
+              "probability": 0.733689546585083
+            },
+            {
+              "start_s": 10.34,
+              "end_s": 10.54,
+              "text": " per",
+              "probability": 0.9949790835380554
+            },
+            {
+              "start_s": 10.54,
+              "end_s": 10.66,
+              "text": " un",
+              "probability": 0.9963253140449524
+            },
+            {
+              "start_s": 10.66,
+              "end_s": 10.9,
+              "text": " weekend",
+              "probability": 0.9809733033180237
+            },
+            {
+              "start_s": 10.9,
+              "end_s": 11.12,
+              "text": " a",
+              "probability": 0.6577025651931763
+            },
+            {
+              "start_s": 11.12,
+              "end_s": 11.52,
+              "text": " Torino,",
+              "probability": 0.9639550447463989
+            },
+            {
+              "start_s": 11.86,
+              "end_s": 12.38,
+              "text": " potremmo",
+              "probability": 0.993860200047493
+            },
+            {
+              "start_s": 12.38,
+              "end_s": 12.76,
+              "text": " cercare",
+              "probability": 0.9792835712432861
+            },
+            {
+              "start_s": 12.76,
+              "end_s": 13.1,
+              "text": " qualcosa",
+              "probability": 0.9922345876693726
+            },
+            {
+              "start_s": 13.1,
+              "end_s": 13.34,
+              "text": " di",
+              "probability": 0.9577897191047668
+            },
+            {
+              "start_s": 13.34,
+              "end_s": 13.8,
+              "text": " interessante.",
+              "probability": 0.9647108912467957
+            }
+          ]
+        },
+        {
+          "start_s": 15.02,
+          "end_s": 18.32,
+          "text": " Che ne dici di esplorare qualche borgo medievale nelle vicinanze?",
+          "words": [
+            {
+              "start_s": 15.02,
+              "end_s": 15.52,
+              "text": " Che",
+              "probability": 0.9831408262252808
+            },
+            {
+              "start_s": 15.52,
+              "end_s": 15.66,
+              "text": " ne",
+              "probability": 0.9980200529098511
+            },
+            {
+              "start_s": 15.66,
+              "end_s": 15.86,
+              "text": " dici",
+              "probability": 0.9908421635627747
+            },
+            {
+              "start_s": 15.86,
+              "end_s": 16.0,
+              "text": " di",
+              "probability": 0.9967808723449707
+            },
+            {
+              "start_s": 16.0,
+              "end_s": 16.48,
+              "text": " esplorare",
+              "probability": 0.9938250333070755
+            },
+            {
+              "start_s": 16.48,
+              "end_s": 16.66,
+              "text": " qualche",
+              "probability": 0.9974426031112671
+            },
+            {
+              "start_s": 16.66,
+              "end_s": 17.06,
+              "text": " borgo",
+              "probability": 0.8350172936916351
+            },
+            {
+              "start_s": 17.06,
+              "end_s": 17.5,
+              "text": " medievale",
+              "probability": 0.9148222804069519
+            },
+            {
+              "start_s": 17.5,
+              "end_s": 17.66,
+              "text": " nelle",
+              "probability": 0.9977896213531494
+            },
+            {
+              "start_s": 17.66,
+              "end_s": 18.32,
+              "text": " vicinanze?",
+              "probability": 0.9718169420957565
+            }
+          ]
+        }
+      ],
+      "text": "Mmm, una gita in montagna o una città d'arte vicina. Mi piace l'idea. Con un budget di senden 20 euro per un weekend a Torino, potremmo cercare qualcosa di interessante. Che ne dici di esplorare qualche borgo medievale nelle vicinanze?"
+    },
+    {
+      "file": "response_B_resp_25455d63d0d6.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/pair_quality_bargein_prefix_fix/response_B_resp_25455d63d0d6.wav",
+      "language": "it",
+      "language_probability": 1,
+      "media": {
+        "sample_rate": 24000,
+        "channels": 1,
+        "frames": 142080,
+        "duration_s": 5.92
+      },
+      "segments": [
+        {
+          "start_s": 0.11,
+          "end_s": 5.37,
+          "text": " Potresti considerare una gita in montagna o una città d'arte vicina per un weekend economico.",
+          "words": [
+            {
+              "start_s": 0.11,
+              "end_s": 0.91,
+              "text": " Potresti",
+              "probability": 0.8724717895189921
+            },
+            {
+              "start_s": 0.91,
+              "end_s": 1.47,
+              "text": " considerare",
+              "probability": 0.9976471364498138
+            },
+            {
+              "start_s": 1.47,
+              "end_s": 1.61,
+              "text": " una",
+              "probability": 0.983463704586029
+            },
+            {
+              "start_s": 1.61,
+              "end_s": 1.95,
+              "text": " gita",
+              "probability": 0.8792353272438049
+            },
+            {
+              "start_s": 1.95,
+              "end_s": 2.03,
+              "text": " in",
+              "probability": 0.9961374402046204
+            },
+            {
+              "start_s": 2.03,
+              "end_s": 2.65,
+              "text": " montagna",
+              "probability": 0.9818938374519348
+            },
+            {
+              "start_s": 2.65,
+              "end_s": 2.83,
+              "text": " o",
+              "probability": 0.9620004296302795
+            },
+            {
+              "start_s": 2.83,
+              "end_s": 2.99,
+              "text": " una",
+              "probability": 0.9825394153594971
+            },
+            {
+              "start_s": 2.99,
+              "end_s": 3.35,
+              "text": " città",
+              "probability": 0.950312614440918
+            },
+            {
+              "start_s": 3.35,
+              "end_s": 3.41,
+              "text": " d",
+              "probability": 0.9937906861305237
+            },
+            {
+              "start_s": 3.41,
+              "end_s": 3.59,
+              "text": "'arte",
+              "probability": 0.9971193671226501
+            },
+            {
+              "start_s": 3.59,
+              "end_s": 4.07,
+              "text": " vicina",
+              "probability": 0.9943823516368866
+            },
+            {
+              "start_s": 4.07,
+              "end_s": 4.27,
+              "text": " per",
+              "probability": 0.9829266667366028
+            },
+            {
+              "start_s": 4.27,
+              "end_s": 4.41,
+              "text": " un",
+              "probability": 0.9977365732192993
+            },
+            {
+              "start_s": 4.41,
+              "end_s": 4.65,
+              "text": " weekend",
+              "probability": 0.9845141768455505
+            },
+            {
+              "start_s": 4.65,
+              "end_s": 5.37,
+              "text": " economico.",
+              "probability": 0.9744511842727661
+            }
+          ]
+        }
+      ],
+      "text": "Potresti considerare una gita in montagna o una città d'arte vicina per un weekend economico."
+    },
+    {
+      "file": "response_B_resp_257febe1d26d.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/pair_quality_bargein_prefix_fix/response_B_resp_257febe1d26d.wav",
+      "language": "it",
+      "language_probability": 1,
+      "media": {
+        "sample_rate": 24000,
+        "channels": 1,
+        "frames": 144000,
+        "duration_s": 6.0
+      },
+      "segments": [
+        {
+          "start_s": 0.24,
+          "end_s": 5.56,
+          "text": " Mi dispiace, non ho capito cosa intendi. Potresti riformulare la tua richiesta?",
+          "words": [
+            {
+              "start_s": 0.24,
+              "end_s": 0.68,
+              "text": " Mi",
+              "probability": 0.8268872499465942
+            },
+            {
+              "start_s": 0.68,
+              "end_s": 1.26,
+              "text": " dispiace,",
+              "probability": 0.9966170787811279
+            },
+            {
+              "start_s": 1.6,
+              "end_s": 1.78,
+              "text": " non",
+              "probability": 0.992639422416687
+            },
+            {
+              "start_s": 1.78,
+              "end_s": 1.9,
+              "text": " ho",
+              "probability": 0.9971641898155212
+            },
+            {
+              "start_s": 1.9,
+              "end_s": 2.26,
+              "text": " capito",
+              "probability": 0.9972312748432159
+            },
+            {
+              "start_s": 2.26,
+              "end_s": 2.44,
+              "text": " cosa",
+              "probability": 0.9846477508544922
+            },
+            {
+              "start_s": 2.44,
+              "end_s": 3.0,
+              "text": " intendi.",
+              "probability": 0.8935461342334747
+            },
+            {
+              "start_s": 3.64,
+              "end_s": 4.16,
+              "text": " Potresti",
+              "probability": 0.9816860953966776
+            },
+            {
+              "start_s": 4.16,
+              "end_s": 4.84,
+              "text": " riformulare",
+              "probability": 0.9646988660097122
+            },
+            {
+              "start_s": 4.84,
+              "end_s": 4.94,
+              "text": " la",
+              "probability": 0.9985730648040771
+            },
+            {
+              "start_s": 4.94,
+              "end_s": 5.1,
+              "text": " tua",
+              "probability": 0.996440589427948
+            },
+            {
+              "start_s": 5.1,
+              "end_s": 5.56,
+              "text": " richiesta?",
+              "probability": 0.9924747347831726
+            }
+          ]
+        }
+      ],
+      "text": "Mi dispiace, non ho capito cosa intendi. Potresti riformulare la tua richiesta?"
+    },
+    {
+      "file": "response_B_resp_569565569044.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/pair_quality_bargein_prefix_fix/response_B_resp_569565569044.wav",
+      "language": "it",
+      "language_probability": 1,
+      "media": {
+        "sample_rate": 24000,
+        "channels": 1,
+        "frames": 67200,
+        "duration_s": 2.8
+      },
+      "segments": [
+        {
+          "start_s": 0.18,
+          "end_s": 2.64,
+          "text": " Ciao, come posso aiutarti oggi?",
+          "words": [
+            {
+              "start_s": 0.18,
+              "end_s": 0.76,
+              "text": " Ciao,",
+              "probability": 0.672575831413269
+            },
+            {
+              "start_s": 1.2,
+              "end_s": 1.48,
+              "text": " come",
+              "probability": 0.9515029788017273
+            },
+            {
+              "start_s": 1.48,
+              "end_s": 1.76,
+              "text": " posso",
+              "probability": 0.9982592463493347
+            },
+            {
+              "start_s": 1.76,
+              "end_s": 2.32,
+              "text": " aiutarti",
+              "probability": 0.902197519938151
+            },
+            {
+              "start_s": 2.32,
+              "end_s": 2.64,
+              "text": " oggi?",
+              "probability": 0.9981332421302795
+            }
+          ]
+        }
+      ],
+      "text": "Ciao, come posso aiutarti oggi?"
+    },
+    {
+      "file": "response_B_resp_c13c6237c1e9.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/pair_quality_bargein_prefix_fix/response_B_resp_c13c6237c1e9.wav",
+      "language": "it",
+      "language_probability": 1,
+      "media": {
+        "sample_rate": 24000,
+        "channels": 1,
+        "frames": 234240,
+        "duration_s": 9.76
+      },
+      "segments": [
+        {
+          "start_s": 1.84,
+          "end_s": 8.02,
+          "text": " Per un budget di 120 euro, potresti cercare agriturismi o campaggi economici in montagna.",
+          "words": [
+            {
+              "start_s": 1.84,
+              "end_s": 2.32,
+              "text": " Per",
+              "probability": 0.9796172976493835
+            },
+            {
+              "start_s": 2.32,
+              "end_s": 2.48,
+              "text": " un",
+              "probability": 0.9977649450302124
+            },
+            {
+              "start_s": 2.48,
+              "end_s": 2.74,
+              "text": " budget",
+              "probability": 0.6173468828201294
+            },
+            {
+              "start_s": 2.74,
+              "end_s": 3.06,
+              "text": " di",
+              "probability": 0.9878098964691162
+            },
+            {
+              "start_s": 3.06,
+              "end_s": 3.36,
+              "text": " 120",
+              "probability": 0.9115436673164368
+            },
+            {
+              "start_s": 3.36,
+              "end_s": 4.06,
+              "text": " euro,",
+              "probability": 0.8180205821990967
+            },
+            {
+              "start_s": 4.38,
+              "end_s": 4.96,
+              "text": " potresti",
+              "probability": 0.9698689182599386
+            },
+            {
+              "start_s": 4.96,
+              "end_s": 5.38,
+              "text": " cercare",
+              "probability": 0.9821751713752747
+            },
+            {
+              "start_s": 5.38,
+              "end_s": 6.22,
+              "text": " agriturismi",
+              "probability": 0.928620207309723
+            },
+            {
+              "start_s": 6.22,
+              "end_s": 6.3,
+              "text": " o",
+              "probability": 0.9848746657371521
+            },
+            {
+              "start_s": 6.3,
+              "end_s": 6.76,
+              "text": " campaggi",
+              "probability": 0.49849990010261536
+            },
+            {
+              "start_s": 6.76,
+              "end_s": 7.4,
+              "text": " economici",
+              "probability": 0.9172528088092804
+            },
+            {
+              "start_s": 7.4,
+              "end_s": 7.5,
+              "text": " in",
+              "probability": 0.9960152506828308
+            },
+            {
+              "start_s": 7.5,
+              "end_s": 8.02,
+              "text": " montagna.",
+              "probability": 0.9127073585987091
+            }
+          ]
+        }
+      ],
+      "text": "Per un budget di 120 euro, potresti cercare agriturismi o campaggi economici in montagna."
+    }
+  ]
+}

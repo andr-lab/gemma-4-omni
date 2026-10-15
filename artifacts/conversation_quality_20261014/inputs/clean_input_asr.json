@@ -1,0 +1,298 @@
+{
+  "model": "faster-whisper small",
+  "device": "cpu",
+  "compute_type": "int8",
+  "results": [
+    {
+      "file": "clean_initial.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/inputs/clean_initial.wav",
+      "language": "it",
+      "language_probability": 1,
+      "media": {
+        "sample_rate": 22050,
+        "channels": 1,
+        "frames": 227556,
+        "duration_s": 10.32
+      },
+      "segments": [
+        {
+          "start_s": 0.0,
+          "end_s": 6.8,
+          "text": " Mi chiamo Elena. Il mio codice è 7-3-1. Vorrei visitare Torino con 120 euro.",
+          "words": [
+            {
+              "start_s": 0.0,
+              "end_s": 0.34,
+              "text": " Mi",
+              "probability": 0.8271432518959045
+            },
+            {
+              "start_s": 0.34,
+              "end_s": 0.62,
+              "text": " chiamo",
+              "probability": 0.9904263615608215
+            },
+            {
+              "start_s": 0.62,
+              "end_s": 0.98,
+              "text": " Elena.",
+              "probability": 0.953029990196228
+            },
+            {
+              "start_s": 1.5,
+              "end_s": 1.64,
+              "text": " Il",
+              "probability": 0.9787278771400452
+            },
+            {
+              "start_s": 1.64,
+              "end_s": 1.8,
+              "text": " mio",
+              "probability": 0.9992519021034241
+            },
+            {
+              "start_s": 1.8,
+              "end_s": 2.28,
+              "text": " codice",
+              "probability": 0.9920603632926941
+            },
+            {
+              "start_s": 2.28,
+              "end_s": 2.42,
+              "text": " è",
+              "probability": 0.9860420823097229
+            },
+            {
+              "start_s": 2.42,
+              "end_s": 2.76,
+              "text": " 7",
+              "probability": 0.8345544338226318
+            },
+            {
+              "start_s": 2.76,
+              "end_s": 3.34,
+              "text": "-3",
+              "probability": 0.6578404605388641
+            },
+            {
+              "start_s": 3.34,
+              "end_s": 4.0,
+              "text": "-1.",
+              "probability": 0.9930309951305389
+            },
+            {
+              "start_s": 4.36,
+              "end_s": 4.8,
+              "text": " Vorrei",
+              "probability": 0.9704887866973877
+            },
+            {
+              "start_s": 4.8,
+              "end_s": 5.26,
+              "text": " visitare",
+              "probability": 0.9931426346302032
+            },
+            {
+              "start_s": 5.26,
+              "end_s": 5.66,
+              "text": " Torino",
+              "probability": 0.8647067844867706
+            },
+            {
+              "start_s": 5.66,
+              "end_s": 5.86,
+              "text": " con",
+              "probability": 0.9903379678726196
+            },
+            {
+              "start_s": 5.86,
+              "end_s": 6.38,
+              "text": " 120",
+              "probability": 0.9930938482284546
+            },
+            {
+              "start_s": 6.38,
+              "end_s": 6.8,
+              "text": " euro.",
+              "probability": 0.7168620824813843
+            }
+          ]
+        },
+        {
+          "start_s": 7.16,
+          "end_s": 9.94,
+          "text": " Respondi in italiano, in non più di due frasi.",
+          "words": [
+            {
+              "start_s": 7.16,
+              "end_s": 7.84,
+              "text": " Respondi",
+              "probability": 0.8118913571039835
+            },
+            {
+              "start_s": 7.84,
+              "end_s": 7.92,
+              "text": " in",
+              "probability": 0.9926435351371765
+            },
+            {
+              "start_s": 7.92,
+              "end_s": 8.4,
+              "text": " italiano,",
+              "probability": 0.9955958724021912
+            },
+            {
+              "start_s": 8.72,
+              "end_s": 8.92,
+              "text": " in",
+              "probability": 0.996788501739502
+            },
+            {
+              "start_s": 8.92,
+              "end_s": 9.04,
+              "text": " non",
+              "probability": 0.9913585186004639
+            },
+            {
+              "start_s": 9.04,
+              "end_s": 9.22,
+              "text": " più",
+              "probability": 0.9752498865127563
+            },
+            {
+              "start_s": 9.22,
+              "end_s": 9.36,
+              "text": " di",
+              "probability": 0.9918748736381531
+            },
+            {
+              "start_s": 9.36,
+              "end_s": 9.52,
+              "text": " due",
+              "probability": 0.799225926399231
+            },
+            {
+              "start_s": 9.52,
+              "end_s": 9.94,
+              "text": " frasi.",
+              "probability": 0.9866069853305817
+            }
+          ]
+        }
+      ],
+      "text": "Mi chiamo Elena. Il mio codice è 7-3-1. Vorrei visitare Torino con 120 euro. Respondi in italiano, in non più di due frasi."
+    },
+    {
+      "file": "clean_followup.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/inputs/clean_followup.wav",
+      "language": "it",
+      "language_probability": 1,
+      "media": {
+        "sample_rate": 22050,
+        "channels": 1,
+        "frames": 142355,
+        "duration_s": 6.456009070294785
+      },
+      "segments": [
+        {
+          "start_s": 0.0,
+          "end_s": 6.12,
+          "text": " Il baggettore è 80 euro. Quali sono i miei nome, codice, città e baggetta attuale?",
+          "words": [
+            {
+              "start_s": 0.0,
+              "end_s": 0.34,
+              "text": " Il",
+              "probability": 0.8776573538780212
+            },
+            {
+              "start_s": 0.34,
+              "end_s": 0.96,
+              "text": " baggettore",
+              "probability": 0.7982231825590134
+            },
+            {
+              "start_s": 0.96,
+              "end_s": 1.1,
+              "text": " è",
+              "probability": 0.9735310077667236
+            },
+            {
+              "start_s": 1.1,
+              "end_s": 1.38,
+              "text": " 80",
+              "probability": 0.9312610626220703
+            },
+            {
+              "start_s": 1.38,
+              "end_s": 1.84,
+              "text": " euro.",
+              "probability": 0.586283802986145
+            },
+            {
+              "start_s": 2.16,
+              "end_s": 2.6,
+              "text": " Quali",
+              "probability": 0.9791397154331207
+            },
+            {
+              "start_s": 2.6,
+              "end_s": 2.8,
+              "text": " sono",
+              "probability": 0.9996874332427979
+            },
+            {
+              "start_s": 2.8,
+              "end_s": 3.02,
+              "text": " i",
+              "probability": 0.7212622165679932
+            },
+            {
+              "start_s": 3.02,
+              "end_s": 3.2,
+              "text": " miei",
+              "probability": 0.9053521156311035
+            },
+            {
+              "start_s": 3.2,
+              "end_s": 3.38,
+              "text": " nome,",
+              "probability": 0.8266794085502625
+            },
+            {
+              "start_s": 3.8,
+              "end_s": 4.38,
+              "text": " codice,",
+              "probability": 0.978640079498291
+            },
+            {
+              "start_s": 4.66,
+              "end_s": 5.06,
+              "text": " città",
+              "probability": 0.9966519276301066
+            },
+            {
+              "start_s": 5.06,
+              "end_s": 5.16,
+              "text": " e",
+              "probability": 0.9941607117652893
+            },
+            {
+              "start_s": 5.16,
+              "end_s": 5.7,
+              "text": " baggetta",
+              "probability": 0.8125496109326681
+            },
+            {
+              "start_s": 5.7,
+              "end_s": 6.12,
+              "text": " attuale?",
+              "probability": 0.9789173603057861
+            }
+          ]
+        }
+      ],
+      "text": "Il baggettore è 80 euro. Quali sono i miei nome, codice, città e baggetta attuale?"
+    }
+  ]
+}

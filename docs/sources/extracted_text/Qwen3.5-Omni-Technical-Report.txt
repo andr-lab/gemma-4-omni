@@ -1,0 +1,1637 @@
+arXiv:2604.15804v2 [cs.CL] 21 Apr 2026
+
+
+
+
+
+
+
+
+
+
+    2026-04-22
+
+
+                                          Qwen3.5-Omni Technical Report
+
+                                                    Qwen Team
+
+                  https://huggingface.co/spaces/Qwen/Qwen3.5-Omni-Online-Demo
+                  https://modelscope.cn/studios/Qwen/Qwen3.5-Omni-Online-Demo
+
+                                                    Abstract
+
+                 In this work, we present Qwen3.5-Omni, the latest advancement in the Qwen-Omni
+              model family. Representing a significant evolution over its predecessor, Qwen3.5-Omni
+               scales to hundreds of billions of parameters and supports a 256k context length. By
+              leveraging a massive dataset comprising heterogeneous text-vision pairs and over 100
+             million hours of audio-visual content, the model demonstrates robust omni-modality ca-
+              pabilities. Qwen3.5-Omni-Plus achieves SOTA results across 215 audio and audio-visual
+              understanding, reasoning, and interaction subtasks and benchmarks, surpassing Gemini-
+             3.1 Pro in key audio tasks and matching it in comprehensive audio-visual understanding.
+                Architecturally, Qwen3.5-Omni employs a Hybrid Attention Mixture-of-Experts (MoE)
+             framework for both Thinker and Talker, enabling efficient long-sequence inference. The
+              model facilitates sophisticated interaction, supporting over 10 hours of audio under-
+             standing and 400 seconds of 720P video (at 1 FPS). To address the inherent instability
+               and unnaturalness in streaming speech synthesis-often caused by encoding efficiency
+                discrepancies between text and speech tokenizers-we introduce ARIA (Adaptive Rate
+               Interleave Alignment). ARIA dynamically aligns text and speech units, significantly
+                enhancing the stability and prosody of conversational speech with minimal latency
+                impact. Furthermore, Qwen3.5-Omni expands linguistic boundaries, supporting mul-
+                tilingual understanding and speech generation across 10 languages with human-like
+              emotional nuance. Beyond preset voices, the model enables zero-shot voice customiza-
+              tion via user-provided samples. Finally, Qwen3.5-Omni exhibits superior audio-visual
+            grounding capabilities, generating script-level structured captions with precise temporal
+                  synchronization and automated scene segmentation. Remarkably, we observed the
+               emergence of a new capability in omnimodal models: directly performing coding based
+               on audio-visual instructions, which we call Audio-Visual Vibe Coding. Qwen3.5-Omni
+    is publicly accessible via API1.
+
+    1 Introduction
+
+       Human interaction with the world is inherently omnimodal and agentic, involving the integration of
+     visual, auditory, and linguistic information, and the production of responses through text, speech, and
+     goal-directed tool-mediated actions, facilitating information exchange with other organisms and demon-
+      strating intelligence. Building on the rapid advances in the understanding and reasoning capabilities
+      of large models across text (Brown et al., 2020; OpenAI, 2023; Gemini Team, 2024; Anthropic, 2023a;b;
+    2024; Bai et al., 2023a; Yang et al., 2024a; 2025a; Touvron et al., 2023; Dubey et al., 2024), vision (Li
+et al., 2023; Liu et al., 2023; Zhu et al., 2023; Bai et al., 2023b; 2025a), and audio (Chu et al., 2023; 2024),
+       natively omnimodal systems that jointly process and generate across all modalities have drawn sub-
+     stantial attention (OpenAI, 2024; Comanici et al., 2025; Xu et al., 2025a;b). However, existing models
+       predominantly operate within passive perception-response paradigms and exhibit limited capacity for
+    scalable agentic behavior, real-time interaction, autonomous tool utilization, and cross-modal reasoning,
+    which are essential prerequisites for practical deployment.
+      In this report, we present Qwen3.5-Omni, Qwen's latest generation of fully omnimodal LLM, supporting
+     the understanding of text, images, audio, and audio-visual content. Natively pretrained in an omnimodal
+      manner on massive amounts of text, visual data, and more than 100 million hours of audio-visual data,
+       Qwen3.5-Omni is designed as a native omni agent model: it not only perceives and reasons across all
+     modalities, but also acts, autonomously invoking WebSearch, executing complex FunctionCall, generating
+       speech outputs, and engaging in real-time streaming interaction. The model series includes Plus and
+    Flash variants, all of which are instruct models with 256k-token long-context input.
+      Qwen3.5-Omni builds on the Thinker-Talker architecture introduced in Qwen2.5-Omni (Xu et al., 2025a)
+       and introduces five key technical upgrades over Qwen3-Omni (Xu et al., 2025b): (1) both the Thinker
+    1https://www.alibabacloud.com/help/en/model-studio/qwen-omni
+
+
+                  1
+
+Figure 1: Qwen3.5-Omni is a unified end-to-end model capable of processing multiple modalities, such
+as text, audio, image and video, and generating real-time text or speech response. Based on these
+features, Qwen3.5-Omni supports a wide range of tasks, including but not limited to voice dialogue,
+video dialogue, and audio-visual tool use.
+
+and Talker adopt Hybrid-Attention Mixture-of-Experts (MoE) designs, enabling highly efficient inference;
+(2) supporting long-context modeling up to 256k tokens, supporting more than 10 hours of audio and
+over 400 seconds of 720P audio-visual content at 1 FPS; (3) on the speech generation side, a multi-
+codebook codec representation enables single-frame, immediate synthesis; (4) the Talker introduces
+ARIA, a technique that dynamically aligns text and speech units during streaming decoding, significantly
+improving naturalness and robustness; and (5) multilingual training is substantially expanded, covering
+113 languages and dialects for speech recognition and 36 for speech synthesis.
+Enabled by these technical advances, Qwen3.5-Omni delivers three major new capabilities over Qwen3-
+Omni: (1) controllable audio-visual captioning, capable of generating controllable, detailed, and struc-
+tured captions as well as screenplay-level fine-grained descriptions, including automatic segmentation,
+timestamp annotation, and detailed descriptions of characters and their relationship to audio; (2) com-
+prehensive real-time interaction, encompassing semantic interruption through native turn-taking intent
+recognition, end-to-end voice control over volume, speed, and emotion, and voice cloning from user-
+provided samples; and (3) native omnimodal agentic behavior, including autonomous WebSearch,
+complex FunctionCall invocation, and Audio-Visual Vibe Coding, an emergent capability wherein the
+model directly generates executable code from audio-visual instructions, enabling the model to respond
+to real-time queries without external orchestration.
+Critically, Qwen3.5-Omni maintains state-of-the-art performance on text and visual modalities without
+degradation relative to same-size single-model Qwen counterparts. Across 215 audio and audio-visual
+understanding, reasoning, and interaction subtasks and benchmarks, covering audio-visual benchmarks,
+audio benchmarks, ASR benchmarks, language-specific speech-to-text translation tasks, and language-
+specific ASR tasks, Qwen3.5-Omni-Plus achieves SOTA results, surpassing Gemini-3.1 Pro across general
+audio understanding, reasoning, recognition, translation, and dialogue, while its overall audio-visual
+understanding reaches the level of Gemini-3.1 Pro.
+
+2 Architecture
+
+2.1 Overview
+
+As shown in Figure 2, Qwen3.5-Omni continues to adopt the Thinker-Talker architecture (Xu et al., 2025a).
+Compared with Qwen3-Omni (Xu et al., 2025b), Qwen3.5-Omni introduces several key improvements in
+scalability, alignment, and real-time interaction:
+
+        2
+
+             Figure 2: The overview of Qwen3.5-Omni. Qwen3.5-Omni adopts the Thinker-Talker architecture.
+     Thinker is tasked with text generation while Talker focuses on generating streaming speech tokens by
+receives high-level representations directly from Thinker. To achieve ultra-low-latency streaming, Talker
+    autoregressively predicts a multi-codebook sequence. At each decoding step, an MTP module outputs the
+    residual codebooks for the current frame, after which the Code2Wav renderer incrementally synthesizes
+the corresponding waveform, enabling frame-by-frame streaming generation.
+
+            • The overall backbone adopts a Hybrid Mixture-of-Experts (MoE) design, improving scalability
+           while better balancing capacity and efficiency across multimodal understanding and generation.
+        • The Thinker receives visual and audio signals through the Vision Encoder and AuT, respectively.
+             Audio and video inputs are interleaved for unified multimodal modeling, with explicit times-
+        tamps inserted to improve temporal perception, especially for long video or audio-video contexts.
+              This design enables the Thinker to handle extended inputs, supporting up to 256k tokens, 10
+hours of audio, or 400 seconds of 720P video at 1 FPS.
+               • The Talker is responsible for contextual speech generation by conditioning on multimodal
+                  inputs together with the textual outputs from the Thinker. Qwen3.5-Omni adopts the RVQ-
+             based speech representation introduced in Qwen3-Omni (Xu et al., 2025b), which substantially
+improves inference efficiency.
+         • To support real-time interaction, Qwen3.5-Omni adopts both chunk-wise streaming input process-
+             ing in the Thinker and a streaming Talker design, enabling low-latency end-to-end multimodal
+conversation.
+         • Different from the dual-track Talker input design in Qwen3-Omni (Xu et al., 2025b), the Talker
+               in Qwen3.5-Omni adopts ARIA to dynamically align text and speech units before interleaving
+              them. This design mitigates the instability caused by mismatched tokenization rates between
+            text and speech, thereby reducing issues such as skipped words, incorrect pronunciations, and
+ambiguous rendering of numbers.
+
+  In the following sections, we first introduce with the AuT encoder, including its training methodology.
+    Then, describe how Thinker processes various inputs. We then detail Talker's multi-codebook streaming
+          speech generation. Finally, we highlight a series of improvements on both the understanding and
+generation modules aimed at achieving ultra-low-latency, end-to-end streaming audio inference.
+
+
+
+3
+
+Figure 3: The overview of AuT. Consuming 40 million hours of supervised data especially more multi-
+lingual data, AuT encoder in Qwen3.5-Omni obtain stronger general purpose audio representation in
+6.25Hz.
+
+2.2 Audio Transformer (AuT)
+
+We use transformer based audio encoder trained from scratch in attention-encoder-decoder model AuT,
+as is shown in Figure 3. The training of Qwen3.5-Omni encoder consumed 40 million hours of audio-text
+pair data generated by Qwen3-ASR. The filter bank features of the audio are downsampled 16 times
+using 4 Conv2D blocks and then fed into self-attention layers to obtain audio tokens in 6.25Hz token rate.
+Comparing to the training process of Qwen3-Omni encoder, the encoder of Qwen3.5-Omni adapts more
+multilingual data of more than 20 languages, and the proportion of Chinese, English and multilingual
+data comes to 3.5 : 3.5 : 3. The dynamic attention window size training mechanism is adopted for
+guaranting balance performance of inference under real-time prefill caching and for the offline audio
+understanding tasks.
+
+2.3 Perceivation
+
+Text, Audio, Image and Video (w/o Audio). The Thinker converts text, audio, image, and silent video
+inputs into a unified sequence of representations. For text, we use the Qwen3.5 tokenizer (Team, 2026),
+which adopts byte-level byte-pair encoding with a vocabulary size of 250k (up from 150k), improving
+encoding and decoding efficiency by 10-60% across most languages. For audio inputs, including audio
+extracted from video, we resample the waveform to 16 kHz and convert it into a 128-channel mel-
+spectrogram using a 25 ms window and a 10 ms hop size. We use AuT as the audio encoder, trained
+from scratch on 40 million hours of audio data, where each output frame corresponds to approximately
+160 ms of the original signal. For visual inputs, we adopt the vision encoder from Qwen3.5 (Team,
+2026) to process both images and videos. Trained on a mixture of image and video data, this encoder
+provides strong capabilities in both image understanding and video comprehension. To preserve video
+information as much as possible while maintaining alignment with the audio stream, we sample video
+frames at a dynamic frame rate.
+
+Audio-visual Timestamp. Following Qwen3-Omni (Xu et al., 2025b), we apply TM-RoPE to endow
+the model with temporal awareness for audio-video synchronization. However, we find that directly
+encoding absolute time through temporal position IDs can lead to excessively sparse indices for visual
+patches from long video with audio inputs, which weakens long-range temporal modeling. In addition,
+such a design often requires large-scale and uniformly distributed training samples across different frame
+rates, increasing data construction cost. To address these issues, we prepend each video or audio-video
+temporal patch with an explicit timestamp represented as a formatted text string in seconds, allowing
+the model to learn timecode representations more naturally. For audio sequences, we further insert
+timestamps at random intervals to improve temporal alignment across modalities. Although this strategy
+
+        4
+
+slightly increases the context length, it enables more precise and robust temporal perception, especially
+when extrapolating long-context multimodal inputs.
+In the context of multimodal audio-visual streams, the audio component is encoded with a temporal ID
+for every 160 ms. The video is treated as a sequence of frames with monotonically increasing temporal
+IDs that are dynamically adjusted based on their actual timestamps to ensure a consistent temporal
+resolution of 160 ms per ID. The height and width IDs for video frames are assigned in the same manner
+as for still images. To prevent positional conflicts when processing multiple modalities, the position
+numbering is made contiguous, with each subsequent modality commencing from one plus the maximum
+position ID of the preceding modality. This refined approach to positional encoding enables the model to
+effectively integrate and jointly model information from diverse modalities. Qwen3.5-Omni aligns these
+representations using their temporal IDs, which are explicitly anchored to absolute time. This design
+choice affords the model the flexibility to support streaming inputs of arbitrary duration.
+
+2.4  Speech Generation
+
+Talker operates directly on the RVQ tokens produced by Qwen3.5-Omni-Audio-Tokenizer. To model the
+residual codebooks, it employs a multi-token prediction (MTP) module, which enables fine-grained
+modeling and control of acoustic details. Coupled with a causal ConvNet for waveform reconstruction,
+Talker delivers high-fidelity speech synthesis with low inference latency and modest computational
+overhead.
+In multi-turn spoken dialogue, Talker is conditioned on the rich contextual information provided by the
+Thinker component, including historical text tokens, multimodal representations, and the streamed text
+of the current turn. Such conditioning allows Talker to dynamically modulate acoustic attributes-such
+as prosody, loudness, and emotion-in accordance with the evolving conversational context.
+Architecturally, our approach differs from Qwen3-Omni (Xu et al., 2025b) in two key respects. First, we
+introduce a dedicated system prompt for Talker that specifies target voice characteristics, thereby enabling
+both zero-shot voice cloning and controllable speech generation. Compared with conventional speaker
+embeddings, this prompt can encode richer multimodal cues, including textual descriptions and codec
+sequences, providing substantially finer-grained control over acoustic realization. Second, we propose
+ARIA (Adaptive Rate Interleave Alignment), which unifies the conventional dual-channel generation
+paradigm into a single-channel formulation. Rather than relying on MFA-derived alignments or fixed
+interleaving rates, ARIA enforces an adaptive rate constraint: for any prefix of the generated sequence,
+the cumulative speech-to-text token ratio must not exceed the corresponding item-level global ratio.
+Despite its simplicity, this design affords flexible text-speech alignment across languages, including those
+with relatively low encoding efficiency, and naturally supports arbitrary text-token prefixes followed by
+coherent speech-token continuation.
+
+2.5  Designs for Streaming and Concurrency
+
+In streaming audio-visual interaction scenarios, the first-packet latency is a critical factor affecting user
+experience, and the model's concurrency capability is key to reducing service costs and improving
+response speed. This section discusses how Qwen3.5-Omni enhances concurrency and reduces first-
+packet latency through algorithmic and architectural optimizations. Table 1 provides an overview of the
+relevant architecture of the Qwen3.5-Omni and its associated latency.
+
+Table 1: Architecture of Qwen3.5-Omni and end-to-end first-packet latency under audio/video settings
+(ms).
+
+         Module         Architecture     Streaming
+         Audio Encoder       AuT             ✓
+         Vision Encoder    SigLIP2           -
+         Thinker   Hybrid MoE Transformer    ✓
+         Talker    Hybrid MoE Transformer    ✓
+         MTP          Dense Transformer      ✓
+         Code2wav          ConvNet           ✓
+         First-Packet Latency (Audio Input)       Plus: 435ms        Flash: 235ms
+         First-Packet Latency (Video Input)       Plus: 651ms        Flash: 426ms
+
+Chunked Prefilling and Hybrid MoE Architecture. In Qwen3.5-Omni, we retain the chunked-prefilling
+mechanism as implemented in Qwen3-Omni and Qwen2.5-Omni, whose audio and vision encoders are
+
+5
+
+    capable of outputting chunks along the temporal dimension. This approach significantly reduces the
+    Time-To-First-Token (TTFT) for both the Thinker and the Talker. Architecturally, both the Thinker and the
+    Talker in Qwen3.5-Omni are built upon the Hybrid MoE architecture introduced in Qwen3.5. Beyond
+    the general efficiency advantage of Hybrid MoE, this architecture includes the Gated Delta Net (GDN)
+    module, which is particularly effective for accelerating the modeling of long audio-video sequences. As a
+    result, it significantly reduces KV-cache I/O overhead in long-context inference, improving generation
+    throughput and enabling higher serving concurrency.
+
+    Streaming Generation with ARIA. For streaming speech generation and high-concurrency serving,
+    Qwen3.5-Omni largely inherits the efficient design of Qwen3-Omni: Talker predicts RVQ codec tokens
+    with a lightweight MTP module, and the generated multi-codebook tokens are converted to waveform by
+    a causal and streaming ConvNet codec decoder. These components remain computationally lightweight,
+    batch-friendly, and well-suited for low-latency deployment. Built on this shared foundation, the pre-
+    viously introduced ARIA further reformulates the dual-channel generation pattern in Qwen3-Omni
+    into a unified interleaved single-stream formulation over text and speech tokens. By organizing text
+    and speech generation under a monotonic interleaving constraint, ARIA reduces the synchronization
+    overhead between separate generation tracks, enables more efficient token scheduling during decoding,
+    and better matches the naturally incremental regime of streaming interaction.
+    In Table 2, we report the theoretical first-packet latency of Qwen3.5-Omni under different concurrency
+    levels for audio and video input, evaluated on internal vLLM with torch.compile and CUDA Graph
+    acceleration enabled for the MTP module and codec decoder. Here, Thinker TTFT (Time-To-First-Token)
+    denotes the time from receiving the input stream to the first text token generated by Thinker, while
+    Talker TTFC (Time-To-First-Chunk) measures the time until Talker produces the first audio chunk. TPOP
+    (Time-Per-Output-Token) represents the per-output-token latency during steady-state decoding, where
+    Talker TPOP includes the combined latency of the Talker backbone and the MTP module. TPS (Tokens Per
+    Second) denotes generation throughput. Since ARIA organizes text and speech generation in a unified
+    interleaved stream, Overall Latency cannot be obtained by simply summing several row values, but
+    instead reflects the end-to-end critical path to the first playable audio packet. We also note that, due to
+    the substantial scale difference between Qwen3.5-Omni-Flash and Qwen3.5-Omni-Plus, the two variants
+    adopt different deployment-time resource allocation and parallelization strategies; therefore, their latency
+    and throughput numbers are not intended for strict horizontal comparison. As shown in the table,
+    Qwen3.5-Omni maintains stable latency and decoding efficiency as concurrency increases, while the low
+    Generation RTF provides sufficient margin for smooth streaming audio generation.
+
+    Table 2: Theoretical first-packet latency of Qwen3.5-Omni under different concurrency levels. A/V
+    denotes audio/video input.
+
+                             Qwen3.5-Omni-Flash                 Qwen3.5-Omni-Plus
+                      1 Conc.      4 Conc.      8 Conc.      1 Conc.      4 Conc.      8 Conc.
+    Thinker TTFT     80/255ms     86/446ms     103/765ms    162/377ms    183/907ms   260/1243ms
+    Talker TTFC       56/61ms     68/108ms     81/116ms      54/56ms      72/88ms     95/116ms
+    Thinker TPOP     5.6/5.9ms    8.2/9.2ms   9.6/15.8ms   17.4/18.5ms  25.6/26.9ms  33.3/40.2ms
+    Talker TPOP     14.2/14.2ms  16.9/17.0ms  20.5/20.6ms  14.9/14.9ms  21.0/21.3ms  25.8/27.1ms
+    Codec Decode                                       3~5ms
+    Overall Latency  235/426ms    298/891ms   352/1625ms    435/651ms   619/1515ms   955/1980ms
+    Thinker TPS       177/171      556/457      942/598       57/54       156/149      266/240
+    Talker TPS         70/70       237/235      389/388       67/67       191/189      320/296
+    Generation RTF     0.178        0.211        0.257        0.187        0.267        0.334
+
+
+3 Pretraining
+
+Qwen3.5-Omni is pre-trained on a diverse dataset that encompasses multiple languages and dialects as
+shown in Table 3 and modalities, including image-text, video-text, audio-text, video-audio, video-audio-
+text, and pure text corpora. Following Qwen3-Omni (Xu et al., 2025b), we employ a wider range of natural
+language prompts to enhance both the generalization ability and instruction-following capabilities. To
+achieve robust performance across all modalities, our training strategy incorporates both unimodal and
+cross-modal data from the early pretraining stage.
+In Qwen3-Omni (Xu et al., 2025b), we employ TMRoPE to endow the model with temporal awareness.
+However, we identify two key limitations of this approach: (1) By directly tying temporal position IDs to
+
+
+                                                   6
+
+    Table 3: Supported languages and dialects in Qwen3.5-Omni-Plus.
+
+Modality  # Varieties   Supported languages and dialects
+Text          201       See Qwen3.5 for the complete list of supported languages.
+Speech Input  113       74 languages: Afrikaans, Arabic, Asturian, Azerbaijani, Basque, Be-
+                        larusian, Bengali, Bosnian, Bulgarian, Cantonese, Catalan, Cebuano,
+                        Chinese, Croatian, Czech, Danish, Dutch, English, Esperanto, Estonian,
+                        Filipino, Finnish, French, Galician, Georgian, German, Greek, Hebrew,
+                        Hindi, Hungarian, Icelandic, Indonesian, Interlingua, Italian, Japanese,
+                        Javanese, Kannada, Kazakh, Korean, Kyrgyz, Lingala, Latvian, Lithua-
+                        nian, Macedonian, Malay, Malayalam, Maltese, Maori, Marathi, Mon-
+                        golian, Norwegian Bokmål, Norwegian Nynorsk, Oriya, Persian, Pol-
+                        ish, Portuguese, Punjabi, Romanian, Russian, Serbian, Slovak, Slove-
+                        nian, Spanish, Swahili, Swedish, Tajiki, Tamil, Telugu, Thai, Turkish,
+                        Ukrainian, Urdu, Uyghur, and Vietnamese.
+                        39 Chinese dialects: Northeastern Mandarin, Guizhou dialect, Guang-
+                        dong Cantonese, Henan dialect, Hong Kong Cantonese, Shanghainese,
+                        Shaanxi dialect, Tianjin dialect, Taiwanese Mandarin, Yunnan dialect,
+                        Anhui dialect, Fujian dialect, Gansu dialect, Guangdong Mandarin,
+                        Hubei dialect, Hunan dialect, Jiangxi dialect, Shandong dialect, Shanxi
+                        dialect, Sichuanese, Guangxi dialect, Hainan dialect, Chongqing di-
+                        alect, Changsha dialect, Hangzhou dialect, Hefei dialect, Yinchuan di-
+                        alect, Zhengzhou dialect, Shenyang dialect, Wenzhou dialect, Wuhan
+                        dialect, Kunming dialect, Taiyuan dialect, Nanchang dialect, Jinan di-
+                        alect, Lanzhou dialect, Nanjing dialect, Hakka, and Southern Min.
+Speech Output 36        29 languages: Chinese, English, German, Italian, Portuguese, Spanish,
+                        Japanese, Korean, French, Russian, Thai, Indonesian, Arabic, Vietnamese,
+                        Turkish, Finnish, Polish, Hindi, Dutch, Czech, Urdu, Tagalog, Swedish,
+                        Danish, Hebrew, Icelandic, Malay, Norwegian, and Persian.
+                        7 Chinese dialects: Sichuanese, Beijing dialect, Tianjin dialect, Nanjing
+                        dialect, Shaanxi dialect, Cantonese, and Southern Min.
+
+
+       absolute time, it produces excessively large and sparse temporal position IDs for long audio-video or
+   video inputs, which undermines the model's ability to capture long-range temporal contexts. (2) Effective
+         learning under this scheme typically requires large-scale and uniformly distributed sampling across
+    different frame rates (fps), significantly increasing the cost of training data construction. To address
+         these issues, we prepend each video or audio-video temporal patch with a timestamp represented as a
+formatted text string in seconds, enabling the model to better learn and interpret timecode representations.
+  In addition, for audio sequences, we insert timestamps at random intervals to better align training across
+  different modalities. Although this approach introduces a modest increase in context length, it allows the
+model to perceive temporal information more effectively and precisely.
+      The pre-training of Qwen3.5-Omni is structured into three distinct stages. In the first stage, we lock
+          the LLM parameters and focus on training the vision and audio encoders, utilizing a vast corpus of
+      audio-text and image-text pairs to enhance semantic understanding within the LLM. In the second stage,
+           we unfreeze all parameters and train with a wider range of multimodal data for more comprehensive
+        learning with a sequence length of 32,768. In the final stage, we use data with a sequence length of
+262,144 to enhance the model's ability to understand complex long-sequence data:
+
+                (1) Encoder Alignment Stage (S1): During the initial pretraining phase, the LLM component of
+               Qwen3.5-Omni is initialized with parameters from Qwen3.5, while the vision encoder is adopted
+                   from Qwen3.5, and the audio encoder is initialized with AuT. The two encoders are trained
+             separately on the fixed LLM, with both initially focusing on training their respective adapters
+before training the encoders.
+           (2) General Stage (S2): The second phase of pretraining utilizes a large-scale dataset containing
+              approximately 4 trillion tokens, with the following distribution across modalities: text (0.92
+        trillion), audio (1.99 trillion), image (0.95 trillion), video (0.14 trillion), and video-audio 0.29
+           trillion). During this stage, the introduction of more diverse multimodal data and tasks enhances
+             the model's understanding and interaction capabilities in auditory, visual, textual, and audio-
+visual information.
+         (3) Long Context Stage (S3): In the final pre-training phase, we increased the maximum token length
+          from 32,768 to 262,144 and also raised the proportion of long audio and long video in the training
+
+                            7
+
+    data. Experimental results indicate that these adjustments lead to significant improvements in
+    the model's ability to understand long sequence data.
+
+4 Post-training
+
+4.1 Thinker
+
+ The post-training phase employs a three-stage strategy for the Thinker, designed to preserve the model's
+capabilities across all modalities without degradation, ensure high response quality under audio queries,
+  and optimize the overall interaction experience. The training corpus, structured in the ChatML (OpenAI,
+2022) format, encompasses pure text, visual, audio, and mixed-modality conversational data. Specifically,
+the process consists of the following stages:
+
+       • Stage 1: Specialist Distillation To establish a strong foundation for omnimodal capabilities, we
+    first train a suite of domain-specialized teacher models via independent Supervised Fine-Tuning
+    (SFT) and reinforcement learning (RL). All teacher models are fine-tuned from the pre-trained
+    Qwen-3.5 base checkpoint. Beyond text-related tasks, including agentic, coding, and foundational
+    reasoning tasks, we also train specialized teacher models for vision and audio. These teacher
+    models are used to generate domain-specific data, enabling the specialized capabilities learned
+    in each domain to be distilled into a single unified model.
+         • Stage 2: On-Policy Distillation Through the specialist distillation described above, the model
+    already achieves strong performance in domains such as multimodal understanding and rea-
+    soning, as well as text-based dialogue, reasoning, coding, and agentic tasks. Nevertheless, a
+    substantial gap remains between the quality of responses conditioned on audio queries and that
+    of responses conditioned on text queries, particularly in speech dialogue. To reduce this gap, we
+    introduce a second-stage training procedure based on on-policy distillation (OPD), with the goal
+    of distilling the model's stronger response capabilities under text inputs into the audio-input
+    setting. Concretely, for each audio-text paired query, we first obtain a response generated un-
+    der the text condition, which typically exhibits higher quality in terms of fluency, reasoning,
+    and task completion. We then use this response as the distillation target for the corresponding
+    audio-conditioned query. By training on such on-policy targets, the model gradually aligns
+    its audio-conditioned outputs with its text-conditioned behavior, thereby improving response
+    quality under audio inputs and promoting modality-consistent generation.
+              • Stage 3: Interaction-Aligned Reinforcement Learning Although the previous two stages sub-
+    stantially improve the model's domain capabilities and cross-modal response quality, they are not
+    sufficient to fully optimize the model for real-world interactive use. In multi-turn conversations,
+    we observe several interaction-specific issues, including unintended language code-switching,
+    persona inconsistency, and degraded instruction-following over extended contexts. To mitigate
+    these issues, we introduce Interaction-Aligned RL, a third-stage reinforcement learning proce-
+    dure aimed at optimizing the model for interaction quality. We construct multi-turn interaction
+    trajectories and design reward signals around these user experience objectives, enabling the
+    model to learn behaviors that are more stable, consistent, and aligned in prolonged interactions.
+    By explicitly optimizing for interaction quality, this stage improves the model's overall usability
+    in practical conversational scenarios.
+
+4.2 Talker
+
+       We employ a four-stage training pipeline for Talker, enabling Qwen3.5-Omni to generate natural and
+contextually appropriate spoken responses jointly with text. All training data is organized in the ChatML
+format to maintain consistency with Thinker and to facilitate voice cloning.
+
+      (1) General Stage: In the initial pre-training stage, we train Qwen3.5-Omni on more than 20 million
+    hours of multilingual speech data paired with multimodal context. In particular, the introduction
+    of more diverse tasks, such as instruction-following speech generation, substantially enhance
+    contextual reasoning and paralinguistic alignment, going beyond a simple monotonic mapping
+    from multimodal representations to speech.
+     (2) Long-Context Stage: We perform data quality stratification through a dedicated curation pipeline
+    and conduct continual pre-training (CPT) on high-quality subsets. Augmented by Qwen3-Omni-
+    Captioner, this stage mitigates hallucinations introduced by noisy data in the initial pre-training
+    phase and substantially improves the naturalness and quality of generated speech. Meanwhile,
+    we extend the maximum context length to 64k tokens, allowing the model to better handle long
+    and complex user inputs and to produce more contextually grounded speech responses.
+
+        8
+
+                   (3) Reinforcement Learning Stage: We further align model behavior with human preferences
+             through Direct Preference Optimization (DPO) (Rafailov et al., 2023). Concretely, we construct
+                  multilingual preference pairs based on human annotations and optimize the model with DPO.
+              In addition, we incorporate rule-based rewards and adopt GSPO (Zheng et al., 2025) to further
+    improve overall capability and training stability across diverse tasks.
+           (4) Speaker Fine-tuning Stage: Finally, we perform lightweight speaker fine-tuning on top of the
+               base model, enabling Qwen3.5-Omni to faithfully capture target speaker characteristics while
+    further improving the naturalness, expressiveness, and controllability of its speech outputs.
+
+5 Evaluation
+
+A comprehensive evaluation was performed on two variants of models, including Qwen3.5-Omni-Flash
+and Qwen3.5-Omni-Plus. The evaluation results are divided into two main categories: understand-
+ing (X→Text) and speech generation (X→Speech).
+
+5.1 Evaluation of X→Text
+
+In this section, we evaluate Qwen3.5-Omni's ability to comprehend various multimodal inputs (text,
+audio, vision, and audio-visual video) and generate textual responses.
+
+Text→Text Our evaluation of Qwen3.5-Omni on text → text primarily focuses on general knowledge
+tasks, instruction following, long context tasks, STEM tasks, reasoning tasks and general agent ability.
+Specifically, we utilize MMLU-Pro (Wang et al., 2024d), MMLU-Redux (Gema et al., 2024), SuperGPQA
+(Team et al., 2025) and C-Eval (Huang et al., 2023) for general knowledge tasks, IFEval (Zhou et al., 2023)
+and IFBench (Pyatkin et al., 2025) for instruction following, AA-LCR (Team, 2025a) and LongBench v2
+(Bai et al., 2025b) for long context tasks, GPQA (Rein et al., 2023) for STEM tasks, LiveCodeBench v6
+(Jain et al., 2024), HMMT Nov 25 (Balunovi´c et al., 2025) and IMOAnswerBench (Luong et al., 2025) for
+reasoning tasks, BFCL-V4 (Yan et al., 2024) and TAU2Bench (Barres et al., 2025) for general agent ability.
+
+Audio→Text To evaluate audio-to-text capabilities, we employ benchmarks across four domains: audio
+understanding, end-to-end speech dialogue, speech-to-text translation (S2TT), and automatic speech
+recognition (ASR). For audio understanding, we utilize MMAU (Sakshi et al., 2024), MMAR (Ma et al.,
+2025a), MMSU (Wang et al., 2025a), RUL-MuchoMusic (Zang et al., 2025), and SongFormBench (Hao et al.,
+2025) to assess comprehension of sound effects, speech, and music. Dialogue performance is evaluated
+via VoiceBench (Chen et al., 2024b), URO-Bench-pro (Yan et al., 2025), SpeechRole (Jiang et al., 2025), and
+WildSpeech-Bench (Zhang et al., 2025b). For S2TT, we focus on the translation of the top 59 languages
+in Fleurs (Conneau et al., 2022) into English and Chinese. Finally, ASR performance is measured using
+Fleurs (Conneau et al., 2022), Common Voice (Ardila et al., 2020), LibriSpeech (Panayotov et al., 2015),
+WenetSpeech (Zhang et al., 2022), KeSpeech (Tang et al., 2021), Opencpop-test (Wang et al., 2022), and
+MIR-1K (vocal) (Hsu & Jang, 2010), covering multilingual speech, Chinese dialects, and singing voice
+transcription.
+
+Vision→Text The evaluation of the model's vision-to-text capabilities encompasses a suite of bench-
+marks targeting diverse and challenging tasks. To assess performance in specialized domain of mathemati-
+cal and STEM reasoning, we utilize MMMU (Yue et al., 2023), MMMU-Pro (Yue et al., 2024), MathVista (Lu
+et al., 2024), MathVision (Wang et al., 2024a), DynaMath (Zou et al., 2025), ZEROBench (Roberts et al.,
+2025). For the general visual question answering, the model is evaluated on RealWorldQA (Zhang
+et al., 2024), MMStar (Chen et al., 2024a), HallusionBench (Guan et al., 2024), and SimpleVQA (Cheng
+et al., 2025). The model's proficiency in document understanding is measured using the CharXiv (Wang
+et al., 2024e), CC-OCR (Yang et al., 2024b), AI2D (Kembhavi et al., 2016), MMLongBench-Doc (Ma et al.,
+2024), and OCRBench (Liu et al., 2024). Furthermore, the model's spatial intelligence is specifically
+tested on ERQA (Team, 2025b), CountBench (Paiss et al., 2023), RefCOCO (Kazemzadeh et al., 2014),
+ODInW13 (Li et al., 2022), and EmbSpatialBench (Du et al., 2024a). To evaluate performance on dynamic
+visual data, we report results on six video understanding benchmarks: Video-MME (Fu et al., 2024),
+MLVU (Zhou et al., 2025a), MVBench (Li et al., 2024), LVBench (Wang et al., 2024b), MMVU (Zhao
+et al., 2025) and MME-VideoOCR (Shi et al., 2025). Specifically, we evaluate the model's performance on
+medical VQA across three established benchmarks: SLAKE (Liu et al., 2021), PMC-VQA (Zhang et al.,
+2023), and MedXpertQA-MM (Zuo et al., 2025). This assessment is designed to demonstrate the model's
+comprehensive clinical reasoning capabilities and its potential utility as a reliable healthcare AI assistant.
+
+Audio-Visual Video→Text We evaluate our model's audio-visual understanding capabilities from mul-
+tiple perspectives. For text-query evaluation, we use DailyOmni (Zhou et al., 2025b), WorldSense (Hong
+
+9
+
+    et al., 2025), AVUT (Yang et al., 2025b), AV-SpeakerBench (Nguyen et al., 2025), and VideoMME (Fu et al.,
+    2025). To assess the model's ability in real-world audio-visual interactive scenarios, we use Qualcomm
+    IVD (Pourreza et al., 2025) as the benchmark for audio-query-based evaluation. Beyond understanding,
+    we also evaluate the model's captioning capability on OmniCloze (Ma et al., 2025b) and its tool-use ability
+    on OmniGAIA (Li et al., 2026).
+
+    5.1.1 Performance of Text→Text
+    We compare Qwen3.5-Omni-Plus and Qwen3.5-Omni-Flash with Qwen3.5-Plus-Instruct. As shown in
+    Table 4, Qwen3.5-Omni-Plus demonstrates text capabilities that are on par with its text-only counterpart
+    across multiple dimensions, including knowledge, instruction following, long-context understanding,
+    STEM, reasoning, and general agent tasks, highlighting its strong language ability. In particular, Qwen3.5-
+    Omni 's instruction-following performance is slightly better than the baseline. We believe that OPD and
+    interaction-aligned RL have a positive effect on improving the instruction-following capabilities of an
+    omni-model LLM.
+
+    Table 4: Text → Text performance of Qwen3.5-Omni and Qwen3.5-Plus-Instruct. The highest scores
+    are shown in bold.
+                  Datasets    Qwen3.5-Plus-Instruct  Qwen3.5-Omni-Flash    Qwen3.5-Omni-Plus
+                                          Knowledge
+          MMLU-Pro                86.8                      79.9                 85.9
+          MMLU-Redux              94.3                      90.0                 94.2
+          SuperGPQA               67.4                      54.9                 66.4
+          C-Eval                  92.3                      86.0                 92.0
+                                      Instruction Following
+          IFEval                  89.7                      85.2                 89.7
+          IFBench                 51.1                      38.4                 52.6
+                                          Long Context
+          AA-LCR                  62.0                      46.0                 57.0
+          LongBench v2            60.2                      46.4                 59.6
+  STEM
+          GPQA                    85.9                      76.4                 83.9
+Reasoning
+          LiveCodeBench v6        67.1                      56.6                 65.6
+          HMMT Nov 25             86.2                      59.0                 84.4
+          IMOAnswerBench          68.3                      51.5                 65.5
+                                          General Agent
+          BFCL-V4                 66.1                      55.3                 63.3
+          TAU2Bench               82.7                      78.0                 81.0
+
+    5.1.2 Performance of Audio→Text
+    In Table 5, we compare Qwen3.5-Omni with Gemini-3.1 Pro in terms of audio-to-text performance.
+    Compared to Gemini-3.1 Pro, Qwen3.5-Omni exhibits superior performance on MMAU, MMSU, RUL-
+    MuchoMusic, and SongFormBench, while achieving comparable results on MMAR, demonstrating its
+    strong comprehension capabilities across multiple audio domains. Regarding end-to-end speech dialogue,
+    Qwen3.5-Omni significantly outperforms Gemini-3.1 Pro on VoiceBench and matches its performance on
+    other benchmarks, further validating Qwen3.5-Omni 's robust capabilities in end-to-end voice interaction.
+    For S2TT and ASR, Qwen3.5-Omni consistently outperforms Gemini-3.1 Pro, underscoring its superior
+    translation and speech recognition performance across diverse languages, dialects, and domains.
+
+    5.1.3 Performance of Vision → Text
+    To comprehensively evaluate vision-to-text capabilities, we compare Qwen3.5-Omni-Flash and Qwen3.5-
+    Omni-Plus with Qwen3.5-Plus-Instruct. As shown in Table 6, Qwen3.5-Omni-Plus achieves performance
+    comparable to that of Qwen3.5-Plus-Instruct, while demonstrating stronger results on video understand-
+    ing tasks involving both short and long videos. These findings highlight the strong dynamic visual
+
+   10
+
+Table 5: Audio benchmark comparison across Gemini-3.1 Pro, Qwen3.5-Omni-Flash, and Qwen3.5-
+Omni-Plus. For most benchmarks, higher is better. For ASR benchmarks, lower WER is better. Best
+results are shown in bold.
+
+Datasets                                     Gemini-3.1 Pro     Qwen3.5-Omni-Flash   Qwen3.5-Omni-Plus
+    Audio Understanding (↑)
+MMAU                                              81.1                 80.4                82.2
+MMAR                                              83.7                 74.0                80.0
+MMSU                                              81.3                 72.2                82.8
+RUL-MuchoMusic                                    59.6                 60.5                72.4
+SongFormBench-HarmonixSet(acc|hr.5f|hr3f)a 75.6 | 46.8 | 77.9   80.6 | 67.8 | 83.4  81.1 | 72.9 | 85.3
+SongFormBench-CN(acc|hr.5f|hr3f)a          78.1 | 43.2 | 71.9   86.7 | 66.4 | 84.6  87.1 | 65.7 | 84.2
+                                           Dialogue (↑)
+VoiceBench                                        88.9                 87.8                93.1
+URO-Bench-pro(U|R|O)    b                  69.1 | 84.0 | 99.2   64.1 | 83.8 | 98.7  66.3 | 86.3 | 99.8
+SpeechRole                                        124.2                119.8               123.5
+WildSpeech-Bench                                  76.3                 72.2                75.4
+                                           S2TT (↑)
+Fleursxx↔zh (top59)  c                            29.5                 26.9                30.2
+Fleursxx↔en (top59)  c                            34.6                 32.0                35.4
+Fleursxx↔zh/en (top59)    c                       32.1                 29.4                32.8
+                                                     ASR (WER↓)
+Fleurs(top60)                                     7.32                 10.75               6.55
+CV15(zh|yue|zh-tw)                         8.59 | 13.40 | 6.78  4.25 | 3.45 | 2.68  3.46 | 1.95 | 2.27
+CV15(en)                                          8.73                 5.90                4.83
+Librispeech(clean|other)                       3.36 | 4.41          1.30 | 2.43         1.11 | 2.23
+Weneetspeech(net|meeting)                     11.53 | 14.21         4.41 | 5.51         4.30 | 5.84
+Kespeech                                          23.67                4.47                3.46
+MIR-1K(vocal-only)   d                            8.76                 4.94                4.56
+Opencpop                                          6.83                 1.11                1.49
+a SongFormBench: We use a unified prompt defining an SRT-like output timestamp format and a closed vocabulary
+for evaluation. The vocabulary follows the SongForm-HX-8Class specified in the official codebase.
+b URO-Bench-Pro: We use the pro track of URO-Bench and denote the three evaluation dimensions as follows: U for
+Understanding, R for Reasoning, and O for Oral Conversation. We use GenStyle-en, GenStyle-zh, Multilingual
+tasks for oral dimension.
+c Fleurs: The top59 languages are English, Chinese, Cantonese, Korean, Japanese, Vietnamese, Thai, Malay, German,
+Russian, Italian, French, Spanish, Portuguese, Dutch, Indonesian, Turkish, Arabic, Polish, Hindi, Urdu, Filipino,
+Persian, Czech, Greek, Swedish, Hebrew, Danish, Finnish, Norwegian, Icelandic, Bengali, Punjabi, Javanese, Marathi,
+Swahili, Ukrainian, Gujarati, Kannada, Azerbaijani, Malayalam, Cebuano, Romanian, Hungarian, Bulgarian,
+Belarusian, Catalan, Tamil, Croatian, Bosnian, Slovak, Galician, Kyrgyz, Macedonian, Slovenian, Latvian, Estonian,
+and Asturian; compared with the top60 list, Afrikaans is excluded because the Fleurs S2TT test set does not cover
+this language.
+d MIR-1K: Transcription is converted into Simplified Chinese.
+
+perception ability of our model in real-world scenarios and suggest the effectiveness of joint video-audio
+training paradigms. Furthermore, we posit that audio-visual streams constitute the most naturalistic
+representation of real-world phenomena, wherein visual and auditory modalities are intrinsically coupled
+rather than independently processed.
+5.1.4 Performance of Audio-Visual Video→Text
+We compare Qwen3.5-Omni and Gemini-3.1 Pro across a diverse range of audio-visual tasks, as shown in
+Table 7. For general understanding, Qwen3.5-Omni achieves state-of-the-art performance on DailyOmni
+and obtains comparable results on AVUT. Our model also surpasses Gemini-3.1-Pro by a substantial
+margin on Qualcomm IVD, demonstrating its effectiveness in real-world audio-visual interactive sce-
+narios. Moreover, our model shows strong performance on captioning tasks. It can provide detailed
+audio, visual, and audio-visual captions. In this version, we also enhance the model's tool-use capability,
+achieving 57.2% on OmniGAIA.
+
+
+
+
+
+
+                                           11
+
+Table 6: Vision → Text performance of Qwen3.5-Omni and Qwen3.5-Plus-Instruct. The highest scores
+are shown in bold.
+    Datasets      Qwen3.5-Plus-Instruct    Qwen3.5-Omni-Flash    Qwen3.5-Omni-Plus
+                              STEM and Puzzle
+    MMMU                  81.0                    76.9                 80.1
+    MMMU-Pro              73.8                    68.2                 73.9
+    MathVision            73.6                    65.4                 73.0
+    Mathvista (mini)      86.9                    82.9                 86.1
+    DynaMath              84.2                    79.3                 83.8
+    ZEROBench               6                       1                    5
+    ZEROBench_sub         31.1                    26.0                 34.4
+                              General VQA
+    RealWorldQA           79.1                    77.5                 84.1
+    MMStar                80.3                    75.7                 79.4
+    MMBenchEN-DEV-v1.1    93.8                    88.8                 92.8
+    SimpleVQA             66.1                    54.4                 65.3
+        Text Recognition and Document Understanding
+    CharXiv (RQ)          74.2                    64.4                 72.5
+    CC-OCR                83.0                    80.8                 83.4
+    AI2D_TEST             92.1                    89.0                 91.2
+    MMLongBench-Doc       59.7                    53.6                 57.5
+    OCRBench              91.4                    89.1                 91.3
+                              Spatial Intelligence
+    ERQA                  53.8                    50.0                 54.8
+    CountBench            95.1                    88.2                 95.1
+    RefCOCO(avg)          95.2                    92.6                 95.0
+    ODInW13               50.3                    46.8                 49.5
+    EmbSpatialBench       83.4                    82.7                 85.4
+                              Video Understanding
+    VideoMME(w/o sub.)    81.0                    77.0                 81.9
+    MLVU(M-Avg)           85.1                    81.9                 86.8
+    MVBench               76.7                    70.8                 79.0
+    LVBench               68.6                    65.7                 71.2
+    MMVU                  67.1                    62.7                 67.5
+    MME-VideoOCR          74.2                    70.5                 77.0
+                              Medical VQA
+    SLAKE                 82.8                    73.1                 84.7
+    PMC-VQA               62.4                    58.7                 62.7
+    MedXpertQA-MM         55.3                    44.8                 54.7
+
+5.2 Evaluation of X→Speech
+
+In this section, we evaluate the speech generation capability of Qwen3.5-Omni. Our evaluation mainly
+focuses on speech generation conditioned on text and prompt speech, following a zero-shot text-to-speech
+(TTS) setting. We study the model from four perspectives:
+
+    • Zero-Shot Speech Generation: We evaluate content consistency, measured by WER, on SEED (Anas-
+    tassiou et al., 2024).
+           • Multilingual Speech Generation: We evaluate both content consistency and speaker similarity
+    in zero-shot multilingual speech generation on the TTS multilingual test set (Zhang et al., 2025a)
+    and an internal multilingual test set built on FLEURS (Conneau et al., 2022).
+           • Cross-Lingual Speech Generation: We evaluate content consistency in zero-shot cross-lingual
+    speech generation on CV3-Eval (Du et al., 2025).
+          • Custom-Voice Speech Generation: We evaluate the stability of our speaker fine-tuned model on
+    the TTS multilingual test set (Zhang et al., 2025a) and our internal multilingual test set.
+
+
+                          12
+
+    Table 7: Audio-Visual → Text performance of Qwen3.5-Omni and Gemini-3.1-Pro. The highest scores
+    are shown in bold.
+
+    Datasets                 Gemini-3.1 Pro    Qwen3.5-Omni-Flash    Qwen3.5-Omni-Plus
+                                               Text Query QA
+    DailyOmni                 82.7                    81.8                 84.6
+    WorldSense                65.5                    57.9                 62.8
+    AVUT                      85.6                    81.4                 85.0
+    AV-SpeakerBench     a     75.1                    65.2                 71.3
+    VideoMMEw/ audio          89.0                    79.3                 83.7
+ Audio Query QA
+    Qualcomm IVD              66.2                    66.3                 68.5
+     Caption
+    Omni-Cloze                57.2                    63.0                 64.8
+Agent (Tool Use)
+    OmniGAIAb                 68.9                    33.9                 57.2
+          a VideoMME is evaluated with use_audio_in_video=True.
+          b OmniGAIA is evaluated without a thinking prompt and without <answer> formatting. All results are
+          evaluated using DeepSeek-V3.2-Thinking as the judge.
+
+    5.2.1 Evaluation of Zero-Shot Speech Generation
+    We compare Qwen3.5-Omni with state-of-the-art zero-shot TTS systems. As shown in Table 8, Qwen3.5-
+    Omni achieves highly competitive performance on the SEED-TTS benchmark, demonstrating strong
+    content fidelity in zero-shot speech generation. These results reflect the effectiveness of our pretraining
+    and continual pretraining pipeline in building robust speech generation and context modeling capabilities.
+    Moreover, after RLHF optimization, Qwen3.5-Omni further improves generation stability and naturalness,
+    achieving the best performance on the test-en split with a WER of 1.26.
+
+    Table 8: Zero-shot speech generation on the SEED-TTS test set. Performance is measured by Word Error
+    Rate (WER, ↓), where lower is better. The best results are highlighted in bold.
+
+              Datasets       Model                                         Performance
+                                  Content Consistency
+                             Seed-TTSICL (Anastassiou et al., 2024)        1.11 | 2.24
+                             Seed-TTSRL (Anastassiou et al., 2024)         1.00 | 1.94
+                             MaskGCT (Wang et al., 2024c)                  2.27 | 2.62
+                             E2 TTS (Eskimez et al., 2024)                 1.97 | 2.19
+      SEED                   F5-TTS (Chen et al., 2024c)                   1.56 | 1.83
+test-zh | test-en            Spark TTS (Wang et al., 2025b)                1.20 | 1.98
+                             CosyVoice 2 (Du et al., 2024b)                1.45 | 2.57
+                             CosyVoice 3 (Du et al., 2025)                 0.71 | 1.45
+                             MiniMax-Speech (Zhang et al., 2025a)          0.83 | 1.65
+                             MiMo-Audio-7B-Instruct (Zhang et al., 2025c) 1.96 | 5.37
+                             Qwen2.5-Omni-7B (Xu et al., 2025a)            1.42 | 2.33
+                             Qwen3-Omni-30B-A3B (Xu et al., 2025b)         1.07 | 1.39
+                             Qwen3.5-Omni-Plus                             0.99 | 1.26
+
+    5.2.2 Evaluation of Multilingual Speech Generation
+    Qwen3.5-Omni supports speech generation in 29 languages. We compare its multilingual speech gen-
+    eration performance with two strong commercial systems, MiniMax-Speech and ElevenLabs. For the
+    internal multilingual test set, we use GPT-4o-transcribe-2025-03-20 for automatic speech recognition.
+    As shown in Table 9 and Table 10, Qwen3.5-Omni achieves the lowest WER in 22 out of 29 evaluated
+    languages on the multilingual test sets, outperforming the comparison systems by a clear margin in
+    most cases. On the remaining languages, Qwen3.5-Omni remains competitive with state-of-the-art
+    systems. In addition to content consistency, Qwen3.5-Omni also shows strong voice cloning fidelity. It
+    obtains the highest speaker similarity scores in the majority of evaluated languages and consistently
+
+       13
+
+    Table 9: Multilingual speech generation on the TTS multilingual test set. Performance is measured by
+    Word Error Rate (WER, ↓) for content consistency and cosine similarity (SIM, ↑) for speaker similarity.
+    The best results are highlighted in bold.
+
+    Language     Content Consistency             Speaker Similarity
+        Qwen3.5-Omni-Plus MiniMax ElevenLabs Qwen3.5-Omni-Plus MiniMax ElevenLabs
+    Chinese      0.695   2.252  16.026       0.800   0.780         0.677
+    English      0.631   2.164   0.756       0.833   0.756         0.613
+    German       0.447   1.906   0.572       0.757   0.733         0.614
+    Italian      0.503   1.543   1.743       0.785   0.699         0.679
+    Portuguese   1.221   1.877   1.331       0.792   0.805         0.711
+    Spanish      0.862   1.029   1.084       0.797   0.762         0.615
+    Japanese     3.479   3.519  10.046       0.788   0.776         0.738
+    Korean       1.458   1.747   1.865       0.747   0.776         0.700
+    French       2.430   4.099   5.216       0.730   0.628         0.535
+    Russian      3.182   4.281   3.878       0.790   0.761         0.676
+    Thai         2.170   2.701  73.936       0.788   0.800         0.588
+    Indonesian   0.823   1.237   1.059       0.780   0.729         0.660
+    Arabic       2.602   1.665   1.666       0.745   0.736         0.706
+    Vietnamese   1.143   0.880  73.415       0.767   0.743         0.369
+    Turkish      0.938   1.520   0.699       0.747   0.779         0.596
+    Finnish      2.784   4.666   2.964       0.859   0.835         0.759
+    Polish       1.427   1.415   0.766       0.839   0.802         0.729
+    Hindi        6.444   6.962   5.827       0.797   0.818         0.730
+    Dutch        1.238   1.143   0.803       0.762   0.738         0.680
+    Czech        2.929   3.875   2.108       0.802   0.796         0.685
+
+
+    outperforms both MiniMax-Speech and ElevenLabs overall. These results suggest that Qwen3.5-Omni
+    effectively preserves speaker characteristics, such as timbre and prosodic style, while maintaining robust
+    multilingual speech generation quality.
+    Furthermore, in Table 10, we report results on our internal multilingual test set, covering an additional
+    9 languages. Qwen3.5-Omni continues to achieve strong performance across all evaluated languages,
+    indicating that its multilingual speech generation ability generalizes well beyond the public benchmark
+    languages.
+
+    Table 10: Multilingual speech generation on the internal multilingual test set. Performance is measured
+    by Word Error Rate (WER, ↓) for content consistency and cosine similarity (SIM, ↑) for speaker similarity.
+    The best results are highlighted in bold.
+
+    Language     Content Consistency         Speaker Similarity
+                 Qwen3.5-Omni-Plus Ground Truth Qwen3.5-Omni-Plus Ground Truth
+    Urdu          14.819  17.822             0.775             -
+    Tagalog      5.193     6.885             0.870             -
+    Swedish      3.760     4.813             0.822             -
+    Danish       3.636     6.403             0.775             -
+    Hebrew       7.860    16.178             0.760             -
+    Icelandic     10.244  11.451             0.764             -
+    Malay        3.142     4.628             0.794             -
+    Norwegian    3.613     4.442             0.825             -
+    Persian       11.113  14.469             0.800             -
+
+
+5.2.3 Evaluation of Cross-Lingual Speech Generation
+Beyond multilingual voice cloning, Qwen3.5-Omni also supports cross-lingual voice cloning, where the
+model is required to preserve speaker identity while generating speech in a different target language. We
+evaluate this capability on the Cross-Lingual benchmark and compare against the CosyVoice series as
+well as Qwen3-Omni-30B-A3B.
+In Table 11, we report the mixed error rate (WER for English and CER for the other languages) across
+different source-target language pairs. Overall, Qwen3.5-Omni achieves the best performance in 10 out
+of 12 evaluated directions and sets a new state of the art on most English-, Japanese-, and Korean-targeted
+pairs. In particular, for zh-to-ko, Qwen3.5-Omni reduces the error rate from 14.4 to 4.03 compared with
+
+
+                                             14
+
+    Table 11: Cross-lingual speech generation on the Cross-Lingual benchmark. Performance is measured
+    by mixed error rate (WER for English and CER for the other languages, ↓). The best results are highlighted
+    in bold.
+
+    Language      Qwen3.5-Omni-Plus Qwen3-Omni-30B-A3B CosyVoice3 CosyVoice2
+    English-to-Chinese      4.86     5.37     5.09     13.5
+    Japanese-to-Chinese     3.55     3.32     3.05     48.1
+    Korean-to-Chinese       0.84     0.99     1.06     7.70
+    Chinese-to-English      2.18     2.76     2.98     6.47
+    Japanese-to-English     2.18     3.31     4.20     17.1
+    Korean-to-English       2.51     3.34     4.19     11.2
+    Chinese-to-Japanese     5.92     8.29     7.08     13.1
+    English-to-Japanese     5.12     7.53     6.80     14.9
+    Korean-to-Japanese      2.16     4.24     3.93     5.86
+    Chinese-to-Korean       4.03     5.13     14.4     24.8
+    English-to-Korean       3.72     4.96     5.87     21.9
+    Japanese-to-Korean      5.12     6.23     7.92     21.5
+
+
+CosyVoice3, corresponding to an approximately 72% relative reduction. Qwen3.5-Omni also performs
+strongly on commonly used language pairs such as zh-to-en and en-to-zh, indicating better content
+consistency under cross-lingual generation. These results demonstrate that Qwen3.5-Omni generalizes
+effectively across language boundaries while preserving target linguistic accuracy.
+5.2.4 Evaluation of Custom-Voice Speech Generation
+We evaluate the custom-voice speech generation capability of Qwen3.5-Omni in multilingual set-
+tings. We compare Qwen3.5-Omni with several strong commercial systems accessed through their
+official APIs in March 2026, including ElevenLabs Multilingual v2 (9YHcvj6GT2YYXdXww), Gemini-
+2.5 Pro-Preview-TTS (Achernar), GPT-Audio-2025-08-28 (Alloy), and MiniMax-Speech-2.8-HD (En-
+glish_expressive_narrator).
+
+
+
+
+
+
+
+
+
+
+                            15
+
+Table 12: Custom-voice multilingual speech generation on the multilingual test set. Performance is
+measured by Word Error Rate (WER, ↓). The best results are highlighted in bold.
+
+Language  Qwen3.5-Omni-Plus  ElevenLabs  Gemini-2.5 Pro GPT-Audio MiniMax
+Chinese         0.785           3.801         1.890     0.829     0.786
+English         0.839           1.126         0.953     1.050     1.429
+German          0.182           0.500         0.509     0.558     1.581
+Italian         0.458           0.513         0.991     0.769     1.063
+Portuguese      1.581           1.109         2.050     1.506     1.240
+Spanish         0.768           0.520         0.891     0.936     0.691
+Japanese        3.306          11.685         4.420     4.317     4.254
+Korean          1.309           3.981         4.110     3.999     3.635
+French          2.724           2.574         3.284     2.809     3.439
+Russian         4.723           4.324         3.858     4.346     3.529
+Thai            1.653          114.813        2.539     4.430     1.811
+Indonesian      1.596           6.094         1.498     2.362     1.585
+Arabic          3.183           5.400         5.525     5.326     3.309
+Vietnamese      1.320          82.849         1.699     1.854     1.058
+Turkish         1.309           0.551         2.237     1.389     0.652
+Finnish         4.039           2.522         5.331     3.270     2.939
+Polish          1.462           0.733         1.622     1.737     0.833
+Hindi           6.776           6.388         6.596     7.191     6.146
+Dutch           1.135           1.005         0.973     1.561     1.406
+Czech           3.769           1.916         3.380     2.859     1.766
+Urdu           14.916          12.970        14.141    13.362    24.151
+Tagalog         5.090           5.473         6.784     5.352     5.674
+Swedish         3.588           3.132         3.196     2.898     2.833
+Danish          7.183           2.604         3.876     3.846     4.951
+Hebrew          7.680          102.018        4.459     5.328     8.161
+Icelandic      10.322          25.110         6.348     9.648    33.431
+Malay           3.738           6.448         3.731     3.406     3.955
+Norwegian       5.576           7.351         4.304     3.400     9.492
+Persian        12.140          20.564        12.620    13.202    12.722
+
+As shown in Table 12, although Qwen3.5-Omni is fine-tuned only on monolingual data, it demonstrates
+strong cross-lingual generalization in custom-voice speech generation. The model is able to transfer the
+target speaker characteristics to all 29 evaluated languages while maintaining stable generation quality.
+Overall, Qwen3.5-Omni achieves the best WER in 10 languages and remains competitive in many others.
+In particular, it shows clear advantages in several challenging languages, including Japanese (3.306) and
+Korean (1.309), indicating strong intelligibility under cross-lingual voice transfer. These results suggest
+that Qwen3.5-Omni can generate custom-voice speech with robust linguistic fidelity across a wide range
+of languages.
+
+6 Conclusion
+
+In this work, we present Qwen3.5-Omni, a fully omnimodal large language model that unifies under-
+standing, reasoning, generation, and action across text, images, audio, and audio-visual inputs. Built
+on the Thinker-Talker framework, Qwen3.5-Omni introduces efficient Hybrid-Attention MoE architec-
+tures, 256k long-context modeling, improved streaming speech generation with multi-codebook codec
+prediction and ARIA, and substantially expanded multilingual speech support. These advances enable
+three key capabilities: controllable audio-visual captioning, comprehensive real-time interaction, and
+native omnimodal agentic behavior through autonomous tool use and audio-visual code generation.
+Empirically, Qwen3.5-Omni achieves state-of-the-art or highly competitive performance across a broad
+range of audio and audio-visual benchmarks, while maintaining the strong text and vision capabilities
+of same-scale Qwen models. These results suggest that scaling native omnimodal training can produce
+unified systems that not only perceive and reason across modalities, but also interact and act in real time.
+We hope Qwen3.5-Omni provides a strong foundation for future research on general-purpose omnimodal
+agents.
+
+
+
+
+
+                             16
+
+References
+     Philip Anastassiou, Jiawei Chen, Jitong Chen, Yuanzhe Chen, Zhuo Chen, Ziyi Chen, Jian Cong, Lelai
+Deng, Chuang Ding, Lu Gao, et al. Seed-tts: A family of high-quality versatile speech generation
+models. arXiv preprint arXiv:2406.02430, 2024.
+Anthropic. Introducing Claude, 2023a. URL https://www.anthropic.com/index/introducing-claude.
+       Anthropic. Claude 2. Technical report, Anthropic, 2023b. URL https://www-files.anthropic.com/pro
+duction/images/Model-Card-Claude-2.pdf.
+  Anthropic. The Claude 3 model family: Opus, Sonnet, Haiku. Technical report, Anthropic, AI, 2024. URL
+https://www-cdn.anthropic.com/de8ba9b01c9ab7cbabf5c33b80b7bbc618857627/Model_Card_Claude_
+3.pdf.
+        Rosana Ardila, Megan Branson, Kelly Davis, Michael Kohler, Josh Meyer, Michael Henretty, Reuben
+Morais, Lindsay Saunders, Francis M. Tyers, and Gregor Weber. Common voice: A massively-
+multilingual speech corpus. In Nicoletta Calzolari, Frédéric Béchet, Philippe Blache, Khalid Choukri,
+Christopher Cieri, Thierry Declerck, Sara Goggi, Hitoshi Isahara, Bente Maegaard, Joseph Mariani,
+Hélène Mazo, Asunción Moreno, Jan Odijk, and Stelios Piperidis (eds.), Proceedings of The 12th Language
+Resources and Evaluation Conference, LREC 2020, Marseille, France, May 11-16, 2020, pp. 4218-4222.
+European Language Resources Association, 2020. URL https://aclanthology.org/2020.lrec-1.520/.
+  Jinze Bai, Shuai Bai, Yunfei Chu, Zeyu Cui, Kai Dang, Xiaodong Deng, Yang Fan, Wenbin Ge, Yu Han, Fei
+Huang, Binyuan Hui, Luo Ji, Mei Li, Junyang Lin, Runji Lin, Dayiheng Liu, Gao Liu, Chengqiang Lu,
+Keming Lu, Jianxin Ma, Rui Men, Xingzhang Ren, Xuancheng Ren, Chuanqi Tan, Sinan Tan, Jianhong
+Tu, Peng Wang, Shijie Wang, Wei Wang, Shengguang Wu, Benfeng Xu, Jin Xu, An Yang, Hao Yang,
+Jian Yang, Shusheng Yang, Yang Yao, Bowen Yu, Hongyi Yuan, Zheng Yuan, Jianwei Zhang, Xingxuan
+Zhang, Yichang Zhang, Zhenru Zhang, Chang Zhou, Jingren Zhou, Xiaohuan Zhou, and Tianhang
+Zhu. Qwen technical report. CoRR, abs/2309.16609, 2023a.
+       Jinze Bai, Shuai Bai, Shusheng Yang, Shijie Wang, Sinan Tan, Peng Wang, Junyang Lin, Chang Zhou,
+and Jingren Zhou. Qwen-VL: A frontier large vision-language model with versatile abilities. CoRR,
+abs/2308.12966, 2023b.
+     Shuai Bai, Keqin Chen, Xuejing Liu, Jialin Wang, Wenbin Ge, Sibo Song, Kai Dang, Peng Wang, Shijie
+Wang, Jun Tang, et al. Qwen2. 5-vl technical report. arXiv preprint arXiv:2502.13923, 2025a.
+    Yushi Bai, Shangqing Tu, Jiajie Zhang, Hao Peng, Xiaozhi Wang, Xin Lv, Shulin Cao, Jiazheng Xu, Lei
+Hou, Yuxiao Dong, Jie Tang, and Juanzi Li. Longbench v2: Towards deeper understanding and
+reasoning on realistic long-context multitasks. In Wanxiang Che, Joyce Nabende, Ekaterina Shutova,
+and Mohammad Taher Pilehvar (eds.), Proceedings of the 63rd Annual Meeting of the Association for
+Computational Linguistics (Volume 1: Long Papers), ACL 2025, Vienna, Austria, July 27 - August 1, 2025, pp.
+3639-3664. Association for Computational Linguistics, 2025b. URL https://aclanthology.org/2025.
+acl-long.183/.
+      Mislav Balunovi´c, Jasper Dekoninck, Ivo Petrov, Nikola Jovanovi´c, and Martin Vechev. Matharena:
+Evaluating llms on uncontaminated math competitions, February 2025. URL https://matharena.ai/.
+Victor Barres, Honghua Dong, Soham Ray, Xujie Si, and Karthik Narasimhan. τ2         -bench: Evaluating
+conversational agents in a dual-control environment, 2025. URL https://arxiv.org/abs/2506.07982.
+       Tom Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared D Kaplan, Prafulla Dhariwal, Arvind
+Neelakantan, Pranav Shyam, Girish Sastry, Amanda Askell, et al. Language models are few-shot
+learners. In NeurIPS, 2020.
+       Lin Chen, Jinsong Li, Xiaoyi Dong, Pan Zhang, Yuhang Zang, Zehui Chen, Haodong Duan, Jiaqi Wang,
+Yu Qiao, Dahua Lin, et al. Are we on the right way for evaluating large vision-language models?
+arXiv:2403.20330, 2024a.
+            Yiming Chen, Xianghu Yue, Chen Zhang, Xiaoxue Gao, Robby T Tan, and Haizhou Li. Voicebench:
+Benchmarking llm-based voice assistants. arXiv preprint arXiv:2410.17196, 2024b.
+     Yushen Chen, Zhikang Niu, Ziyang Ma, Keqi Deng, Chunhui Wang, Jian Zhao, Kai Yu, and Xie Chen. F5-
+tts: A fairytaler that fakes fluent and faithful speech with flow matching. arXiv preprint arXiv:2410.06885,
+2024c.
+
+
+
+17
+
+Xianfu Cheng, Wei Zhang, Shiwei Zhang, Jian Yang, Xiangyuan Guan, Xianjie Wu, Xiang Li, Ge Zhang,
+  Jiaheng Liu, Yuying Mai, Yutao Zeng, Zhoufutu Wen, Ke Jin, Baorui Wang, Weixiao Zhou, Yunhong
+  Lu, Tongliang Li, Wenhao Huang, and Zhoujun Li. Simplevqa: Multimodal factuality evaluation for
+  multimodal large language models. CoRR, abs/2502.13059, 2025.
+Yunfei Chu, Jin Xu, Xiaohuan Zhou, Qian Yang, Shiliang Zhang, Zhijie Yan, Chang Zhou, and Jingren
+  Zhou. Qwen-Audio: Advancing universal audio understanding via unified large-scale audio-language
+  models. CoRR, abs/2311.07919, 2023.
+Yunfei Chu, Jin Xu, Qian Yang, Haojie Wei, Xipin Wei, Zhifang Guo, Yichong Leng, Yuanjun Lv, Jinzheng
+  He, Junyang Lin, et al. Qwen2-audio technical report. arXiv preprint arXiv:2407.10759, 2024.
+Gheorghe Comanici, Eric Bieber, Mike Schaekermann, Ice Pasupat, Noveen Sachdeva, Inderjit Dhillon,
+  Marcel Blistein, Ori Ram, Dan Zhang, Evan Rosen, et al. Gemini 2.5: Pushing the frontier with
+  advanced reasoning, multimodality, long context, and next generation agentic capabilities. arXiv
+  preprint arXiv:2507.06261, 2025.
+Alexis Conneau, Min Ma, Simran Khanuja, Yu Zhang, Vera Axelrod, Siddharth Dalmia, Jason Riesa,
+  Clara Rivera, and Ankur Bapna. Fleurs: Few-shot learning evaluation of universal representations
+  of speech. 2022 IEEE Spoken Language Technology Workshop (SLT), pp. 798-805, 2022. URL https:
+  //api.semanticscholar.org/CorpusID:249062909.
+Mengfei Du, Binhao Wu, Zejun Li, Xuanjing Huang, and Zhongyu Wei. Embspatial-bench: Benchmark-
+  ing spatial understanding for embodied tasks with large vision-language models. In Lun-Wei Ku,
+  Andre Martins, and Vivek Srikumar (eds.), Proceedings of the 62nd Annual Meeting of the Association for
+  Computational Linguistics (Volume 2: Short Papers), ACL 2024, Bangkok, Thailand, August 11-16, 2024, pp.
+  346-355. Association for Computational Linguistics, 2024a.
+Zhihao Du, Yuxuan Wang, Qian Chen, Xian Shi, Xiang Lv, Tianyu Zhao, Zhifu Gao, Yexin Yang,
+  Changfeng Gao, Hui Wang, et al. Cosyvoice 2: Scalable streaming speech synthesis with large
+  language models. arXiv preprint arXiv:2412.10117, 2024b.
+Zhihao Du, Changfeng Gao, Yuxuan Wang, Fan Yu, Tianyu Zhao, Hao Wang, Xiang Lv, Hui Wang,
+  Chongjia Ni, Xian Shi, Keyu An, Guanrou Yang, Yabin Li, Yanni Chen, Zhifu Gao, Qian Chen, Yue
+  Gu, Mengzhe Chen, Yafeng Chen, Shiliang Zhang, Wen Wang, and Jieping Ye. Cosyvoice 3: Towards
+  in-the-wild speech generation via scaling-up and post-training. CoRR, abs/2505.17589, 2025.
+Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, Aiesha
+  Letman, Akhil Mathur, Alan Schelten, Amy Yang, Angela Fan, Anirudh Goyal, Anthony Hartshorn,
+  Aobo Yang, Archi Mitra, Archie Sravankumar, Artem Korenev, Arthur Hinsvark, Arun Rao, Aston
+  Zhang, Aurélien Rodriguez, Austen Gregerson, Ava Spataru, Baptiste Rozière, Bethany Biron, Binh
+  Tang, Bobbie Chern, Charlotte Caucheteux, Chaya Nayak, Chloe Bi, Chris Marra, Chris McConnell,
+  Christian Keller, Christophe Touret, Chunyang Wu, Corinne Wong, Cristian Canton Ferrer, Cyrus
+  Nikolaidis, Damien Allonsius, Daniel Song, Danielle Pintz, Danny Livshits, David Esiobu, Dhruv
+  Choudhary, Dhruv Mahajan, Diego Garcia-Olano, Diego Perino, Dieuwke Hupkes, Egor Lakomkin,
+  Ehab AlBadawy, Elina Lobanova, Emily Dinan, Eric Michael Smith, Filip Radenovic, Frank Zhang,
+  Gabriel Synnaeve, Gabrielle Lee, Georgia Lewis Anderson, Graeme Nail, Grégoire Mialon, Guan
+  Pang, Guillem Cucurell, Hailey Nguyen, Hannah Korevaar, Hu Xu, Hugo Touvron, Iliyan Zarov,
+  Imanol Arrieta Ibarra, Isabel M. Kloumann, Ishan Misra, Ivan Evtimov, Jade Copet, Jaewon Lee, Jan
+  Geffert, Jana Vranes, Jason Park, Jay Mahadeokar, Jeet Shah, Jelmer van der Linde, Jennifer Billock,
+  Jenny Hong, Jenya Lee, Jeremy Fu, Jianfeng Chi, Jianyu Huang, Jiawen Liu, Jie Wang, Jiecao Yu,
+  Joanna Bitton, Joe Spisak, Jongsoo Park, Joseph Rocca, Joshua Johnstun, Joshua Saxe, Junteng Jia,
+  Kalyan Vasuden Alwala, Kartikeya Upasani, Kate Plawiak, Ke Li, Kenneth Heafield, Kevin Stone, and
+  et al. The Llama 3 herd of models. CoRR, abs/2407.21783, 2024.
+Sefik Emre Eskimez, Xiaofei Wang, Manthan Thakker, Canrun Li, Chung-Hsien Tsai, Zhen Xiao, Hemin
+  Yang, Zirun Zhu, Min Tang, Xu Tan, et al. E2 tts: Embarrassingly easy fully non-autoregressive
+  zero-shot tts. In 2024 IEEE Spoken Language Technology Workshop (SLT), pp. 682-689. IEEE, 2024.
+Chaoyou Fu, Yuhan Dai, Yondong Luo, Lei Li, Shuhuai Ren, Renrui Zhang, Zihan Wang, Chenyu
+  Zhou, Yunhang Shen, Mengdan Zhang, et al. Video-mme: The first-ever comprehensive evaluation
+  benchmark of multi-modal llms in video analysis. arXiv:2405.21075, 2024.
+Chaoyou Fu, Yuhan Dai, Yongdong Luo, Lei Li, Shuhuai Ren, Renrui Zhang, Zihan Wang, Chenyu
+  Zhou, Yunhang Shen, Mengdan Zhang, et al. Video-mme: The first-ever comprehensive evaluation
+  benchmark of multi-modal llms in video analysis. In Proceedings of the IEEE/CVF conference on computer
+  vision and pattern recognition, pp. 24108-24118, 2025.
+
+        18
+
+      Aryo Pradipta Gema, Joshua Ong Jun Leang, Giwon Hong, Alessio Devoto, Alberto Carlo Maria Mancino,
+  Rohit Saxena, Xuanli He, Yu Zhao, Xiaotang Du, Mohammad Reza Ghasemi Madani, et al. Are we
+  done with mmlu? CoRR, abs/2406.04127, 2024.
+       Gemini Team. Gemini 1.5: Unlocking multimodal understanding across millions of tokens of context.
+  Technical report, Google, 2024. URL https://storage.googleapis.com/deepmind-media/gemini/gemi
+  ni_v1_5_report.pdf.
+      Tianrui Guan, Fuxiao Liu, Xiyang Wu, Ruiqi Xian, Zongxia Li, Xiaoyu Liu, Xijun Wang, Lichang Chen,
+  Furong Huang, Yaser Yacoob, Dinesh Manocha, and Tianyi Zhou. Hallusionbench: An advanced
+  diagnostic suite for entangled language hallucination and visual illusion in large vision-language
+  models. In IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2024, Seattle, WA,
+  USA, June 16-22, 2024, pp. 14375-14385. IEEE, 2024.
+    Chunbo Hao, Ruibin Yuan, Jixun Yao, Qixin Deng, Xinyi Bai, Wei Xue, and Lei Xie. Songformer: Scaling
+  music structure analysis with heterogeneous supervision, 2025. URL https://arxiv.org/abs/2510.0
+  2797.
+        Jack Hong, Shilin Yan, Jiayin Cai, Xiaolong Jiang, Yao Hu, and Weidi Xie. Worldsense: Evaluating
+  real-world omnimodal understanding for multimodal llms. CoRR, abs/2502.04326, 2025.
+     Chao-Ling Hsu and Jyh-Shing Roger Jang. On the improvement of singing voice separation for monaural
+  recordings using the MIR-1K dataset. IEEE Trans. Speech Audio Process., 18(2):310-319, 2010. doi:
+  10.1109/TASL.2009.2026503. URL https://doi.org/10.1109/TASL.2009.2026503.
+             Yuzhen Huang, Yuzhuo Bai, Zhihao Zhu, Junlei Zhang, Jinghan Zhang, Tangjun Su, Junteng Liu,
+  Chuancheng Lv, Yikai Zhang, Jiayi Lei, Yao Fu, Maosong Sun, and Junxian He. C-Eval: A multi-
+  level multi-discipline chinese evaluation suite for foundation models. In NeurIPS, 2023.
+        Naman Jain, King Han, Alex Gu, Wen-Ding Li, Fanjia Yan, Tianjun Zhang, Sida Wang, Armando Solar-
+  Lezama, Koushik Sen, and Ion Stoica. LiveCodeBench: Holistic and contamination free evaluation of
+  large language models for code. CoRR, abs/2403.07974, 2024.
+       Changhao Jiang, Jiajun Sun, Yifei Cao, Jiabao Zhuang, Hui Li, Xiaoran Fan, Ming Zhang, Junjie Ye,
+  Shihan Dou, Zhiheng Xi, et al. Speechrole: A large-scale dataset and benchmark for evaluating speech
+  role-playing agents. arXiv preprint arXiv:2508.02013, 2025.
+      Sahar Kazemzadeh, Vicente Ordonez, Mark Matten, and Tamara Berg. Referitgame: Referring to objects
+  in photographs of natural scenes. In EMNLP, 2014.
+      Aniruddha Kembhavi, Mike Salvato, Eric Kolve, Minjoon Seo, Hannaneh Hajishirzi, and Ali Farhadi. A
+  diagram is worth a dozen images. In ECCV, 2016.
+Junnan Li, Dongxu Li, Silvio Savarese, and Steven Hoi. Blip-2: Bootstrapping language-image pre-training
+  with frozen image encoders and large language models. arXiv:2301.12597, 2023.
+   Kunchang Li, Yali Wang, Yinan He, Yizhuo Li, Yi Wang, Yi Liu, Zun Wang, Jilan Xu, Guo Chen, Ping Luo,
+  et al. Mvbench: A comprehensive multi-modal video understanding benchmark. In CVPR, 2024.
+        Liunian Harold Li, Pengchuan Zhang, Haotian Zhang, Jianwei Yang, Chunyuan Li, Yiwu Zhong, Lijuan
+  Wang, Lu Yuan, Lei Zhang, Jenq-Neng Hwang, Kai-Wei Chang, and Jianfeng Gao. Grounded language-
+  image pre-training. In CVPR, pp. 10955-10965. IEEE, 2022.
+    Xiaoxi Li, Wenxiang Jiao, Jiarui Jin, Shijian Wang, Guanting Dong, Jiajie Jin, Hao Wang, Yinuo Wang,
+  Ji-Rong Wen, Yuan Lu, et al. Omnigaia: Towards native omni-modal ai agents. arXiv preprint
+  arXiv:2602.22897, 2026.
+          Bo Liu, Li-Ming Zhan, Li Xu, Lin Ma, Yan Yang, and Xiao-Ming Wu. Slake: A semantically-labeled
+  knowledge-enhanced dataset for medical visual question answering. In 18th IEEE International Sympo-
+  sium on Biomedical Imaging, ISBI 2021, Nice, France, April 13-16, 2021, pp. 1650-1654. IEEE, 2021.
+   Haotian Liu, Chunyuan Li, Qingyang Wu, and Yong Jae Lee. Visual instruction tuning. arXiv:2304.08485,
+  2023.
+        Yuliang Liu, Zhang Li, Mingxin Huang, Biao Yang, Wenwen Yu, Chunyuan Li, Xu-Cheng Yin, Cheng-Lin
+  Liu, Lianwen Jin, and Xiang Bai. Ocrbench: on the hidden mystery of ocr in large multimodal models.
+  Science China Information Sciences, 67(12), December 2024. ISSN 1869-1919. doi: 10.1007/s11432-024-423
+  5-6. URL http://dx.doi.org/10.1007/s11432-024-4235-6.
+
+
+  19
+
+    Pan Lu, Hritik Bansal, Tony Xia, Jiacheng Liu, Chunyuan Li, Hannaneh Hajishirzi, Hao Cheng, Kai-Wei
+Chang, Michel Galley, and Jianfeng Gao. Mathvista: Evaluating mathematical reasoning of foundation
+models in visual contexts. In ICLR, 2024.
+       Thang Luong, Dawsen Hwang, Hoang H. Nguyen, Golnaz Ghiasi, Yuri Chervonyi, Insuk Seo, Junsu Kim,
+Garrett Bingham, Jonathan Lee, Swaroop Mishra, Alex Zhai, Clara Huiyi Hu, Henryk Michalewski,
+Jimin Kim, Jeonghyun Ahn, Junhwi Bae, Xingyou Song, Trieu H. Trinh, Quoc V. Le, and Junehyuk Jung.
+Towards robust mathematical reasoning. In Proceedings of the 2025 Conference on Empirical Methods in
+Natural Language Processing, 2025. URL https://aclanthology.org/2025.emnlp-main.1794/.
+        Yubo Ma, Yuhang Zang, Liangyu Chen, Meiqi Chen, Yizhu Jiao, Xinze Li, Xinyuan Lu, Ziyu Liu, Yan
+Ma, Xiaoyi Dong, Pan Zhang, Liangming Pan, Yu-Gang Jiang, Jiaqi Wang, Yixin Cao, and Aixin Sun.
+MMLONGBENCH-DOC: benchmarking long-context document understanding with visualizations. In
+Amir Globersons, Lester Mackey, Danielle Belgrave, Angela Fan, Ulrich Paquet, Jakub M. Tomczak,
+and Cheng Zhang (eds.), Advances in Neural Information Processing Systems 38: Annual Conference on
+Neural Information Processing Systems 2024, NeurIPS 2024, Vancouver, BC, Canada, December 10 - 15, 2024,
+2024.
+            Ziyang Ma, Yinghao Ma, Yanqiao Zhu, Chen Yang, Yi-Wen Chao, Ruiyang Xu, Wenxi Chen, Yuanzhe
+Chen, Zhuo Chen, Jian Cong, Kai Li, Keliang Li, Siyou Li, Xinfeng Li, Xiquan Li, Zheng Lian, Yuzhe
+Liang, Minghao Liu, Zhikang Niu, Tianrui Wang, Yuping Wang, Yuxuan Wang, Yihao Wu, Guanrou
+Yang, Jianwei Yu, Ruibin Yuan, Zhisheng Zheng, Ziya Zhou, Haina Zhu, Wei Xue, Emmanouil Benetos,
+Kai Yu, Chng Eng Siong, and Xie Chen. MMAR: A challenging benchmark for deep reasoning in
+speech, audio, music, and their mix. CoRR, abs/2505.13032, 2025a. doi: 10.48550/ARXIV.2505.13032.
+URL https://doi.org/10.48550/arXiv.2505.13032.
+          Ziyang Ma, Ruiyang Xu, Zhenghao Xing, Yunfei Chu, Yuxuan Wang, Jinzheng He, Jin Xu, Pheng-Ann
+Heng, Kai Yu, Junyang Lin, et al. Omni-captioner: Data pipeline, models, and benchmark for omni
+detailed perception. arXiv preprint arXiv:2510.12720, 2025b.
+            Le Thien Phuc Nguyen, Zhuoran Yu, Samuel Low Yu Hang, Subin An, Jeongik Lee, Yohan Ban, Se-
+ungEun Chung, Thanh-Huy Nguyen, JuWan Maeng, Soochahn Lee, et al. See, hear, and understand:
+Benchmarking audiovisual human speech understanding in multimodal large language models. arXiv
+preprint arXiv:2512.02231, 2025.
+             OpenAI. ChatML, 2022. URL https://github.com/openai/openai-python/blob/e389823ba013a24b4c3
+2ce38fa0bd87e6bccae94/chatml.md.
+OpenAI. GPT4 technical report. CoRR, abs/2303.08774, 2023.
+OpenAI. Hello GPT-4o, 2024. URL https://openai.com/index/hello-gpt-4o/.
+ Roni Paiss, Ariel Ephrat, Omer Tov, Shiran Zada, Inbar Mosseri, Michal Irani, and Tali Dekel. Teaching
+CLIP to count to ten. In IEEE/CVF International Conference on Computer Vision, ICCV 2023, Paris, France,
+October 1-6, 2023, pp. 3147-3157. IEEE, 2023.
+         Vassil Panayotov, Guoguo Chen, Daniel Povey, and Sanjeev Khudanpur. Librispeech: An ASR corpus
+based on public domain audio books. In 2015 IEEE International Conference on Acoustics, Speech and
+Signal Processing, ICASSP 2015, South Brisbane, Queensland, Australia, April 19-24, 2015. IEEE, 2015.
+        Reza Pourreza, Rishit Dagli, Apratim Bhattacharyya, Sunny Panchal, Guillaume Berger, and Roland
+Memisevic. Can vision-language models answer face to face questions in the real-world? arXiv preprint
+arXiv:2503.19356, 2025.
+          Valentina Pyatkin, Saumya Malik, Victoria Graf, Hamish Ivison, Shengyi Huang, Pradeep Dasigi,
+Nathan Lambert, and Hannaneh Hajishirzi. Generalizing verifiable instruction following. CoRR,
+abs/2507.02833, 2025. doi: 10.48550/ARXIV.2507.02833. URL https://doi.org/10.48550/arXiv.2507.
+02833.
+Rafael Rafailov, Archit Sharma, Eric Mitchell, Christopher D. Manning, Stefano Ermon, and Chelsea Finn.
+Direct preference optimization: Your language model is secretly a reward model. In NeurIPS, 2023.
+    David Rein, Betty Li Hou, Asa Cooper Stickland, Jackson Petty, Richard Yuanzhe Pang, Julien Dirani,
+Julian Michael, and Samuel R. Bowman. GPQA: A graduate-level Google-proof Q&A benchmark.
+CoRR, abs/2311.12022, 2023.
+
+
+
+
+20
+
+        Jonathan Roberts, Mohammad Reza Taesiri, Ansh Sharma, Akash Gupta, Samuel Roberts, Ioana Croitoru,
+    Simion-Vlad Bogolin, Jialu Tang, Florian Langer, Vyas Raina, Vatsal Raina, Hanyi Xiong, Vishaal
+    Udandarao, Jingyi Lu, Shiyang Chen, Sam Purkis, Tianshuo Yan, Wenye Lin, Gyungin Shin, Qiaochu
+    Yang, Anh Totti Nguyen, Kai Han, and Samuel Albanie. Zerobench: An impossible visual benchmark
+    for contemporary large multimodal models. CoRR, abs/2502.09696, 2025.
+           S Sakshi, Utkarsh Tyagi, Sonal Kumar, Ashish Seth, Ramaneswaran Selvakumar, Oriol Nieto, Ramani
+    Duraiswami, Sreyan Ghosh, and Dinesh Manocha. Mmau: A massive multi-task audio understanding
+    and reasoning benchmark, 2024. URL https://arxiv.org/abs/2410.19168.
+       Yang Shi, Huanqian Wang, Wulin Xie, Huanyao Zhang, Lijie Zhao, Yifan Zhang, Xinfeng Li, Chaoyou Fu,
+    Zhuoer Wen, Wenting Liu, Zhuoran Zhang, Xinlong Chen, Bohan Zeng, Sihan Yang, Yuanxing Zhang,
+    Pengfei Wan, Haotian Wang, and Wenjing Yang. Mme-videoocr: Evaluating ocr-based capabilities of
+    multimodal llms in video scenarios. CoRR, abs/2505.21333, 2025.
+              Zhiyuan Tang, Dong Wang, Yanguang Xu, Jianwei Sun, Xiaoning Lei, Shuaijiang Zhao, Cheng Wen,
+    Xingjun Tan, Chuandong Xie, Shuran Zhou, Rui Yan, Chenjia Lv, Yang Han, Wei Zou, and Xiangang
+    Li. Kespeech: An open source speech dataset of mandarin and its eight subdialects. In Joaquin
+    Vanschoren and Sai-Kit Yeung (eds.), Proceedings of the Neural Information Processing Systems Track on
+    Datasets and Benchmarks 1, NeurIPS Datasets and Benchmarks 2021, December 2021, virtual, 2021. URL
+    https://datasets-benchmarks-proceedings.neurips.cc/paper/2021/hash/0336dcbab05b9d5ad24f
+    4333c7658a0e-Abstract-round2.html.
+Artificial Analysis Team. Artificial analysis long context reasoning benchmark (lcr). Artificial Analysis,
+    Inc., 2025a. Dataset.
+         Gemini Robotics Team. Gemini robotics: Bringing AI into the physical world. CoRR, abs/2503.20020,
+    2025b.
+         M.-A-P. Team, Xinrun Du, Yifan Yao, Kaijing Ma, Bingli Wang, Tianyu Zheng, Kang Zhu, Minghao Liu,
+    Yiming Liang, Xiaolong Jin, Zhenlin Wei, Chujie Zheng, Kaixin Deng, Shian Jia, Sichao Jiang, Yiyan Liao,
+    Rui Li, Qinrui Li, Sirun Li, Yizhi Li, Yunwen Li, Dehua Ma, Yuansheng Ni, Haoran Que, Qiyao Wang,
+    Zhoufutu Wen, Siwei Wu, Tianshun Xing, Ming Xu, Zhenzhu Yang, Zekun Moore Wang, Jun Zhou,
+    Yuelin Bai, Xingyuan Bu, Chenglin Cai, Liang Chen, Yifan Chen, Chengtuo Cheng, Tianhao Cheng,
+    Keyi Ding, Siming Huang, Yun Huang, Yaoru Li, Yizhe Li, Zhaoqun Li, Tianhao Liang, Chengdong
+    Lin, Hongquan Lin, Yinghao Ma, Tianyang Pang, Zhongyuan Peng, Zifan Peng, Qige Qi, Shi Qiu,
+    Xingwei Qu, Shanghaoran Quan, Yizhou Tan, Zili Wang, Chenqing Wang, Hao Wang, Yiya Wang, Yubo
+    Wang, Jiajun Xu, Kexin Yang, Ruibin Yuan, Yuanhao Yue, Tianyang Zhan, Chun Zhang, Jinyang Zhang,
+    Xiyue Zhang, Xingjian Zhang, Yue Zhang, Yongchi Zhao, Xiangyu Zheng, Chenghua Zhong, Yang
+    Gao, Zhoujun Li, Dayiheng Liu, Qian Liu, Tianyu Liu, Shiwen Ni, Junran Peng, Yujia Qin, Wenbo Su,
+    Guoyin Wang, Shi Wang, Jian Yang, Min Yang, Meng Cao, Xiang Yue, Zhaoxiang Zhang, Wangchunshu
+    Zhou, Jiaheng Liu, Qunshu Lin, Wenhao Huang, and Ge Zhang. Supergpqa: Scaling LLM evaluation
+    across 285 graduate disciplines. CoRR, abs/2502.14739, 2025. doi: 10.48550/ARXIV.2502.14739. URL
+    https://doi.org/10.48550/arXiv.2502.14739.
+           Qwen Team. Qwen3.5: Accelerating productivity with native multimodal agents, February 2026. URL
+    https://qwen.ai/blog?id=qwen3.5.
+           Hugo Touvron, Louis Martin, Kevin Stone, Peter Albert, Amjad Almahairi, Yasmine Babaei, Nikolay
+    Bashlykov, Soumya Batra, Prajjwal Bhargava, Shruti Bhosale, et al. Llama 2: Open foundation and
+    fine-tuned chat models. arXiv:2307.09288, 2023.
+               Dingdong Wang, Jincenzi Wu, Junan Li, Dongchao Yang, Xueyuan Chen, Tianhua Zhang, and Helen
+    Meng. MMSU: A massive multi-task spoken language understanding and reasoning benchmark. CoRR,
+    abs/2506.04779, 2025a. doi: 10.48550/ARXIV.2506.04779. URL https://doi.org/10.48550/arXiv.250
+    6.04779.
+          Ke Wang, Junting Pan, Weikang Shi, Zimu Lu, Mingjie Zhan, and Hongsheng Li. Measuring multimodal
+    mathematical reasoning with math-vision dataset. arXiv:2402.14804, 2024a.
+          Weihan Wang, Zehai He, Wenyi Hong, Yean Cheng, Xiaohan Zhang, Ji Qi, Shiyu Huang, Bin Xu, Yuxiao
+    Dong, Ming Ding, and Jie Tang. Lvbench: An extreme long video understanding benchmark. CoRR,
+    abs/2406.08035, 2024b.
+           Xinsheng Wang, Mingqi Jiang, Ziyang Ma, Ziyu Zhang, Songxiang Liu, Linqin Li, Zheng Liang, Qixi
+    Zheng, Rui Wang, Xiaoqin Feng, Weizhen Bian, Zhen Ye, Sitong Cheng, Ruibin Yuan, Zhixian Zhao,
+    Xinfa Zhu, Jiahao Pan, Liumeng Xue, Pengcheng Zhu, Yunlin Chen, Zhifei Li, Xie Chen, Lei Xie, Yike
+    Guo, and Wei Xue. Spark-tts: An efficient llm-based text-to-speech model with single-stream decoupled
+    speech tokens. CoRR, abs/2503.01710, 2025b.
+
+        21
+
+Yu Wang, Xinsheng Wang, Pengcheng Zhu, Jie Wu, Hanzhao Li, Heyang Xue, Yongmao Zhang, Lei Xie,
+  and Mengxiao Bi. Opencpop: A high-quality open source chinese popular song corpus for singing voice
+  synthesis. In Hanseok Ko and John H. L. Hansen (eds.), 23rd Annual Conference of the International Speech
+  Communication Association, Interspeech 2022, Incheon, Korea, September 18-22, 2022, pp. 4242-4246. ISCA,
+  2022. doi: 10.21437/INTERSPEECH.2022-48. URL https://doi.org/10.21437/Interspeech.2022-48.
+Yuancheng Wang, Haoyue Zhan, Liwei Liu, Ruihong Zeng, Haotian Guo, Jiachen Zheng, Qiang Zhang,
+  Xueyao Zhang, Shunsi Zhang, and Zhizheng Wu. Maskgct: Zero-shot text-to-speech with masked
+  generative codec transformer. arXiv preprint arXiv:2409.00750, 2024c.
+Yubo Wang, Xueguang Ma, Ge Zhang, Yuansheng Ni, Abhranil Chandra, Shiguang Guo, Weiming Ren,
+  Aaran Arulraj, Xuan He, Ziyan Jiang, Tianle Li, Max Ku, Kai Wang, Alex Zhuang, Rongqi Fan, Xiang
+  Yue, and Wenhu Chen. MMLU-Pro: A more robust and challenging multi-task language understanding
+  benchmark. CoRR, abs/2406.01574, 2024d.
+Zirui Wang, Mengzhou Xia, Luxi He, Howard Chen, Yitao Liu, Richard Zhu, Kaiqu Liang, Xindi Wu,
+  Haotian Liu, Sadhika Malladi, Alexis Chevalier, Sanjeev Arora, and Danqi Chen. Charxiv: Charting
+  gaps in realistic chart understanding in multimodal llms. arXiv preprint arXiv:2406.18521, 2024e.
+Jin Xu, Zhifang Guo, Jinzheng He, Hangrui Hu, Ting He, Shuai Bai, Keqin Chen, Jialin Wang, Yang Fan,
+  Kai Dang, et al. Qwen2. 5-omni technical report. arXiv preprint arXiv:2503.20215, 2025a.
+Jin Xu, Zhifang Guo, Hangrui Hu, Yunfei Chu, Xiong Wang, Jinzheng He, Yuxuan Wang, Xianzhong
+  Shi, Ting He, Xinfa Zhu, Yuanjun Lv, Yongqi Wang, Dake Guo, He Wang, Linhan Ma, Pei Zhang,
+  Xinyu Zhang, Hongkun Hao, Zishan Guo, Baosong Yang, Bin Zhang, Ziyang Ma, Xipin Wei, Shuai Bai,
+  Ke Chen, Xue Lian Liu, Peng Wang, Ming Yang, Dayiheng Liu, Xingzhang Ren, Bo Zheng, Rui Men,
+  Fan Zhou, Bowen Yu, Jianxin Yang, Le Yu, Jing-Jun Zhou, and Junyang Lin. Qwen3-omni technical
+  report. ArXiv, abs/2509.17765, 2025b.
+Fanjia Yan, Huanzhi Mao, Charlie Cheng-Jie Ji, Tianjun Zhang, Shishir G. Patil, Ion Stoica, and Joseph E.
+  Gonzalez. Berkeley function calling leaderboard. https://gorilla.cs.berkeley.edu/blogs/8_berkel
+  ey_function_calling_leaderboard.html, 2024.
+Ruiqi Yan, Xiquan Li, Wenxi Chen, Zhikang Niu, Chen Yang, Ziyang Ma, Kai Yu, and Xie Chen. Uro-bench:
+  A comprehensive benchmark for end-to-end spoken dialogue models. arXiv preprint arXiv:2502.17810,
+  2025.
+An Yang, Baosong Yang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Zhou, Chengpeng Li, Chengyuan Li,
+  Dayiheng Liu, Fei Huang, et al. Qwen2 technical report. arXiv:2407.10671, 2024a.
+An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao,
+  Chengen Huang, Chenxu Lv, et al. Qwen3 technical report. arXiv preprint arXiv:2505.09388, 2025a.
+Yudong Yang, Jimin Zhuang, Guangzhi Sun, Changli Tang, Yixuan Li, Peihan Li, Yifan Jiang, Wei Li,
+  Zejun Ma, and Chao Zhang. Audio-centric video understanding benchmark without text shortcut. In
+  Proceedings of the 2025 Conference on Empirical Methods in Natural Language Processing, pp. 6580-6598,
+  2025b.
+Zhibo Yang, Jun Tang, Zhaohai Li, Pengfei Wang, Jianqiang Wan, Humen Zhong, Xuejing Liu, Mingkun
+  Yang, Peng Wang, Shuai Bai, LianWen Jin, and Junyang Lin. CC-OCR: A comprehensive and chal-
+  lenging OCR benchmark for evaluating large multimodal models in literacy. CoRR, abs/2412.02210,
+  2024b.
+Xiang Yue, Yuansheng Ni, Kai Zhang, Tianyu Zheng, Ruoqi Liu, Ge Zhang, Samuel Stevens, Dongfu
+  Jiang, Weiming Ren, Yuxuan Sun, et al. Mmmu: A massive multi-discipline multimodal understanding
+  and reasoning benchmark for expert agi. arXiv:2311.16502, 2023.
+Xiang Yue, Tianyu Zheng, Yuansheng Ni, Yubo Wang, Kai Zhang, Shengbang Tong, Yuxuan Sun, Ming
+  Yin, Botao Yu, Ge Zhang, et al. Mmmu-pro: A more robust multi-discipline multimodal understanding
+  benchmark. arXiv preprint arXiv:2409.02813, 2024.
+Yongyi Zang, Sean O'Brien, Taylor Berg-Kirkpatrick, Julian McAuley, and Zachary Novack. Are you really
+  listening? boosting perceptual awareness in music-qa benchmarks. arXiv preprint arXiv:2504.00369,
+  2025.
+Binbin Zhang, Hang Lv, Pengcheng Guo, Qijie Shao, Chao Yang, Lei Xie, Xin Xu, Hui Bu, Xiaoyu
+  Chen, Chenchen Zeng, Di Wu, and Zhendong Peng. WENETSPEECH: A 10000+ hours multi-domain
+  mandarin corpus for speech recognition. In IEEE International Conference on Acoustics, Speech and
+  Signal Processing, ICASSP 2022, Virtual and Singapore, 23-27 May 2022, pp. 6182-6186. IEEE, 2022. doi:
+  10.1109/ICASSP43922.2022.9746682. URL https://doi.org/10.1109/ICASSP43922.2022.9746682.
+
+        22
+
+       Bowen Zhang, Congchao Guo, Geng Yang, Hang Yu, Haozhe Zhang, Heidi Lei, Jialong Mai, Junjie Yan,
+Kaiyue Yang, Mingqi Yang, Peikai Huang, Ruiyang Jin, Sitan Jiang, Weihua Cheng, Yawei Li, Yichen
+Xiao, Yiying Zhou, Yongmao Zhang, Yuan Lu, and Yucen He. Minimax-speech: Intrinsic zero-shot
+text-to-speech with a learnable speaker encoder. CoRR, abs/2505.07916, 2025a.
+   Linhao Zhang, Jian Zhang, Bokai Lei, Chuhan Wu, Aiwei Liu, Wei Jia, and Xiao Zhou. Wildspeech-bench:
+Benchmarking end-to-end speechllms in the wild, 2025b.
+            Xiaoman Zhang, Chaoyi Wu, Ziheng Zhao, Weixiong Lin, Ya Zhang, Yanfeng Wang, and Weidi Xie.
+PMC-VQA: visual instruction tuning for medical visual question answering. CoRR, abs/2305.10415,
+2023.
+            Xiaomi LLM-Core Team Dong Zhang, Gang Wang, Jinlong Xue, Kai Fang, Liang Zhao, Rui Ma, Shu-
+Qin Ren, Shuo Liu, Tao Guo, Weiji Zhuang, Xin Zhang, Xi-Na Song, Yihan Yan, Yongzhe He, Cici,
+Bowen Shen, Chengxuan Zhu, Chong Ma, Chun Chen, Heyu Chen, Jiawei Li, Lei Li, Menghang
+Zhu, Peidian Li, Qiying Wang, Sirui Deng, Weimin Xiong, Wen Huang, Wenyu Yang, Yilin Jiang,
+Yixin Yang, Yu-Shi Tian, Yue Ma, Yue Yu, Zihan Zhang, Zihao Yue, Bangjun Xiao, Bin Xia, Bofei
+Gao, Bowen Ye, Can Cai, Chang Liu, Chenhong He, Chunan Li, Dawei Zhu, Duo Zhang, Fengyuan
+Shi, Guoan Wang, Hailin Zhang, Hanglong Lv, Hanyu Li, Hao Tian, Hengxu Qu, Hong-Mei Xu,
+Houbin Zhang, Huaqiu Liu, Jiangshan Duo, Jia Zuo, Jianyu Wei, Jiebao Xiao, Jinhao Dong, Jun Shi,
+Junhao Hu, Kainan Bao, Kang Zhou, Linghao Zhang, Meng Chen, Nuo Chen, Peng Zhang, Qian
+Chen, Qiantong Wang, Rang Li, Shao yang Liu, Shengfan Wang, Shicheng Li, Shi liang Yu, Shijie Cao,
+Shimao Chen, Shuhao Gu, Weikun Wang, Wen-Juan Ma, Xia Deng, Xing Yong, Xing Zhang, Xu Wang,
+Yi-Hao Song, Yihao Zhao, Yingbo Zhao, Yizhao Gao, Yu Cheng, Yuanfang Tu, Yudong Wang, Zhaojun
+Huang, Zheng-Yu Tang, Zhenrui Lin, Zhichao Song, Zhi-Yue Xu, Zhixian Zheng, and Zi-Cheng Jiang.
+Mimo-audio: Audio language models are few-shot learners. ArXiv, abs/2512.23808, 2025c. URL
+https://api.semanticscholar.org/CorpusID:284351195.
+        Yi-Fan Zhang, Huanyu Zhang, Haochen Tian, Chaoyou Fu, Shuangqing Zhang, Junfei Wu, Feng Li, Kun
+Wang, Qingsong Wen, Zhang Zhang, et al. Mme-realworld: Could your multimodal llm challenge
+high-resolution real-world scenarios that are difficult for humans? arXiv preprint arXiv:2408.13257,
+2024.
+       Yilun Zhao, Haowei Zhang, Lujing Xie, Tongyan Hu, Guo Gan, Yitao Long, Zhiyuan Hu, Weiyuan Chen,
+Chuhan Li, Zhijian Xu, Chengye Wang, Ziyao Shangguan, Zhenwen Liang, Yixin Liu, Chen Zhao, and
+Arman Cohan. MMVU: measuring expert-level multi-discipline video understanding. In IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, CVPR 2025, Nashville, TN, USA, June 11-15, 2025,
+pp. 8475-8489. Computer Vision Foundation / IEEE, 2025.
+      Chujie Zheng, Shixuan Liu, Mingze Li, Xiong-Hui Chen, Bowen Yu, Chang Gao, Kai Dang, Yuqiong Liu,
+Rui Men, An Yang, et al. Group sequence policy optimization. arXiv preprint arXiv:2507.18071, 2025.
+     Jeffrey Zhou, Tianjian Lu, Swaroop Mishra, Siddhartha Brahma, Sujoy Basu, Yi Luan, Denny Zhou, and
+Le Hou. Instruction-following evaluation for large language models. CoRR, abs/2311.07911, 2023.
+            Junjie Zhou, Yan Shu, Bo Zhao, Boya Wu, Zhengyang Liang, Shitao Xiao, Minghao Qin, Xi Yang,
+Yongping Xiong, Bo Zhang, Tiejun Huang, and Zheng Liu. MLVU: benchmarking multi-task long
+video understanding. In IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2025,
+Nashville, TN, USA, June 11-15, 2025, pp. 13691-13701. Computer Vision Foundation / IEEE, 2025a.
+          Ziwei Zhou, Rui Wang, and Zuxuan Wu. Daily-omni: Towards audio-visual reasoning with temporal
+alignment across modalities. CoRR, abs/2505.17862, 2025b.
+      Deyao Zhu, Jun Chen, Xiaoqian Shen, Xiang Li, and Mohamed Elhoseiny. Minigpt-4: Enhancing vision-
+language understanding with advanced large language models. arXiv:2304.10592, 2023.
+           Chengke Zou, Xingang Guo, Rui Yang, Junyu Zhang, Bin Hu, and Huan Zhang. Dynamath: A dynamic
+visual benchmark for evaluating mathematical reasoning robustness of vision language models. In
+ICLR. OpenReview.net, 2025.
+          Yuxin Zuo, Shang Qu, Yifei Li, Zhang-Ren Chen, Xuekai Zhu, Ermo Hua, Kaiyan Zhang, Ning Ding,
+and Bowen Zhou. Medxpertqa: Benchmarking expert-level medical reasoning and understanding.
+In Aarti Singh, Maryam Fazel, Daniel Hsu, Simon Lacoste-Julien, Felix Berkenkamp, Tegan Maharaj,
+Kiri Wagstaff, and Jerry Zhu (eds.), ICML, Proceedings of Machine Learning Research. PMLR /
+OpenReview.net, 2025.
+
+
+
+23
+
+7 Authors
+Core Contributors2
+
+Bing Han          Hangrui Hu         Peng Wang         Ting He           Xinfa Zhu         Zhifang Guo
+Baosong Yang      Jin Xu∗            Pei Zhang         Xize Cheng        Yunfei Chu        Zishan Guo
+Bin Zhang         Jianxin Yang       Qize Yang         Xuejing Liu       Yuanjun Lv        Ziyang Ma
+Bo Zheng          Jingren Zhou       Rui Men           Xingzhang Ren     Yuchong Sun
+Dayiheng Liu      Keqin Chen         Ruiyang Xu        Xian Shi          Yongqi Wang
+Fan Zhou          Le Yu              Shuai Bai         Xiong Wang        Yuxuan Wang
+Hongkun Hao       Mingkun Yang       Sibo Song         Xinyu Zhang       Yang Zhang
+
+Contributors2
+
+Andong Chen       Gaoji Liu          Kangxiang Xia     Qin Zhu           Xinyao Niu        Yunbao Wu
+Anfeng Li         Guangdong          Kun Yan           Ruisheng Cao      Xuancheng Ren     Yu Xi
+An Yang           Zhou               Kexin Yang        Rongyao Fang      Xuechun Wang      Yi Zhang
+Bei Chen          Hao Ge             Lianghao Deng     Rui Hu            Xuwu Wang         Yichang Zhang
+Bin Lin           Huiqiang Jiang     Lulu Hu           Ruibin Yuan       Xingzhe Wu        Yinger Zhang
+Bingshen Mu       Haoran Lian        Linhan Ma         Song Chen         Xipin Wei         Yuxiang Zheng
+Bohan Wang        Hongjian Tu        Lingchen Meng     Su Hao            Xiao Xu           Zeyu Cui
+Buxiao Wu         Hao Yu             Lei Xie           Shen Li           Xian Yang         Ziwei Ji
+Bowen Xu          Hang Zhang         Laiwen Zheng      Shixuan Liu       Yuxuan Cai        Ziyue Jiang
+Beichen Zhang     Hao Zhou           Miao Hong         Shurui Li         Yizhong Cao       Zhaohai Li
+Cheng Chen        Haiquan Zhao       Mei Li            Siqi Zhang        Yilei Chen        Zheng Li
+Chang Gao         Humen Zhong        Mingcheng Li      Tianyi Tang       Yuxiang Chen      Zhi Li
+Chengen Huang     Jiawei Chen        Mingze Li         Tingyu Xia        Yiming Dong       Zihan Qiu
+Chenyang Le       Jian Guan          Minsheng Li       Wei Ding          Yang Fan          Zekun Wang
+Chenhao Li        Jiayi Leng         Minghao Wu        Wenbin Ge         Yanpeng Li        Zhihai Wang
+Chenglong Liu     Jiahao Li          Mingfeng Xue      Weizhou Shen      Yucheng Li        Zhenghao Xing
+Chenxu Lv         Junrong Lin        Na Ni             Wei Wang          Yang Liu          Zhibo Yang
+Chen Qiang        Jiawei Liu         Peng Liu          Wentao Yao        Yantao Liu        Zhuorui Ye
+Chenfei Wu        Jialong Tang       Peng Wang         Xi Chen           Yuqiong Liu       Zhenru Zhang
+Chenhan Yuan      Jun Tang           Pengfei Wang      Xiaotong Chen     Yuxuan Liu        Zhipeng Zhou
+Chengruidong      Jianhong Tu        Peiyang Zhang     Xionghui Chen     Yuyan Luo         Zhengyang
+Zhang             Jianqiang Wan      Qidong Huang      Xiaodong Deng     Yubo Ma           Zhuge
+Chujie Zheng      Jinxi Wei          Qingfeng Lan      Xudong Guo        Yang Su
+Daren Chen        Jianwei Zhang      Qintong Li        Xin Le            Yuezhang Wang
+Dake Guo          Jing Zhou          Que Shen          Xiao Li           Yuhao Wang
+Fei Huang         Kai Dang           Qiuyue Wang       Xie Chen          Yi Wu
+
+
+
+
+
+
+
+
+
+
+2Alphabetical order. * denotes the corresponding author.
+
+                                     24
+
+8 Appendix
+
+8.1 Detailed Multilingual Evaluation Results
+
+Multilingual ASR. As presented in Table 13, Qwen3.5-Omni demonstrates superior speech recognition
+capabilities compared to state-of-the-art competitors on the FLEURS test set. Qwen3.5-Omni-Plus
+achieves the lowest average WER of 6.6%, outperforming both Gemini-3.1-Pro (7.3%) and GPT-4o-
+Transcribe (10.4%). It secures the best performance in the majority of languages, with particularly
+significant margins in complex tonal and low-resource languages such as Cantonese (2.2% vs. 6.3%
+for Gemini-3.1-Pro), Thai, and Vietnamese. Meanwhile, Qwen3.5-Omni-Flash offers a highly efficient
+alternative, achieving an average WER of 10.8% that remains competitive against Gemini-3-Flash (10.5%).
+Notably, Qwen3.5-Omni-Flash exhibits exceptional robustness in challenging scenarios, drastically
+reducing errors in Cantonese (3.1% vs. 10.8% for Gemini-3-Flash) and maintaining strong performance in
+Japanese and Korean, thereby highlighting its advantage for high-value Asian language pairs.
+
+Multilingual Translation. As shown in Tables 14 and 15, the Qwen3.5-Omni series demonstrates
+distinct advantages over state-of-the-art competitors on the FLEURS test set, particularly in Asian
+languages and specific high-resource pairs. Qwen3.5-Omni-Plus exhibits comprehensive superiority
+over Gemini-3.1-Pro in the many-to-many directions (en2xx/zh2xx), achieving higher average BLEU
+scores in both English-to-XX (33.8 vs. 31.8) and Chinese-to-XX (21.4 vs. 19.6). It also leads in key xx2en
+pairs such as Portuguese (49.4 vs. 47.7) and Indonesian (45.7 vs. 45.1). Although Gemini-3.1-Pro holds a
+slight edge in overall xx2zh averages, Qwen3.5-Omni-Plus significantly outperforms it in critical Asian
+languages, including Cantonese (+15.6 BLEU), Korean, and Japanese. Similarly, Qwen3.5-Omni-Flash
+shows targeted strengths against Gemini-3-Flash. While maintaining competitive general performance, it
+vastly surpasses Gemini in Cantonese translation across all directions (e.g., 37.5 vs. 22.4 in xx2zh and 37.3
+vs. 26.7 in en2xx) and delivers better results in Japanese and Korean xx2zh tasks. These results underscore
+Qwen3.5-Omni's robust optimization for complex Asian linguistic structures and key regional languages.
+
+
+
+
+
+
+
+
+
+
+    25
+
+Table 13: Multilingual ASR performance on the FLEURS test set. Results are reported using Word Error
+Rate (WER, ↓), where lower values indicate better performance. For italicized languages, Character Error
+Rate (CER, ↓) is reported instead. Compared with competing models, Qwen3.5-Omni-Plus achieves the
+best results on the majority of languages. The best results are highlighted in bold.
+
+Language    Qwen3.5-      Qwen3.5-    Gemin-3.1-    GPT-4o-    Gemini-3-
+            Omni-Plus    Omni-Flash       Pro     Transcribe     Flash
+Chinese        2.9           2.9          3.6         2.6         4.6
+English        3.2           3.7          2.7         3.2         2.9
+Cantonese      2.2           3.1          6.3         5.2        10.8
+Arabic        11.7          13.6          9.2        13.0        10.1
+German         2.0           2.5          2.7         2.3         3.3
+French         2.6           3.3          3.7         3.7         3.9
+Spanish        2.2           2.4          2.5         2.3         2.7
+Portuguese     2.1           2.2          2.6         2.3         2.9
+Indonesian     1.6           2.4          2.5         3.5         2.8
+Italian        0.8           1.0          1.1         1.4         1.8
+Korean         1.7           2.1          2.0         2.1         2.4
+Russian        3.1           3.6          3.4         3.7         3.9
+Thai           2.8           3.2          4.3         4.9         4.5
+Vietnamese     1.9           2.5          2.5         3.5         3.5
+Japanese       1.9           2.5          2.3         3.0         3.4
+Turkish        3.1           4.4          3.8         4.2         4.4
+Hindi          9.7           9.9          4.5        12.0         5.6
+Malay          2.7           4.2          3.7         4.1         6.2
+Dutch          2.8           3.5          3.5         3.7         4.7
+Urdu          20.8          31.9         25.2        19.7        23.0
+Norwegian      3.9           5.2          5.0         5.5         6.7
+Swedish        3.1           5.0          4.6         5.2         7.7
+Danish         3.5           5.3          5.7         6.5         7.9
+Hebrew        12.5          16.6         15.6        19.4        20.2
+Finnish        2.4           4.5          3.4         3.8         5.2
+Polish         1.9           3.1          2.7         2.8         4.9
+Icelandic      3.6           8.9          4.7        10.8         6.8
+Czech          2.6           4.5          3.8         4.7         8.0
+Filipino       5.1           7.1          7.6         7.3         8.5
+Persian       12.0          12.1          8.9         9.9        10.0
+Greek          4.7           8.1          5.4         6.5         7.6
+Afrikaans     10.6          13.7         12.7        17.9        18.6
+Asturian      15.8          25.9         23.7        23.8        48.3
+Belarusian     6.7          12.2          6.7        10.2        10.9
+Bulgarian      6.2          10.7          5.3         7.0         7.9
+Bengali       16.2          19.8         21.9        24.1        21.9
+Bosnian        5.4           9.5          6.0        13.9        11.2
+Catalan        2.8           6.3          2.7         2.7         6.4
+Cebuano       10.5          16.6         13.0        15.1        12.8
+Estonian       6.7          16.6          4.9         7.6         7.3
+Galician       5.0           8.6          4.9         6.8        14.6
+Gujarati      13.9          18.4         14.8        26.9        16.3
+Croatian       5.4           9.0          5.1        16.4         9.3
+Hungarian      4.9          10.6          5.5         7.4        11.3
+Javanese      11.8          18.3         14.1        24.7        15.7
+Kazakh         6.3          16.6          6.2        11.5        12.7
+Kannada       16.0          23.8         16.3        28.1        16.3
+Kyrgyz        10.0          19.7          8.3        20.7        16.3
+Latvian        6.7          17.8          3.7         6.3         6.8
+Macedonian     4.1           7.9          4.0         6.2         7.8
+Malayalam     18.8          27.0         18.3        33.5        20.3
+Marathi       16.3          23.6         15.3        26.3        16.0
+Punjabi       13.7          24.6         14.4        36.4        17.4
+Romanian       3.2           6.1          3.4         4.5         5.9
+Slovak         3.3           5.5          2.8         3.6         6.5
+Slovenian      6.1          14.3          6.3         8.8        10.0
+Swahili        9.4          17.5          9.9        16.3        10.7
+Tajik         10.0          41.1         20.4        20.2        53.1
+Azerbaijani    7.2          13.0          5.8        10.6        13.2
+Ukrainian      3.2           5.4          3.4         4.3         5.1
+Average        6.6          10.8          7.3        10.4        10.5
+
+
+                         26
+
+    Table 14: Multilingual translation performance on the FLEURS en2xx and zh2xx test sets. Results are
+    reported using BLEU (↑). Compared with competing models, Qwen3.5-Omni-Plus outperforms them on
+    the majority of language pairs. The best results are highlighted in bold.
+
+en2xx (English → Other Languages)           zh2xx (Chinese → Other Languages)
+    Language   Qwen3.5-  Qwen3.5- Gemin-3.1- Gemini-3- Qwen3.5- Qwen3.5-     Gemin-3.1- Gemini-3-
+        Omni-Plus Omni-Flash      Pro  Flash     Omni-Plus Omni-Flash      Pro    Flash
+    Chinese      47.8      46.6  47.4  46.3      -                  -       -       -
+    English        -         -     -     -         32.2           31.2    30.1    29.5
+    Cantonese    40.1      37.3  25.5  26.7        36.7           35.9    23.7    24.0
+    Arabic       31.1      28.2  27.0  28.5        16.1           13.9    14.2    14.4
+    German       43.2      39.6  41.8  40.9        23.2           20.8    22.0    21.4
+    French       50.9      48.8  48.0  47.8        30.7           28.8    29.4    29.2
+    Spanish      29.1      28.9  28.3  28.8        22.2           20.4    20.8    20.6
+    Portuguese   51.2      48.6  47.3  47.2        28.5           26.8    25.7    25.6
+    Indonesian   45.3      43.7  42.1  41.7        28.8           26.9    25.4    25.2
+    Italian      32.7      30.7  31.9  30.9        23.1           21.1    21.9    21.3
+    Korean       33.9      31.8  30.8  31.7        25.1           23.4    21.9    22.8
+    Russian      33.8      31.8  33.1  33.2        21.5           18.9    20.0    19.9
+    Thai         65.4      62.9  64.8  64.4        58.0           55.5    57.2    56.4
+    Vietnamese   43.0      41.8  41.1  40.2        31.6           30.5    28.1    28.4
+    Japanese     53.2      50.6  51.3  50.8        45.6           41.6    43.0    42.0
+    Turkish      30.4      27.6  29.3  29.0        16.8           14.6    15.9    16.0
+    Hindi        33.1      29.1  28.2  29.2        19.1           14.3    17.6    17.5
+    Malay        39.6      37.2  35.9  36.0        24.1           21.7    21.0    20.5
+    Dutch        30.1      28.2  28.1  28.8        21.0           18.8    19.3    19.1
+    Urdu         25.0      22.1  23.0  23.0        15.5            8.6    14.9    14.7
+    Norwegian    35.3      32.8  33.1  33.7        20.3           17.8    18.4    18.9
+    Swedish      47.5      44.1  45.7  45.8        25.4           23.0    23.7    24.1
+    Danish       48.4      45.2  45.7  45.2        25.7           22.8    23.5    23.2
+    Hebrew       36.4      29.9  36.5  35.4        18.2           14.5    17.7    17.4
+    Finnish      30.1      26.0  32.1  32.3        18.1           15.3    18.6    17.7
+    Polish       25.2      22.5  24.9  23.4        17.5           15.0    15.6    15.5
+    Icelandic    28.5      27.2  29.6  28.2        16.2           13.5    16.0    15.6
+    Czech        35.9      32.5  33.3  33.7        20.4           18.1    19.4    19.0
+    Filipino     35.0      32.0  32.1  33.1        22.3           19.0    20.7    20.7
+    Persian      30.7      27.3  25.1  25.9        19.5           16.4    15.9    15.9
+    Greek        30.0      27.8  30.0  29.4        18.4           15.9    17.6    17.5
+    Asturian     32.4      27.9  31.5  30.4        20.4           16.2    18.6    18.1
+    Belarusian   16.4      14.7  16.4  16.5        12.6           10.8    12.1    12.2
+    Bulgarian    45.0      40.7  41.7  42.5        25.6           23.0    24.3    24.0
+    Bengali      18.6      15.7  14.3  15.0        10.6            9.2     9.0     9.3
+    Bosnian      37.5      34.0  36.3  35.2        21.4           18.6    19.9    19.4
+    Catalan      43.9      41.5  42.7  42.9        26.6           17.2    25.0    25.1
+    Cebuano      28.5      12.7  28.5  29.2        19.0            5.6    17.5    17.7
+    Estonian     30.8      26.3  31.4  30.6        18.9           13.6    17.5    17.2
+    Galician     37.4      35.4  36.6  35.9        23.9           22.0    22.7    22.3
+    Gujarati     23.8      20.9  21.0  21.5        14.3           10.8    12.3    12.3
+    Croatian     33.3      30.7  33.4  32.6        21.3           18.5    19.2    18.6
+    Hungarian    29.5      24.9  28.1  27.6        18.8           15.8    17.3    16.7
+    Javanese     26.8      24.4  16.4  22.1        16.5           14.8     9.0    13.0
+    Kazakh       24.9      21.1  20.6  22.5        15.0           12.4    12.9    13.1
+    Kannada      20.0      17.0  16.1  17.2        11.7            6.9     9.5    10.0
+    Kyrgyz       15.3      12.6  15.1  14.7        10.4            7.8    10.0     9.5
+    Latvian      36.1      31.0  35.4  35.3        21.9           17.8    20.1    19.5
+    Macedonian   38.1      34.0  38.5  38.2        22.3           20.1    22.0    21.6
+    Malayalam    19.3      11.1  16.1  16.1        10.4            5.2     9.9     9.4
+    Marathi      17.7      11.6  15.9  16.2        11.3            8.1     9.4    10.1
+    Punjabi      26.1      23.1  24.1  24.6        15.7            8.9    14.3    14.1
+    Romanian     42.0      39.9  41.4  42.0        25.6           22.8    23.6    23.4
+    Slovak       35.3      31.4  34.8  34.6        19.6           16.4    19.2    18.5
+    Slovenian    32.8      28.5  33.5  32.9        20.1           17.7    20.9    20.2
+    Swahili      36.3      30.9  32.1  32.2        20.4            9.3    18.5    18.3
+    Tajik        23.8      18.3  22.1  22.9        14.6           10.9    14.3    14.2
+    Azerbaijani  13.7       9.8  15.2  14.7        11.5            9.7    11.3    10.8
+    Ukrainian    31.7      29.2  29.8  30.1        19.5           15.0    17.0    17.6
+    Average      33.8      30.4  31.8  31.8        21.4           18.1    19.6    19.5
+
+
+                                        27
+
+Table 15: Multilingual translation performance on the FLEURS xx2en and xx2zh test sets. Results are
+reported using BLEU (↑). The best results are highlighted in bold.
+
+             xx2en (Other Languages → English)     xx2zh (Other Languages → Chinese)
+Language   Qwen3.5-  Qwen3.5- Gemin-3.1- Gemini-3- Qwen3.5-  Qwen3.5-  Gemin-3.1- Gemini-3-
+    Omni-Plus Omni-Flash      Pro  Flash     Omni-Plus Omni-Flash       Pro    Flash
+Chinese      32.2      31.2  30.1  29.5                -         -       -       -
+English        -         -     -     -               47.8      46.6    47.4    46.3
+Cantonese    30.3      29.9  27.7  26.3              36.8      37.5    21.2    22.4
+Arabic       42.9      40.0  42.1  42.3              40.2      37.3    40.5    40.5
+German       44.6      44.1  43.9  43.9              43.3      42.8    42.1    41.8
+French       43.5      42.0  41.6  41.3              41.6      40.3    41.6    41.4
+Spanish      32.3      31.3  30.3  30.4              38.8      38.5    38.4    38.2
+Portuguese   49.4      48.2  47.7  47.5              43.6      41.8    42.5    42.4
+Indonesian   45.7      43.1  45.1  44.9              43.5      41.4    42.8    42.9
+Italian      34.4      31.9  30.8  31.0              40.8      39.5    39.7    39.4
+Korean       34.1      32.4  32.0  32.1              39.9      37.5    37.0    37.2
+Russian      38.6      37.2  36.7  36.5              41.7      39.5    41.1    40.4
+Thai         34.1      32.4  34.2  33.0              40.2      37.9    40.0    39.5
+Vietnamese   36.4      34.9  36.1  35.4              38.7      36.3    39.2    38.9
+Japanese     30.4      29.2  29.5  29.4              38.0      35.7    35.6    34.8
+Turkish      40.3      39.1  39.5  38.9              41.8      40.3    40.6    41.0
+Hindi        38.8      36.2  39.3  39.2              38.9      36.9    38.0    38.4
+Malay        42.9      41.1  44.8  42.4              41.0      39.5    42.4    41.5
+Dutch        33.3      32.2  31.2  30.4              40.1      38.5    39.4    39.4
+Urdu         35.5      31.5  32.9  32.6              37.2      33.8    36.9    36.5
+Norwegian    43.5      42.1  42.6  41.4              42.2      39.6    40.9    40.8
+Swedish      47.2      45.2  46.6  44.7              42.9      40.7    41.5    41.6
+Danish       45.4      44.0  44.7  42.7              43.4      41.1    41.7    40.6
+Hebrew       39.7      36.4  42.5  39.9              36.7      34.1    40.3    37.8
+Finnish      36.9      35.0  36.7  35.5              40.8      38.7    41.0    40.6
+Polish       32.1      30.5  30.4  29.7              38.4      36.0    37.9    37.4
+Icelandic    31.5      27.5  35.1  35.8              38.2      31.8    37.9    37.5
+Czech        42.1      39.3  40.1  39.5              40.6      39.4    40.6    40.0
+Filipino     42.7      40.9  45.0  44.3              41.0      38.0    42.6    41.5
+Persian      40.2      36.8  38.0  38.1              40.2      37.0    41.1    41.1
+Greek        36.0      32.5  35.3  35.4              38.0      32.8    39.0    38.4
+Asturian     37.0      35.1  37.2  35.5              37.7      34.0    38.1    36.7
+Belarusian   23.1      19.9  20.6  19.9              33.3      31.2    33.7    33.7
+Bulgarian    39.6      36.0  41.3  40.0              40.9      36.6    41.0    40.4
+Bengali      32.0      27.6  34.9  34.3              35.8      32.4    38.1    37.5
+Bosnian      43.1      40.8  42.7  42.4              41.5      39.1    42.3    41.4
+Catalan      46.6      42.3  46.2  45.5              42.2      38.9    42.6    41.5
+Cebuano      37.3      26.3  38.9  38.2              34.0      26.5    36.7    36.6
+Estonian     35.7      28.3  40.1  38.3              38.0      32.2    41.7    41.2
+Galician     40.8      38.6  39.6  38.6              40.9      39.1    41.6    40.9
+Gujarati     33.4      28.3  40.3  39.7              35.8      31.4    39.7    39.0
+Croatian     39.5      36.3  38.0  36.9              40.0      37.7    40.2    39.6
+Hungarian    35.5      29.6  35.3  33.3              39.1      33.9    40.0    37.4
+Javanese     35.9      28.4  38.4  36.5              34.9      28.3    36.7    36.3
+Kazakh       34.4      26.9  35.7  35.5              37.1      31.4    39.3    38.8
+Kannada      26.4      19.8  33.1  33.6              32.3      26.1    38.0    37.8
+Kyrgyz       22.2      17.1  24.8  23.7              29.9      24.8    33.7    32.8
+Latvian      33.7      25.2  38.0  37.9              37.1      30.0    41.4    40.6
+Macedonian   43.3      39.6  43.1  41.9              41.6      38.0    42.1    41.8
+Malayalam    31.2      25.7  34.9  34.2              36.1      31.5    38.4    38.0
+Marathi      33.5      25.7  36.7  35.5              34.6      29.4    38.8    37.9
+Punjabi      33.0      26.9  38.3  36.5              35.1      29.9    37.4    36.4
+Romanian     43.5      39.7  42.3  41.5              42.0      38.7    42.4    41.3
+Slovak       39.7      38.4  39.9  38.8              39.2      38.1    40.2    39.3
+Slovenian    31.7      26.5  34.7  33.2              34.5      30.1    38.4    37.3
+Swahili      35.0      27.4  42.6  40.5              33.9      26.8    39.2    37.9
+Tajik        33.9      29.0  34.5  33.3              36.7      32.7    38.9    38.1
+Azerbaijani  25.0      22.0  23.7  23.3              33.4      30.5    33.5    33.3
+Ukrainian    42.0      40.1  41.7  41.4              41.7      39.7    41.6    40.7
+Average      37.0      33.5  37.4  36.6              38.9      35.7    39.4    38.9
+
+
+
+                                    28

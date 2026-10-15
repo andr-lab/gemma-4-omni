@@ -1,0 +1,78 @@
+{
+  "all_active_actions_have_at_least_1000_examples": true,
+  "builder": "tools/build_native_action_dialogue_dataset.py",
+  "counts": {
+    "examples_by_action": {
+      "BACKCHANNEL": 10277,
+      "REPLAN": 8874,
+      "SPEAK": 6951
+    },
+    "examples_by_action_and_split": {
+      "train": {
+        "BACKCHANNEL": 8309,
+        "REPLAN": 7142,
+        "SPEAK": 5427
+      },
+      "validation": {
+        "BACKCHANNEL": 1968,
+        "REPLAN": 1732,
+        "SPEAK": 1524
+      }
+    },
+    "examples_by_source": {
+      "DuplexConv": 6586,
+      "SmoothConv": 19324,
+      "synthetic_dialogue_plan": 192
+    },
+    "total_examples": 26102,
+    "train_examples": 20878,
+    "validation_examples": 5224
+  },
+  "dataset_status": "EXPERIMENTAL_DERIVED_LABELS_NOT_HUMAN_ADJUDICATED",
+  "excluded": {
+    "dialogue_plan": {},
+    "duplexconv": {
+      "backchannel_target_outside_1_4_words": 3906,
+      "missing_causal_partner_history": 216,
+      "not_complete_turn": 6479,
+      "speak_length_outside_8_80": 217
+    },
+    "smoothconv": {
+      "backchannel_target_outside_1_4_words": 5698,
+      "empty_text": 911,
+      "held_out_evaluation_source_group": 14,
+      "invalid_speaker": 5221,
+      "missing_causal_partner_history": 1077,
+      "not_complete_turn": 12954,
+      "speak_length_outside_8_80": 6483
+    }
+  },
+  "group_split_report": {
+    "assigned_group_counts": {
+      "train": 1291,
+      "validation": 324
+    },
+    "deterministically_assigned_group_count": 1615,
+    "group_count": 1615,
+    "policy": "int.from_bytes(sha256(group_id), big) modulo 5; 0=validation, otherwise train"
+  },
+  "inputs": {
+    "dialogue_plan": "data/synthetic_it_t6_audio_grounded_v5_candidate_seed260928/dialogue_plan.json",
+    "duplexconv_evidence": "data/training_gates/chinese_label_evidence_duplexconv_20260929_v1.jsonl",
+    "duplexconv_rows": 987,
+    "duplexconv_source_adjudication_status_counts": {
+      "llm_annotation_unadjudicated_quarantined": 987
+    },
+    "smoothconv_heldout_groups_excluded": 14,
+    "smoothconv_manifest": "data/hf_slices/smoothconv_pinned_20260930_full40h/smoothconv.slice.jsonl",
+    "smoothconv_manifest_rows": 1038,
+    "smoothconv_rows_used": 1024
+  },
+  "outputs": {
+    "summary": "data/action_dialogue_v1/summary.json",
+    "train": "data/action_dialogue_v1/train.jsonl",
+    "validation": "data/action_dialogue_v1/validation.jsonl"
+  },
+  "schema_version": 1,
+  "source_group_leakage": false
+}

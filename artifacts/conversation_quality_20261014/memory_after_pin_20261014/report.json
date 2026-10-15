@@ -1,0 +1,130 @@
+{
+  "started_utc": "2026-10-14T18:41:38.582643+00:00",
+  "mode": "single_realtime_stream",
+  "ws_url": "ws://127.0.0.1:8000/v1/realtime?duplex=1",
+  "session_id": "fd05b0649c6a44f3880fa5b7ab86fc30",
+  "input_wav": "/workspace/artifacts/conversation_quality_20261014/inputs/clean_initial.wav",
+  "followup_wav": "/workspace/artifacts/conversation_quality_20261014/inputs/clean_followup.wav",
+  "followup_timing": {
+    "mode": "after_first_response_done",
+    "configured_delay_ms": 1000,
+    "first_response_done_ns": 4787102587541410,
+    "first_followup_input_frame_index": 236,
+    "first_followup_sent_at_ns": 4787106389410841,
+    "actual_delay_ms": 3801.869,
+    "last_followup_sent_at_ns": 4787116133840334,
+    "followup_frames_sent": 81
+  },
+  "requested_input_duration_s": 120.0,
+  "source_timing_basis": "prerecorded_wav_scheduled_at_80ms_intervals",
+  "requested_input_frames": 1500,
+  "tts_quality_diagnostics": false,
+  "diagnostic_seed_sha256": null,
+  "ack_capacity_frames": 6,
+  "input_frames_sent": 1500,
+  "input_frames_not_dispatched": 0,
+  "source_playback_complete": true,
+  "input_frames_acked": 1500,
+  "ack_ids_unique": true,
+  "missing_ack_ids": [],
+  "duplicate_acks": 0,
+  "out_of_order_acks": 0,
+  "capacity_overflow": false,
+  "pending_high_water_frames": 6,
+  "pending_after_close": 0,
+  "final_ack_drain_complete": true,
+  "final_ack_drain_timed_out": false,
+  "ack_credit_timeout_count": 0,
+  "ack_latency_ms": {
+    "p50": 52.67,
+    "p95": 84.14,
+    "max": 3767.49
+  },
+  "ack_capacity_backpressure_ms": {
+    "wait_count": 6,
+    "p50": 3354.4,
+    "p95": 3364.11,
+    "max": 3364.11
+  },
+  "server_listener_queue_ms": {
+    "p50": 50.83,
+    "p95": 81.82,
+    "max": 3765.06
+  },
+  "server_listener_step_ms": {
+    "p50": 2.62,
+    "p95": 8.01,
+    "max": 57.91
+  },
+  "server_ack_queue_ms": {
+    "p50": 0.19,
+    "p95": 0.37,
+    "max": 2.39
+  },
+  "input_send_interval_ms": {
+    "p50": 80.97,
+    "p95": 81.99,
+    "max": 3364.62,
+    "deadline_misses_gt_100ms": 3
+  },
+  "input_send_lag_ms": {
+    "p50": 10496.58,
+    "p95": 11134.86,
+    "max": 11205.65,
+    "frames_over_80ms": 1405
+  },
+  "input_frames_during_response": 161,
+  "non_silent_input_frames_during_response": 55,
+  "input_frames_during_audio_generation": 129,
+  "non_silent_input_frames_during_audio_generation": 37,
+  "responses": [
+    {
+      "response_id": "resp_bf087849c793",
+      "action": "SPEAK",
+      "created_ns": 4787094861442457,
+      "first_audio_ns": 4787095985543921,
+      "last_audio_ns": 4787102585415025,
+      "done_ns": 4787102587539810,
+      "text": "Certamente, Elena. Posso aiutarti a trovare un tour a Torino per 120 euro.",
+      "packets": 60,
+      "audio_samples": 230400,
+      "audio_duration_s": 9.6,
+      "first_audio_ms": 1124.1,
+      "response_wall_ms": 7726.1,
+      "wav_path": "/workspace/artifacts/conversation_quality_20261014/memory_after_pin_20261014/response_resp_bf087849c793.wav"
+    },
+    {
+      "response_id": "resp_b7aba21c0215",
+      "action": "BACKCHANNEL",
+      "created_ns": 4787106779581443,
+      "first_audio_ns": 4787107260788472,
+      "last_audio_ns": 4787107846717671,
+      "done_ns": 4787107848879796,
+      "text": "Ascolto.",
+      "packets": 9,
+      "audio_samples": 34560,
+      "audio_duration_s": 1.44,
+      "first_audio_ms": 481.2,
+      "response_wall_ms": 1069.3,
+      "wav_path": "/workspace/artifacts/conversation_quality_20261014/memory_after_pin_20261014/response_resp_b7aba21c0215.wav"
+    },
+    {
+      "response_id": "resp_cf47f6f443cc",
+      "action": "SPEAK",
+      "created_ns": 4787112059848931,
+      "first_audio_ns": 4787113052285961,
+      "last_audio_ns": 4787116207715628,
+      "done_ns": 4787116209636700,
+      "text": "Capisco. Cercherò opzioni più economiche per te a Torino con un budget di ottantuno euro.",
+      "packets": 36,
+      "audio_samples": 138240,
+      "audio_duration_s": 5.76,
+      "first_audio_ms": 992.4,
+      "response_wall_ms": 4149.8,
+      "wav_path": "/workspace/artifacts/conversation_quality_20261014/memory_after_pin_20261014/response_resp_cf47f6f443cc.wav"
+    }
+  ],
+  "response_completion_timed_out": false,
+  "errors": [],
+  "sender_error": null
+}

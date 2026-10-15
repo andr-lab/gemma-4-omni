@@ -1,0 +1,249 @@
+{
+  "model": "faster-whisper small",
+  "device": "cpu",
+  "compute_type": "int8",
+  "results": [
+    {
+      "file": "resp_6f62c25efc1c.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/chat_baseline_natural_20261015/manual_full_audio/automatic_final_clean/resp_6f62c25efc1c.wav",
+      "language": "it",
+      "language_probability": 1,
+      "media": {
+        "sample_rate": 24000,
+        "channels": 1,
+        "frames": 122880,
+        "duration_s": 5.12
+      },
+      "segments": [
+        {
+          "start_s": 0.0,
+          "end_s": 4.74,
+          "text": " Certo Elena, posso aiutarti a trovare un tour a Torino per 120 euro.",
+          "words": [
+            {
+              "start_s": 0.0,
+              "end_s": 0.46,
+              "text": " Certo",
+              "probability": 0.7982300817966461
+            },
+            {
+              "start_s": 0.46,
+              "end_s": 0.82,
+              "text": " Elena,",
+              "probability": 0.8532236218452454
+            },
+            {
+              "start_s": 1.46,
+              "end_s": 1.78,
+              "text": " posso",
+              "probability": 0.9768081903457642
+            },
+            {
+              "start_s": 1.78,
+              "end_s": 2.36,
+              "text": " aiutarti",
+              "probability": 0.9651949604352316
+            },
+            {
+              "start_s": 2.36,
+              "end_s": 2.48,
+              "text": " a",
+              "probability": 0.9946263432502747
+            },
+            {
+              "start_s": 2.48,
+              "end_s": 2.82,
+              "text": " trovare",
+              "probability": 0.9992316663265228
+            },
+            {
+              "start_s": 2.82,
+              "end_s": 2.96,
+              "text": " un",
+              "probability": 0.9659098386764526
+            },
+            {
+              "start_s": 2.96,
+              "end_s": 3.14,
+              "text": " tour",
+              "probability": 0.4474680721759796
+            },
+            {
+              "start_s": 3.14,
+              "end_s": 3.26,
+              "text": " a",
+              "probability": 0.995598316192627
+            },
+            {
+              "start_s": 3.26,
+              "end_s": 3.6,
+              "text": " Torino",
+              "probability": 0.9476046562194824
+            },
+            {
+              "start_s": 3.6,
+              "end_s": 3.8,
+              "text": " per",
+              "probability": 0.9974303841590881
+            },
+            {
+              "start_s": 3.8,
+              "end_s": 4.34,
+              "text": " 120",
+              "probability": 0.9944307208061218
+            },
+            {
+              "start_s": 4.34,
+              "end_s": 4.74,
+              "text": " euro.",
+              "probability": 0.7117937803268433
+            }
+          ]
+        }
+      ],
+      "text": "Certo Elena, posso aiutarti a trovare un tour a Torino per 120 euro."
+    },
+    {
+      "file": "resp_db9ce7ad9e46.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/chat_baseline_natural_20261015/manual_full_audio/automatic_final_clean/resp_db9ce7ad9e46.wav",
+      "language": "it",
+      "language_probability": 1,
+      "media": {
+        "sample_rate": 24000,
+        "channels": 1,
+        "frames": 182400,
+        "duration_s": 7.6
+      },
+      "segments": [
+        {
+          "start_s": 0.11,
+          "end_s": 7.23,
+          "text": " Il tuo nome è Elena. Il codice è 731. La città è Torino e il bagge tatuale è 80 euro.",
+          "words": [
+            {
+              "start_s": 0.11,
+              "end_s": 0.63,
+              "text": " Il",
+              "probability": 0.8816036581993103
+            },
+            {
+              "start_s": 0.63,
+              "end_s": 0.77,
+              "text": " tuo",
+              "probability": 0.9860921502113342
+            },
+            {
+              "start_s": 0.77,
+              "end_s": 1.03,
+              "text": " nome",
+              "probability": 0.9983008503913879
+            },
+            {
+              "start_s": 1.03,
+              "end_s": 1.25,
+              "text": " è",
+              "probability": 0.9868859052658081
+            },
+            {
+              "start_s": 1.25,
+              "end_s": 1.53,
+              "text": " Elena.",
+              "probability": 0.8997064828872681
+            },
+            {
+              "start_s": 2.09,
+              "end_s": 2.19,
+              "text": " Il",
+              "probability": 0.9851551651954651
+            },
+            {
+              "start_s": 2.19,
+              "end_s": 2.71,
+              "text": " codice",
+              "probability": 0.9916753172874451
+            },
+            {
+              "start_s": 2.71,
+              "end_s": 2.89,
+              "text": " è",
+              "probability": 0.9817558526992798
+            },
+            {
+              "start_s": 2.89,
+              "end_s": 3.69,
+              "text": " 731.",
+              "probability": 0.88289475440979
+            },
+            {
+              "start_s": 4.27,
+              "end_s": 4.37,
+              "text": " La",
+              "probability": 0.9895066618919373
+            },
+            {
+              "start_s": 4.37,
+              "end_s": 4.75,
+              "text": " città",
+              "probability": 0.997896651426951
+            },
+            {
+              "start_s": 4.75,
+              "end_s": 4.83,
+              "text": " è",
+              "probability": 0.9952126741409302
+            },
+            {
+              "start_s": 4.83,
+              "end_s": 5.25,
+              "text": " Torino",
+              "probability": 0.943079799413681
+            },
+            {
+              "start_s": 5.25,
+              "end_s": 5.37,
+              "text": " e",
+              "probability": 0.9810888767242432
+            },
+            {
+              "start_s": 5.37,
+              "end_s": 5.47,
+              "text": " il",
+              "probability": 0.994148850440979
+            },
+            {
+              "start_s": 5.47,
+              "end_s": 5.77,
+              "text": " bagge",
+              "probability": 0.7682258784770966
+            },
+            {
+              "start_s": 5.77,
+              "end_s": 6.35,
+              "text": " tatuale",
+              "probability": 0.9155653715133667
+            },
+            {
+              "start_s": 6.35,
+              "end_s": 6.49,
+              "text": " è",
+              "probability": 0.9952605366706848
+            },
+            {
+              "start_s": 6.49,
+              "end_s": 6.85,
+              "text": " 80",
+              "probability": 0.9795722365379333
+            },
+            {
+              "start_s": 6.85,
+              "end_s": 7.23,
+              "text": " euro.",
+              "probability": 0.7351155877113342
+            }
+          ]
+        }
+      ],
+      "text": "Il tuo nome è Elena. Il codice è 731. La città è Torino e il bagge tatuale è 80 euro."
+    }
+  ]
+}

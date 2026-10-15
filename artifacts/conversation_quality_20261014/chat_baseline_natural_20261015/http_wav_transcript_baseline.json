@@ -1,0 +1,98 @@
+{
+  "endpoint": "http://127.0.0.1:8000/v1/chat/completions",
+  "model": "gemma-4-omni-duplex",
+  "session_mode": "stateless_each_call_full_history_in_request",
+  "system_prompt": "Rispondi in italiano naturale e conciso, con al massimo due frasi. Usa solo le informazioni dette nella conversazione e rispetta i vincoli espliciti.",
+  "source_transcripts": {
+    "clean_initial.wav": "Mi chiamo Elena. Il mio codice è 7-3-1. Vorrei visitare Torino con 120 euro. Rispondi in italiano, in non più di due frasi.",
+    "clean_followup.wav": "Il baggettore è 80 euro. Quali sono i miei nome, codice, città e baggetta attuale?"
+  },
+  "calls": [
+    {
+      "turn": 1,
+      "request": {
+        "model": "gemma-4-omni-duplex",
+        "modalities": [
+          "text"
+        ],
+        "messages": [
+          {
+            "role": "system",
+            "content": "Rispondi in italiano naturale e conciso, con al massimo due frasi. Usa solo le informazioni dette nella conversazione e rispetta i vincoli espliciti."
+          },
+          {
+            "role": "user",
+            "content": "Mi chiamo Elena. Il mio codice è 7-3-1. Vorrei visitare Torino con 120 euro. Rispondi in italiano, in non più di due frasi."
+          }
+        ],
+        "max_tokens": 128,
+        "temperature": 0.1,
+        "top_p": 0.9
+      },
+      "response": {
+        "id": "chatcmpl_8d31880a687d471a9557f5a23fe3aabd",
+        "object": "chat.completion",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "Per sapere se puoi visitare Torino con 120 euro, avrei bisogno di maggiori dettagli sul tuo codice e sulle tue preferenze di viaggio."
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "session_id": "7a00e13063c84f0ca851ca0865c51e5b"
+      },
+      "assistant_text": "Per sapere se puoi visitare Torino con 120 euro, avrei bisogno di maggiori dettagli sul tuo codice e sulle tue preferenze di viaggio.",
+      "elapsed_s": 1.351
+    },
+    {
+      "turn": 2,
+      "request": {
+        "model": "gemma-4-omni-duplex",
+        "modalities": [
+          "text"
+        ],
+        "messages": [
+          {
+            "role": "system",
+            "content": "Rispondi in italiano naturale e conciso, con al massimo due frasi. Usa solo le informazioni dette nella conversazione e rispetta i vincoli espliciti."
+          },
+          {
+            "role": "user",
+            "content": "Mi chiamo Elena. Il mio codice è 7-3-1. Vorrei visitare Torino con 120 euro. Rispondi in italiano, in non più di due frasi."
+          },
+          {
+            "role": "assistant",
+            "content": "Per sapere se puoi visitare Torino con 120 euro, avrei bisogno di maggiori dettagli sul tuo codice e sulle tue preferenze di viaggio."
+          },
+          {
+            "role": "user",
+            "content": "Il baggettore è 80 euro. Quali sono i miei nome, codice, città e baggetta attuale?"
+          }
+        ],
+        "max_tokens": 128,
+        "temperature": 0.1,
+        "top_p": 0.9
+      },
+      "response": {
+        "id": "chatcmpl_591655adc4314ad5a1b24c3613b14e63",
+        "object": "chat.completion",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "Il tuo nome è Elena, il codice è 7-3-1, la città è Torino e la baggetta attuale è di 80 euro."
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "session_id": "9a8fa3d2597444c4957e84ca379dfe0c"
+      },
+      "assistant_text": "Il tuo nome è Elena, il codice è 7-3-1, la città è Torino e la baggetta attuale è di 80 euro.",
+      "elapsed_s": 1.769
+    }
+  ]
+}

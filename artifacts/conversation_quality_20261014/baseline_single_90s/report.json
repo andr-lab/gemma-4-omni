@@ -1,0 +1,105 @@
+{
+  "started_utc": "2026-10-14T15:59:03.683116+00:00",
+  "mode": "single_realtime_stream",
+  "ws_url": "ws://127.0.0.1:8000/v1/realtime?duplex=1",
+  "session_id": "9efbddf8f3c24165b4ac5aaaa6b59d9e",
+  "input_wav": "/workspace/artifacts/conversation_quality_20261014/inputs/clean_initial.wav",
+  "followup_wav": "/workspace/artifacts/conversation_quality_20261014/inputs/clean_followup.wav",
+  "requested_input_duration_s": 90.0,
+  "source_timing_basis": "prerecorded_wav_scheduled_at_80ms_intervals",
+  "requested_input_frames": 1125,
+  "tts_quality_diagnostics": false,
+  "diagnostic_seed_sha256": null,
+  "ack_capacity_frames": 6,
+  "input_frames_sent": 1125,
+  "input_frames_not_dispatched": 0,
+  "source_playback_complete": true,
+  "input_frames_acked": 1125,
+  "ack_ids_unique": true,
+  "missing_ack_ids": [],
+  "duplicate_acks": 0,
+  "out_of_order_acks": 0,
+  "capacity_overflow": false,
+  "pending_high_water_frames": 6,
+  "pending_after_close": 0,
+  "final_ack_drain_complete": true,
+  "final_ack_drain_timed_out": false,
+  "ack_credit_timeout_count": 0,
+  "ack_latency_ms": {
+    "p50": 50.94,
+    "p95": 82.77,
+    "max": 3792.73
+  },
+  "ack_capacity_backpressure_ms": {
+    "wait_count": 2,
+    "p50": 3388.91,
+    "p95": 3388.91,
+    "max": 3388.91
+  },
+  "server_listener_queue_ms": {
+    "p50": 49.03,
+    "p95": 80.24,
+    "max": 3788.92
+  },
+  "server_listener_step_ms": {
+    "p50": 2.66,
+    "p95": 3.67,
+    "max": 56.68
+  },
+  "server_ack_queue_ms": {
+    "p50": 0.18,
+    "p95": 0.34,
+    "max": 2.52
+  },
+  "input_send_interval_ms": {
+    "p50": 80.97,
+    "p95": 81.98,
+    "max": 3392.34,
+    "deadline_misses_gt_100ms": 1
+  },
+  "input_send_lag_ms": {
+    "p50": 3793.13,
+    "p95": 4268.88,
+    "max": 4323.94,
+    "frames_over_80ms": 1026
+  },
+  "input_frames_during_response": 85,
+  "non_silent_input_frames_during_response": 65,
+  "input_frames_during_audio_generation": 65,
+  "non_silent_input_frames_during_audio_generation": 49,
+  "responses": [
+    {
+      "response_id": "resp_eab77b35e080",
+      "action": "SPEAK",
+      "created_ns": 4777376685748650,
+      "first_audio_ns": 4777377991050991,
+      "last_audio_ns": 4777383222598627,
+      "done_ns": 4777383225713439,
+      "text": "Certamente, posso aiutarti a trovare un tour a Torino per 120 euro. Fammi sapere se hai altre domande o preferenze.",
+      "packets": 47,
+      "audio_samples": 178560,
+      "audio_duration_s": 7.44,
+      "first_audio_ms": 1305.3,
+      "response_wall_ms": 6540.0,
+      "wav_path": "/workspace/artifacts/conversation_quality_20261014/baseline_single_90s/response_resp_eab77b35e080.wav"
+    },
+    {
+      "response_id": "resp_7cf32d4e5221",
+      "action": "BACKCHANNEL",
+      "created_ns": 4777387055167719,
+      "first_audio_ns": null,
+      "last_audio_ns": null,
+      "done_ns": 4777387335606089,
+      "text": "",
+      "packets": 0,
+      "audio_samples": 0,
+      "audio_duration_s": 0.0,
+      "first_audio_ms": null,
+      "response_wall_ms": 280.4,
+      "wav_path": null
+    }
+  ],
+  "response_completion_timed_out": false,
+  "errors": [],
+  "sender_error": null
+}

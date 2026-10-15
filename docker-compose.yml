@@ -141,6 +141,12 @@ services:
       - CUDA_VISIBLE_DEVICES=0
       - HF_TOKEN=${HF_TOKEN}
       - PYTHONUNBUFFERED=1
+      - GEMMA4_OMNI_WORKSPACE=/workspace
+      - GEMMA4_OMNI_FRAME_RESIDUAL_ADAPTER_CKPT=/workspace/checkpoints/frame_residual_adapter_emovo_query_film_v2_candidate.pt
+      - GEMMA4_OMNI_DEFAULT_VOICE=gemma
+      - GEMMA4_OMNI_CUSTOM_VOICE_DIR=/workspace/custom_voices
+      - GEMMA4_OMNI_SPEAKER_REFERENCE_WAV=/workspace/artifacts/voices/reference.wav
+      - GEMMA4_OMNI_SPEAKER_REFERENCE_SHA256=480f55f41c71c3d79c2a9acc48f0bfb3c5a46222e6e9ebf3e2888e93501a6b5c
     ports:
       - "8000:8000"
     volumes:

@@ -1,0 +1,1108 @@
+{
+  "model": "faster-whisper small",
+  "device": "cpu",
+  "compute_type": "int8",
+  "results": [
+    {
+      "file": "A_input.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/pair_quality_8_content/A_input.wav",
+      "language": "it",
+      "language_probability": 1,
+      "media": {
+        "sample_rate": 16000,
+        "channels": 1,
+        "frames": 528640,
+        "duration_s": 33.04
+      },
+      "segments": [
+        {
+          "start_s": 0.0,
+          "end_s": 0.92,
+          "text": " Inizia pure!",
+          "words": [
+            {
+              "start_s": 0.0,
+              "end_s": 0.68,
+              "text": " Inizia",
+              "probability": 0.9459807872772217
+            },
+            {
+              "start_s": 0.68,
+              "end_s": 0.92,
+              "text": " pure!",
+              "probability": 0.9662103056907654
+            }
+          ]
+        },
+        {
+          "start_s": 16.21,
+          "end_s": 28.77,
+          "text": " Ascolto, ciao Elena, per un weekend a Torino con un budget di 120 euro, potremmo considerare",
+          "words": [
+            {
+              "start_s": 16.21,
+              "end_s": 16.95,
+              "text": " Ascolto,",
+              "probability": 0.9712348381678263
+            },
+            {
+              "start_s": 20.09,
+              "end_s": 20.73,
+              "text": " ciao",
+              "probability": 0.9605789184570312
+            },
+            {
+              "start_s": 20.73,
+              "end_s": 21.13,
+              "text": " Elena,",
+              "probability": 0.9085223078727722
+            },
+            {
+              "start_s": 21.93,
+              "end_s": 22.13,
+              "text": " per",
+              "probability": 0.8357793688774109
+            },
+            {
+              "start_s": 22.13,
+              "end_s": 22.29,
+              "text": " un",
+              "probability": 0.947638750076294
+            },
+            {
+              "start_s": 22.29,
+              "end_s": 22.87,
+              "text": " weekend",
+              "probability": 0.959162712097168
+            },
+            {
+              "start_s": 22.87,
+              "end_s": 23.19,
+              "text": " a",
+              "probability": 0.2457769215106964
+            },
+            {
+              "start_s": 23.19,
+              "end_s": 23.79,
+              "text": " Torino",
+              "probability": 0.9537790417671204
+            },
+            {
+              "start_s": 23.79,
+              "end_s": 23.99,
+              "text": " con",
+              "probability": 0.9744417071342468
+            },
+            {
+              "start_s": 23.99,
+              "end_s": 24.09,
+              "text": " un",
+              "probability": 0.9951335787773132
+            },
+            {
+              "start_s": 24.09,
+              "end_s": 24.41,
+              "text": " budget",
+              "probability": 0.6414191722869873
+            },
+            {
+              "start_s": 24.41,
+              "end_s": 24.71,
+              "text": " di",
+              "probability": 0.9972407817840576
+            },
+            {
+              "start_s": 24.71,
+              "end_s": 25.35,
+              "text": " 120",
+              "probability": 0.9789268374443054
+            },
+            {
+              "start_s": 25.35,
+              "end_s": 25.85,
+              "text": " euro,",
+              "probability": 0.7761136889457703
+            },
+            {
+              "start_s": 26.75,
+              "end_s": 27.91,
+              "text": " potremmo",
+              "probability": 0.9431924670934677
+            },
+            {
+              "start_s": 27.91,
+              "end_s": 28.77,
+              "text": " considerare",
+              "probability": 0.9918382465839386
+            }
+          ]
+        },
+        {
+          "start_s": 28.77,
+          "end_s": 32.39,
+          "text": " visite ai musei e una passeggiata nel centro storico.",
+          "words": [
+            {
+              "start_s": 28.77,
+              "end_s": 29.25,
+              "text": " visite",
+              "probability": 0.8690687119960785
+            },
+            {
+              "start_s": 29.25,
+              "end_s": 29.47,
+              "text": " ai",
+              "probability": 0.9439334273338318
+            },
+            {
+              "start_s": 29.47,
+              "end_s": 30.43,
+              "text": " musei",
+              "probability": 0.9473838806152344
+            },
+            {
+              "start_s": 30.43,
+              "end_s": 30.57,
+              "text": " e",
+              "probability": 0.9539154171943665
+            },
+            {
+              "start_s": 30.57,
+              "end_s": 30.73,
+              "text": " una",
+              "probability": 0.9747410416603088
+            },
+            {
+              "start_s": 30.73,
+              "end_s": 31.41,
+              "text": " passeggiata",
+              "probability": 0.9805055459340414
+            },
+            {
+              "start_s": 31.41,
+              "end_s": 31.59,
+              "text": " nel",
+              "probability": 0.9929652214050293
+            },
+            {
+              "start_s": 31.59,
+              "end_s": 31.87,
+              "text": " centro",
+              "probability": 0.6907439827919006
+            },
+            {
+              "start_s": 31.87,
+              "end_s": 32.39,
+              "text": " storico.",
+              "probability": 0.989694744348526
+            }
+          ]
+        }
+      ],
+      "text": "Inizia pure! Ascolto, ciao Elena, per un weekend a Torino con un budget di 120 euro, potremmo considerare visite ai musei e una passeggiata nel centro storico."
+    },
+    {
+      "file": "B_input.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/pair_quality_8_content/B_input.wav",
+      "language": "it",
+      "language_probability": 1,
+      "media": {
+        "sample_rate": 16000,
+        "channels": 1,
+        "frames": 527360,
+        "duration_s": 32.96
+      },
+      "segments": [
+        {
+          "start_s": 5.58,
+          "end_s": 13.24,
+          "text": " Ciao, mi chiamo Elena, il mio codice è 731, sarei felice di aiutarti a organizzare una visita a Torino.",
+          "words": [
+            {
+              "start_s": 5.58,
+              "end_s": 6.16,
+              "text": " Ciao,",
+              "probability": 0.6556510925292969
+            },
+            {
+              "start_s": 6.68,
+              "end_s": 6.9,
+              "text": " mi",
+              "probability": 0.9919318556785583
+            },
+            {
+              "start_s": 6.9,
+              "end_s": 7.12,
+              "text": " chiamo",
+              "probability": 0.9879870116710663
+            },
+            {
+              "start_s": 7.12,
+              "end_s": 7.44,
+              "text": " Elena,",
+              "probability": 0.919729471206665
+            },
+            {
+              "start_s": 7.98,
+              "end_s": 8.1,
+              "text": " il",
+              "probability": 0.988115668296814
+            },
+            {
+              "start_s": 8.1,
+              "end_s": 8.2,
+              "text": " mio",
+              "probability": 0.9992307424545288
+            },
+            {
+              "start_s": 8.2,
+              "end_s": 8.62,
+              "text": " codice",
+              "probability": 0.9901082217693329
+            },
+            {
+              "start_s": 8.62,
+              "end_s": 8.78,
+              "text": " è",
+              "probability": 0.9472504258155823
+            },
+            {
+              "start_s": 8.78,
+              "end_s": 9.56,
+              "text": " 731,",
+              "probability": 0.9192468822002411
+            },
+            {
+              "start_s": 10.34,
+              "end_s": 10.76,
+              "text": " sarei",
+              "probability": 0.899576872587204
+            },
+            {
+              "start_s": 10.76,
+              "end_s": 11.1,
+              "text": " felice",
+              "probability": 0.9906558990478516
+            },
+            {
+              "start_s": 11.1,
+              "end_s": 11.22,
+              "text": " di",
+              "probability": 0.9964426159858704
+            },
+            {
+              "start_s": 11.22,
+              "end_s": 11.68,
+              "text": " aiutarti",
+              "probability": 0.9869071841239929
+            },
+            {
+              "start_s": 11.68,
+              "end_s": 11.76,
+              "text": " a",
+              "probability": 0.96548992395401
+            },
+            {
+              "start_s": 11.76,
+              "end_s": 12.28,
+              "text": " organizzare",
+              "probability": 0.9878585537274679
+            },
+            {
+              "start_s": 12.28,
+              "end_s": 12.44,
+              "text": " una",
+              "probability": 0.9984610080718994
+            },
+            {
+              "start_s": 12.44,
+              "end_s": 12.8,
+              "text": " visita",
+              "probability": 0.9925500750541687
+            },
+            {
+              "start_s": 12.8,
+              "end_s": 12.92,
+              "text": " a",
+              "probability": 0.9944082498550415
+            },
+            {
+              "start_s": 12.92,
+              "end_s": 13.24,
+              "text": " Torino.",
+              "probability": 0.9649424850940704
+            }
+          ]
+        },
+        {
+          "start_s": 13.76,
+          "end_s": 17.34,
+          "text": " Avresti qualche proposta per un weekend li con un budget di 120 euro?",
+          "words": [
+            {
+              "start_s": 13.76,
+              "end_s": 14.24,
+              "text": " Avresti",
+              "probability": 0.9559800624847412
+            },
+            {
+              "start_s": 14.24,
+              "end_s": 14.38,
+              "text": " qualche",
+              "probability": 0.9790068864822388
+            },
+            {
+              "start_s": 14.38,
+              "end_s": 14.9,
+              "text": " proposta",
+              "probability": 0.9971659779548645
+            },
+            {
+              "start_s": 14.9,
+              "end_s": 15.06,
+              "text": " per",
+              "probability": 0.9968558549880981
+            },
+            {
+              "start_s": 15.06,
+              "end_s": 15.18,
+              "text": " un",
+              "probability": 0.994816243648529
+            },
+            {
+              "start_s": 15.18,
+              "end_s": 15.4,
+              "text": " weekend",
+              "probability": 0.9817711114883423
+            },
+            {
+              "start_s": 15.4,
+              "end_s": 15.72,
+              "text": " li",
+              "probability": 0.31442365050315857
+            },
+            {
+              "start_s": 15.72,
+              "end_s": 15.92,
+              "text": " con",
+              "probability": 0.8700565695762634
+            },
+            {
+              "start_s": 15.92,
+              "end_s": 16.04,
+              "text": " un",
+              "probability": 0.9982544779777527
+            },
+            {
+              "start_s": 16.04,
+              "end_s": 16.32,
+              "text": " budget",
+              "probability": 0.8103721141815186
+            },
+            {
+              "start_s": 16.32,
+              "end_s": 16.54,
+              "text": " di",
+              "probability": 0.9974198341369629
+            },
+            {
+              "start_s": 16.54,
+              "end_s": 17.0,
+              "text": " 120",
+              "probability": 0.9687164425849915
+            },
+            {
+              "start_s": 17.0,
+              "end_s": 17.34,
+              "text": " euro?",
+              "probability": 0.8450826406478882
+            }
+          ]
+        },
+        {
+          "start_s": 18.96,
+          "end_s": 25.4,
+          "text": " Aspetto le tue idee, ciao!",
+          "words": [
+            {
+              "start_s": 18.96,
+              "end_s": 19.6,
+              "text": " Aspetto",
+              "probability": 0.8842221200466156
+            },
+            {
+              "start_s": 19.6,
+              "end_s": 19.96,
+              "text": " le",
+              "probability": 0.9889658093452454
+            },
+            {
+              "start_s": 19.96,
+              "end_s": 20.22,
+              "text": " tue",
+              "probability": 0.966888427734375
+            },
+            {
+              "start_s": 20.22,
+              "end_s": 20.68,
+              "text": " idee,",
+              "probability": 0.987525463104248
+            },
+            {
+              "start_s": 25.0,
+              "end_s": 25.4,
+              "text": " ciao!",
+              "probability": 0.9349282383918762
+            }
+          ]
+        },
+        {
+          "start_s": 30.98,
+          "end_s": 32.94,
+          "text": " Ok, un weekend a Torino con...",
+          "words": [
+            {
+              "start_s": 30.98,
+              "end_s": 31.38,
+              "text": " Ok,",
+              "probability": 0.696702241897583
+            },
+            {
+              "start_s": 31.94,
+              "end_s": 32.1,
+              "text": " un",
+              "probability": 0.9885927438735962
+            },
+            {
+              "start_s": 32.1,
+              "end_s": 32.34,
+              "text": " weekend",
+              "probability": 0.9935374855995178
+            },
+            {
+              "start_s": 32.34,
+              "end_s": 32.5,
+              "text": " a",
+              "probability": 0.9883689880371094
+            },
+            {
+              "start_s": 32.5,
+              "end_s": 32.78,
+              "text": " Torino",
+              "probability": 0.9931744933128357
+            },
+            {
+              "start_s": 32.78,
+              "end_s": 32.94,
+              "text": " con...",
+              "probability": 0.3647048771381378
+            }
+          ]
+        }
+      ],
+      "text": "Ciao, mi chiamo Elena, il mio codice è 731, sarei felice di aiutarti a organizzare una visita a Torino. Avresti qualche proposta per un weekend li con un budget di 120 euro? Aspetto le tue idee, ciao! Ok, un weekend a Torino con..."
+    },
+    {
+      "file": "response_A_resp_85b2b4263d73.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/pair_quality_8_content/response_A_resp_85b2b4263d73.wav",
+      "language": "it",
+      "language_probability": 1,
+      "media": {
+        "sample_rate": 24000,
+        "channels": 1,
+        "frames": 293760,
+        "duration_s": 12.24
+      },
+      "segments": [
+        {
+          "start_s": 0.14,
+          "end_s": 7.0,
+          "text": " Ciao, mi chiamo Elena, il mio codice è 731, sarei felice di aiutarti a organizzare una",
+          "words": [
+            {
+              "start_s": 0.14,
+              "end_s": 0.72,
+              "text": " Ciao,",
+              "probability": 0.8904989361763
+            },
+            {
+              "start_s": 1.24,
+              "end_s": 1.46,
+              "text": " mi",
+              "probability": 0.9930203557014465
+            },
+            {
+              "start_s": 1.46,
+              "end_s": 1.68,
+              "text": " chiamo",
+              "probability": 0.9898391962051392
+            },
+            {
+              "start_s": 1.68,
+              "end_s": 2.0,
+              "text": " Elena,",
+              "probability": 0.891998291015625
+            },
+            {
+              "start_s": 2.5,
+              "end_s": 2.64,
+              "text": " il",
+              "probability": 0.9878515601158142
+            },
+            {
+              "start_s": 2.64,
+              "end_s": 2.76,
+              "text": " mio",
+              "probability": 0.9991939663887024
+            },
+            {
+              "start_s": 2.76,
+              "end_s": 3.18,
+              "text": " codice",
+              "probability": 0.9894734621047974
+            },
+            {
+              "start_s": 3.18,
+              "end_s": 3.32,
+              "text": " è",
+              "probability": 0.9591719508171082
+            },
+            {
+              "start_s": 3.32,
+              "end_s": 4.14,
+              "text": " 731,",
+              "probability": 0.9266143441200256
+            },
+            {
+              "start_s": 4.9,
+              "end_s": 5.32,
+              "text": " sarei",
+              "probability": 0.8734862208366394
+            },
+            {
+              "start_s": 5.32,
+              "end_s": 5.66,
+              "text": " felice",
+              "probability": 0.9884002208709717
+            },
+            {
+              "start_s": 5.66,
+              "end_s": 5.78,
+              "text": " di",
+              "probability": 0.9969431757926941
+            },
+            {
+              "start_s": 5.78,
+              "end_s": 6.24,
+              "text": " aiutarti",
+              "probability": 0.9892898400624593
+            },
+            {
+              "start_s": 6.24,
+              "end_s": 6.32,
+              "text": " a",
+              "probability": 0.9709157347679138
+            },
+            {
+              "start_s": 6.32,
+              "end_s": 6.86,
+              "text": " organizzare",
+              "probability": 0.9884608387947083
+            },
+            {
+              "start_s": 6.86,
+              "end_s": 7.0,
+              "text": " una",
+              "probability": 0.9987004995346069
+            }
+          ]
+        },
+        {
+          "start_s": 7.0,
+          "end_s": 11.88,
+          "text": " visita a Torino. Avresti qualche proposta per un weekend li con un budget di 120 euro?",
+          "words": [
+            {
+              "start_s": 7.0,
+              "end_s": 7.36,
+              "text": " visita",
+              "probability": 0.9893513917922974
+            },
+            {
+              "start_s": 7.36,
+              "end_s": 7.48,
+              "text": " a",
+              "probability": 0.9953663349151611
+            },
+            {
+              "start_s": 7.48,
+              "end_s": 7.8,
+              "text": " Torino.",
+              "probability": 0.9670915603637695
+            },
+            {
+              "start_s": 8.36,
+              "end_s": 8.8,
+              "text": " Avresti",
+              "probability": 0.9659862518310547
+            },
+            {
+              "start_s": 8.8,
+              "end_s": 8.94,
+              "text": " qualche",
+              "probability": 0.972881019115448
+            },
+            {
+              "start_s": 8.94,
+              "end_s": 9.48,
+              "text": " proposta",
+              "probability": 0.9972523152828217
+            },
+            {
+              "start_s": 9.48,
+              "end_s": 9.62,
+              "text": " per",
+              "probability": 0.9967316389083862
+            },
+            {
+              "start_s": 9.62,
+              "end_s": 9.74,
+              "text": " un",
+              "probability": 0.9959048628807068
+            },
+            {
+              "start_s": 9.74,
+              "end_s": 9.96,
+              "text": " weekend",
+              "probability": 0.965046763420105
+            },
+            {
+              "start_s": 9.96,
+              "end_s": 10.28,
+              "text": " li",
+              "probability": 0.28211021423339844
+            },
+            {
+              "start_s": 10.28,
+              "end_s": 10.48,
+              "text": " con",
+              "probability": 0.832175612449646
+            },
+            {
+              "start_s": 10.48,
+              "end_s": 10.6,
+              "text": " un",
+              "probability": 0.9983347058296204
+            },
+            {
+              "start_s": 10.6,
+              "end_s": 10.88,
+              "text": " budget",
+              "probability": 0.8751558065414429
+            },
+            {
+              "start_s": 10.88,
+              "end_s": 11.1,
+              "text": " di",
+              "probability": 0.9974592328071594
+            },
+            {
+              "start_s": 11.1,
+              "end_s": 11.54,
+              "text": " 120",
+              "probability": 0.9720728993415833
+            },
+            {
+              "start_s": 11.54,
+              "end_s": 11.88,
+              "text": " euro?",
+              "probability": 0.7534412741661072
+            }
+          ]
+        }
+      ],
+      "text": "Ciao, mi chiamo Elena, il mio codice è 731, sarei felice di aiutarti a organizzare una visita a Torino. Avresti qualche proposta per un weekend li con un budget di 120 euro?"
+    },
+    {
+      "file": "response_B_resp_8201c6da085b.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/pair_quality_8_content/response_B_resp_8201c6da085b.wav",
+      "language": "it",
+      "language_probability": 1,
+      "media": {
+        "sample_rate": 24000,
+        "channels": 1,
+        "frames": 34560,
+        "duration_s": 1.44
+      },
+      "segments": [
+        {
+          "start_s": 0.05,
+          "end_s": 1.01,
+          "text": " Ascolto",
+          "words": [
+            {
+              "start_s": 0.05,
+              "end_s": 1.01,
+              "text": " Ascolto",
+              "probability": 0.8962409297625223
+            }
+          ]
+        }
+      ],
+      "text": "Ascolto"
+    },
+    {
+      "file": "response_A_resp_ce616622c91c.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/pair_quality_8_content/response_A_resp_ce616622c91c.wav",
+      "language": "it",
+      "language_probability": 1,
+      "media": {
+        "sample_rate": 24000,
+        "channels": 1,
+        "frames": 72960,
+        "duration_s": 3.04
+      },
+      "segments": [
+        {
+          "start_s": 0.4,
+          "end_s": 1.74,
+          "text": " Aspetto le tue idee",
+          "words": [
+            {
+              "start_s": 0.4,
+              "end_s": 0.98,
+              "text": " Aspetto",
+              "probability": 0.7846769094467163
+            },
+            {
+              "start_s": 0.98,
+              "end_s": 1.2,
+              "text": " le",
+              "probability": 0.9982433319091797
+            },
+            {
+              "start_s": 1.2,
+              "end_s": 1.48,
+              "text": " tue",
+              "probability": 0.9770906567573547
+            },
+            {
+              "start_s": 1.48,
+              "end_s": 1.74,
+              "text": " idee",
+              "probability": 0.9946541786193848
+            }
+          ]
+        }
+      ],
+      "text": "Aspetto le tue idee"
+    },
+    {
+      "file": "response_B_resp_390582f199ea.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/pair_quality_8_content/response_B_resp_390582f199ea.wav",
+      "language": "it",
+      "language_probability": 1,
+      "media": {
+        "sample_rate": 24000,
+        "channels": 1,
+        "frames": 226560,
+        "duration_s": 9.44
+      },
+      "segments": [
+        {
+          "start_s": 0.3,
+          "end_s": 9.02,
+          "text": " Ciao Elena! Per un weekend a Torino con un budget di 120 euro, potremmo considerare visite ai musei e una passeggiata nel centro storico.",
+          "words": [
+            {
+              "start_s": 0.3,
+              "end_s": 0.84,
+              "text": " Ciao",
+              "probability": 0.9405953288078308
+            },
+            {
+              "start_s": 0.84,
+              "end_s": 1.12,
+              "text": " Elena!",
+              "probability": 0.9362159371376038
+            },
+            {
+              "start_s": 1.78,
+              "end_s": 1.84,
+              "text": " Per",
+              "probability": 0.9934152364730835
+            },
+            {
+              "start_s": 1.84,
+              "end_s": 2.0,
+              "text": " un",
+              "probability": 0.9953008890151978
+            },
+            {
+              "start_s": 2.0,
+              "end_s": 2.16,
+              "text": " weekend",
+              "probability": 0.9813787937164307
+            },
+            {
+              "start_s": 2.16,
+              "end_s": 2.46,
+              "text": " a",
+              "probability": 0.8970223069190979
+            },
+            {
+              "start_s": 2.46,
+              "end_s": 2.76,
+              "text": " Torino",
+              "probability": 0.9769893288612366
+            },
+            {
+              "start_s": 2.76,
+              "end_s": 2.94,
+              "text": " con",
+              "probability": 0.9700600504875183
+            },
+            {
+              "start_s": 2.94,
+              "end_s": 3.06,
+              "text": " un",
+              "probability": 0.9987319111824036
+            },
+            {
+              "start_s": 3.06,
+              "end_s": 3.3,
+              "text": " budget",
+              "probability": 0.9667577147483826
+            },
+            {
+              "start_s": 3.3,
+              "end_s": 3.54,
+              "text": " di",
+              "probability": 0.9980048537254333
+            },
+            {
+              "start_s": 3.54,
+              "end_s": 4.06,
+              "text": " 120",
+              "probability": 0.9871106147766113
+            },
+            {
+              "start_s": 4.06,
+              "end_s": 4.54,
+              "text": " euro,",
+              "probability": 0.6619935631752014
+            },
+            {
+              "start_s": 4.9,
+              "end_s": 5.42,
+              "text": " potremmo",
+              "probability": 0.9788730442523956
+            },
+            {
+              "start_s": 5.42,
+              "end_s": 6.0,
+              "text": " considerare",
+              "probability": 0.9978516399860382
+            },
+            {
+              "start_s": 6.0,
+              "end_s": 6.36,
+              "text": " visite",
+              "probability": 0.9512962400913239
+            },
+            {
+              "start_s": 6.36,
+              "end_s": 6.46,
+              "text": " ai",
+              "probability": 0.9524689316749573
+            },
+            {
+              "start_s": 6.46,
+              "end_s": 7.18,
+              "text": " musei",
+              "probability": 0.9397843480110168
+            },
+            {
+              "start_s": 7.18,
+              "end_s": 7.28,
+              "text": " e",
+              "probability": 0.9554117918014526
+            },
+            {
+              "start_s": 7.28,
+              "end_s": 7.44,
+              "text": " una",
+              "probability": 0.9933663010597229
+            },
+            {
+              "start_s": 7.44,
+              "end_s": 8.04,
+              "text": " passeggiata",
+              "probability": 0.9876232147216797
+            },
+            {
+              "start_s": 8.04,
+              "end_s": 8.2,
+              "text": " nel",
+              "probability": 0.9973917007446289
+            },
+            {
+              "start_s": 8.2,
+              "end_s": 8.48,
+              "text": " centro",
+              "probability": 0.7179979085922241
+            },
+            {
+              "start_s": 8.48,
+              "end_s": 9.02,
+              "text": " storico.",
+              "probability": 0.9920627772808075
+            }
+          ]
+        }
+      ],
+      "text": "Ciao Elena! Per un weekend a Torino con un budget di 120 euro, potremmo considerare visite ai musei e una passeggiata nel centro storico."
+    },
+    {
+      "file": "response_A_resp_db93e2127a5e.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/pair_quality_8_content/response_A_resp_db93e2127a5e.wav",
+      "language": "it",
+      "language_probability": 1,
+      "media": {
+        "sample_rate": 24000,
+        "channels": 1,
+        "frames": 42240,
+        "duration_s": 1.76
+      },
+      "segments": [
+        {
+          "start_s": 0.75,
+          "end_s": 1.27,
+          "text": " Ciao!",
+          "words": [
+            {
+              "start_s": 0.75,
+              "end_s": 1.27,
+              "text": " Ciao!",
+              "probability": 0.593909740447998
+            }
+          ]
+        }
+      ],
+      "text": "Ciao!"
+    },
+    {
+      "file": "response_A_resp_6f3b65a4bb75.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/pair_quality_8_content/response_A_resp_6f3b65a4bb75.wav",
+      "language": "it",
+      "language_probability": 1,
+      "media": {
+        "sample_rate": 24000,
+        "channels": 1,
+        "frames": 130560,
+        "duration_s": 5.44
+      },
+      "segments": [
+        {
+          "start_s": 0.05,
+          "end_s": 2.91,
+          "text": " Ok, un weekend a Torino con so dente euro.",
+          "words": [
+            {
+              "start_s": 0.05,
+              "end_s": 0.67,
+              "text": " Ok,",
+              "probability": 0.48163798451423645
+            },
+            {
+              "start_s": 1.19,
+              "end_s": 1.37,
+              "text": " un",
+              "probability": 0.9774413704872131
+            },
+            {
+              "start_s": 1.37,
+              "end_s": 1.57,
+              "text": " weekend",
+              "probability": 0.9638609290122986
+            },
+            {
+              "start_s": 1.57,
+              "end_s": 1.77,
+              "text": " a",
+              "probability": 0.9766079187393188
+            },
+            {
+              "start_s": 1.77,
+              "end_s": 2.05,
+              "text": " Torino",
+              "probability": 0.9539085328578949
+            },
+            {
+              "start_s": 2.05,
+              "end_s": 2.25,
+              "text": " con",
+              "probability": 0.8861175179481506
+            },
+            {
+              "start_s": 2.25,
+              "end_s": 2.37,
+              "text": " so",
+              "probability": 0.4528346657752991
+            },
+            {
+              "start_s": 2.37,
+              "end_s": 2.59,
+              "text": " dente",
+              "probability": 0.7551561892032623
+            },
+            {
+              "start_s": 2.59,
+              "end_s": 2.91,
+              "text": " euro.",
+              "probability": 0.6732062697410583
+            }
+          ]
+        },
+        {
+          "start_s": 4.25,
+          "end_s": 5.41,
+          "text": " Con quel budget po-",
+          "words": [
+            {
+              "start_s": 4.25,
+              "end_s": 4.69,
+              "text": " Con",
+              "probability": 0.21072302758693695
+            },
+            {
+              "start_s": 4.69,
+              "end_s": 4.91,
+              "text": " quel",
+              "probability": 0.9931799173355103
+            },
+            {
+              "start_s": 4.91,
+              "end_s": 5.21,
+              "text": " budget",
+              "probability": 0.9795048832893372
+            },
+            {
+              "start_s": 5.21,
+              "end_s": 5.41,
+              "text": " po",
+              "probability": 0.1930527538061142
+            },
+            {
+              "start_s": 5.41,
+              "end_s": 5.41,
+              "text": "-",
+              "probability": 0.31551000475883484
+            }
+          ]
+        }
+      ],
+      "text": "Ok, un weekend a Torino con so dente euro. Con quel budget po-"
+    }
+  ]
+}

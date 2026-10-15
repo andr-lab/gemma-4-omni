@@ -1,19 +1,70 @@
 # Environment & Agent
 .antigravity/
 .venv/
+.venv_e2e_runtime/
 __pycache__/
 *.pyc
-
-# Heavy Run Outputs & Local Artifacts
-_archive/eval_outputs/
-_archive/run_outputs/
-_archive_20260817/
-eval_r*/
-eval_syntest*/
-*.zip
+*.pyo
+.tmp/
+.tmp_*
 *.log
 
-# output run Kaggle (checkpoint pesanti, non versionati)
-*_r1_out/
-*_r2_out/
-*_out/
+# Heavy Model Weights & Checkpoints
+*.safetensors
+*.pt
+*.pth
+*.gguf
+*.bin
+*.onnx
+*.ckpt
+checkpoints/
+
+# Datasets, Caches & Heavy Data
+*.parquet
+*.npy
+*.npz
+*.arrow
+data/*.parquet
+data/*.npy
+data/*.npz
+**/.cache/
+.cache/
+unsloth_compiled_cache/
+
+# Audio files & Sample Outputs
+*.wav
+*.mp3
+*.flac
+samples/
+samples_*/
+
+# Archives
+*.zip
+*.tar
+*.tar.gz
+
+# Large local conversation replay trace
+/artifacts/conversation_quality_20261014/microbatch_shadow_replay_n1_20261014/generation_domain_fix/events.jsonl
+
+
+# Large generated conversation replay logs kept local
+/artifacts/conversation_quality_20261014/pair_long_20261015_owner_pin_fix/events.jsonl
+/artifacts/conversation_quality_20261014/pair_long_20261015_owner_pin_fix/pair_long_20261015_owner_pin_fix/events.jsonl
+/artifacts/conversation_quality_20261014/pair_quality_bargein_prefix_fix/events.jsonl
+/artifacts/conversation_quality_20261014/pair_quality_prefix_cache_fix/events.jsonl
+
+
+# Generated replay data and bundles kept local
+/artifacts/conversation_quality_20261014/memory_followup_after_eos/events.jsonl
+/artifacts/conversation_quality_20261014/memory_after_pin_20261014/events.jsonl
+/artifacts/conversation_quality_20261014/chat_baseline_natural_20261015/manual_full_audio/automatic_final_clean/events.jsonl
+/artifacts/conversation_quality_20261014/pair_quality_8_content/events.jsonl
+/artifacts/conversation_quality_20261014/pair_quality_8_content_run2/events.jsonl
+/artifacts/conversation_quality_20261014/baseline_single_90s/events.jsonl
+/artifacts/conversation_quality_20261014/pair_quality_smoke_3/events.jsonl
+/artifacts/conversation_quality_20261014/pair_long_20261015_owner_pin_fix/bundle.tgz
+/artifacts/conversation_quality_20261014/pair_long_20261015_owner_pin_fix_bundle.tgz
+
+
+# Model tokenizer assets stay local
+/data/tokenizer.json

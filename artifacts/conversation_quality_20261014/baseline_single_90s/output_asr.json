@@ -1,0 +1,156 @@
+{
+  "model": "faster-whisper small",
+  "device": "cpu",
+  "compute_type": "int8",
+  "results": [
+    {
+      "file": "response_resp_eab77b35e080.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/baseline_single_90s/response_resp_eab77b35e080.wav",
+      "language": "it",
+      "language_probability": 1,
+      "media": {
+        "sample_rate": 24000,
+        "channels": 1,
+        "frames": 178560,
+        "duration_s": 7.44
+      },
+      "segments": [
+        {
+          "start_s": 0.0,
+          "end_s": 3.94,
+          "text": " Certamente posso aiutarti a trovare un tour a Torino per 120 euro.",
+          "words": [
+            {
+              "start_s": 0.0,
+              "end_s": 0.7,
+              "text": " Certamente",
+              "probability": 0.9141088724136353
+            },
+            {
+              "start_s": 0.7,
+              "end_s": 0.94,
+              "text": " posso",
+              "probability": 0.7503020763397217
+            },
+            {
+              "start_s": 0.94,
+              "end_s": 1.56,
+              "text": " aiutarti",
+              "probability": 0.9638887246449789
+            },
+            {
+              "start_s": 1.56,
+              "end_s": 1.68,
+              "text": " a",
+              "probability": 0.9950199127197266
+            },
+            {
+              "start_s": 1.68,
+              "end_s": 2.02,
+              "text": " trovare",
+              "probability": 0.9980713725090027
+            },
+            {
+              "start_s": 2.02,
+              "end_s": 2.16,
+              "text": " un",
+              "probability": 0.99039626121521
+            },
+            {
+              "start_s": 2.16,
+              "end_s": 2.38,
+              "text": " tour",
+              "probability": 0.8111507296562195
+            },
+            {
+              "start_s": 2.38,
+              "end_s": 2.52,
+              "text": " a",
+              "probability": 0.9945544004440308
+            },
+            {
+              "start_s": 2.52,
+              "end_s": 2.84,
+              "text": " Torino",
+              "probability": 0.9462278187274933
+            },
+            {
+              "start_s": 2.84,
+              "end_s": 3.02,
+              "text": " per",
+              "probability": 0.9971785545349121
+            },
+            {
+              "start_s": 3.02,
+              "end_s": 3.5,
+              "text": " 120",
+              "probability": 0.991954505443573
+            },
+            {
+              "start_s": 3.5,
+              "end_s": 3.94,
+              "text": " euro.",
+              "probability": 0.7339509725570679
+            }
+          ]
+        },
+        {
+          "start_s": 4.46,
+          "end_s": 6.92,
+          "text": " Fammi sapere se hai altre domande o preferenze.",
+          "words": [
+            {
+              "start_s": 4.46,
+              "end_s": 4.88,
+              "text": " Fammi",
+              "probability": 0.8670215904712677
+            },
+            {
+              "start_s": 4.88,
+              "end_s": 5.26,
+              "text": " sapere",
+              "probability": 0.9977813363075256
+            },
+            {
+              "start_s": 5.26,
+              "end_s": 5.38,
+              "text": " se",
+              "probability": 0.9903116226196289
+            },
+            {
+              "start_s": 5.38,
+              "end_s": 5.52,
+              "text": " hai",
+              "probability": 0.9901055693626404
+            },
+            {
+              "start_s": 5.52,
+              "end_s": 5.72,
+              "text": " altre",
+              "probability": 0.9961878657341003
+            },
+            {
+              "start_s": 5.72,
+              "end_s": 6.14,
+              "text": " domande",
+              "probability": 0.9980795681476593
+            },
+            {
+              "start_s": 6.14,
+              "end_s": 6.28,
+              "text": " o",
+              "probability": 0.9743009209632874
+            },
+            {
+              "start_s": 6.28,
+              "end_s": 6.92,
+              "text": " preferenze.",
+              "probability": 0.9861226280530294
+            }
+          ]
+        }
+      ],
+      "text": "Certamente posso aiutarti a trovare un tour a Torino per 120 euro. Fammi sapere se hai altre domande o preferenze."
+    }
+  ]
+}

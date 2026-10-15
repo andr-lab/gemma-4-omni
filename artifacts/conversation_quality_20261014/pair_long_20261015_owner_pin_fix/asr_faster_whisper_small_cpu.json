@@ -1,0 +1,2019 @@
+{
+  "model": "faster-whisper small cached snapshot 536b0662742c02347bc0e980a01041f333bce120",
+  "device": "cpu",
+  "compute_type": "int8",
+  "cpu_threads": 4,
+  "local_cache_only": true,
+  "results": [
+    {
+      "file": "A_input.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/pair_long_20261015_owner_pin_fix/A_input.wav",
+      "media": {
+        "sample_rate": 16000,
+        "channels": 1,
+        "frames": 4709120,
+        "duration_s": 294.32
+      },
+      "language": "it",
+      "language_probability": 1,
+      "segments": [
+        {
+          "start_s": 0.0,
+          "end_s": 0.92,
+          "text": " Inizia pure.",
+          "words": [
+            {
+              "start_s": 0.0,
+              "end_s": 0.66,
+              "text": " Inizia",
+              "probability": 0.9579885403315226
+            },
+            {
+              "start_s": 0.66,
+              "end_s": 0.92,
+              "text": " pure.",
+              "probability": 0.9808504581451416
+            }
+          ]
+        },
+        {
+          "start_s": 25.5,
+          "end_s": 29.26,
+          "text": " Ciao Marco, sono qui per aiutarti a pianificare il tuo viaggio.",
+          "words": [
+            {
+              "start_s": 25.5,
+              "end_s": 25.84,
+              "text": " Ciao",
+              "probability": 0.9302080869674683
+            },
+            {
+              "start_s": 25.84,
+              "end_s": 26.18,
+              "text": " Marco,",
+              "probability": 0.9322813749313354
+            },
+            {
+              "start_s": 26.68,
+              "end_s": 26.98,
+              "text": " sono",
+              "probability": 0.988239049911499
+            },
+            {
+              "start_s": 26.98,
+              "end_s": 27.24,
+              "text": " qui",
+              "probability": 0.996658444404602
+            },
+            {
+              "start_s": 27.24,
+              "end_s": 27.44,
+              "text": " per",
+              "probability": 0.996475875377655
+            },
+            {
+              "start_s": 27.44,
+              "end_s": 27.88,
+              "text": " aiutarti",
+              "probability": 0.9143206079800924
+            },
+            {
+              "start_s": 27.88,
+              "end_s": 28.02,
+              "text": " a",
+              "probability": 0.9970008730888367
+            },
+            {
+              "start_s": 28.02,
+              "end_s": 28.56,
+              "text": " pianificare",
+              "probability": 0.9899747570355734
+            },
+            {
+              "start_s": 28.56,
+              "end_s": 28.7,
+              "text": " il",
+              "probability": 0.9975378513336182
+            },
+            {
+              "start_s": 28.7,
+              "end_s": 28.84,
+              "text": " tuo",
+              "probability": 0.9937500357627869
+            },
+            {
+              "start_s": 28.84,
+              "end_s": 29.26,
+              "text": " viaggio.",
+              "probability": 0.9964379668235779
+            }
+          ]
+        },
+        {
+          "start_s": 30.06,
+          "end_s": 31.02,
+          "text": " Cosa è in mente?",
+          "words": [
+            {
+              "start_s": 30.06,
+              "end_s": 30.54,
+              "text": " Cosa",
+              "probability": 0.8791432678699493
+            },
+            {
+              "start_s": 30.54,
+              "end_s": 30.7,
+              "text": " è",
+              "probability": 0.5866785645484924
+            },
+            {
+              "start_s": 30.7,
+              "end_s": 30.8,
+              "text": " in",
+              "probability": 0.9837610125541687
+            },
+            {
+              "start_s": 30.8,
+              "end_s": 31.02,
+              "text": " mente?",
+              "probability": 0.9933887720108032
+            }
+          ]
+        },
+        {
+          "start_s": 39.6,
+          "end_s": 47.52,
+          "text": " Perfetto, abbiamo un budget totale di 350 euro, e le date sono da venerdì alle 18.30 a domenica",
+          "words": [
+            {
+              "start_s": 39.6,
+              "end_s": 40.28,
+              "text": " Perfetto,",
+              "probability": 0.9536849856376648
+            },
+            {
+              "start_s": 40.82,
+              "end_s": 41.1,
+              "text": " abbiamo",
+              "probability": 0.9924853444099426
+            },
+            {
+              "start_s": 41.1,
+              "end_s": 41.44,
+              "text": " un",
+              "probability": 0.9982607960700989
+            },
+            {
+              "start_s": 41.44,
+              "end_s": 41.72,
+              "text": " budget",
+              "probability": 0.8159344792366028
+            },
+            {
+              "start_s": 41.72,
+              "end_s": 42.18,
+              "text": " totale",
+              "probability": 0.9874936938285828
+            },
+            {
+              "start_s": 42.18,
+              "end_s": 42.36,
+              "text": " di",
+              "probability": 0.9976522326469421
+            },
+            {
+              "start_s": 42.36,
+              "end_s": 43.02,
+              "text": " 350",
+              "probability": 0.9551113247871399
+            },
+            {
+              "start_s": 43.02,
+              "end_s": 44.02,
+              "text": " euro,",
+              "probability": 0.6421072483062744
+            },
+            {
+              "start_s": 44.56,
+              "end_s": 44.8,
+              "text": " e",
+              "probability": 0.9773019552230835
+            },
+            {
+              "start_s": 44.8,
+              "end_s": 44.86,
+              "text": " le",
+              "probability": 0.9991626739501953
+            },
+            {
+              "start_s": 44.86,
+              "end_s": 45.06,
+              "text": " date",
+              "probability": 0.9321484565734863
+            },
+            {
+              "start_s": 45.06,
+              "end_s": 45.36,
+              "text": " sono",
+              "probability": 0.9982179999351501
+            },
+            {
+              "start_s": 45.36,
+              "end_s": 45.52,
+              "text": " da",
+              "probability": 0.9855583906173706
+            },
+            {
+              "start_s": 45.52,
+              "end_s": 45.98,
+              "text": " venerdì",
+              "probability": 0.8936501145362854
+            },
+            {
+              "start_s": 45.98,
+              "end_s": 46.08,
+              "text": " alle",
+              "probability": 0.9554033875465393
+            },
+            {
+              "start_s": 46.08,
+              "end_s": 46.44,
+              "text": " 18",
+              "probability": 0.988344669342041
+            },
+            {
+              "start_s": 46.44,
+              "end_s": 46.86,
+              "text": ".30",
+              "probability": 0.9164556264877319
+            },
+            {
+              "start_s": 46.86,
+              "end_s": 47.1,
+              "text": " a",
+              "probability": 0.9544247388839722
+            },
+            {
+              "start_s": 47.1,
+              "end_s": 47.52,
+              "text": " domenica",
+              "probability": 0.9662709434827169
+            }
+          ]
+        },
+        {
+          "start_s": 47.52,
+          "end_s": 48.58,
+          "text": " alle 17.0.",
+          "words": [
+            {
+              "start_s": 47.52,
+              "end_s": 47.7,
+              "text": " alle",
+              "probability": 0.9294551610946655
+            },
+            {
+              "start_s": 47.7,
+              "end_s": 48.0,
+              "text": " 17",
+              "probability": 0.9967380166053772
+            },
+            {
+              "start_s": 48.0,
+              "end_s": 48.58,
+              "text": ".0.",
+              "probability": 0.7501734495162964
+            }
+          ]
+        },
+        {
+          "start_s": 49.38,
+          "end_s": 51.14,
+          "text": " Avete già una destinazione in mente.",
+          "words": [
+            {
+              "start_s": 49.38,
+              "end_s": 49.72,
+              "text": " Avete",
+              "probability": 0.9659186899662018
+            },
+            {
+              "start_s": 49.72,
+              "end_s": 49.94,
+              "text": " già",
+              "probability": 0.9973430037498474
+            },
+            {
+              "start_s": 49.94,
+              "end_s": 50.08,
+              "text": " una",
+              "probability": 0.996846616268158
+            },
+            {
+              "start_s": 50.08,
+              "end_s": 50.68,
+              "text": " destinazione",
+              "probability": 0.9785845875740051
+            },
+            {
+              "start_s": 50.68,
+              "end_s": 50.9,
+              "text": " in",
+              "probability": 0.9963656663894653
+            },
+            {
+              "start_s": 50.9,
+              "end_s": 51.14,
+              "text": " mente.",
+              "probability": 0.9991088509559631
+            }
+          ]
+        },
+        {
+          "start_s": 55.82,
+          "end_s": 60.28,
+          "text": " Considerando il budget e gli interessi, potremmo pensare a una città con opzioni",
+          "words": [
+            {
+              "start_s": 55.82,
+              "end_s": 56.5,
+              "text": " Considerando",
+              "probability": 0.972627192735672
+            },
+            {
+              "start_s": 56.5,
+              "end_s": 56.66,
+              "text": " il",
+              "probability": 0.9983997941017151
+            },
+            {
+              "start_s": 56.66,
+              "end_s": 57.02,
+              "text": " budget",
+              "probability": 0.9708818793296814
+            },
+            {
+              "start_s": 57.02,
+              "end_s": 57.22,
+              "text": " e",
+              "probability": 0.8524283170700073
+            },
+            {
+              "start_s": 57.22,
+              "end_s": 57.32,
+              "text": " gli",
+              "probability": 0.9992483258247375
+            },
+            {
+              "start_s": 57.32,
+              "end_s": 57.92,
+              "text": " interessi,",
+              "probability": 0.9861395955085754
+            },
+            {
+              "start_s": 58.36,
+              "end_s": 58.7,
+              "text": " potremmo",
+              "probability": 0.9622137993574142
+            },
+            {
+              "start_s": 58.7,
+              "end_s": 59.14,
+              "text": " pensare",
+              "probability": 0.9960321485996246
+            },
+            {
+              "start_s": 59.14,
+              "end_s": 59.24,
+              "text": " a",
+              "probability": 0.919161319732666
+            },
+            {
+              "start_s": 59.24,
+              "end_s": 59.34,
+              "text": " una",
+              "probability": 0.9943882822990417
+            },
+            {
+              "start_s": 59.34,
+              "end_s": 59.74,
+              "text": " città",
+              "probability": 0.9976028601328532
+            },
+            {
+              "start_s": 59.74,
+              "end_s": 59.92,
+              "text": " con",
+              "probability": 0.9979637861251831
+            },
+            {
+              "start_s": 59.92,
+              "end_s": 60.28,
+              "text": " opzioni",
+              "probability": 0.9727205634117126
+            }
+          ]
+        },
+        {
+          "start_s": 60.28,
+          "end_s": 63.74,
+          "text": " di ristorazione vegetariana e attività culturali rilassanti.",
+          "words": [
+            {
+              "start_s": 60.28,
+              "end_s": 60.46,
+              "text": " di",
+              "probability": 0.998580813407898
+            },
+            {
+              "start_s": 60.46,
+              "end_s": 61.02,
+              "text": " ristorazione",
+              "probability": 0.9665641784667969
+            },
+            {
+              "start_s": 61.02,
+              "end_s": 61.76,
+              "text": " vegetariana",
+              "probability": 0.9408482511838278
+            },
+            {
+              "start_s": 61.76,
+              "end_s": 62.04,
+              "text": " e",
+              "probability": 0.977196216583252
+            },
+            {
+              "start_s": 62.04,
+              "end_s": 62.5,
+              "text": " attività",
+              "probability": 0.9961129426956177
+            },
+            {
+              "start_s": 62.5,
+              "end_s": 63.1,
+              "text": " culturali",
+              "probability": 0.8642768263816833
+            },
+            {
+              "start_s": 63.1,
+              "end_s": 63.74,
+              "text": " rilassanti.",
+              "probability": 0.9963293671607971
+            }
+          ]
+        },
+        {
+          "start_s": 64.42,
+          "end_s": 67.58,
+          "text": " Avete qualche preferenza per il tipo di ambiente che cercate?",
+          "words": [
+            {
+              "start_s": 64.42,
+              "end_s": 64.94,
+              "text": " Avete",
+              "probability": 0.8586700558662415
+            },
+            {
+              "start_s": 64.94,
+              "end_s": 65.18,
+              "text": " qualche",
+              "probability": 0.9914780259132385
+            },
+            {
+              "start_s": 65.18,
+              "end_s": 65.86,
+              "text": " preferenza",
+              "probability": 0.9844925701618195
+            },
+            {
+              "start_s": 65.86,
+              "end_s": 66.06,
+              "text": " per",
+              "probability": 0.9901573657989502
+            },
+            {
+              "start_s": 66.06,
+              "end_s": 66.2,
+              "text": " il",
+              "probability": 0.9982985854148865
+            },
+            {
+              "start_s": 66.2,
+              "end_s": 66.38,
+              "text": " tipo",
+              "probability": 0.9973248243331909
+            },
+            {
+              "start_s": 66.38,
+              "end_s": 66.52,
+              "text": " di",
+              "probability": 0.9903085827827454
+            },
+            {
+              "start_s": 66.52,
+              "end_s": 66.82,
+              "text": " ambiente",
+              "probability": 0.9902266263961792
+            },
+            {
+              "start_s": 66.82,
+              "end_s": 67.08,
+              "text": " che",
+              "probability": 0.9980610013008118
+            },
+            {
+              "start_s": 67.08,
+              "end_s": 67.58,
+              "text": " cercate?",
+              "probability": 0.990768164396286
+            }
+          ]
+        }
+      ],
+      "text": "Inizia pure. Ciao Marco, sono qui per aiutarti a pianificare il tuo viaggio. Cosa è in mente? Perfetto, abbiamo un budget totale di 350 euro, e le date sono da venerdì alle 18.30 a domenica alle 17.0. Avete già una destinazione in mente. Considerando il budget e gli interessi, potremmo pensare a una città con opzioni di ristorazione vegetariana e attività culturali rilassanti. Avete qualche preferenza per il tipo di ambiente che cercate?"
+    },
+    {
+      "file": "B_input.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/pair_long_20261015_owner_pin_fix/B_input.wav",
+      "media": {
+        "sample_rate": 16000,
+        "channels": 1,
+        "frames": 4705280,
+        "duration_s": 294.08
+      },
+      "language": "it",
+      "language_probability": 1,
+      "segments": [
+        {
+          "start_s": 8.94,
+          "end_s": 16.4,
+          "text": " Ciao, sono Marco. Stavo pensando on weekend a Torino dal 13 al 15 novembre 2026 con Elena.",
+          "words": [
+            {
+              "start_s": 8.94,
+              "end_s": 9.5,
+              "text": " Ciao,",
+              "probability": 0.9253135919570923
+            },
+            {
+              "start_s": 9.94,
+              "end_s": 10.18,
+              "text": " sono",
+              "probability": 0.9911333918571472
+            },
+            {
+              "start_s": 10.18,
+              "end_s": 10.5,
+              "text": " Marco.",
+              "probability": 0.9723090529441833
+            },
+            {
+              "start_s": 11.62,
+              "end_s": 12.1,
+              "text": " Stavo",
+              "probability": 0.9882127344608307
+            },
+            {
+              "start_s": 12.1,
+              "end_s": 12.48,
+              "text": " pensando",
+              "probability": 0.9901289343833923
+            },
+            {
+              "start_s": 12.48,
+              "end_s": 12.76,
+              "text": " on",
+              "probability": 0.30110758543014526
+            },
+            {
+              "start_s": 12.76,
+              "end_s": 12.98,
+              "text": " weekend",
+              "probability": 0.8328462243080139
+            },
+            {
+              "start_s": 12.98,
+              "end_s": 13.34,
+              "text": " a",
+              "probability": 0.9195441007614136
+            },
+            {
+              "start_s": 13.34,
+              "end_s": 13.62,
+              "text": " Torino",
+              "probability": 0.9741727709770203
+            },
+            {
+              "start_s": 13.62,
+              "end_s": 13.78,
+              "text": " dal",
+              "probability": 0.9056581854820251
+            },
+            {
+              "start_s": 13.78,
+              "end_s": 14.04,
+              "text": " 13",
+              "probability": 0.8849785327911377
+            },
+            {
+              "start_s": 14.04,
+              "end_s": 14.38,
+              "text": " al",
+              "probability": 0.9272521138191223
+            },
+            {
+              "start_s": 14.38,
+              "end_s": 14.68,
+              "text": " 15",
+              "probability": 0.9897023439407349
+            },
+            {
+              "start_s": 14.68,
+              "end_s": 15.16,
+              "text": " novembre",
+              "probability": 0.9193405210971832
+            },
+            {
+              "start_s": 15.16,
+              "end_s": 15.94,
+              "text": " 2026",
+              "probability": 0.9002894163131714
+            },
+            {
+              "start_s": 15.94,
+              "end_s": 16.22,
+              "text": " con",
+              "probability": 0.9791818857192993
+            },
+            {
+              "start_s": 16.22,
+              "end_s": 16.4,
+              "text": " Elena.",
+              "probability": 0.9043759703636169
+            }
+          ]
+        },
+        {
+          "start_s": 17.92,
+          "end_s": 23.7,
+          "text": " Il budget iniziale totale è di 350 euro per entrambi e arriveremo in treno venerdì alle",
+          "words": [
+            {
+              "start_s": 17.92,
+              "end_s": 18.16,
+              "text": " Il",
+              "probability": 0.9848946928977966
+            },
+            {
+              "start_s": 18.16,
+              "end_s": 18.46,
+              "text": " budget",
+              "probability": 0.7445241808891296
+            },
+            {
+              "start_s": 18.46,
+              "end_s": 19.02,
+              "text": " iniziale",
+              "probability": 0.9802044630050659
+            },
+            {
+              "start_s": 19.02,
+              "end_s": 19.5,
+              "text": " totale",
+              "probability": 0.9902377128601074
+            },
+            {
+              "start_s": 19.5,
+              "end_s": 19.94,
+              "text": " è",
+              "probability": 0.9588178396224976
+            },
+            {
+              "start_s": 19.94,
+              "end_s": 20.06,
+              "text": " di",
+              "probability": 0.99826580286026
+            },
+            {
+              "start_s": 20.06,
+              "end_s": 20.5,
+              "text": " 350",
+              "probability": 0.9746240973472595
+            },
+            {
+              "start_s": 20.5,
+              "end_s": 21.2,
+              "text": " euro",
+              "probability": 0.7202917337417603
+            },
+            {
+              "start_s": 21.2,
+              "end_s": 21.4,
+              "text": " per",
+              "probability": 0.9972124695777893
+            },
+            {
+              "start_s": 21.4,
+              "end_s": 21.96,
+              "text": " entrambi",
+              "probability": 0.9251950184504191
+            },
+            {
+              "start_s": 21.96,
+              "end_s": 22.34,
+              "text": " e",
+              "probability": 0.9187533855438232
+            },
+            {
+              "start_s": 22.34,
+              "end_s": 22.8,
+              "text": " arriveremo",
+              "probability": 0.8536729613939921
+            },
+            {
+              "start_s": 22.8,
+              "end_s": 22.9,
+              "text": " in",
+              "probability": 0.9878826141357422
+            },
+            {
+              "start_s": 22.9,
+              "end_s": 23.16,
+              "text": " treno",
+              "probability": 0.9500380456447601
+            },
+            {
+              "start_s": 23.16,
+              "end_s": 23.58,
+              "text": " venerdì",
+              "probability": 0.8159555792808533
+            },
+            {
+              "start_s": 23.58,
+              "end_s": 23.7,
+              "text": " alle",
+              "probability": 0.9811313152313232
+            }
+          ]
+        },
+        {
+          "start_s": 23.7,
+          "end_s": 41.86,
+          "text": " 18.30, ripartendo domenica alle 17.0. Ascolto, Elena è vegetariana, non abbiamo un auto",
+          "words": [
+            {
+              "start_s": 23.7,
+              "end_s": 23.98,
+              "text": " 18",
+              "probability": 0.9916702508926392
+            },
+            {
+              "start_s": 23.98,
+              "end_s": 24.48,
+              "text": ".30,",
+              "probability": 0.8723067045211792
+            },
+            {
+              "start_s": 24.98,
+              "end_s": 25.5,
+              "text": " ripartendo",
+              "probability": 0.9970404307047526
+            },
+            {
+              "start_s": 25.5,
+              "end_s": 25.98,
+              "text": " domenica",
+              "probability": 0.9785743951797485
+            },
+            {
+              "start_s": 25.98,
+              "end_s": 26.16,
+              "text": " alle",
+              "probability": 0.9981189370155334
+            },
+            {
+              "start_s": 26.16,
+              "end_s": 26.44,
+              "text": " 17",
+              "probability": 0.9971067309379578
+            },
+            {
+              "start_s": 26.44,
+              "end_s": 27.04,
+              "text": ".0.",
+              "probability": 0.7058810293674469
+            },
+            {
+              "start_s": 33.2,
+              "end_s": 33.84,
+              "text": " Ascolto,",
+              "probability": 0.9690086245536804
+            },
+            {
+              "start_s": 39.12,
+              "end_s": 39.5,
+              "text": " Elena",
+              "probability": 0.9936457872390747
+            },
+            {
+              "start_s": 39.5,
+              "end_s": 39.7,
+              "text": " è",
+              "probability": 0.930213212966919
+            },
+            {
+              "start_s": 39.7,
+              "end_s": 40.28,
+              "text": " vegetariana,",
+              "probability": 0.9440339008967081
+            },
+            {
+              "start_s": 40.94,
+              "end_s": 41.04,
+              "text": " non",
+              "probability": 0.9880557060241699
+            },
+            {
+              "start_s": 41.04,
+              "end_s": 41.3,
+              "text": " abbiamo",
+              "probability": 0.9580239653587341
+            },
+            {
+              "start_s": 41.3,
+              "end_s": 41.6,
+              "text": " un",
+              "probability": 0.9960130453109741
+            },
+            {
+              "start_s": 41.6,
+              "end_s": 41.86,
+              "text": " auto",
+              "probability": 0.6024571061134338
+            }
+          ]
+        },
+        {
+          "start_s": 41.86,
+          "end_s": 47.22,
+          "text": " e ci interessano cinema e cibo con un ritmo tranquillo. Avresti qualche idea per un possibile",
+          "words": [
+            {
+              "start_s": 41.86,
+              "end_s": 42.08,
+              "text": " e",
+              "probability": 0.9769335389137268
+            },
+            {
+              "start_s": 42.08,
+              "end_s": 42.24,
+              "text": " ci",
+              "probability": 0.9906285405158997
+            },
+            {
+              "start_s": 42.24,
+              "end_s": 42.8,
+              "text": " interessano",
+              "probability": 0.9917369484901428
+            },
+            {
+              "start_s": 42.8,
+              "end_s": 43.12,
+              "text": " cinema",
+              "probability": 0.942455530166626
+            },
+            {
+              "start_s": 43.12,
+              "end_s": 43.34,
+              "text": " e",
+              "probability": 0.9825387001037598
+            },
+            {
+              "start_s": 43.34,
+              "end_s": 43.62,
+              "text": " cibo",
+              "probability": 0.9534570872783661
+            },
+            {
+              "start_s": 43.62,
+              "end_s": 43.82,
+              "text": " con",
+              "probability": 0.9960523843765259
+            },
+            {
+              "start_s": 43.82,
+              "end_s": 43.94,
+              "text": " un",
+              "probability": 0.9979400038719177
+            },
+            {
+              "start_s": 43.94,
+              "end_s": 44.2,
+              "text": " ritmo",
+              "probability": 0.9905178844928741
+            },
+            {
+              "start_s": 44.2,
+              "end_s": 44.86,
+              "text": " tranquillo.",
+              "probability": 0.9919621348381042
+            },
+            {
+              "start_s": 45.58,
+              "end_s": 46.06,
+              "text": " Avresti",
+              "probability": 0.9416075746218363
+            },
+            {
+              "start_s": 46.06,
+              "end_s": 46.2,
+              "text": " qualche",
+              "probability": 0.9981011748313904
+            },
+            {
+              "start_s": 46.2,
+              "end_s": 46.6,
+              "text": " idea",
+              "probability": 0.9867463707923889
+            },
+            {
+              "start_s": 46.6,
+              "end_s": 46.8,
+              "text": " per",
+              "probability": 0.9948732256889343
+            },
+            {
+              "start_s": 46.8,
+              "end_s": 46.92,
+              "text": " un",
+              "probability": 0.9979491829872131
+            },
+            {
+              "start_s": 46.92,
+              "end_s": 47.22,
+              "text": " possibile",
+              "probability": 0.996191143989563
+            }
+          ]
+        },
+        {
+          "start_s": 47.22,
+          "end_s": 47.64,
+          "text": " piano?",
+          "words": [
+            {
+              "start_s": 47.22,
+              "end_s": 47.64,
+              "text": " piano?",
+              "probability": 0.1253328174352646
+            }
+          ]
+        }
+      ],
+      "text": "Ciao, sono Marco. Stavo pensando on weekend a Torino dal 13 al 15 novembre 2026 con Elena. Il budget iniziale totale è di 350 euro per entrambi e arriveremo in treno venerdì alle 18.30, ripartendo domenica alle 17.0. Ascolto, Elena è vegetariana, non abbiamo un auto e ci interessano cinema e cibo con un ritmo tranquillo. Avresti qualche idea per un possibile piano?"
+    },
+    {
+      "file": "B_input_prefix_first_B_SPEAK.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/pair_long_20261015_owner_pin_fix/B_input_prefix_first_B_SPEAK.wav",
+      "media": {
+        "sample_rate": 16000,
+        "channels": 1,
+        "frames": 186880,
+        "duration_s": 11.68
+      },
+      "language": "it",
+      "language_probability": 1,
+      "segments": [
+        {
+          "start_s": 8.94,
+          "end_s": 10.5,
+          "text": " Ciao, sono Marco.",
+          "words": [
+            {
+              "start_s": 8.94,
+              "end_s": 9.5,
+              "text": " Ciao,",
+              "probability": 0.8777466416358948
+            },
+            {
+              "start_s": 9.94,
+              "end_s": 10.2,
+              "text": " sono",
+              "probability": 0.9760898351669312
+            },
+            {
+              "start_s": 10.2,
+              "end_s": 10.5,
+              "text": " Marco.",
+              "probability": 0.974118173122406
+            }
+          ]
+        }
+      ],
+      "text": "Ciao, sono Marco."
+    },
+    {
+      "file": "response_A_resp_57946e51adbc.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/pair_long_20261015_owner_pin_fix/response_A_resp_57946e51adbc.wav",
+      "media": {
+        "sample_rate": 24000,
+        "channels": 1,
+        "frames": 34560,
+        "duration_s": 1.44
+      },
+      "language": "it",
+      "language_probability": 1,
+      "segments": [
+        {
+          "start_s": 0.14,
+          "end_s": 1.12,
+          "text": " Ascolto",
+          "words": [
+            {
+              "start_s": 0.14,
+              "end_s": 1.12,
+              "text": " Ascolto",
+              "probability": 0.8669268687566122
+            }
+          ]
+        }
+      ],
+      "text": "Ascolto"
+    },
+    {
+      "file": "response_A_resp_ac2a7f5a7aee.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/pair_long_20261015_owner_pin_fix/response_A_resp_ac2a7f5a7aee.wav",
+      "media": {
+        "sample_rate": 24000,
+        "channels": 1,
+        "frames": 449280,
+        "duration_s": 18.72
+      },
+      "language": "it",
+      "language_probability": 1,
+      "segments": [
+        {
+          "start_s": 0.0,
+          "end_s": 5.54,
+          "text": " Ciao, sono Marco. Stavo pensando on weekend a Torino dal 13 al 15",
+          "words": [
+            {
+              "start_s": 0.0,
+              "end_s": 0.38,
+              "text": " Ciao,",
+              "probability": 0.9361672401428223
+            },
+            {
+              "start_s": 0.82,
+              "end_s": 1.08,
+              "text": " sono",
+              "probability": 0.9786002039909363
+            },
+            {
+              "start_s": 1.08,
+              "end_s": 1.4,
+              "text": " Marco.",
+              "probability": 0.9707574248313904
+            },
+            {
+              "start_s": 2.54,
+              "end_s": 2.98,
+              "text": " Stavo",
+              "probability": 0.9871432185173035
+            },
+            {
+              "start_s": 2.98,
+              "end_s": 3.36,
+              "text": " pensando",
+              "probability": 0.988752543926239
+            },
+            {
+              "start_s": 3.36,
+              "end_s": 3.64,
+              "text": " on",
+              "probability": 0.32512494921684265
+            },
+            {
+              "start_s": 3.64,
+              "end_s": 3.88,
+              "text": " weekend",
+              "probability": 0.8350737690925598
+            },
+            {
+              "start_s": 3.88,
+              "end_s": 4.22,
+              "text": " a",
+              "probability": 0.9312759637832642
+            },
+            {
+              "start_s": 4.22,
+              "end_s": 4.52,
+              "text": " Torino",
+              "probability": 0.9606616497039795
+            },
+            {
+              "start_s": 4.52,
+              "end_s": 4.66,
+              "text": " dal",
+              "probability": 0.9010902643203735
+            },
+            {
+              "start_s": 4.66,
+              "end_s": 4.92,
+              "text": " 13",
+              "probability": 0.8887748122215271
+            },
+            {
+              "start_s": 4.92,
+              "end_s": 5.26,
+              "text": " al",
+              "probability": 0.9149179458618164
+            },
+            {
+              "start_s": 5.26,
+              "end_s": 5.54,
+              "text": " 15",
+              "probability": 0.9868038296699524
+            }
+          ]
+        },
+        {
+          "start_s": 5.54,
+          "end_s": 12.28,
+          "text": " novembre 2026 con Elena. Il budget iniziale totale è di 350 euro per",
+          "words": [
+            {
+              "start_s": 5.54,
+              "end_s": 6.06,
+              "text": " novembre",
+              "probability": 0.9354028403759003
+            },
+            {
+              "start_s": 6.06,
+              "end_s": 6.84,
+              "text": " 2026",
+              "probability": 0.9237135648727417
+            },
+            {
+              "start_s": 6.84,
+              "end_s": 7.08,
+              "text": " con",
+              "probability": 0.9909713268280029
+            },
+            {
+              "start_s": 7.08,
+              "end_s": 7.28,
+              "text": " Elena.",
+              "probability": 0.7552568316459656
+            },
+            {
+              "start_s": 8.28,
+              "end_s": 9.04,
+              "text": " Il",
+              "probability": 0.9792506694793701
+            },
+            {
+              "start_s": 9.04,
+              "end_s": 9.34,
+              "text": " budget",
+              "probability": 0.851348876953125
+            },
+            {
+              "start_s": 9.34,
+              "end_s": 9.9,
+              "text": " iniziale",
+              "probability": 0.9818206230799357
+            },
+            {
+              "start_s": 9.9,
+              "end_s": 10.4,
+              "text": " totale",
+              "probability": 0.9918540418148041
+            },
+            {
+              "start_s": 10.4,
+              "end_s": 10.82,
+              "text": " è",
+              "probability": 0.9353893399238586
+            },
+            {
+              "start_s": 10.82,
+              "end_s": 10.92,
+              "text": " di",
+              "probability": 0.9970523118972778
+            },
+            {
+              "start_s": 10.92,
+              "end_s": 11.4,
+              "text": " 350",
+              "probability": 0.9778053760528564
+            },
+            {
+              "start_s": 11.4,
+              "end_s": 12.08,
+              "text": " euro",
+              "probability": 0.7410743236541748
+            },
+            {
+              "start_s": 12.08,
+              "end_s": 12.28,
+              "text": " per",
+              "probability": 0.998155415058136
+            }
+          ]
+        },
+        {
+          "start_s": 12.28,
+          "end_s": 17.92,
+          "text": " entrambi e arriveremo in treno venerdì alle 18.30, ripartendo domenica alle 17.0.",
+          "words": [
+            {
+              "start_s": 12.28,
+              "end_s": 13.06,
+              "text": " entrambi",
+              "probability": 0.9399284521738688
+            },
+            {
+              "start_s": 13.06,
+              "end_s": 13.22,
+              "text": " e",
+              "probability": 0.9253462553024292
+            },
+            {
+              "start_s": 13.22,
+              "end_s": 13.68,
+              "text": " arriveremo",
+              "probability": 0.8610849579175314
+            },
+            {
+              "start_s": 13.68,
+              "end_s": 13.78,
+              "text": " in",
+              "probability": 0.9901158213615417
+            },
+            {
+              "start_s": 13.78,
+              "end_s": 14.06,
+              "text": " treno",
+              "probability": 0.8513355255126953
+            },
+            {
+              "start_s": 14.06,
+              "end_s": 14.46,
+              "text": " venerdì",
+              "probability": 0.8164704740047455
+            },
+            {
+              "start_s": 14.46,
+              "end_s": 14.58,
+              "text": " alle",
+              "probability": 0.9743209481239319
+            },
+            {
+              "start_s": 14.58,
+              "end_s": 14.86,
+              "text": " 18",
+              "probability": 0.9929143190383911
+            },
+            {
+              "start_s": 14.86,
+              "end_s": 15.36,
+              "text": ".30,",
+              "probability": 0.8622582852840424
+            },
+            {
+              "start_s": 15.84,
+              "end_s": 16.4,
+              "text": " ripartendo",
+              "probability": 0.9960036079088846
+            },
+            {
+              "start_s": 16.4,
+              "end_s": 16.86,
+              "text": " domenica",
+              "probability": 0.9815485080083212
+            },
+            {
+              "start_s": 16.86,
+              "end_s": 17.04,
+              "text": " alle",
+              "probability": 0.9974294304847717
+            },
+            {
+              "start_s": 17.04,
+              "end_s": 17.3,
+              "text": " 17",
+              "probability": 0.994755744934082
+            },
+            {
+              "start_s": 17.3,
+              "end_s": 17.92,
+              "text": ".0.",
+              "probability": 0.7010299563407898
+            }
+          ]
+        }
+      ],
+      "text": "Ciao, sono Marco. Stavo pensando on weekend a Torino dal 13 al 15 novembre 2026 con Elena. Il budget iniziale totale è di 350 euro per entrambi e arriveremo in treno venerdì alle 18.30, ripartendo domenica alle 17.0."
+    },
+    {
+      "file": "response_A_resp_fd8253b6228d.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/pair_long_20261015_owner_pin_fix/response_A_resp_fd8253b6228d.wav",
+      "media": {
+        "sample_rate": 24000,
+        "channels": 1,
+        "frames": 218880,
+        "duration_s": 9.12
+      },
+      "language": "it",
+      "language_probability": 1,
+      "segments": [
+        {
+          "start_s": 0.08,
+          "end_s": 5.8,
+          "text": " Elena è vegetariana, non abbiamo un auto e ci interessano cinema e cibo con un ritmo tranquillo.",
+          "words": [
+            {
+              "start_s": 0.08,
+              "end_s": 0.72,
+              "text": " Elena",
+              "probability": 0.9558799862861633
+            },
+            {
+              "start_s": 0.72,
+              "end_s": 0.88,
+              "text": " è",
+              "probability": 0.9132714867591858
+            },
+            {
+              "start_s": 0.88,
+              "end_s": 1.56,
+              "text": " vegetariana,",
+              "probability": 0.9710049231847128
+            },
+            {
+              "start_s": 2.0,
+              "end_s": 2.16,
+              "text": " non",
+              "probability": 0.9810499548912048
+            },
+            {
+              "start_s": 2.16,
+              "end_s": 2.38,
+              "text": " abbiamo",
+              "probability": 0.9910069108009338
+            },
+            {
+              "start_s": 2.38,
+              "end_s": 2.64,
+              "text": " un",
+              "probability": 0.994541347026825
+            },
+            {
+              "start_s": 2.64,
+              "end_s": 2.92,
+              "text": " auto",
+              "probability": 0.5020509362220764
+            },
+            {
+              "start_s": 2.92,
+              "end_s": 3.12,
+              "text": " e",
+              "probability": 0.9470918774604797
+            },
+            {
+              "start_s": 3.12,
+              "end_s": 3.28,
+              "text": " ci",
+              "probability": 0.9935824275016785
+            },
+            {
+              "start_s": 3.28,
+              "end_s": 3.78,
+              "text": " interessano",
+              "probability": 0.9820070862770081
+            },
+            {
+              "start_s": 3.78,
+              "end_s": 4.06,
+              "text": " cinema",
+              "probability": 0.9299777150154114
+            },
+            {
+              "start_s": 4.06,
+              "end_s": 4.22,
+              "text": " e",
+              "probability": 0.9835736155509949
+            },
+            {
+              "start_s": 4.22,
+              "end_s": 4.52,
+              "text": " cibo",
+              "probability": 0.9848251342773438
+            },
+            {
+              "start_s": 4.52,
+              "end_s": 4.7,
+              "text": " con",
+              "probability": 0.9931861162185669
+            },
+            {
+              "start_s": 4.7,
+              "end_s": 4.82,
+              "text": " un",
+              "probability": 0.9965949654579163
+            },
+            {
+              "start_s": 4.82,
+              "end_s": 5.1,
+              "text": " ritmo",
+              "probability": 0.9900609850883484
+            },
+            {
+              "start_s": 5.1,
+              "end_s": 5.8,
+              "text": " tranquillo.",
+              "probability": 0.99385866522789
+            }
+          ]
+        },
+        {
+          "start_s": 6.32,
+          "end_s": 8.44,
+          "text": " Avresti qualche idea per un possibile piano?",
+          "words": [
+            {
+              "start_s": 6.32,
+              "end_s": 6.86,
+              "text": " Avresti",
+              "probability": 0.9588775038719177
+            },
+            {
+              "start_s": 6.86,
+              "end_s": 7.02,
+              "text": " qualche",
+              "probability": 0.99735426902771
+            },
+            {
+              "start_s": 7.02,
+              "end_s": 7.4,
+              "text": " idea",
+              "probability": 0.9827362298965454
+            },
+            {
+              "start_s": 7.4,
+              "end_s": 7.6,
+              "text": " per",
+              "probability": 0.9869347810745239
+            },
+            {
+              "start_s": 7.6,
+              "end_s": 7.72,
+              "text": " un",
+              "probability": 0.9975169897079468
+            },
+            {
+              "start_s": 7.72,
+              "end_s": 8.02,
+              "text": " possibile",
+              "probability": 0.9911375045776367
+            },
+            {
+              "start_s": 8.02,
+              "end_s": 8.44,
+              "text": " piano?",
+              "probability": 0.9900901317596436
+            }
+          ]
+        }
+      ],
+      "text": "Elena è vegetariana, non abbiamo un auto e ci interessano cinema e cibo con un ritmo tranquillo. Avresti qualche idea per un possibile piano?"
+    },
+    {
+      "file": "response_B_resp_3b9dd1cb58a2.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/pair_long_20261015_owner_pin_fix/response_B_resp_3b9dd1cb58a2.wav",
+      "media": {
+        "sample_rate": 24000,
+        "channels": 1,
+        "frames": 301440,
+        "duration_s": 12.56
+      },
+      "language": "it",
+      "language_probability": 1,
+      "segments": [
+        {
+          "start_s": 0.11,
+          "end_s": 8.31,
+          "text": " Considerando il budget e gli interessi, potremmo pensare a una città con opzioni di ristorazione vegetariana e attività culturali rilassanti.",
+          "words": [
+            {
+              "start_s": 0.11,
+              "end_s": 1.07,
+              "text": " Considerando",
+              "probability": 0.9570698440074921
+            },
+            {
+              "start_s": 1.07,
+              "end_s": 1.21,
+              "text": " il",
+              "probability": 0.9984861016273499
+            },
+            {
+              "start_s": 1.21,
+              "end_s": 1.59,
+              "text": " budget",
+              "probability": 0.6090285778045654
+            },
+            {
+              "start_s": 1.59,
+              "end_s": 1.77,
+              "text": " e",
+              "probability": 0.8318042755126953
+            },
+            {
+              "start_s": 1.77,
+              "end_s": 1.89,
+              "text": " gli",
+              "probability": 0.9995669722557068
+            },
+            {
+              "start_s": 1.89,
+              "end_s": 2.55,
+              "text": " interessi,",
+              "probability": 0.9927708208560944
+            },
+            {
+              "start_s": 2.95,
+              "end_s": 3.27,
+              "text": " potremmo",
+              "probability": 0.9513499885797501
+            },
+            {
+              "start_s": 3.27,
+              "end_s": 3.71,
+              "text": " pensare",
+              "probability": 0.9959541261196136
+            },
+            {
+              "start_s": 3.71,
+              "end_s": 3.79,
+              "text": " a",
+              "probability": 0.9242324233055115
+            },
+            {
+              "start_s": 3.79,
+              "end_s": 3.91,
+              "text": " una",
+              "probability": 0.9972134232521057
+            },
+            {
+              "start_s": 3.91,
+              "end_s": 4.35,
+              "text": " città",
+              "probability": 0.9976263642311096
+            },
+            {
+              "start_s": 4.35,
+              "end_s": 4.47,
+              "text": " con",
+              "probability": 0.9967280626296997
+            },
+            {
+              "start_s": 4.47,
+              "end_s": 4.85,
+              "text": " opzioni",
+              "probability": 0.9670569896697998
+            },
+            {
+              "start_s": 4.85,
+              "end_s": 5.01,
+              "text": " di",
+              "probability": 0.9994016885757446
+            },
+            {
+              "start_s": 5.01,
+              "end_s": 5.59,
+              "text": " ristorazione",
+              "probability": 0.9779368837674459
+            },
+            {
+              "start_s": 5.59,
+              "end_s": 6.37,
+              "text": " vegetariana",
+              "probability": 0.9373682538668314
+            },
+            {
+              "start_s": 6.37,
+              "end_s": 6.61,
+              "text": " e",
+              "probability": 0.987159252166748
+            },
+            {
+              "start_s": 6.61,
+              "end_s": 7.05,
+              "text": " attività",
+              "probability": 0.9960819681485494
+            },
+            {
+              "start_s": 7.05,
+              "end_s": 7.69,
+              "text": " culturali",
+              "probability": 0.8442060351371765
+            },
+            {
+              "start_s": 7.69,
+              "end_s": 8.31,
+              "text": " rilassanti.",
+              "probability": 0.9966485351324081
+            }
+          ]
+        },
+        {
+          "start_s": 9.05,
+          "end_s": 12.15,
+          "text": " Avete qualche preferenza per il tipo di ambiente che cercate?",
+          "words": [
+            {
+              "start_s": 9.05,
+              "end_s": 9.51,
+              "text": " Avete",
+              "probability": 0.9685715436935425
+            },
+            {
+              "start_s": 9.51,
+              "end_s": 9.71,
+              "text": " qualche",
+              "probability": 0.9956188797950745
+            },
+            {
+              "start_s": 9.71,
+              "end_s": 10.43,
+              "text": " preferenza",
+              "probability": 0.9821987450122833
+            },
+            {
+              "start_s": 10.43,
+              "end_s": 10.63,
+              "text": " per",
+              "probability": 0.9915727376937866
+            },
+            {
+              "start_s": 10.63,
+              "end_s": 10.75,
+              "text": " il",
+              "probability": 0.9983038902282715
+            },
+            {
+              "start_s": 10.75,
+              "end_s": 10.93,
+              "text": " tipo",
+              "probability": 0.9970492720603943
+            },
+            {
+              "start_s": 10.93,
+              "end_s": 11.07,
+              "text": " di",
+              "probability": 0.990786075592041
+            },
+            {
+              "start_s": 11.07,
+              "end_s": 11.41,
+              "text": " ambiente",
+              "probability": 0.9872521162033081
+            },
+            {
+              "start_s": 11.41,
+              "end_s": 11.63,
+              "text": " che",
+              "probability": 0.9990654587745667
+            },
+            {
+              "start_s": 11.63,
+              "end_s": 12.15,
+              "text": " cercate?",
+              "probability": 0.9914227724075317
+            }
+          ]
+        }
+      ],
+      "text": "Considerando il budget e gli interessi, potremmo pensare a una città con opzioni di ristorazione vegetariana e attività culturali rilassanti. Avete qualche preferenza per il tipo di ambiente che cercate?"
+    },
+    {
+      "file": "response_B_resp_987920c0af48.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/pair_long_20261015_owner_pin_fix/response_B_resp_987920c0af48.wav",
+      "media": {
+        "sample_rate": 24000,
+        "channels": 1,
+        "frames": 272640,
+        "duration_s": 11.36
+      },
+      "language": "it",
+      "language_probability": 1,
+      "segments": [
+        {
+          "start_s": 0.0,
+          "end_s": 8.32,
+          "text": " Perfetto! Abbiamo un budget totale di 350 euro e le date sono da venerdì alle 18.30 a domenica alle 17.00.",
+          "words": [
+            {
+              "start_s": 0.0,
+              "end_s": 0.74,
+              "text": " Perfetto!",
+              "probability": 0.9477699597676595
+            },
+            {
+              "start_s": 1.12,
+              "end_s": 1.54,
+              "text": " Abbiamo",
+              "probability": 0.9586815237998962
+            },
+            {
+              "start_s": 1.54,
+              "end_s": 1.68,
+              "text": " un",
+              "probability": 0.9991273283958435
+            },
+            {
+              "start_s": 1.68,
+              "end_s": 1.94,
+              "text": " budget",
+              "probability": 0.3364367187023163
+            },
+            {
+              "start_s": 1.94,
+              "end_s": 2.36,
+              "text": " totale",
+              "probability": 0.9187420010566711
+            },
+            {
+              "start_s": 2.36,
+              "end_s": 2.52,
+              "text": " di",
+              "probability": 0.99825519323349
+            },
+            {
+              "start_s": 2.52,
+              "end_s": 3.08,
+              "text": " 350",
+              "probability": 0.9623557925224304
+            },
+            {
+              "start_s": 3.08,
+              "end_s": 3.9,
+              "text": " euro",
+              "probability": 0.7426779270172119
+            },
+            {
+              "start_s": 3.9,
+              "end_s": 4.52,
+              "text": " e",
+              "probability": 0.507692813873291
+            },
+            {
+              "start_s": 4.52,
+              "end_s": 4.62,
+              "text": " le",
+              "probability": 0.9989757537841797
+            },
+            {
+              "start_s": 4.62,
+              "end_s": 4.82,
+              "text": " date",
+              "probability": 0.9402843713760376
+            },
+            {
+              "start_s": 4.82,
+              "end_s": 5.1,
+              "text": " sono",
+              "probability": 0.9975599050521851
+            },
+            {
+              "start_s": 5.1,
+              "end_s": 5.28,
+              "text": " da",
+              "probability": 0.9910955429077148
+            },
+            {
+              "start_s": 5.28,
+              "end_s": 5.74,
+              "text": " venerdì",
+              "probability": 0.9502398570378622
+            },
+            {
+              "start_s": 5.74,
+              "end_s": 5.84,
+              "text": " alle",
+              "probability": 0.9811199307441711
+            },
+            {
+              "start_s": 5.84,
+              "end_s": 6.2,
+              "text": " 18",
+              "probability": 0.9932509064674377
+            },
+            {
+              "start_s": 6.2,
+              "end_s": 6.6,
+              "text": ".30",
+              "probability": 0.9408182501792908
+            },
+            {
+              "start_s": 6.6,
+              "end_s": 6.86,
+              "text": " a",
+              "probability": 0.9074845314025879
+            },
+            {
+              "start_s": 6.86,
+              "end_s": 7.3,
+              "text": " domenica",
+              "probability": 0.9834712942441305
+            },
+            {
+              "start_s": 7.3,
+              "end_s": 7.44,
+              "text": " alle",
+              "probability": 0.9790430068969727
+            },
+            {
+              "start_s": 7.44,
+              "end_s": 7.86,
+              "text": " 17",
+              "probability": 0.9973099231719971
+            },
+            {
+              "start_s": 7.86,
+              "end_s": 8.32,
+              "text": ".00.",
+              "probability": 0.7892235815525055
+            }
+          ]
+        },
+        {
+          "start_s": 9.14,
+          "end_s": 10.92,
+          "text": " Avete già una destinazione in mente?",
+          "words": [
+            {
+              "start_s": 9.14,
+              "end_s": 9.48,
+              "text": " Avete",
+              "probability": 0.9646989703178406
+            },
+            {
+              "start_s": 9.48,
+              "end_s": 9.7,
+              "text": " già",
+              "probability": 0.9979547262191772
+            },
+            {
+              "start_s": 9.7,
+              "end_s": 9.84,
+              "text": " una",
+              "probability": 0.9964922070503235
+            },
+            {
+              "start_s": 9.84,
+              "end_s": 10.5,
+              "text": " destinazione",
+              "probability": 0.9753526449203491
+            },
+            {
+              "start_s": 10.5,
+              "end_s": 10.66,
+              "text": " in",
+              "probability": 0.9989585876464844
+            },
+            {
+              "start_s": 10.66,
+              "end_s": 10.92,
+              "text": " mente?",
+              "probability": 0.9973970651626587
+            }
+          ]
+        }
+      ],
+      "text": "Perfetto! Abbiamo un budget totale di 350 euro e le date sono da venerdì alle 18.30 a domenica alle 17.00. Avete già una destinazione in mente?"
+    },
+    {
+      "file": "response_B_resp_a5d71e00da36.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/pair_long_20261015_owner_pin_fix/response_B_resp_a5d71e00da36.wav",
+      "media": {
+        "sample_rate": 24000,
+        "channels": 1,
+        "frames": 142080,
+        "duration_s": 5.92
+      },
+      "language": "it",
+      "language_probability": 1,
+      "segments": [
+        {
+          "start_s": 0.0,
+          "end_s": 3.76,
+          "text": " Ciao Marco, sono qui per aiutarti a pianificare il tuo viaggio.",
+          "words": [
+            {
+              "start_s": 0.0,
+              "end_s": 0.32,
+              "text": " Ciao",
+              "probability": 0.8606730103492737
+            },
+            {
+              "start_s": 0.32,
+              "end_s": 0.66,
+              "text": " Marco,",
+              "probability": 0.9344623684883118
+            },
+            {
+              "start_s": 1.18,
+              "end_s": 1.46,
+              "text": " sono",
+              "probability": 0.9924496412277222
+            },
+            {
+              "start_s": 1.46,
+              "end_s": 1.7,
+              "text": " qui",
+              "probability": 0.9950140118598938
+            },
+            {
+              "start_s": 1.7,
+              "end_s": 1.9,
+              "text": " per",
+              "probability": 0.9955926537513733
+            },
+            {
+              "start_s": 1.9,
+              "end_s": 2.38,
+              "text": " aiutarti",
+              "probability": 0.9416184027989706
+            },
+            {
+              "start_s": 2.38,
+              "end_s": 2.48,
+              "text": " a",
+              "probability": 0.9921395182609558
+            },
+            {
+              "start_s": 2.48,
+              "end_s": 3.06,
+              "text": " pianificare",
+              "probability": 0.9766288797060648
+            },
+            {
+              "start_s": 3.06,
+              "end_s": 3.16,
+              "text": " il",
+              "probability": 0.9975523352622986
+            },
+            {
+              "start_s": 3.16,
+              "end_s": 3.3,
+              "text": " tuo",
+              "probability": 0.9913927316665649
+            },
+            {
+              "start_s": 3.3,
+              "end_s": 3.76,
+              "text": " viaggio.",
+              "probability": 0.9969802498817444
+            }
+          ]
+        },
+        {
+          "start_s": 4.48,
+          "end_s": 5.54,
+          "text": " Cosa hai in mente?",
+          "words": [
+            {
+              "start_s": 4.48,
+              "end_s": 5.02,
+              "text": " Cosa",
+              "probability": 0.9009925723075867
+            },
+            {
+              "start_s": 5.02,
+              "end_s": 5.18,
+              "text": " hai",
+              "probability": 0.43650004267692566
+            },
+            {
+              "start_s": 5.18,
+              "end_s": 5.28,
+              "text": " in",
+              "probability": 0.9500432014465332
+            },
+            {
+              "start_s": 5.28,
+              "end_s": 5.54,
+              "text": " mente?",
+              "probability": 0.9950357675552368
+            }
+          ]
+        }
+      ],
+      "text": "Ciao Marco, sono qui per aiutarti a pianificare il tuo viaggio. Cosa hai in mente?"
+    }
+  ]
+}

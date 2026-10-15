@@ -1,0 +1,547 @@
+{
+  "model": "faster-whisper small",
+  "device": "cpu",
+  "compute_type": "int8",
+  "results": [
+    {
+      "file": "clean_initial.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/inputs/clean_initial.wav",
+      "language": "it",
+      "language_probability": 1.0,
+      "media": {
+        "sample_rate": 22050,
+        "channels": 1,
+        "frames": 227556,
+        "duration_s": 10.32
+      },
+      "segments": [
+        {
+          "start_s": 0.0,
+          "end_s": 6.8,
+          "text": " Mi chiamo Elena. Il mio codice è 7-3-1. Vorrei visitare Torino con 120 euro.",
+          "words": [
+            {
+              "start_s": 0.0,
+              "end_s": 0.34,
+              "text": " Mi",
+              "probability": 0.8271432518959045
+            },
+            {
+              "start_s": 0.34,
+              "end_s": 0.62,
+              "text": " chiamo",
+              "probability": 0.9904263615608215
+            },
+            {
+              "start_s": 0.62,
+              "end_s": 0.98,
+              "text": " Elena.",
+              "probability": 0.953029990196228
+            },
+            {
+              "start_s": 1.5,
+              "end_s": 1.64,
+              "text": " Il",
+              "probability": 0.9787278771400452
+            },
+            {
+              "start_s": 1.64,
+              "end_s": 1.8,
+              "text": " mio",
+              "probability": 0.9992519021034241
+            },
+            {
+              "start_s": 1.8,
+              "end_s": 2.28,
+              "text": " codice",
+              "probability": 0.9920603632926941
+            },
+            {
+              "start_s": 2.28,
+              "end_s": 2.42,
+              "text": " è",
+              "probability": 0.9860420823097229
+            },
+            {
+              "start_s": 2.42,
+              "end_s": 2.76,
+              "text": " 7",
+              "probability": 0.8345544338226318
+            },
+            {
+              "start_s": 2.76,
+              "end_s": 3.34,
+              "text": "-3",
+              "probability": 0.6578404605388641
+            },
+            {
+              "start_s": 3.34,
+              "end_s": 4.0,
+              "text": "-1.",
+              "probability": 0.9930309951305389
+            },
+            {
+              "start_s": 4.36,
+              "end_s": 4.8,
+              "text": " Vorrei",
+              "probability": 0.9704887866973877
+            },
+            {
+              "start_s": 4.8,
+              "end_s": 5.26,
+              "text": " visitare",
+              "probability": 0.9931426346302032
+            },
+            {
+              "start_s": 5.26,
+              "end_s": 5.66,
+              "text": " Torino",
+              "probability": 0.8647067844867706
+            },
+            {
+              "start_s": 5.66,
+              "end_s": 5.86,
+              "text": " con",
+              "probability": 0.9903379678726196
+            },
+            {
+              "start_s": 5.86,
+              "end_s": 6.38,
+              "text": " 120",
+              "probability": 0.9930938482284546
+            },
+            {
+              "start_s": 6.38,
+              "end_s": 6.8,
+              "text": " euro.",
+              "probability": 0.7168620824813843
+            }
+          ]
+        },
+        {
+          "start_s": 7.16,
+          "end_s": 9.94,
+          "text": " Respondi in italiano, in non più di due frasi.",
+          "words": [
+            {
+              "start_s": 7.16,
+              "end_s": 7.84,
+              "text": " Respondi",
+              "probability": 0.8118913571039835
+            },
+            {
+              "start_s": 7.84,
+              "end_s": 7.92,
+              "text": " in",
+              "probability": 0.9926435351371765
+            },
+            {
+              "start_s": 7.92,
+              "end_s": 8.4,
+              "text": " italiano,",
+              "probability": 0.9955958724021912
+            },
+            {
+              "start_s": 8.72,
+              "end_s": 8.92,
+              "text": " in",
+              "probability": 0.996788501739502
+            },
+            {
+              "start_s": 8.92,
+              "end_s": 9.04,
+              "text": " non",
+              "probability": 0.9913585186004639
+            },
+            {
+              "start_s": 9.04,
+              "end_s": 9.22,
+              "text": " più",
+              "probability": 0.9752498865127563
+            },
+            {
+              "start_s": 9.22,
+              "end_s": 9.36,
+              "text": " di",
+              "probability": 0.9918748736381531
+            },
+            {
+              "start_s": 9.36,
+              "end_s": 9.52,
+              "text": " due",
+              "probability": 0.799225926399231
+            },
+            {
+              "start_s": 9.52,
+              "end_s": 9.94,
+              "text": " frasi.",
+              "probability": 0.9866069853305817
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "file": "clean_followup.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/inputs/clean_followup.wav",
+      "language": "it",
+      "language_probability": 1.0,
+      "media": {
+        "sample_rate": 22050,
+        "channels": 1,
+        "frames": 142355,
+        "duration_s": 6.456009070294785
+      },
+      "segments": [
+        {
+          "start_s": 0.0,
+          "end_s": 6.12,
+          "text": " Il baggettore è 80 euro. Quali sono i miei nome, codice, città e baggetta attuale?",
+          "words": [
+            {
+              "start_s": 0.0,
+              "end_s": 0.34,
+              "text": " Il",
+              "probability": 0.8776573538780212
+            },
+            {
+              "start_s": 0.34,
+              "end_s": 0.96,
+              "text": " baggettore",
+              "probability": 0.7982231825590134
+            },
+            {
+              "start_s": 0.96,
+              "end_s": 1.1,
+              "text": " è",
+              "probability": 0.9735310077667236
+            },
+            {
+              "start_s": 1.1,
+              "end_s": 1.38,
+              "text": " 80",
+              "probability": 0.9312610626220703
+            },
+            {
+              "start_s": 1.38,
+              "end_s": 1.84,
+              "text": " euro.",
+              "probability": 0.586283802986145
+            },
+            {
+              "start_s": 2.16,
+              "end_s": 2.6,
+              "text": " Quali",
+              "probability": 0.9791397154331207
+            },
+            {
+              "start_s": 2.6,
+              "end_s": 2.8,
+              "text": " sono",
+              "probability": 0.9996874332427979
+            },
+            {
+              "start_s": 2.8,
+              "end_s": 3.02,
+              "text": " i",
+              "probability": 0.7212622165679932
+            },
+            {
+              "start_s": 3.02,
+              "end_s": 3.2,
+              "text": " miei",
+              "probability": 0.9053521156311035
+            },
+            {
+              "start_s": 3.2,
+              "end_s": 3.38,
+              "text": " nome,",
+              "probability": 0.8266794085502625
+            },
+            {
+              "start_s": 3.8,
+              "end_s": 4.38,
+              "text": " codice,",
+              "probability": 0.978640079498291
+            },
+            {
+              "start_s": 4.66,
+              "end_s": 5.06,
+              "text": " città",
+              "probability": 0.9966519276301066
+            },
+            {
+              "start_s": 5.06,
+              "end_s": 5.16,
+              "text": " e",
+              "probability": 0.9941607117652893
+            },
+            {
+              "start_s": 5.16,
+              "end_s": 5.7,
+              "text": " baggetta",
+              "probability": 0.8125496109326681
+            },
+            {
+              "start_s": 5.7,
+              "end_s": 6.12,
+              "text": " attuale?",
+              "probability": 0.9789173603057861
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "file": "response_resp_b7aba21c0215.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/memory_after_pin_20261014/response_resp_b7aba21c0215.wav",
+      "language": "it",
+      "language_probability": 1.0,
+      "media": {
+        "sample_rate": 24000,
+        "channels": 1,
+        "frames": 34560,
+        "duration_s": 1.44
+      },
+      "segments": [
+        {
+          "start_s": 0.0,
+          "end_s": 1.0,
+          "text": " Ascolto",
+          "words": [
+            {
+              "start_s": 0.0,
+              "end_s": 1.0,
+              "text": " Ascolto",
+              "probability": 0.8925307790438334
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "file": "response_resp_bf087849c793.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/memory_after_pin_20261014/response_resp_bf087849c793.wav",
+      "language": "it",
+      "language_probability": 1.0,
+      "media": {
+        "sample_rate": 24000,
+        "channels": 1,
+        "frames": 230400,
+        "duration_s": 9.6
+      },
+      "segments": [
+        {
+          "start_s": 0.0,
+          "end_s": 0.68,
+          "text": " Certamente.",
+          "words": [
+            {
+              "start_s": 0.0,
+              "end_s": 0.68,
+              "text": " Certamente.",
+              "probability": 0.9146756827831268
+            }
+          ]
+        },
+        {
+          "start_s": 1.76,
+          "end_s": 2.16,
+          "text": " Elena.",
+          "words": [
+            {
+              "start_s": 1.76,
+              "end_s": 2.16,
+              "text": " Elena.",
+              "probability": 0.9744911789894104
+            }
+          ]
+        },
+        {
+          "start_s": 5.640000000000001,
+          "end_s": 9.16,
+          "text": " Posso aiutarti a trovare un tour a Torino per 120 euro.",
+          "words": [
+            {
+              "start_s": 5.640000000000001,
+              "end_s": 6.4,
+              "text": " Posso",
+              "probability": 0.9847016036510468
+            },
+            {
+              "start_s": 6.4,
+              "end_s": 6.84,
+              "text": " aiutarti",
+              "probability": 0.9837731122970581
+            },
+            {
+              "start_s": 6.84,
+              "end_s": 6.94,
+              "text": " a",
+              "probability": 0.9966298937797546
+            },
+            {
+              "start_s": 6.94,
+              "end_s": 7.26,
+              "text": " trovare",
+              "probability": 0.9989294111728668
+            },
+            {
+              "start_s": 7.26,
+              "end_s": 7.38,
+              "text": " un",
+              "probability": 0.9958204030990601
+            },
+            {
+              "start_s": 7.38,
+              "end_s": 7.54,
+              "text": " tour",
+              "probability": 0.5879292488098145
+            },
+            {
+              "start_s": 7.54,
+              "end_s": 7.7,
+              "text": " a",
+              "probability": 0.9943174719810486
+            },
+            {
+              "start_s": 7.7,
+              "end_s": 8.02,
+              "text": " Torino",
+              "probability": 0.9512138962745667
+            },
+            {
+              "start_s": 8.02,
+              "end_s": 8.22,
+              "text": " per",
+              "probability": 0.9973352551460266
+            },
+            {
+              "start_s": 8.22,
+              "end_s": 8.66,
+              "text": " 120",
+              "probability": 0.989928662776947
+            },
+            {
+              "start_s": 8.66,
+              "end_s": 9.16,
+              "text": " euro.",
+              "probability": 0.7832956910133362
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "file": "response_resp_cf47f6f443cc.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/memory_after_pin_20261014/response_resp_cf47f6f443cc.wav",
+      "language": "it",
+      "language_probability": 1.0,
+      "media": {
+        "sample_rate": 24000,
+        "channels": 1,
+        "frames": 138240,
+        "duration_s": 5.76
+      },
+      "segments": [
+        {
+          "start_s": 0.0,
+          "end_s": 5.36,
+          "text": " Capisco. Cercherò opzioni più economiche per te a Torino con un budget di 81 euro.",
+          "words": [
+            {
+              "start_s": 0.0,
+              "end_s": 0.58,
+              "text": " Capisco.",
+              "probability": 0.9092997908592224
+            },
+            {
+              "start_s": 1.14,
+              "end_s": 1.7,
+              "text": " Cercherò",
+              "probability": 0.9788124561309814
+            },
+            {
+              "start_s": 1.7,
+              "end_s": 2.1,
+              "text": " opzioni",
+              "probability": 0.981171727180481
+            },
+            {
+              "start_s": 2.1,
+              "end_s": 2.3,
+              "text": " più",
+              "probability": 0.9989732503890991
+            },
+            {
+              "start_s": 2.3,
+              "end_s": 2.88,
+              "text": " economiche",
+              "probability": 0.9787397980690002
+            },
+            {
+              "start_s": 2.88,
+              "end_s": 3.08,
+              "text": " per",
+              "probability": 0.997694194316864
+            },
+            {
+              "start_s": 3.08,
+              "end_s": 3.24,
+              "text": " te",
+              "probability": 0.9476273059844971
+            },
+            {
+              "start_s": 3.24,
+              "end_s": 3.34,
+              "text": " a",
+              "probability": 0.9674930572509766
+            },
+            {
+              "start_s": 3.34,
+              "end_s": 3.76,
+              "text": " Torino",
+              "probability": 0.9661562442779541
+            },
+            {
+              "start_s": 3.76,
+              "end_s": 4.0,
+              "text": " con",
+              "probability": 0.5045115947723389
+            },
+            {
+              "start_s": 4.0,
+              "end_s": 4.14,
+              "text": " un",
+              "probability": 0.9987514019012451
+            },
+            {
+              "start_s": 4.14,
+              "end_s": 4.38,
+              "text": " budget",
+              "probability": 0.5494622588157654
+            },
+            {
+              "start_s": 4.38,
+              "end_s": 4.6,
+              "text": " di",
+              "probability": 0.9987209439277649
+            },
+            {
+              "start_s": 4.6,
+              "end_s": 4.96,
+              "text": " 81",
+              "probability": 0.9451425671577454
+            },
+            {
+              "start_s": 4.96,
+              "end_s": 5.36,
+              "text": " euro.",
+              "probability": 0.8033828735351562
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

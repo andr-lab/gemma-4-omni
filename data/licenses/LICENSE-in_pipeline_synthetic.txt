@@ -1,0 +1,7 @@
+Identifier: in_pipeline_synthetic
+
+This identifier records that an evaluation item was generated inside this repository's pipeline. It is provenance metadata; it is not a third-party license and this file grants no rights.
+
+The generated item's use remains subject to applicable rights in the generator, model weights, source prompts, voices, and any underlying material, as well as privacy, publicity, and other applicable restrictions. This marker does not waive those restrictions or establish that a model or voice license covers generated output.
+
+The T1 exception and the required generator and parameter hashes are documented in docs/decisions/ADR-041-t1-synthetic-italian-duplex-exception.md.

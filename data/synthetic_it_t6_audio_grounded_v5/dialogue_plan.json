@@ -1,0 +1,4732 @@
+{
+  "audio_generated": false,
+  "dialogues": [
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-train-0001",
+      "group_ordinal": 0,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "train",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "community_garden__plan_a",
+      "template_variant": "plan_a",
+      "topic_family_id": "community_garden",
+      "topic_group_id": "community_garden",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Vorrei organizzare il progetto di giardinaggio del quartiere; il punto più delicato mi sembra la disponibilità degli attrezzi.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0001-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0001-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Partirei da la distribuzione delle aiuole: possiamo preparare un prospetto breve e confrontarci giovedì.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0001-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Mhm.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aggiungo un dettaglio: la disponibilità degli attrezzi va considerato insieme a le decisioni prese la settimana scorsa.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0001-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0001-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Sì.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0001-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0001-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Allora proporrei la distribuzione delle aiuole nel punto di ritrovo; prima di confermare, controlliamo la disponibilità degli attrezzi.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0001-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aspetta, correggo un dato: dobbiamo considerare il limite settimanale d'acqua, non la disponibilità degli attrezzi.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0001-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0001-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Rivedo la proposta: verifichiamo il limite settimanale d'acqua, poi definiamo la distribuzione delle aiuole per giovedì.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-train-0002",
+      "group_ordinal": 1,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "train",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "community_garden__plan_b",
+      "template_variant": "plan_b",
+      "topic_family_id": "community_garden",
+      "topic_group_id": "community_garden",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Sto cercando un modo pratico per seguire l'orto comunale, soprattutto per la disponibilità degli attrezzi.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0002-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0002-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Una prima possibilità è i turni per l'irrigazione; preparo una mappa aggiornata e ne parliamo giovedì.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0002-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Capito.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "C'è anche un altro elemento: le persone già coinvolte potrebbe cambiare la valutazione di la disponibilità degli attrezzi.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0002-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0002-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Perfetto.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0002-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0002-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Metterei i turni per l'irrigazione al primo posto nel punto di ritrovo, tenendo come verifica la disponibilità degli attrezzi.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0002-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Mi correggo: è cambiato la zona d'ombra; il vincolo iniziale non è più aggiornato.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0002-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0002-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Allora cambio il piano: prima verifichiamo la zona d'ombra, poi riprendiamo i turni per l'irrigazione.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-train-0003",
+      "group_ordinal": 2,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "train",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "community_garden__plan_a",
+      "template_variant": "plan_a",
+      "topic_family_id": "community_garden",
+      "topic_group_id": "community_garden",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Vorrei organizzare il progetto di giardinaggio del quartiere; il punto più delicato mi sembra l'esposizione al sole.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0003-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0003-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Partirei da la scelta delle piante: possiamo preparare una mappa aggiornata e confrontarci venerdì.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0003-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Va bene.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aggiungo un dettaglio: l'esposizione al sole va considerato insieme a gli aggiornamenti ricevuti.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0003-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0003-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Sì.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0003-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0003-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Allora proporrei la scelta delle piante nel cortile; prima di confermare, controlliamo l'esposizione al sole.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0003-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aspetta, correggo un dato: dobbiamo considerare il limite settimanale d'acqua, non l'esposizione al sole.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0003-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0003-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Rivedo la proposta: verifichiamo il limite settimanale d'acqua, poi definiamo la scelta delle piante per venerdì.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-train-0004",
+      "group_ordinal": 3,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "train",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "community_garden__plan_b",
+      "template_variant": "plan_b",
+      "topic_family_id": "community_garden",
+      "topic_group_id": "community_garden",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Sto cercando un modo pratico per seguire le aiuole condivise, soprattutto per la disponibilità degli attrezzi.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0004-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0004-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Una prima possibilità è i turni per l'irrigazione; preparo un prospetto breve e ne parliamo giovedì.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0004-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Perfetto.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "C'è anche un altro elemento: gli aggiornamenti ricevuti potrebbe cambiare la valutazione di la disponibilità degli attrezzi.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0004-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0004-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Capito.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0004-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0004-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Metterei i turni per l'irrigazione al primo posto nella sala piccola, tenendo come verifica la disponibilità degli attrezzi.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0004-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Mi correggo: è cambiato la zona d'ombra; il vincolo iniziale non è più aggiornato.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0004-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0004-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Allora cambio il piano: prima verifichiamo la zona d'ombra, poi riprendiamo i turni per l'irrigazione.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-train-0005",
+      "group_ordinal": 4,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "train",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "community_garden__plan_a",
+      "template_variant": "plan_a",
+      "topic_family_id": "community_garden",
+      "topic_group_id": "community_garden",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Vorrei organizzare il progetto di giardinaggio del quartiere; il punto più delicato mi sembra l'esposizione al sole.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0005-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0005-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Partirei da la distribuzione delle aiuole: possiamo preparare un promemoria e confrontarci lunedì.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0005-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Mhm.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aggiungo un dettaglio: l'esposizione al sole va considerato insieme a le persone già coinvolte.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0005-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0005-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Mhm.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0005-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0005-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Allora proporrei la distribuzione delle aiuole nel cortile; prima di confermare, controlliamo l'esposizione al sole.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0005-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aspetta, correggo un dato: dobbiamo considerare la zona d'ombra, non l'esposizione al sole.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0005-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0005-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Rivedo la proposta: verifichiamo la zona d'ombra, poi definiamo la distribuzione delle aiuole per lunedì.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-train-0006",
+      "group_ordinal": 5,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "train",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "community_garden__plan_b",
+      "template_variant": "plan_b",
+      "topic_family_id": "community_garden",
+      "topic_group_id": "community_garden",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Sto cercando un modo pratico per seguire il progetto di giardinaggio del quartiere, soprattutto per l'esposizione al sole.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0006-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0006-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Una prima possibilità è la distribuzione delle aiuole; preparo un prospetto breve e ne parliamo domenica.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0006-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Capito.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "C'è anche un altro elemento: le alternative disponibili potrebbe cambiare la valutazione di l'esposizione al sole.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0006-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0006-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Perfetto.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0006-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0006-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Metterei la distribuzione delle aiuole al primo posto nel cortile, tenendo come verifica l'esposizione al sole.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0006-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Mi correggo: è cambiato la zona d'ombra; il vincolo iniziale non è più aggiornato.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0006-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0006-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Allora cambio il piano: prima verifichiamo la zona d'ombra, poi riprendiamo la distribuzione delle aiuole.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-train-0007",
+      "group_ordinal": 6,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "train",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "neighborhood_library__plan_a",
+      "template_variant": "plan_a",
+      "topic_family_id": "neighborhood_library",
+      "topic_group_id": "neighborhood_library",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Vorrei organizzare il servizio di prestito locale; il punto più delicato mi sembra le richieste dei lettori.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0007-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0007-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Partirei da il calendario delle letture: possiamo preparare un prospetto breve e confrontarci giovedì.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0007-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Perfetto.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aggiungo un dettaglio: le richieste dei lettori va considerato insieme a gli aggiornamenti ricevuti.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0007-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0007-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Capito.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0007-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0007-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Allora proporrei il calendario delle letture al tavolo vicino alla finestra; prima di confermare, controlliamo le richieste dei lettori.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0007-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aspetta, correggo un dato: dobbiamo considerare le prenotazioni già ricevute, non le richieste dei lettori.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0007-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0007-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Rivedo la proposta: verifichiamo le prenotazioni già ricevute, poi definiamo il calendario delle letture per giovedì.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-train-0008",
+      "group_ordinal": 7,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "train",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "neighborhood_library__plan_b",
+      "template_variant": "plan_b",
+      "topic_family_id": "neighborhood_library",
+      "topic_group_id": "neighborhood_library",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Sto cercando un modo pratico per seguire il gruppo dei lettori, soprattutto per la disponibilità dei volontari.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0008-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0008-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Una prima possibilità è il calendario delle letture; preparo una lista condivisa e ne parliamo giovedì.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0008-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Mhm.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "C'è anche un altro elemento: gli aggiornamenti ricevuti potrebbe cambiare la valutazione di la disponibilità dei volontari.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0008-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0008-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Giusto.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0008-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0008-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Metterei il calendario delle letture al primo posto all'ingresso, tenendo come verifica la disponibilità dei volontari.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0008-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Mi correggo: è cambiato il turno del sabato; il vincolo iniziale non è più aggiornato.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0008-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0008-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Allora cambio il piano: prima verifichiamo il turno del sabato, poi riprendiamo il calendario delle letture.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-train-0009",
+      "group_ordinal": 8,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "train",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "neighborhood_library__plan_a",
+      "template_variant": "plan_a",
+      "topic_family_id": "neighborhood_library",
+      "topic_group_id": "neighborhood_library",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Vorrei organizzare il gruppo dei lettori; il punto più delicato mi sembra la disponibilità dei volontari.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0009-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0009-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Partirei da la selezione dei nuovi libri: possiamo preparare una lista condivisa e confrontarci sabato.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0009-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Capito.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aggiungo un dettaglio: la disponibilità dei volontari va considerato insieme a gli aggiornamenti ricevuti.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0009-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0009-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Esatto.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0009-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0009-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Allora proporrei la selezione dei nuovi libri al tavolo vicino alla finestra; prima di confermare, controlliamo la disponibilità dei volontari.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0009-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aspetta, correggo un dato: dobbiamo considerare la capienza della sala, non la disponibilità dei volontari.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0009-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0009-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Rivedo la proposta: verifichiamo la capienza della sala, poi definiamo la selezione dei nuovi libri per sabato.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-train-0010",
+      "group_ordinal": 9,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "train",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "neighborhood_library__plan_b",
+      "template_variant": "plan_b",
+      "topic_family_id": "neighborhood_library",
+      "topic_group_id": "neighborhood_library",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Sto cercando un modo pratico per seguire la biblioteca di quartiere, soprattutto per lo spazio per gli incontri.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0010-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0010-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Una prima possibilità è gli orari di apertura; preparo un messaggio al gruppo e ne parliamo domenica.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0010-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Va bene.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "C'è anche un altro elemento: le decisioni prese la settimana scorsa potrebbe cambiare la valutazione di lo spazio per gli incontri.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0010-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0010-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Esatto.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0010-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0010-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Metterei gli orari di apertura al primo posto nel punto di ritrovo, tenendo come verifica lo spazio per gli incontri.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0010-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Mi correggo: è cambiato la capienza della sala; il vincolo iniziale non è più aggiornato.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0010-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0010-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Allora cambio il piano: prima verifichiamo la capienza della sala, poi riprendiamo gli orari di apertura.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-train-0011",
+      "group_ordinal": 10,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "train",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "neighborhood_library__plan_a",
+      "template_variant": "plan_a",
+      "topic_family_id": "neighborhood_library",
+      "topic_group_id": "neighborhood_library",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Vorrei organizzare il servizio di prestito locale; il punto più delicato mi sembra le richieste dei lettori.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0011-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0011-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Partirei da la selezione dei nuovi libri: possiamo preparare una mappa aggiornata e confrontarci venerdì.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0011-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Perfetto.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aggiungo un dettaglio: le richieste dei lettori va considerato insieme a le persone già coinvolte.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0011-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0011-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Mhm.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0011-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0011-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Allora proporrei la selezione dei nuovi libri nel punto di ritrovo; prima di confermare, controlliamo le richieste dei lettori.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0011-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aspetta, correggo un dato: dobbiamo considerare le prenotazioni già ricevute, non le richieste dei lettori.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0011-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0011-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Rivedo la proposta: verifichiamo le prenotazioni già ricevute, poi definiamo la selezione dei nuovi libri per venerdì.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-train-0012",
+      "group_ordinal": 11,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "train",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "neighborhood_library__plan_b",
+      "template_variant": "plan_b",
+      "topic_family_id": "neighborhood_library",
+      "topic_group_id": "neighborhood_library",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Sto cercando un modo pratico per seguire il servizio di prestito locale, soprattutto per le richieste dei lettori.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0012-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0012-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Una prima possibilità è il calendario delle letture; preparo una lista condivisa e ne parliamo domenica.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0012-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Mhm.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "C'è anche un altro elemento: gli aggiornamenti ricevuti potrebbe cambiare la valutazione di le richieste dei lettori.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0012-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0012-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Capito.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0012-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0012-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Metterei il calendario delle letture al primo posto nel cortile, tenendo come verifica le richieste dei lettori.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0012-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Mi correggo: è cambiato il turno del sabato; il vincolo iniziale non è più aggiornato.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0012-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0012-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Allora cambio il piano: prima verifichiamo il turno del sabato, poi riprendiamo il calendario delle letture.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-train-0013",
+      "group_ordinal": 12,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "train",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "school_workshop__plan_a",
+      "template_variant": "plan_a",
+      "topic_family_id": "school_workshop",
+      "topic_group_id": "school_workshop",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Vorrei organizzare le attività pomeridiane; il punto più delicato mi sembra le allergie segnalate.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0013-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0013-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Partirei da i gruppi di lavoro: possiamo preparare un prospetto breve e confrontarci sabato.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0013-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Va bene.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aggiungo un dettaglio: le allergie segnalate va considerato insieme a il tempo necessario.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0013-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0013-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Capito.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0013-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0013-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Allora proporrei i gruppi di lavoro al tavolo vicino alla finestra; prima di confermare, controlliamo le allergie segnalate.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0013-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aspetta, correggo un dato: dobbiamo considerare l'autorizzazione mancante, non le allergie segnalate.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0013-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0013-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Rivedo la proposta: verifichiamo l'autorizzazione mancante, poi definiamo i gruppi di lavoro per sabato.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-train-0014",
+      "group_ordinal": 13,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "train",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "school_workshop__plan_b",
+      "template_variant": "plan_b",
+      "topic_family_id": "school_workshop",
+      "topic_group_id": "school_workshop",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Sto cercando un modo pratico per seguire il laboratorio scolastico, soprattutto per il tempo disponibile.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0014-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0014-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Una prima possibilità è la lista dei materiali; preparo una mappa aggiornata e ne parliamo lunedì.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0014-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Perfetto.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "C'è anche un altro elemento: le persone già coinvolte potrebbe cambiare la valutazione di il tempo disponibile.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0014-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0014-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Esatto.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0014-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0014-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Metterei la lista dei materiali al primo posto nella sala piccola, tenendo come verifica il tempo disponibile.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0014-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Mi correggo: è cambiato il tempo per la pulizia; il vincolo iniziale non è più aggiornato.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0014-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0014-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Allora cambio il piano: prima verifichiamo il tempo per la pulizia, poi riprendiamo la lista dei materiali.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-train-0015",
+      "group_ordinal": 14,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "train",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "school_workshop__plan_a",
+      "template_variant": "plan_a",
+      "topic_family_id": "school_workshop",
+      "topic_group_id": "school_workshop",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Vorrei organizzare il laboratorio scolastico; il punto più delicato mi sembra la sicurezza durante le prove.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0015-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0015-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Partirei da la lista dei materiali: possiamo preparare una mappa aggiornata e confrontarci domenica.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0015-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Mhm.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aggiungo un dettaglio: la sicurezza durante le prove va considerato insieme a le decisioni prese la settimana scorsa.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0015-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0015-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Capito.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0015-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0015-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Allora proporrei la lista dei materiali nel punto di ritrovo; prima di confermare, controlliamo la sicurezza durante le prove.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0015-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aspetta, correggo un dato: dobbiamo considerare il tempo per la pulizia, non la sicurezza durante le prove.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0015-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0015-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Rivedo la proposta: verifichiamo il tempo per la pulizia, poi definiamo la lista dei materiali per domenica.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-train-0016",
+      "group_ordinal": 15,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "train",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "school_workshop__plan_b",
+      "template_variant": "plan_b",
+      "topic_family_id": "school_workshop",
+      "topic_group_id": "school_workshop",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Sto cercando un modo pratico per seguire le attività pomeridiane, soprattutto per la sicurezza durante le prove.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0016-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0016-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Una prima possibilità è la sequenza delle prove; preparo un promemoria e ne parliamo martedì.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0016-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Capito.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "C'è anche un altro elemento: le persone già coinvolte potrebbe cambiare la valutazione di la sicurezza durante le prove.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0016-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0016-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Perfetto.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0016-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0016-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Metterei la sequenza delle prove al primo posto nel cortile, tenendo come verifica la sicurezza durante le prove.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0016-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Mi correggo: è cambiato il materiale non adatto; il vincolo iniziale non è più aggiornato.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0016-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0016-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Allora cambio il piano: prima verifichiamo il materiale non adatto, poi riprendiamo la sequenza delle prove.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-train-0017",
+      "group_ordinal": 16,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "train",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "school_workshop__plan_a",
+      "template_variant": "plan_a",
+      "topic_family_id": "school_workshop",
+      "topic_group_id": "school_workshop",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Vorrei organizzare le attività pomeridiane; il punto più delicato mi sembra la sicurezza durante le prove.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0017-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0017-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Partirei da la sequenza delle prove: possiamo preparare un promemoria e confrontarci domenica.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0017-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Va bene.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aggiungo un dettaglio: la sicurezza durante le prove va considerato insieme a gli aggiornamenti ricevuti.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0017-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0017-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Sì.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0017-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0017-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Allora proporrei la sequenza delle prove nel punto di ritrovo; prima di confermare, controlliamo la sicurezza durante le prove.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0017-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aspetta, correggo un dato: dobbiamo considerare l'autorizzazione mancante, non la sicurezza durante le prove.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0017-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0017-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Rivedo la proposta: verifichiamo l'autorizzazione mancante, poi definiamo la sequenza delle prove per domenica.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-train-0018",
+      "group_ordinal": 17,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "train",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "local_market__plan_a",
+      "template_variant": "plan_a",
+      "topic_family_id": "local_market",
+      "topic_group_id": "local_market",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Vorrei organizzare il nuovo spazio dei produttori; il punto più delicato mi sembra l'accesso dei mezzi.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0018-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0018-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Partirei da il percorso dei visitatori: possiamo preparare una lista condivisa e confrontarci giovedì.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0018-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Esatto.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aggiungo un dettaglio: l'accesso dei mezzi va considerato insieme a il tempo necessario.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0018-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0018-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Va bene.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0018-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0018-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Allora proporrei il percorso dei visitatori al tavolo vicino alla finestra; prima di confermare, controlliamo l'accesso dei mezzi.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0018-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aspetta, correggo un dato: dobbiamo considerare il divieto di accesso prima delle sette, non l'accesso dei mezzi.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0018-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0018-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Rivedo la proposta: verifichiamo il divieto di accesso prima delle sette, poi definiamo il percorso dei visitatori per giovedì.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-train-0019",
+      "group_ordinal": 18,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "train",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "local_market__plan_b",
+      "template_variant": "plan_b",
+      "topic_family_id": "local_market",
+      "topic_group_id": "local_market",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Sto cercando un modo pratico per seguire il nuovo spazio dei produttori, soprattutto per gli orari di scarico.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0019-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0019-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Una prima possibilità è le consegne del mattino; preparo una mappa aggiornata e ne parliamo sabato.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0019-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Giusto.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "C'è anche un altro elemento: le persone già coinvolte potrebbe cambiare la valutazione di gli orari di scarico.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0019-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0019-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Va bene.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0019-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0019-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Metterei le consegne del mattino al primo posto nel cortile, tenendo come verifica gli orari di scarico.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0019-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Mi correggo: è cambiato il nuovo orario di consegna; il vincolo iniziale non è più aggiornato.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0019-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0019-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Allora cambio il piano: prima verifichiamo il nuovo orario di consegna, poi riprendiamo le consegne del mattino.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-train-0020",
+      "group_ordinal": 19,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "train",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "local_market__plan_a",
+      "template_variant": "plan_a",
+      "topic_family_id": "local_market",
+      "topic_group_id": "local_market",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Vorrei organizzare il nuovo spazio dei produttori; il punto più delicato mi sembra l'accesso dei mezzi.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0020-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0020-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Partirei da la disposizione dei banchi: possiamo preparare una lista condivisa e confrontarci giovedì.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0020-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Certo.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aggiungo un dettaglio: l'accesso dei mezzi va considerato insieme a il tempo necessario.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0020-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0020-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Certo.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0020-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0020-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Allora proporrei la disposizione dei banchi al tavolo vicino alla finestra; prima di confermare, controlliamo l'accesso dei mezzi.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0020-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aspetta, correggo un dato: dobbiamo considerare il nuovo orario di consegna, non l'accesso dei mezzi.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0020-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0020-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Rivedo la proposta: verifichiamo il nuovo orario di consegna, poi definiamo la disposizione dei banchi per giovedì.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-train-0021",
+      "group_ordinal": 20,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "train",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "local_market__plan_b",
+      "template_variant": "plan_b",
+      "topic_family_id": "local_market",
+      "topic_group_id": "local_market",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Sto cercando un modo pratico per seguire le bancarelle del sabato, soprattutto per l'accesso dei mezzi.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0021-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0021-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Una prima possibilità è il percorso dei visitatori; preparo un messaggio al gruppo e ne parliamo giovedì.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0021-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Sì.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "C'è anche un altro elemento: le persone già coinvolte potrebbe cambiare la valutazione di l'accesso dei mezzi.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0021-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0021-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Sì.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0021-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0021-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Metterei il percorso dei visitatori al primo posto nel cortile, tenendo come verifica l'accesso dei mezzi.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0021-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Mi correggo: è cambiato il nuovo orario di consegna; il vincolo iniziale non è più aggiornato.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0021-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0021-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Allora cambio il piano: prima verifichiamo il nuovo orario di consegna, poi riprendiamo il percorso dei visitatori.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-train-0022",
+      "group_ordinal": 21,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "train",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "local_market__plan_a",
+      "template_variant": "plan_a",
+      "topic_family_id": "local_market",
+      "topic_group_id": "local_market",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Vorrei organizzare il mercato rionale; il punto più delicato mi sembra l'accesso dei mezzi.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0022-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0022-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Partirei da le consegne del mattino: possiamo preparare un messaggio al gruppo e confrontarci sabato.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0022-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Esatto.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aggiungo un dettaglio: l'accesso dei mezzi va considerato insieme a gli aggiornamenti ricevuti.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0022-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0022-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Giusto.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0022-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0022-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Allora proporrei le consegne del mattino nella sala piccola; prima di confermare, controlliamo l'accesso dei mezzi.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0022-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aspetta, correggo un dato: dobbiamo considerare il nuovo orario di consegna, non l'accesso dei mezzi.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0022-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0022-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Rivedo la proposta: verifichiamo il nuovo orario di consegna, poi definiamo le consegne del mattino per sabato.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-train-0023",
+      "group_ordinal": 22,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "train",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "hiking_group__plan_a",
+      "template_variant": "plan_a",
+      "topic_family_id": "hiking_group",
+      "topic_group_id": "hiking_group",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Vorrei organizzare la camminata del fine settimana; il punto più delicato mi sembra la disponibilità dei passaggi.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0023-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0023-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Partirei da la durata della camminata: possiamo preparare un promemoria e confrontarci domenica.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0023-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Perfetto.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aggiungo un dettaglio: la disponibilità dei passaggi va considerato insieme a gli aggiornamenti ricevuti.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0023-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0023-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Va bene.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0023-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0023-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Allora proporrei la durata della camminata nella sala piccola; prima di confermare, controlliamo la disponibilità dei passaggi.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0023-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aspetta, correggo un dato: dobbiamo considerare il tratto chiuso del sentiero, non la disponibilità dei passaggi.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0023-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0023-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Rivedo la proposta: verifichiamo il tratto chiuso del sentiero, poi definiamo la durata della camminata per domenica.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-train-0024",
+      "group_ordinal": 23,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "train",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "hiking_group__plan_b",
+      "template_variant": "plan_b",
+      "topic_family_id": "hiking_group",
+      "topic_group_id": "hiking_group",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Sto cercando un modo pratico per seguire l'uscita sui sentieri, soprattutto per la disponibilità dei passaggi.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0024-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0024-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Una prima possibilità è il punto di ritrovo; preparo un prospetto breve e ne parliamo domenica.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0024-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Mhm.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "C'è anche un altro elemento: il tempo necessario potrebbe cambiare la valutazione di la disponibilità dei passaggi.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0024-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0024-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Esatto.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0024-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0024-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Metterei il punto di ritrovo al primo posto nel cortile, tenendo come verifica la disponibilità dei passaggi.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0024-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Mi correggo: è cambiato l'allerta meteo aggiornata; il vincolo iniziale non è più aggiornato.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0024-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0024-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Allora cambio il piano: prima verifichiamo l'allerta meteo aggiornata, poi riprendiamo il punto di ritrovo.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-train-0025",
+      "group_ordinal": 24,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "train",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "hiking_group__plan_a",
+      "template_variant": "plan_a",
+      "topic_family_id": "hiking_group",
+      "topic_group_id": "hiking_group",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Vorrei organizzare il gruppo di escursionismo; il punto più delicato mi sembra la disponibilità dei passaggi.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0025-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0025-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Partirei da il punto di ritrovo: possiamo preparare un promemoria e confrontarci martedì.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0025-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Capito.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aggiungo un dettaglio: la disponibilità dei passaggi va considerato insieme a le persone già coinvolte.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0025-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0025-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Mhm.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0025-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0025-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Allora proporrei il punto di ritrovo nel punto di ritrovo; prima di confermare, controlliamo la disponibilità dei passaggi.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0025-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aspetta, correggo un dato: dobbiamo considerare l'allerta meteo aggiornata, non la disponibilità dei passaggi.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0025-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0025-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Rivedo la proposta: verifichiamo l'allerta meteo aggiornata, poi definiamo il punto di ritrovo per martedì.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-train-0026",
+      "group_ordinal": 25,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "train",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "hiking_group__plan_b",
+      "template_variant": "plan_b",
+      "topic_family_id": "hiking_group",
+      "topic_group_id": "hiking_group",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Sto cercando un modo pratico per seguire l'uscita sui sentieri, soprattutto per il dislivello massimo.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0026-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0026-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Una prima possibilità è il punto di ritrovo; preparo una mappa aggiornata e ne parliamo sabato.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0026-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Va bene.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "C'è anche un altro elemento: il tempo necessario potrebbe cambiare la valutazione di il dislivello massimo.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0026-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0026-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Va bene.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0026-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0026-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Metterei il punto di ritrovo al primo posto nella sala piccola, tenendo come verifica il dislivello massimo.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0026-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Mi correggo: è cambiato il tratto chiuso del sentiero; il vincolo iniziale non è più aggiornato.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0026-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0026-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Allora cambio il piano: prima verifichiamo il tratto chiuso del sentiero, poi riprendiamo il punto di ritrovo.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-train-0027",
+      "group_ordinal": 26,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "train",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "hiking_group__plan_a",
+      "template_variant": "plan_a",
+      "topic_family_id": "hiking_group",
+      "topic_group_id": "hiking_group",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Vorrei organizzare l'uscita sui sentieri; il punto più delicato mi sembra le previsioni del tempo.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0027-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0027-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Partirei da il percorso della domenica: possiamo preparare una lista condivisa e confrontarci domenica.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0027-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Perfetto.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aggiungo un dettaglio: le previsioni del tempo va considerato insieme a le persone già coinvolte.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0027-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0027-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Esatto.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0027-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0027-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Allora proporrei il percorso della domenica nel cortile; prima di confermare, controlliamo le previsioni del tempo.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0027-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aspetta, correggo un dato: dobbiamo considerare il numero di posti in auto, non le previsioni del tempo.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0027-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0027-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Rivedo la proposta: verifichiamo il numero di posti in auto, poi definiamo il percorso della domenica per domenica.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-train-0028",
+      "group_ordinal": 27,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "train",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "small_museum__plan_a",
+      "template_variant": "plan_a",
+      "topic_family_id": "small_museum",
+      "topic_group_id": "small_museum",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Vorrei organizzare il percorso per i visitatori; il punto più delicato mi sembra i permessi per le fotografie.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0028-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0028-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Partirei da l'accoglienza delle scuole: possiamo preparare un messaggio al gruppo e confrontarci sabato.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0028-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Giusto.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aggiungo un dettaglio: i permessi per le fotografie va considerato insieme a le persone già coinvolte.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0028-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0028-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Capito.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0028-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0028-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Allora proporrei l'accoglienza delle scuole nel punto di ritrovo; prima di confermare, controlliamo i permessi per le fotografie.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0028-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aspetta, correggo un dato: dobbiamo considerare il limite di persone per sala, non i permessi per le fotografie.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0028-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0028-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Rivedo la proposta: verifichiamo il limite di persone per sala, poi definiamo l'accoglienza delle scuole per sabato.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-train-0029",
+      "group_ordinal": 28,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "train",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "small_museum__plan_b",
+      "template_variant": "plan_b",
+      "topic_family_id": "small_museum",
+      "topic_group_id": "small_museum",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Sto cercando un modo pratico per seguire il piccolo museo civico, soprattutto per i permessi per le fotografie.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0029-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0029-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Una prima possibilità è la descrizione delle opere; preparo una lista condivisa e ne parliamo giovedì.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0029-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Certo.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "C'è anche un altro elemento: le decisioni prese la settimana scorsa potrebbe cambiare la valutazione di i permessi per le fotografie.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0029-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0029-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Esatto.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0029-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0029-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Metterei la descrizione delle opere al primo posto nel cortile, tenendo come verifica i permessi per le fotografie.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0029-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Mi correggo: è cambiato la regola sulle fotografie; il vincolo iniziale non è più aggiornato.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0029-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0029-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Allora cambio il piano: prima verifichiamo la regola sulle fotografie, poi riprendiamo la descrizione delle opere.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-train-0030",
+      "group_ordinal": 29,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "train",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "small_museum__plan_a",
+      "template_variant": "plan_a",
+      "topic_family_id": "small_museum",
+      "topic_group_id": "small_museum",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Vorrei organizzare il piccolo museo civico; il punto più delicato mi sembra i permessi per le fotografie.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0030-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0030-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Partirei da l'accoglienza delle scuole: possiamo preparare una mappa aggiornata e confrontarci sabato.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0030-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Sì.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aggiungo un dettaglio: i permessi per le fotografie va considerato insieme a le alternative disponibili.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0030-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0030-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Mhm.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0030-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0030-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Allora proporrei l'accoglienza delle scuole nella sala piccola; prima di confermare, controlliamo i permessi per le fotografie.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0030-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aspetta, correggo un dato: dobbiamo considerare il turno della guida, non i permessi per le fotografie.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0030-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0030-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Rivedo la proposta: verifichiamo il turno della guida, poi definiamo l'accoglienza delle scuole per sabato.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-train-0031",
+      "group_ordinal": 30,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "train",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "small_museum__plan_b",
+      "template_variant": "plan_b",
+      "topic_family_id": "small_museum",
+      "topic_group_id": "small_museum",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Sto cercando un modo pratico per seguire il percorso per i visitatori, soprattutto per la disponibilità delle guide.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0031-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0031-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Una prima possibilità è la visita guidata; preparo un messaggio al gruppo e ne parliamo venerdì.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0031-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Esatto.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "C'è anche un altro elemento: le persone già coinvolte potrebbe cambiare la valutazione di la disponibilità delle guide.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0031-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0031-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Certo.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0031-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0031-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Metterei la visita guidata al primo posto al tavolo vicino alla finestra, tenendo come verifica la disponibilità delle guide.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0031-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Mi correggo: è cambiato il limite di persone per sala; il vincolo iniziale non è più aggiornato.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0031-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0031-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Allora cambio il piano: prima verifichiamo il limite di persone per sala, poi riprendiamo la visita guidata.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-train-0032",
+      "group_ordinal": 31,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "train",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "small_museum__plan_a",
+      "template_variant": "plan_a",
+      "topic_family_id": "small_museum",
+      "topic_group_id": "small_museum",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Vorrei organizzare il percorso per i visitatori; il punto più delicato mi sembra la disponibilità delle guide.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0032-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0032-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Partirei da l'accoglienza delle scuole: possiamo preparare una lista condivisa e confrontarci giovedì.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0032-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Giusto.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aggiungo un dettaglio: la disponibilità delle guide va considerato insieme a le decisioni prese la settimana scorsa.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0032-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0032-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Sì.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0032-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0032-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Allora proporrei l'accoglienza delle scuole al tavolo vicino alla finestra; prima di confermare, controlliamo la disponibilità delle guide.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0032-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aspetta, correggo un dato: dobbiamo considerare la regola sulle fotografie, non la disponibilità delle guide.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-train-0032-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-train-0032-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Rivedo la proposta: verifichiamo la regola sulle fotografie, poi definiamo l'accoglienza delle scuole per giovedì.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-validation-0001",
+      "group_ordinal": 0,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "validation",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "volunteer_handoff__plan_a",
+      "template_variant": "plan_a",
+      "topic_family_id": "volunteer_handoff",
+      "topic_group_id": "volunteer_handoff",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Vorrei organizzare l'organizzazione dell'associazione; il punto più delicato mi sembra la copertura dell'orario.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-validation-0001-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-validation-0001-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Partirei da l'elenco delle attività aperte: possiamo preparare un messaggio al gruppo e confrontarci domenica.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-validation-0001-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Mhm.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aggiungo un dettaglio: la copertura dell'orario va considerato insieme a le decisioni prese la settimana scorsa.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-validation-0001-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-validation-0001-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Giusto.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-validation-0001-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-validation-0001-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Allora proporrei l'elenco delle attività aperte al tavolo vicino alla finestra; prima di confermare, controlliamo la copertura dell'orario.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-validation-0001-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aspetta, correggo un dato: dobbiamo considerare il recapito aggiornato, non la copertura dell'orario.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-validation-0001-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-validation-0001-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Rivedo la proposta: verifichiamo il recapito aggiornato, poi definiamo l'elenco delle attività aperte per domenica.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-validation-0002",
+      "group_ordinal": 1,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "validation",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "volunteer_handoff__plan_b",
+      "template_variant": "plan_b",
+      "topic_family_id": "volunteer_handoff",
+      "topic_group_id": "volunteer_handoff",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Sto cercando un modo pratico per seguire l'organizzazione dell'associazione, soprattutto per la copertura dell'orario.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-validation-0002-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-validation-0002-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Una prima possibilità è l'elenco delle attività aperte; preparo una lista condivisa e ne parliamo venerdì.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-validation-0002-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Capito.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "C'è anche un altro elemento: le decisioni prese la settimana scorsa potrebbe cambiare la valutazione di la copertura dell'orario.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-validation-0002-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-validation-0002-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Giusto.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-validation-0002-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-validation-0002-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Metterei l'elenco delle attività aperte al primo posto nel punto di ritrovo, tenendo come verifica la copertura dell'orario.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-validation-0002-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Mi correggo: è cambiato la fascia oraria scoperta; il vincolo iniziale non è più aggiornato.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-validation-0002-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-validation-0002-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Allora cambio il piano: prima verifichiamo la fascia oraria scoperta, poi riprendiamo l'elenco delle attività aperte.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-validation-0003",
+      "group_ordinal": 2,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "validation",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "volunteer_handoff__plan_a",
+      "template_variant": "plan_a",
+      "topic_family_id": "volunteer_handoff",
+      "topic_group_id": "volunteer_handoff",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Vorrei organizzare il passaggio di consegne; il punto più delicato mi sembra la disponibilità della persona di turno.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-validation-0003-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-validation-0003-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Partirei da la consegna dei materiali: possiamo preparare una mappa aggiornata e confrontarci martedì.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-validation-0003-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Va bene.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aggiungo un dettaglio: la disponibilità della persona di turno va considerato insieme a il tempo necessario.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-validation-0003-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-validation-0003-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Certo.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-validation-0003-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-validation-0003-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Allora proporrei la consegna dei materiali nel punto di ritrovo; prima di confermare, controlliamo la disponibilità della persona di turno.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-validation-0003-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aspetta, correggo un dato: dobbiamo considerare l'assenza del referente, non la disponibilità della persona di turno.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-validation-0003-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-validation-0003-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Rivedo la proposta: verifichiamo l'assenza del referente, poi definiamo la consegna dei materiali per martedì.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-validation-0004",
+      "group_ordinal": 3,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "validation",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "volunteer_handoff__plan_b",
+      "template_variant": "plan_b",
+      "topic_family_id": "volunteer_handoff",
+      "topic_group_id": "volunteer_handoff",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Sto cercando un modo pratico per seguire il passaggio di consegne, soprattutto per le informazioni ancora da verificare.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-validation-0004-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-validation-0004-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Una prima possibilità è il referente del prossimo turno; preparo un messaggio al gruppo e ne parliamo lunedì.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-validation-0004-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Perfetto.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "C'è anche un altro elemento: gli aggiornamenti ricevuti potrebbe cambiare la valutazione di le informazioni ancora da verificare.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-validation-0004-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-validation-0004-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Va bene.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-validation-0004-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-validation-0004-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Metterei il referente del prossimo turno al primo posto al tavolo vicino alla finestra, tenendo come verifica le informazioni ancora da verificare.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-validation-0004-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Mi correggo: è cambiato l'assenza del referente; il vincolo iniziale non è più aggiornato.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-validation-0004-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-validation-0004-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Allora cambio il piano: prima verifichiamo l'assenza del referente, poi riprendiamo il referente del prossimo turno.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-validation-0005",
+      "group_ordinal": 4,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "validation",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "shared_kitchen__plan_a",
+      "template_variant": "plan_a",
+      "topic_family_id": "shared_kitchen",
+      "topic_group_id": "shared_kitchen",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Vorrei organizzare gli spazi comuni del condominio; il punto più delicato mi sembra le preferenze alimentari.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-validation-0005-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-validation-0005-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Partirei da la prenotazione dei fornelli: possiamo preparare un prospetto breve e confrontarci domenica.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-validation-0005-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Va bene.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aggiungo un dettaglio: le preferenze alimentari va considerato insieme a gli aggiornamenti ricevuti.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-validation-0005-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-validation-0005-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Capito.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-validation-0005-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-validation-0005-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Allora proporrei la prenotazione dei fornelli all'ingresso; prima di confermare, controlliamo le preferenze alimentari.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-validation-0005-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aspetta, correggo un dato: dobbiamo considerare il turno di pulizia assegnato, non le preferenze alimentari.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-validation-0005-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-validation-0005-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Rivedo la proposta: verifichiamo il turno di pulizia assegnato, poi definiamo la prenotazione dei fornelli per domenica.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-validation-0006",
+      "group_ordinal": 5,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "validation",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "shared_kitchen__plan_b",
+      "template_variant": "plan_b",
+      "topic_family_id": "shared_kitchen",
+      "topic_group_id": "shared_kitchen",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Sto cercando un modo pratico per seguire il menu della settimana, soprattutto per gli orari di utilizzo.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-validation-0006-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-validation-0006-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Una prima possibilità è la lista della spesa; preparo una mappa aggiornata e ne parliamo giovedì.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-validation-0006-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Perfetto.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "C'è anche un altro elemento: gli aggiornamenti ricevuti potrebbe cambiare la valutazione di gli orari di utilizzo.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-validation-0006-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-validation-0006-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Giusto.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-validation-0006-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-validation-0006-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Metterei la lista della spesa al primo posto nella sala piccola, tenendo come verifica gli orari di utilizzo.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-validation-0006-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Mi correggo: è cambiato la prenotazione già confermata; il vincolo iniziale non è più aggiornato.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-validation-0006-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-validation-0006-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Allora cambio il piano: prima verifichiamo la prenotazione già confermata, poi riprendiamo la lista della spesa.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-validation-0007",
+      "group_ordinal": 6,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "validation",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "shared_kitchen__plan_a",
+      "template_variant": "plan_a",
+      "topic_family_id": "shared_kitchen",
+      "topic_group_id": "shared_kitchen",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Vorrei organizzare gli spazi comuni del condominio; il punto più delicato mi sembra la presenza di allergie.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-validation-0007-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-validation-0007-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Partirei da la pulizia dopo l'uso: possiamo preparare una lista condivisa e confrontarci martedì.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-validation-0007-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Mhm.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aggiungo un dettaglio: la presenza di allergie va considerato insieme a le persone già coinvolte.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-validation-0007-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-validation-0007-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Sì.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-validation-0007-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-validation-0007-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Allora proporrei la pulizia dopo l'uso nella sala piccola; prima di confermare, controlliamo la presenza di allergie.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-validation-0007-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aspetta, correggo un dato: dobbiamo considerare la prenotazione già confermata, non la presenza di allergie.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-validation-0007-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-validation-0007-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Rivedo la proposta: verifichiamo la prenotazione già confermata, poi definiamo la pulizia dopo l'uso per martedì.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-validation-0008",
+      "group_ordinal": 7,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "validation",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "shared_kitchen__plan_b",
+      "template_variant": "plan_b",
+      "topic_family_id": "shared_kitchen",
+      "topic_group_id": "shared_kitchen",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Sto cercando un modo pratico per seguire gli spazi comuni del condominio, soprattutto per gli orari di utilizzo.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-validation-0008-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-validation-0008-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Una prima possibilità è la prenotazione dei fornelli; preparo un promemoria e ne parliamo venerdì.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-validation-0008-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Capito.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "C'è anche un altro elemento: le alternative disponibili potrebbe cambiare la valutazione di gli orari di utilizzo.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-validation-0008-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-validation-0008-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Sì.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-validation-0008-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-validation-0008-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Metterei la prenotazione dei fornelli al primo posto all'ingresso, tenendo come verifica gli orari di utilizzo.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-validation-0008-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Mi correggo: è cambiato il turno di pulizia assegnato; il vincolo iniziale non è più aggiornato.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-validation-0008-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-validation-0008-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Allora cambio il piano: prima verifichiamo il turno di pulizia assegnato, poi riprendiamo la prenotazione dei fornelli.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-test-0001",
+      "group_ordinal": 0,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "test",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "evening_course__plan_a",
+      "template_variant": "plan_a",
+      "topic_family_id": "evening_course",
+      "topic_group_id": "evening_course",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Vorrei organizzare il corso serale; il punto più delicato mi sembra il tempo per le domande.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-test-0001-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-test-0001-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Partirei da la scaletta della lezione: possiamo preparare una mappa aggiornata e confrontarci sabato.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-test-0001-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Mhm.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aggiungo un dettaglio: il tempo per le domande va considerato insieme a le alternative disponibili.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-test-0001-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-test-0001-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Giusto.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-test-0001-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-test-0001-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Allora proporrei la scaletta della lezione nella sala piccola; prima di confermare, controlliamo il tempo per le domande.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-test-0001-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aspetta, correggo un dato: dobbiamo considerare il gruppo che non ha ancora visto quel tema, non il tempo per le domande.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-test-0001-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-test-0001-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Rivedo la proposta: verifichiamo il gruppo che non ha ancora visto quel tema, poi definiamo la scaletta della lezione per sabato.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-test-0002",
+      "group_ordinal": 1,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "test",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "evening_course__plan_b",
+      "template_variant": "plan_b",
+      "topic_family_id": "evening_course",
+      "topic_group_id": "evening_course",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Sto cercando un modo pratico per seguire le lezioni del dopolavoro, soprattutto per il tempo per le domande.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-test-0002-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-test-0002-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Una prima possibilità è il tempo per gli esercizi; preparo una mappa aggiornata e ne parliamo sabato.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-test-0002-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Capito.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "C'è anche un altro elemento: le alternative disponibili potrebbe cambiare la valutazione di il tempo per le domande.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-test-0002-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-test-0002-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Certo.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-test-0002-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-test-0002-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Metterei il tempo per gli esercizi al primo posto nel cortile, tenendo come verifica il tempo per le domande.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-test-0002-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Mi correggo: è cambiato la chiusura anticipata della sede; il vincolo iniziale non è più aggiornato.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-test-0002-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-test-0002-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Allora cambio il piano: prima verifichiamo la chiusura anticipata della sede, poi riprendiamo il tempo per gli esercizi.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-test-0003",
+      "group_ordinal": 2,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "test",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "evening_course__plan_a",
+      "template_variant": "plan_a",
+      "topic_family_id": "evening_course",
+      "topic_group_id": "evening_course",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Vorrei organizzare il corso serale; il punto più delicato mi sembra la chiusura dell'aula.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-test-0003-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-test-0003-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Partirei da la scelta degli esempi: possiamo preparare un prospetto breve e confrontarci venerdì.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-test-0003-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Va bene.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aggiungo un dettaglio: la chiusura dell'aula va considerato insieme a le alternative disponibili.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-test-0003-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-test-0003-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Capito.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-test-0003-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-test-0003-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Allora proporrei la scelta degli esempi all'ingresso; prima di confermare, controlliamo la chiusura dell'aula.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-test-0003-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aspetta, correggo un dato: dobbiamo considerare il gruppo che non ha ancora visto quel tema, non la chiusura dell'aula.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-test-0003-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-test-0003-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Rivedo la proposta: verifichiamo il gruppo che non ha ancora visto quel tema, poi definiamo la scelta degli esempi per venerdì.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-test-0004",
+      "group_ordinal": 3,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "test",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "evening_course__plan_b",
+      "template_variant": "plan_b",
+      "topic_family_id": "evening_course",
+      "topic_group_id": "evening_course",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Sto cercando un modo pratico per seguire le lezioni del dopolavoro, soprattutto per il livello di partenza del gruppo.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-test-0004-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-test-0004-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Una prima possibilità è il tempo per gli esercizi; preparo una lista condivisa e ne parliamo venerdì.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-test-0004-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Perfetto.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "C'è anche un altro elemento: le decisioni prese la settimana scorsa potrebbe cambiare la valutazione di il livello di partenza del gruppo.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-test-0004-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-test-0004-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Esatto.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-test-0004-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-test-0004-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Metterei il tempo per gli esercizi al primo posto all'ingresso, tenendo come verifica il livello di partenza del gruppo.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-test-0004-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Mi correggo: è cambiato il gruppo che non ha ancora visto quel tema; il vincolo iniziale non è più aggiornato.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-test-0004-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-test-0004-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Allora cambio il piano: prima verifichiamo il gruppo che non ha ancora visto quel tema, poi riprendiamo il tempo per gli esercizi.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-test-0005",
+      "group_ordinal": 4,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "test",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "neighborhood_mobility__plan_a",
+      "template_variant": "plan_a",
+      "topic_family_id": "neighborhood_mobility",
+      "topic_group_id": "neighborhood_mobility",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Vorrei organizzare l'iniziativa per la mobilità; il punto più delicato mi sembra l'accessibilità del marciapiede.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-test-0005-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-test-0005-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Partirei da i punti di attraversamento: possiamo preparare una lista condivisa e confrontarci giovedì.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-test-0005-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Va bene.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aggiungo un dettaglio: l'accessibilità del marciapiede va considerato insieme a le alternative disponibili.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-test-0005-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-test-0005-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Giusto.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-test-0005-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-test-0005-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Allora proporrei i punti di attraversamento nel cortile; prima di confermare, controlliamo l'accessibilità del marciapiede.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-test-0005-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aspetta, correggo un dato: dobbiamo considerare il passaggio pedonale spostato, non l'accessibilità del marciapiede.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-test-0005-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-test-0005-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Rivedo la proposta: verifichiamo il passaggio pedonale spostato, poi definiamo i punti di attraversamento per giovedì.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-test-0006",
+      "group_ordinal": 5,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "test",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "neighborhood_mobility__plan_b",
+      "template_variant": "plan_b",
+      "topic_family_id": "neighborhood_mobility",
+      "topic_group_id": "neighborhood_mobility",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Sto cercando un modo pratico per seguire la mappa dei tragitti, soprattutto per i lavori stradali in corso.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-test-0006-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-test-0006-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Una prima possibilità è i punti di attraversamento; preparo una mappa aggiornata e ne parliamo martedì.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-test-0006-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Perfetto.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "C'è anche un altro elemento: le persone già coinvolte potrebbe cambiare la valutazione di i lavori stradali in corso.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-test-0006-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-test-0006-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Giusto.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-test-0006-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-test-0006-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Metterei i punti di attraversamento al primo posto al tavolo vicino alla finestra, tenendo come verifica i lavori stradali in corso.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-test-0006-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Mi correggo: è cambiato il passaggio pedonale spostato; il vincolo iniziale non è più aggiornato.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-test-0006-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-test-0006-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Allora cambio il piano: prima verifichiamo il passaggio pedonale spostato, poi riprendiamo i punti di attraversamento.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-test-0007",
+      "group_ordinal": 6,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "test",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "neighborhood_mobility__plan_a",
+      "template_variant": "plan_a",
+      "topic_family_id": "neighborhood_mobility",
+      "topic_group_id": "neighborhood_mobility",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Vorrei organizzare la mappa dei tragitti; il punto più delicato mi sembra i lavori stradali in corso.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-test-0007-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-test-0007-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Partirei da le fermate dell'autobus: possiamo preparare una lista condivisa e confrontarci sabato.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-test-0007-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Mhm.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aggiungo un dettaglio: i lavori stradali in corso va considerato insieme a il tempo necessario.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-test-0007-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-test-0007-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Giusto.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-test-0007-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-test-0007-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Allora proporrei le fermate dell'autobus al tavolo vicino alla finestra; prima di confermare, controlliamo i lavori stradali in corso.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-test-0007-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Aspetta, correggo un dato: dobbiamo considerare la rampa temporaneamente chiusa, non i lavori stradali in corso.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-test-0007-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-test-0007-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Rivedo la proposta: verifichiamo la rampa temporaneamente chiusa, poi definiamo le fermate dell'autobus per sabato.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    },
+    {
+      "conversation_id": "synthetic-it-t6-v5-sp260928-test-0008",
+      "group_ordinal": 7,
+      "required_actions": [
+        "LISTEN",
+        "SPEAK",
+        "CONTINUE",
+        "YIELD",
+        "BACKCHANNEL",
+        "REPLAN"
+      ],
+      "seed": 260928,
+      "split": "test",
+      "supervision_contract": {
+        "action_instructions_embedded_in_text": false,
+        "action_targets_are_metadata": true,
+        "input_is_audio_only": true,
+        "input_text_visible": false,
+        "synthetic_lm_calls": 0
+      },
+      "template_id": "neighborhood_mobility__plan_b",
+      "template_variant": "plan_b",
+      "topic_family_id": "neighborhood_mobility",
+      "topic_group_id": "neighborhood_mobility",
+      "utterances": [
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Sto cercando un modo pratico per seguire la mappa dei tragitti, soprattutto per i lavori stradali in corso.",
+          "utterance_id": "user_open"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-test-0008-reply",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-test-0008-turn-1",
+          "role": "assistant_start",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Una prima possibilità è i punti di attraversamento; preparo un messaggio al gruppo e ne parliamo sabato.",
+          "utterance_id": "assistant_reply"
+        },
+        {
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-test-0008-turn-1",
+          "new_assistant_segment": false,
+          "role": "non_interrupting_ack",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Capito.",
+          "utterance_id": "user_ack"
+        },
+        {
+          "assistant_turn_id": null,
+          "role": "ordinary",
+          "speaker": "user",
+          "target_action": null,
+          "text": "C'è anche un altro elemento: le decisioni prese la settimana scorsa potrebbe cambiare la valutazione di i lavori stradali in corso.",
+          "utterance_id": "user_elaboration"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-test-0008-backchannel",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-test-0008-backchannel",
+          "role": "assistant_backchannel",
+          "speaker": "assistant",
+          "target_action": "BACKCHANNEL",
+          "text": "Perfetto.",
+          "utterance_id": "assistant_backchannel"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-test-0008-assistant-long",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-test-0008-turn-2",
+          "role": "assistant_start_interruptible",
+          "speaker": "assistant",
+          "target_action": "SPEAK",
+          "text": "Metterei i punti di attraversamento al primo posto nel punto di ritrovo, tenendo come verifica i lavori stradali in corso.",
+          "utterance_id": "assistant_long"
+        },
+        {
+          "preempts_assistant_segment_id": "synthetic-it-t6-v5-sp260928-test-0008-assistant-long",
+          "role": "fresh_correction",
+          "speaker": "user",
+          "target_action": null,
+          "text": "Mi correggo: è cambiato il cantiere appena segnalato; il vincolo iniziale non è più aggiornato.",
+          "utterance_id": "user_correction"
+        },
+        {
+          "assistant_segment_id": "synthetic-it-t6-v5-sp260928-test-0008-replan",
+          "assistant_turn_id": "synthetic-it-t6-v5-sp260928-test-0008-turn-3",
+          "role": "assistant_replan",
+          "speaker": "assistant",
+          "target_action": "REPLAN",
+          "text": "Allora cambio il piano: prima verifichiamo il cantiere appena segnalato, poi riprendiamo i punti di attraversamento.",
+          "utterance_id": "assistant_replan"
+        }
+      ]
+    }
+  ],
+  "frame_ms": 80,
+  "implementation_sources": {
+    "resampling": {
+      "down": 3,
+      "method": "scipy.signal.resample_poly",
+      "project_pin": "Dockerfile scipy==1.17.1",
+      "up": 2
+    },
+    "tts": {
+      "official_source": "https://github.com/QwenLM/Qwen3-TTS/blob/main/qwen_tts/inference/qwen3_tts_model.py#L637-L644",
+      "package_pin": "qwen-tts==0.1.1",
+      "project_source_snapshot": "docs/sources/qwen3_tts_official_src/qwen3_tts_model.py:637-644",
+      "reused_path": "_generate_dialogues_batch -> Qwen3TTSModel.generate_voice_design"
+    }
+  },
+  "limitations": [
+    "Synthetic text scripts only: this plan contains no generated or verified audio.",
+    "Synthetic event timings are authored targets, not human-event annotation or a behavior-quality result."
+  ],
+  "profile": "audio_grounded_v5",
+  "profile_version": "synthetic-it-t6-audio-grounded-v5-plan.1",
+  "sample_rate_hz": 16000,
+  "schema_version": 1,
+  "seed": 260928,
+  "split_metadata": {
+    "dialogue_counts": {
+      "test": 8,
+      "train": 32,
+      "validation": 8
+    },
+    "hash_certified": false,
+    "method": "deterministic balanced assignment from fixed topic-group lists",
+    "template_ids_by_split": {
+      "test": [
+        "evening_course__plan_a",
+        "evening_course__plan_b",
+        "neighborhood_mobility__plan_a",
+        "neighborhood_mobility__plan_b"
+      ],
+      "train": [
+        "community_garden__plan_a",
+        "community_garden__plan_b",
+        "hiking_group__plan_a",
+        "hiking_group__plan_b",
+        "local_market__plan_a",
+        "local_market__plan_b",
+        "neighborhood_library__plan_a",
+        "neighborhood_library__plan_b",
+        "school_workshop__plan_a",
+        "school_workshop__plan_b",
+        "small_museum__plan_a",
+        "small_museum__plan_b"
+      ],
+      "validation": [
+        "shared_kitchen__plan_a",
+        "shared_kitchen__plan_b",
+        "volunteer_handoff__plan_a",
+        "volunteer_handoff__plan_b"
+      ]
+    },
+    "topic_group_counts_by_split": {
+      "test": {
+        "evening_course": 4,
+        "neighborhood_mobility": 4
+      },
+      "train": {
+        "community_garden": 6,
+        "hiking_group": 5,
+        "local_market": 5,
+        "neighborhood_library": 6,
+        "school_workshop": 5,
+        "small_museum": 5
+      },
+      "validation": {
+        "shared_kitchen": 4,
+        "volunteer_handoff": 4
+      }
+    },
+    "topic_groups_by_split": {
+      "test": [
+        "evening_course",
+        "neighborhood_mobility"
+      ],
+      "train": [
+        "community_garden",
+        "neighborhood_library",
+        "school_workshop",
+        "local_market",
+        "hiking_group",
+        "small_museum"
+      ],
+      "validation": [
+        "volunteer_handoff",
+        "shared_kitchen"
+      ]
+    }
+  },
+  "timeline_contract": {
+    "actual_waveform_durations_required": true,
+    "audio_channels": {
+      "0": "user",
+      "1": "assistant"
+    },
+    "backchannel_while_user_active": true,
+    "final_sample_rate_hz": 16000,
+    "frame_sample_cutoff_is_causal": true,
+    "non_interrupting_ack_ms": [
+      250,
+      500
+    ],
+    "replan_boundary_alignment_ms": 80,
+    "replan_delay_after_correction_end_ms": 800,
+    "resample_passes": 1,
+    "tts_sample_rate_hz": 24000,
+    "yield_cut_fade_ms": 5,
+    "yield_cut_max_ms_after_correction_onset": 160,
+    "yield_decision_observation_ms": 160,
+    "yield_first_frame_action_masked_ms": 80
+  }
+}

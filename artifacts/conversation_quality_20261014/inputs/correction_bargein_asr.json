@@ -1,0 +1,77 @@
+{
+  "model": "faster-whisper small",
+  "device": "cpu",
+  "compute_type": "int8",
+  "results": [
+    {
+      "file": "correction_bargein.wav",
+      "path": "/workspace/artifacts/conversation_quality_20261014/inputs/correction_bargein.wav",
+      "language": "it",
+      "language_probability": 1,
+      "media": {
+        "sample_rate": 16000,
+        "channels": 1,
+        "frames": 69504,
+        "duration_s": 4.344
+      },
+      "segments": [
+        {
+          "start_s": 0.0,
+          "end_s": 3.72,
+          "text": " Aspetta, il baggete è 80 euro, non 120.",
+          "words": [
+            {
+              "start_s": 0.0,
+              "end_s": 0.8,
+              "text": " Aspetta,",
+              "probability": 0.9820506572723389
+            },
+            {
+              "start_s": 1.14,
+              "end_s": 1.32,
+              "text": " il",
+              "probability": 0.9804070591926575
+            },
+            {
+              "start_s": 1.32,
+              "end_s": 1.9,
+              "text": " baggete",
+              "probability": 0.8024839361508688
+            },
+            {
+              "start_s": 1.9,
+              "end_s": 1.92,
+              "text": " è",
+              "probability": 0.98478764295578
+            },
+            {
+              "start_s": 1.92,
+              "end_s": 2.26,
+              "text": " 80",
+              "probability": 0.9711148142814636
+            },
+            {
+              "start_s": 2.26,
+              "end_s": 2.72,
+              "text": " euro,",
+              "probability": 0.7004815340042114
+            },
+            {
+              "start_s": 3.0,
+              "end_s": 3.14,
+              "text": " non",
+              "probability": 0.9927302002906799
+            },
+            {
+              "start_s": 3.14,
+              "end_s": 3.72,
+              "text": " 120.",
+              "probability": 0.9965289235115051
+            }
+          ]
+        }
+      ],
+      "text": "Aspetta, il baggete è 80 euro, non 120."
+    }
+  ]
+}

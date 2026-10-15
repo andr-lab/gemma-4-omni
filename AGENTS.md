@@ -2,93 +2,68 @@
 
 ## Regole operative di base
 
-- NON eseguire mai il download locale di modelli più grandi di 1GB. Il computer di esecuzione locale è lento e questo creerebbe colli di bottiglia inutili. L'esecuzione della pipeline avverrà interamente in Kaggle.
-- Genera codice come fossero celle Kaggle, quindi un singolo modulo python per la pipeline principale, con separatori netti delle varie celle, e moduli secondi a sé stanti per celle necessarie ma scollegate dalla pipeline principale.
-- Il tempo GPU Kaggle è costoso: mai lanciare run di training completi senza prima validare la pipeline con smoke test e test su pochi sample.
+- L'ambiente primario di calcolo GPU ed esecuzione è la macchina remota **Mondaini** (host `mondaini` / RTX 3090 24GB VRAM) via Docker isolato.
+- Non scaricare mai modelli di dimensioni superiori a 1GB sulla macchina di sviluppo locale Windows. I download pesanti avvengono esclusivamente sulla macchina Linux remota o nei volumi container.
+- **Divieto Assoluto di Burocrazia e Gate Formali**: Non reintrodurre manifest di SHA, gate formali di certificazione, verificatori a cascata bloccanti o file di piano rigidi che congelano il lavoro. Lo sviluppo è guidato da test funzionali e contratti snelli.
+- Ogni modifica a codice o architettura deve aggiornare direttamente `docs/ARCHITECTURE.md` o i test pertinenti, senza creare documenti orfani o report di stato usa-e-getta.
 
-## Principi di sviluppo obbligatori (istruzione per tutti gli agenti futuri)
+---
 
-Ogni agente che lavora su questo progetto DEVE applicare i tre principi seguenti. Sono vincolanti, non opzionali.
+## Principi di sviluppo obbligatori (istruzione per tutti gli agenti)
+
+Ogni agente che lavora su questo repository deve applicare i tre principi seguenti:
 
 ### 1. Doubt-Driven Development (DDD)
-
-Una risposta sicura non è una risposta corretta. Ogni decisione non banale viene sottoposta a una revisione avversariale a contesto fresco PRIMA di essere considerata valida.
-
-- Una decisione è **non banale** se: introduce o modifica logica ramificata, attraversa un confine di modulo, afferma una proprietà che il type system non può verificare, dipende da contesto che il lettore futuro non vede, o ha un raggio d'impatto irreversibile (deploy, migrazione dati, run GPU costose, cambi di API).
-- Processo (per ogni ciclo): **CLAIM** (nome la decisione in 2-3 righe e perché conta) → **EXTRACT** (isolo l'artefatto minimo + il contratto, senza il mio ragionamento) → **DOUBT** (revisore avversariale a contesto fresco: "trova cosa c'è di sbagliato, NON validare"; mai passare il CLAIM al revisore, solo ARTEFATTO + CONTRATTO) → **RECONCILE** (classifico ogni finding: contratto ambiguo / valido e azionabile / trade-off valido / rumore; il revisore non è infallibile: rileggo l'artefatto e decido io) → **STOP** (solo finding triviali, 3 cicli massimi, o override dell'utente).
-- In contesto interattivo: dopo ogni revisione single-model, OFFRIRE esplicitamente un secondo parere cross-model (Gemini CLI, Codex CLI, revisione esterna manuale, o skip). In contesto non interattivo: annunciare lo skip. Mai invocare CLI esterne senza autorizzazione esplicita dell'utente.
-- Se un test fallisce (RED di TDD), quel test fallito È il passo di dubbio per le affermazioni comportamentali.
-- Non applicare DDD a operazioni meccaniche (rinominare, formattare, spostare file, eseguire tool). Altrimenti non si spedisce nulla.
+Una risposta sicura non è una risposta corretta. Ogni decisione non banale viene verificata con rigore prima di essere considerata valida.
+- Una decisione è **non banale** se introduce o modifica logica ramificata, attraversa un confine di modulo, tocca parametri numerici critici o ha un raggio d'impatto irreversibile.
+- Processo: isolare l'artefatto minimo e il contratto; sottoporre a verifica avversariale ("trova cosa c'è di sbagliato, non limitarti a confermare"); riconciliare i punti emersi ed eliminare il codice non necessario.
+- Non applicare DDD a operazioni meccaniche (rinominare, formattare, spostare file, eseguire tool).
 
 ### 2. Source-Driven Development (SDD)
-
-Ogni decisione di codice specifica per un framework/libreria DEVE essere fondata sulla documentazione ufficiale, con citazione. Mai implementare a memoria.
-
-- Processo: **DETECT** (identifico stack e versioni esatte dal file delle dipendenze; se le versioni sono ambigue chiedo all'utente) → **FETCH** (recupero la pagina di documentazione SPECIFICA, non la homepage; gerarchia di autorità: 1. documentazione ufficiale, 2. blog/changelog ufficiale, 3. reference web standard, 4. dati di compatibilità; MAI Stack Overflow, tutorial, riassunti AI o la mia memoria come fonte primaria) → **IMPLMENT** (codice conforme ai pattern documentati per QUELLA versione; se i docs confliggono col codice esistente, lo segnalo all'utente) → **CITE** (citazione con URL completo, quote del passo rilevante, note di deprecazione).
-- Se non trovo documentazione ufficiale per un pattern: lo dichiaro esplicitamente UNVERIFIED invece di fare finta di essere sicuro.
-- Versioni chiave del progetto (riferimento): `qwen-tts` richiede `transformers==4.49.0` (Fase 1); Unsloth + Gemma 4 E2B richiedono `transformers>=5.x` (Fase 2, kernel riavviato). ADR-003 regola questa separazione.
+Ogni decisione di codice specifica per un framework o libreria deve essere fondata sulla documentazione ufficiale o sul codice sorgente effettivo verificato.
+- Isolare lo stack e le versioni esatte dal runtime o dai file di configurazione (`docker-compose.yml`, `pyproject.toml`).
+- Verificare i contratti leggendo direttamente il codice implementativo nei moduli target.
+- Se un comportamento non è documentato o verificato a runtime, dichiararlo esplicitamente invece di fare assunzioni.
 
 ### 3. Test-Driven Development (TDD)
+Comportamento guidato da test snelli e mirati: RED -> GREEN -> REFACTOR.
+- Prima scrivere o isolare il test che fallisce o cattura la proprietà richiesta; poi implementare la modifica minima per farlo passare; infine rifattorizzare rimuovendo codice difensivo o residuo.
+- Su GPU RTX 3090: eseguire sempre uno smoke test breve (pochi batch o frame) prima di lanciare job pesanti o sessioni lunghe.
 
-Comportamento guidato dai test: RED → GREEN → REFACTOR.
+---
 
-- Prima scrivo un test che fallisce (RED) e dimostro che fallisce per il motivo giusto; poi implemento il minimo per farlo passare (GREEN); poi rifattorizzo (REFACTOR) senza cambiare comportamento.
-- Il test fallito è il "dubbio materializzato": è il meccanismo che rende il dubbio verificabile e la correzione provata.
-- Su Kaggle (GPU a ore): ogni run che consuma GPU deve essere preceduto da uno smoke test. Gli smoke test sono OBBLIGATORI prima di qualsiasi run di training completo.
+## Esecuzione su RTX 3090 (Host `mondaini` via Docker)
 
-## Regole di esecuzione su Kaggle (valide per tutti gli agenti)
-
-- **Smoke test Fase 1**: ridurre `DUPLEXCONV_MAX_HOURS` (es. 1-2h → pochi segmenti) e `MDC_MAX_SAMPLES` (es. 8-16) per validare download, tokenizzazione RVQ reale (Qwen3-TTS 12Hz), estrazione mel numpy (bit-pari col Gemma4AudioFeatureExtractor), estrazione Code2Wav + sub-talker e scrittura parquet/sidecar. Controllare che `TOKENIZER_REAL_ENCODING_ACTIVE=True` e che la distribuzione dei target NON sia degenerata (niente loss collassata ~0.002).
-- **Smoke test Fase 2**: usare `PHASE2_SMOKE_BATCHES` (es. 2-4) per validare forward/backward, coupling (sub-talker congelato), loss testo, validation split e checkpoint prima di un run completo.
-- **Gate**: si passa al run completo SOLO quando la pipeline non crasha, è corretta metodologicamente e teoricamente nelle operazioni che compie (verificato con DDD+SDD+TDD). In caso di dubbi sulla correttezza: fermarsi e chiedere.
-- **Debugging**: usare `debugging-and-error-recovery` per root-cause sistematico; mai fix a tentativi (niente "guess and pray").
-- **Checkpoint & metriche**: ogni run salva checkpoint in `checkpoints/`, wav ascoltabili in `samples/` e report. Confrontare i risultati col report precedente (`gemma4_training_report.md`). Loss iniziale attesa ~13-17 (log 4096 + log 2048), NON ~0.002.
-- **Comunicazione**: alla fine del lavoro informare l'utente via email (estensione email-status / send_status_email), con stato (fatto/in corso/bloccato), file toccati, test eseguiti, prossimi passi.
-
-## Esecuzione locale 3090 (RTX 3090 SSH + Docker)
-
-A causa dell'esaurimento della quota GPU Kaggle (30h/settimana), i training pesanti e le eval GPU migrano sulla macchina Linux locale con NVIDIA GeForce RTX 3090 (24GB VRAM, ~14GB RAM per dataloader), raggiungibile via SSH (alias `gpu3090` in `~/.ssh/config`).
+L'esecuzione avviene sulla macchina remota Linux con NVIDIA GeForce RTX 3090 (24GB VRAM), raggiungibile via SSH (host `mondaini`).
 
 ### Vincoli operativi e di sicurezza (obbligatori)
-- **Non-root container**: eseguire sempre come utente `uid:gid 1000:1000` (`appuser`) per garantire che i file creati nei volumi montati abbiano i permessi corretti.
-- **Shared memory**: usare sempre `--ipc=host` per prevenire errori di bus (`SIGBUS`) nel DataLoader PyTorch durante il passaggio dei batch tra processi worker.
+- **Container non-root**: eseguire sempre come utente `uid:gid 1000:1000` (`appuser`) per garantire che i file creati nei volumi montati mantengano permessi coerenti.
+- **Shared memory**: usare sempre `--ipc=host` per prevenire errori di bus (`SIGBUS`) nel DataLoader PyTorch durante il trasferimento dei batch tra processi worker.
 - **Isolamento di rete e privilegi**:
   - MAI usare `--privileged`.
   - MAI usare `--network host`. Per il serving REST usare esclusivamente il port mapping esplicito `-p 8000:8000`.
-- **Volume di lavoro**: montare sempre il repository host in `/workspace` (`-v ~/gemma-4-omni:/workspace`).
-- **Download > 1GB su 3090**: il vincolo "mai > 1GB in locale" non si applica alla macchina 3090 (dotata di SSD veloce e banda). Scaricare direttamente via `huggingface-cli` o `huggingface_hub` solo i modelli strettamente necessari (`unsloth/gemma-4-E2B-it`, `Qwen/Qwen3-TTS-12Hz-1.7B-Base`, `Qwen/Qwen3-TTS-Tokenizer-12Hz`).
+- **Volume di lavoro**: montare sempre il repository host in `/workspace` (`-v /home/administrator/gemma-4-omni:/workspace`).
+- **Preservazione dei Checkpoint**: MAI cancellare o sovrascrivere checkpoint in `checkpoints/` (inclusi adapter QLoRA e Projector FiLM v2) senza esplicita richiesta dell'utente.
 
-### Comandi di esecuzione standard su 3090
-Tutti i comandi vanno eseguiti all'interno di `~/gemma-4-omni` sull'host `gpu3090`:
-
+### Comandi standard su `mondaini`
 ```bash
-# Provisioning host e verifica NVIDIA Container Toolkit (una tantum)
-./setup_3090.sh
+# Avvio del servizio speech di produzione
+./start_speech_service_3090.sh
 
-# 1. Smoke test rapido di validazione (4 batch, gate numerici)
-./docker_run_3090.sh smoke
-# oppure con docker compose:
-docker compose run --rm train-smoke
-
-# 2. Training completo Fase 2 (Gemma 4 QLoRA + TemporalResidualAdapter)
-./docker_run_3090.sh train
-# oppure con docker compose:
-docker compose run --rm train
-
-# 3. Data Preparation Fase 1 (RVQ Tokenization + Parquet/memmap)
-./docker_run_3090.sh prep
-
-# 4. Valutazione e sintesi campioni audio di verifica
-./docker_run_3090.sh eval
-
-# 5. Serving API REST FastAPI (porta 8000)
-./docker_run_3090.sh serve
-
-# 6. Shell interattiva non-root nel container
-./docker_run_3090.sh bash
+# Verifica health endpoint
+curl -s http://localhost:8000/health
 ```
 
-### Verifica numerica obbligatoria
-- **Loss iniziale attesa**: ~13.0 - 17.0 (somma dei logit semantici e acustici al passo 0).
-- **Divergenza critica**: se la loss iniziale supera 19.0 o collassa < 1.0 (indice di dati degenerati o allineamento errato), fermare l'esecuzione e investigare prima di consumare cicli di calcolo.
+---
 
+## Delega Operativa a Codex CLI (GPT-6 Luna xhigh)
+
+Tutte le implementazioni complesse non banali (> 50 righe, logica core multi-file, refactoring estesi) vengono affidate a **Codex CLI** con modello **`gpt-6-luna`** a massimo sforzo di ragionamento (**`xhigh`**).
+
+### Regole di Delega
+1. **Modello e Ragionamento**: usare rigorosamente `gpt-6-luna` con reasoning `xhigh`.
+2. **Timeout Illimitato**: non impostare timeout artificiali brevi; lasciare a Codex il tempo necessario per il completamento.
+3. **Contratti Tecnici Rigorosi**: passare a Codex specifiche deterministiche, interfacce, vincoli e criteri di verifica; non delegare decisioni architetturali di alto livello aperte.
+4. **Strumento di Esecuzione**:
+   `$null | codex exec -m gpt-6-luna -c model_reasoning_effort="xhigh" --dangerously-bypass-approvals-and-sandbox -C "<workspace>" "<task_spec>"`
+   oppure tramite lo script dedicato in `tools/codex_orchestrator.py`.
