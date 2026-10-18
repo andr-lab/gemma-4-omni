@@ -8,8 +8,46 @@ readonly IMAGE="${DUPLEX_SERVICE_IMAGE:-gemma4-listener-control6-baseline-snapsh
 readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly HEALTH_TIMEOUT_S="${DUPLEX_HEALTH_TIMEOUT_S:-600}"
 readonly PYTHON="/workspace/.venv_e2e_runtime/bin/python"
+readonly UNIFIED_KV="${DUPLEX_UNIFIED_KV:-0}"
+case "$UNIFIED_KV" in
+  0|1) ;;
+  *) echo "speech service: DUPLEX_UNIFIED_KV must be 0 or 1" >&2; exit 1 ;;
+esac
+if [[ "$UNIFIED_KV" == "1" ]]; then
+  if [[ ${DUPLEX_AUDIO_RESPONSE_PROTOCOL+x} && "$DUPLEX_AUDIO_RESPONSE_PROTOCOL" != "heard_action_say_v2" ]]; then
+    echo "speech service: unified KV requires DUPLEX_AUDIO_RESPONSE_PROTOCOL=heard_action_say_v2" >&2
+    exit 1
+  fi
+  if [[ ${DUPLEX_CONTROLLER_GUIDED_SAY_V1+x} && "$DUPLEX_CONTROLLER_GUIDED_SAY_V1" != "0" ]]; then
+    echo "speech service: unified KV conflicts with DUPLEX_CONTROLLER_GUIDED_SAY_V1; set it to 0 or unset it" >&2
+    exit 1
+  fi
+  RESPONSE_PROTOCOL="heard_action_say_v2"
+elif [[ ${DUPLEX_AUDIO_RESPONSE_PROTOCOL+x} ]]; then
+  RESPONSE_PROTOCOL="$DUPLEX_AUDIO_RESPONSE_PROTOCOL"
+else
+  case "${DUPLEX_CONTROLLER_GUIDED_SAY_V1:-1}" in
+    1) RESPONSE_PROTOCOL="controller_guided_say_v1" ;;
+    0) RESPONSE_PROTOCOL="heard_action_say_v2" ;;
+    *) echo "speech service: DUPLEX_CONTROLLER_GUIDED_SAY_V1 must be 0 or 1" >&2; exit 1 ;;
+  esac
+fi
+case "$RESPONSE_PROTOCOL" in
+  controller_guided_say_v1|heard_action_say_v2) ;;
+  *) echo "speech service: DUPLEX_AUDIO_RESPONSE_PROTOCOL must be controller_guided_say_v1 or heard_action_say_v2" >&2; exit 1 ;;
+esac
+readonly RESPONSE_PROTOCOL
 readonly LISTENER_MICROBATCH="${DUPLEX_LISTENER_MICROBATCH:-1}"
-readonly LISTENER_MICROBATCH_SEMANTIC_SHADOW="${DUPLEX_LISTENER_MICROBATCH_SEMANTIC_SHADOW:-1}"
+LISTENER_MICROBATCH_SEMANTIC_SHADOW="${DUPLEX_LISTENER_MICROBATCH_SEMANTIC_SHADOW:-1}"
+if [[ "$UNIFIED_KV" == "1" ]]; then
+  [[ "$LISTENER_MICROBATCH" == "1" ]] || {
+    echo "speech service: DUPLEX_UNIFIED_KV=1 requires DUPLEX_LISTENER_MICROBATCH=1" >&2
+    exit 1
+  }
+  # Unified mode has one native cache owner; the legacy semantic shadow is off.
+  LISTENER_MICROBATCH_SEMANTIC_SHADOW=0
+fi
+readonly LISTENER_MICROBATCH_SEMANTIC_SHADOW
 readonly LISTENER_MICROBATCH_GEMM_GRAPHS="${DUPLEX_LISTENER_MICROBATCH_GEMM_GRAPHS:-0}"
 readonly LISTENER_SOURCE_ROOT_RELATIVE="${DUPLEX_LISTENER_MICROBATCH_SOURCE_ROOT:-artifacts/runtime/listener_microbatch_source}"
 readonly NATIVE_CONTROL6_TRACE="${DUPLEX_NATIVE_CONTROL6_TRACE:-0}"
@@ -140,7 +178,7 @@ fi
 [[ "$LISTENER_SOURCE_ROOT_RELATIVE" != *\\* ]] || fail "listener source root must use repository-relative POSIX separators"
 [[ "$LISTENER_SOURCE_ROOT_RELATIVE" != *:* ]] || fail "listener source root must not contain PYTHONPATH separators"
 
-[[ "$NATIVE_CONTROL6_SEMANTIC_PREFIX" != "1" || "$LISTENER_MICROBATCH" != "1" || "$LISTENER_MICROBATCH_SEMANTIC_SHADOW" == "1" ]] || \
+[[ "$UNIFIED_KV" == "1" || "$NATIVE_CONTROL6_SEMANTIC_PREFIX" != "1" || "$LISTENER_MICROBATCH" != "1" || "$LISTENER_MICROBATCH_SEMANTIC_SHADOW" == "1" ]] || \
   fail "semantic-prefix Control6 microbatch requires DUPLEX_LISTENER_MICROBATCH_SEMANTIC_SHADOW=1"
 [[ "$LISTENER_MICROBATCH" != "1" || "$LISTENER_MICROBATCH_GEMM_GRAPHS" == "0" ]] || \
   fail "production listener microbatch requires DUPLEX_LISTENER_MICROBATCH_GEMM_GRAPHS=0"
@@ -193,7 +231,31 @@ docker image inspect "$IMAGE" >/dev/null 2>&1 || fail "serving image is not pres
 check_env() {
   local key="$1" expected="$2" actual
   actual="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER" | awk -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); print; exit}')"
+  # Existing legacy containers predate the explicit unified toggle; absence is
+  # equivalent to the documented opt-out, but never to an opt-in.
+  if [[ "$key" == "DUPLEX_UNIFIED_KV" && "$expected" == "0" && -z "$actual" ]]; then
+    return
+  fi
   [[ "$actual" == "$expected" ]] || fail "existing $CONTAINER has unexpected $key; refusing to mutate it"
+}
+
+check_response_protocol_env() {
+  local protocol_env legacy_toggle
+  protocol_env="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER" | awk -F= '$1 == "DUPLEX_AUDIO_RESPONSE_PROTOCOL" {sub(/^[^=]*=/, ""); print; exit}')"
+  if [[ -n "$protocol_env" ]]; then
+    [[ "$protocol_env" == "$RESPONSE_PROTOCOL" ]] || fail "existing $CONTAINER has unexpected DUPLEX_AUDIO_RESPONSE_PROTOCOL; refusing to mutate it"
+    return
+  fi
+  if [[ "$UNIFIED_KV" == "0" && ( "$RESPONSE_PROTOCOL" == "controller_guided_say_v1" || "$RESPONSE_PROTOCOL" == "heard_action_say_v2" ) ]]; then
+    legacy_toggle="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER" | awk -F= '$1 == "DUPLEX_CONTROLLER_GUIDED_SAY_V1" {sub(/^[^=]*=/, ""); print; exit}')"
+    if [[ "$RESPONSE_PROTOCOL" == "controller_guided_say_v1" ]]; then
+      [[ "$legacy_toggle" == "1" ]] || fail "existing $CONTAINER has no matching audio-response protocol setting; refusing to mutate it"
+    else
+      [[ "$legacy_toggle" == "0" ]] || fail "existing $CONTAINER has no matching audio-response protocol setting; refusing to mutate it"
+    fi
+    return
+  fi
+  fail "existing $CONTAINER has no explicit DUPLEX_AUDIO_RESPONSE_PROTOCOL; refusing to mutate it"
 }
 
 check_existing_container() {
@@ -233,7 +295,8 @@ check_existing_container() {
   check_env DUPLEX_NATIVE_CONTROL6_PREFIX_SCHEMA_VERSION "$PREFIX_SCHEMA_VERSION"
   check_env DUPLEX_NATIVE_CONTROL6_PREFIX_CONTRACT "$PREFIX_CONTRACT"
   check_env DUPLEX_DIRECT_AUDIO_CANDIDATE 1
-  check_env DUPLEX_CONTROLLER_GUIDED_SAY_V1 1
+  check_env DUPLEX_UNIFIED_KV "$UNIFIED_KV"
+  check_response_protocol_env
   check_env GEMMA4_OMNI_SPEAKER_REFERENCE_WAV /workspace/artifacts/voices/reference.wav
   check_env GEMMA4_OMNI_SPEAKER_REFERENCE_SHA256 480f55f41c71c3d79c2a9acc48f0bfb3c5a46222e6e9ebf3e2888e93501a6b5c
   check_env DUPLEX_AUDIO_HISTORY_ARCHIVE_CPU 1
@@ -284,7 +347,8 @@ else
     --volume /usr/local/cuda-13.1:/usr/local/cuda:ro \
     --workdir "$LISTENER_SOURCE_ROOT_CONTAINER" \
     --env DUPLEX_DIRECT_AUDIO_CANDIDATE=1 \
-    --env DUPLEX_CONTROLLER_GUIDED_SAY_V1=1 \
+    --env DUPLEX_UNIFIED_KV="$UNIFIED_KV" \
+    --env DUPLEX_AUDIO_RESPONSE_PROTOCOL="$RESPONSE_PROTOCOL" \
     --env GEMMA4_OMNI_FRAME_RESIDUAL_ADAPTER_CKPT="$ADAPTER_CONTAINER" \
     --env GEMMA4_OMNI_DEFAULT_VOICE=gemma \
     --env GEMMA4_OMNI_CUSTOM_VOICE_DIR=/workspace/custom_voices \
@@ -335,21 +399,24 @@ for ((elapsed=0; elapsed<HEALTH_TIMEOUT_S; elapsed++)); do
 import json, sys
 d = json.load(sys.stdin)
 requested = sys.argv[1] == "1"
+response_protocol = sys.argv[2]
+unified_kv = sys.argv[3] == "1"
 microbatch = d.get("listener_microbatch")
 ok = (
     d.get("status") == "ok"
     and d.get("engine_loaded") is True
     and d.get("talker_q1_backend") == "native_audio_q1"
     and d.get("talker_q1_native_status") == "ready"
-    and d.get("response_protocol") == "controller_guided_say_v1"
+    and d.get("response_protocol") == response_protocol
+    and d.get("unified_kv_enabled") is unified_kv
     and isinstance(microbatch, dict)
     and microbatch.get("enabled") is requested
 )
 if requested:
-    ok = ok and microbatch.get("semantic_shadow_setting") == "1"
+    ok = ok and microbatch.get("semantic_shadow_setting") == ("0" if unified_kv else "1")
     ok = ok and microbatch.get("gemm_graphs_setting") == "0"
 sys.exit(0 if ok else 1)
-' "$LISTENER_MICROBATCH" 2>/dev/null; then
+' "$LISTENER_MICROBATCH" "$RESPONSE_PROTOCOL" "$UNIFIED_KV" 2>/dev/null; then
       printf '%s\n' "$body"
       exit 0
     fi

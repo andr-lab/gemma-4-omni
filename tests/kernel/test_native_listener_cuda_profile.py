@@ -94,7 +94,7 @@ def test_native_q4_sampler_wraps_actual_ctypes_call_on_exact_torch_stream() -> N
     _initialize_existing_runtime_timing_fixture(native)
     native._q4_cuda_profiler = profiler
     native.enable_cuda_graph = False
-    native.stream_q_len = 4
+    native.stream_q_len = 2
     native._ctx = ctypes.c_void_p(123)
     native._frame_meta_ptr = ctypes.c_void_p(456)
     native._frame_input = _FakeTensor(calls, "frame")
@@ -131,7 +131,7 @@ def test_native_q4_profile_disabled_creates_no_events_or_cuda_timing_calls() -> 
     _initialize_existing_runtime_timing_fixture(native)
     native._q4_cuda_profiler = None
     native.enable_cuda_graph = False
-    native.stream_q_len = 4
+    native.stream_q_len = 2
     native._ctx = ctypes.c_void_p(123)
     native._frame_meta_ptr = ctypes.c_void_p(456)
     native._frame_input = _FakeTensor(calls, "frame")
@@ -159,7 +159,7 @@ def test_requested_native_profile_fails_closed_before_dso_when_event_unavailable
     _initialize_existing_runtime_timing_fixture(native)
     native._q4_cuda_profiler = profiler
     native.enable_cuda_graph = False
-    native.stream_q_len = 4
+    native.stream_q_len = 2
     native._ctx = ctypes.c_void_p(123)
     native._frame_meta_ptr = ctypes.c_void_p(456)
     native._frame_input = _FakeTensor(calls, "frame")
@@ -224,7 +224,7 @@ def test_native_q4_profile_keeps_host_context_live_until_sidecar_snapshot() -> N
     _initialize_existing_runtime_timing_fixture(native)
     native._q4_cuda_profiler = profiler
     native.enable_cuda_graph = False
-    native.stream_q_len = 4
+    native.stream_q_len = 2
     native._ctx = ctypes.c_void_p(123)
     native._frame_meta_ptr = ctypes.c_void_p(456)
     native._frame_input = _FakeTensor(calls, "frame")

@@ -10,10 +10,12 @@ import pytest
 import torch
 
 from duplex_kernel.gemma_native_control6_batch_policy import (
+    DecisionRowSource,
     GemmaNativeControl6BatchPolicy,
     ListenerHiddenProvenance,
     BatchPolicyInput,
     NativeControl6RawScoreSnapshot,
+    PolicyPreHeadContext,
 )
 from duplex_kernel.gemma_native_control6_policy import GemmaNativeControl6Policy
 from duplex_kernel.listener_microbatch import ListenerMicrobatchCoordinator
@@ -46,7 +48,7 @@ def runtime_signature() -> RuntimeSignature:
         attention_backend_id=3,
         rmsnorm_backend_id=2,
         max_seq_len=16_384,
-        stream_q_len=4,
+        stream_q_len=2,
     )
 
 
@@ -58,7 +60,7 @@ def capability() -> NativeBatchCapability:
         attention_backend_id=3,
         rmsnorm_backend_id=2,
         max_seq_len=16_384,
-        stream_q_len=4,
+        stream_q_len=2,
         supports_arbitrary_batch_size=True,
         stream_priority=-1,
         stream_identity="listener-cuda-stream-17",
@@ -136,6 +138,7 @@ def _frame(
     generation_id: int = 7,
     epoch: str | None = None,
     value: float | None = None,
+    policy_context: PolicyPreHeadContext | None = None,
 ) -> ListenerFrame:
     return ListenerFrame(
         session_id=session_id,
@@ -144,6 +147,7 @@ def _frame(
         frame_id=frame_id,
         ready_at_ns=ready_at_ns,
         pcm=np.full(1280, frame_id if value is None else value, dtype=np.float32),
+        policy_context=policy_context,
     )
 
 
@@ -208,8 +212,8 @@ def test_phase_aligned_ready_frames_make_one_real_batch_call(
                 RowStateUpdate(
                     session_id=row.session_id,
                     frame_id=row.frame_id,
-                    cache_position=row.cache_position + 4,
-                    valid_history_tokens=row.valid_history_tokens + 4,
+                    cache_position=row.cache_position + 2,
+                    valid_history_tokens=row.valid_history_tokens + 2,
                 )
                 for row in batch.manifest.rows  # type: ignore[attr-defined]
             )
@@ -317,8 +321,8 @@ def _updates(batch: object) -> tuple[RowStateUpdate, ...]:
         RowStateUpdate(
             session_id=row.session_id,
             frame_id=row.frame_id,
-            cache_position=row.cache_position + 4,
-            valid_history_tokens=row.valid_history_tokens + 4,
+            cache_position=row.cache_position + 2,
+            valid_history_tokens=row.valid_history_tokens + 2,
         )
         for row in batch.manifest.rows  # type: ignore[attr-defined]
     )
@@ -345,7 +349,7 @@ def test_one_session_is_serialized_and_next_manifest_uses_committed_cache_positi
     row = second.manifest.rows[0]
     assert row.listener_state_version == 1
     assert row.sequence_position == 1
-    assert row.cache_position == 38
+    assert row.cache_position == 36
 
 
 def test_stale_frame_wrong_epoch_and_out_of_order_frame_are_rejected(
@@ -391,7 +395,7 @@ def test_runtime_signature_mismatch_and_missing_batch_capability_fail_closed(
     with pytest.raises(ValueError, match="max_seq_len"):
         replace(runtime_signature, max_seq_len=4_096)
     with pytest.raises(ValueError, match="stream_q_len"):
-        replace(capability, stream_q_len=2)
+        replace(capability, stream_q_len=4)
 
 
 def test_shared_mutable_listener_state_is_rejected_between_sessions(
@@ -629,12 +633,12 @@ def test_malformed_multirow_completion_poison_is_atomic_and_cannot_partially_adv
 @pytest.mark.parametrize(
     "mutate, message",
     [
-        (lambda update: replace(update, cache_position=update.cache_position + 4), "exactly Q=4"),
+        (lambda update: replace(update, cache_position=update.cache_position + 2), "logical Q=2"),
         (lambda update: replace(update, valid_history_tokens=update.cache_position - 1), "valid_history_tokens"),
         (lambda update: replace(update, cache_position=16_385, valid_history_tokens=16_385), "max_seq_len=16384"),
     ],
 )
-def test_multirow_completion_prevalidates_q4_and_history_before_any_commit(
+def test_multirow_completion_prevalidates_q2_and_history_before_any_commit(
     runtime_signature: RuntimeSignature,
     capability: NativeBatchCapability,
     mutate: object,
@@ -686,7 +690,7 @@ def test_completion_staged_state_hook_runs_after_prevalidation_before_cursor_com
     coordinator.complete(batch, _updates(batch), before_cursor_commit=commit_staged_state)
 
     assert observed == [(0, 34), (0, 34)]
-    assert [coordinator.session_state(sid).cache_position for sid in ("s0", "s1")] == [38, 38]
+    assert [coordinator.session_state(sid).cache_position for sid in ("s0", "s1")] == [36, 36]
 
 
 def test_staged_state_commit_failure_poisons_all_rows_without_cursor_advance(
@@ -852,7 +856,8 @@ class _FixedBatchAdapter(NativeControl6LoRA):
         self.fixed_logits = torch.tensor(logits, dtype=torch.float32)
         self.forward_calls = 0
 
-    def forward(self, normalized_hidden: torch.Tensor) -> torch.Tensor:
+    def forward(self, normalized_hidden: torch.Tensor, *, phase_t=None) -> torch.Tensor:
+        del phase_t
         if not torch.isfinite(normalized_hidden).all():
             raise ValueError("normalized_hidden contains non-finite values")
         self.forward_calls += 1
@@ -865,16 +870,162 @@ class _RecordingBatchAdapter(_FixedBatchAdapter):
         super().__init__(logits)
         self.seen_hidden: torch.Tensor | None = None
 
-    def forward(self, normalized_hidden: torch.Tensor) -> torch.Tensor:
+    def forward(self, normalized_hidden: torch.Tensor, *, phase_t=None) -> torch.Tensor:
         self.seen_hidden = normalized_hidden.detach().clone()
-        return super().forward(normalized_hidden)
+        return super().forward(normalized_hidden, phase_t=phase_t)
 
 
 class _NonfiniteLogitAdapter(_FixedBatchAdapter):
-    def forward(self, normalized_hidden: torch.Tensor) -> torch.Tensor:
+    def forward(self, normalized_hidden: torch.Tensor, *, phase_t=None) -> torch.Tensor:
+        del phase_t
         self.forward_calls += 1
         rows = normalized_hidden.shape[0]
         return torch.full((rows, len(ACTIONS)), float("nan"), device=normalized_hidden.device)
+
+
+def test_mixed_native_output_views_apply_one_head_forward_to_per_session_turn_contexts(
+    runtime_signature: RuntimeSignature,
+    capability: NativeBatchCapability,
+) -> None:
+    logits = [[-5.0] * len(ACTIONS) for _ in range(2)]
+    logits[0][ACTIONS.index("SPEAK")] = 9.0
+    logits[1][ACTIONS.index("SPEAK")] = 8.0
+    adapter = _RecordingBatchAdapter(logits)
+    policies = tuple(
+        GemmaNativeControl6Policy(adapter, checkpoint_path="cpu-test.pt")
+        for _ in range(2)
+    )
+    coordinator = _coordinator(runtime_signature, capability, session_count=2)
+    turn_generations = (101, 202)
+    for index, session_id in enumerate(("s0", "s1")):
+        pcm = np.full(1280, 0.125 + index, dtype=np.float32)
+        policy_input = PolicyInput(
+            session_id=session_id,
+            frame_id=0,
+            user_pcm=pcm,
+            speaker_active=False,
+            generation_id=turn_generations[index],
+            legal_actions=("LISTEN", "SPEAK"),
+            native_control_phase_t=(0.0, 0.0, 0.0, 0.0),
+            native_listener_generation=7,
+        )
+        context = PolicyPreHeadContext(
+            policy=policies[index],
+            policy_input=policy_input,
+            tick_id=(session_id, turn_generations[index], 0),
+            captured_at_ns=time.monotonic_ns(),
+            listener_generation_id=7,
+        )
+        frame = ListenerFrame(
+            session_id=session_id,
+            generation_id=7,
+            state_epoch_id=f"epoch-{session_id}",
+            frame_id=0,
+            ready_at_ns=10 + index,
+            pcm=pcm,
+            policy_context=context,
+        )
+        coordinator.enqueue(frame)
+    batch = coordinator.take_ready(2_000_100)
+    assert batch is not None
+    output = NativeBatchOutput(
+        manifest_id=batch.manifest.manifest_id,
+        generation=17,
+        rows=batch.manifest.rows,
+        tensor=torch.ones((2, 2, HIDDEN_WIDTH), dtype=torch.bfloat16),
+        completion_event=object(),
+    )
+    sources = tuple(
+        DecisionRowSource(output, batch.manifest, index, row)
+        for index, row in enumerate(batch.manifest.rows)
+    )
+    contexts = tuple(frame.policy_context for frame in batch.frames)
+    batch_policy = GemmaNativeControl6BatchPolicy(adapter, checkpoint_path="cpu-test.pt")
+
+    decisions = batch_policy.step_native_output_views(sources, contexts)
+
+    assert adapter.forward_calls == 1
+    assert len({id(context.policy) for context in contexts}) == 2
+    assert [decision.generation_id for decision in decisions] == list(turn_generations)
+    assert [decision.diagnostics["native_control6_hysteresis_count"] for decision in decisions] == [1, 1]
+    for decision, context in zip(decisions, contexts, strict=True):
+        provenance = decision.diagnostics["native_output_provenance"]
+        assert provenance["listener_generation_id"] == 7
+        assert provenance["turn_generation_id"] == context.tick_id[1]
+        assert decision.session == context.policy_input.session_id
+    for index, context in enumerate(contexts):
+        next_turn_generation = context.tick_id[1] + 1
+        next_state = replace(
+            context.policy_input,
+            frame_id=1,
+            generation_id=next_turn_generation,
+            native_control_hidden=torch.ones((1, HIDDEN_WIDTH)),
+            native_control_hidden_frame_id=1,
+            native_control_hidden_at_ns=time.monotonic_ns(),
+        )
+        second_turn = context.policy.step_with_logits(
+            next_state,
+            torch.tensor(logits[index]),
+            tick_id=(context.tick_id[0], next_turn_generation, 1),
+        )
+        assert second_turn.generation_id == next_turn_generation
+        stale_cancelled_turn = replace(
+            context.policy_input,
+            native_control_hidden=torch.ones((1, HIDDEN_WIDTH)),
+            native_control_hidden_frame_id=0,
+            native_control_hidden_at_ns=time.monotonic_ns(),
+        )
+        with pytest.raises(RuntimeError, match="stale listener frame"):
+            context.policy.step_with_logits(
+                stale_cancelled_turn,
+                torch.tensor(logits[index]),
+                tick_id=context.tick_id,
+            )
+
+
+def test_policy_prehead_context_copies_nested_mutable_tick_data() -> None:
+    adapter = _RecordingBatchAdapter([[0.0] * len(ACTIONS)])
+    policy = GemmaNativeControl6Policy(adapter, checkpoint_path="cpu-test.pt")
+    pcm = np.ones(1280, dtype=np.float32)
+    history_frame = np.full(1280, 0.25, dtype=np.float32)
+    history = [history_frame]
+    legal_actions = ["LISTEN", "SPEAK"]
+    phase_t = [0.1, 0.2, 0.3, 0.4]
+    state = PolicyInput(
+        session_id="snapshot",
+        frame_id=4,
+        user_pcm=pcm,
+        speaker_active=False,
+        generation_id=92,
+        user_pcm_history=history,
+        legal_actions=legal_actions,  # type: ignore[arg-type]
+        native_control_hidden=None,
+        native_listener_generation=7,
+        native_control_phase_t=phase_t,
+    )
+    context = PolicyPreHeadContext(
+        policy=policy,
+        policy_input=state,
+        tick_id=("snapshot", 92, 4),
+        captured_at_ns=time.monotonic_ns(),
+        listener_generation_id=7,
+    )
+
+    pcm.fill(0.0)
+    history_frame.fill(0.0)
+    history.append(np.zeros_like(history_frame))
+    legal_actions.clear()
+    phase_t[0] = 99.0
+
+    snapshot = context.policy_input
+    assert snapshot.user_pcm is not None and snapshot.user_pcm[0] == 1.0
+    assert snapshot.user_pcm_history[0][0] == 0.25
+    assert len(snapshot.user_pcm_history) == 1
+    assert snapshot.legal_actions == ("LISTEN", "SPEAK")
+    assert tuple(snapshot.native_control_phase_t) == (0.1, 0.2, 0.3, 0.4)
+    assert snapshot.native_listener_generation == 7
+    with pytest.raises(ValueError):
+        snapshot.user_pcm.setflags(write=True)
 
 
 def _policy_input(
@@ -884,12 +1035,13 @@ def _policy_input(
     hidden: torch.Tensor | None = None,
     *,
     generation_id: int = 3,
+    speaker_active: bool = False,
 ) -> PolicyInput:
     return PolicyInput(
         session_id=session_id,
         frame_id=frame_id,
         user_pcm=None,
-        speaker_active=False,
+        speaker_active=speaker_active,
         generation_id=generation_id,
         native_control_hidden=torch.zeros((1, HIDDEN_WIDTH)) if hidden is None else hidden,
         native_control_hidden_frame_id=frame_id,
@@ -911,12 +1063,18 @@ def _batch_policy_input(
     hidden_state_version: int | None = None,
     hidden_frame_id: int | None = None,
     hidden: torch.Tensor | None = None,
+    speaker_active: bool = False,
 ) -> BatchPolicyInput:
     epoch = state_epoch_id or f"epoch-{session_id}"
     version = frame_id if state_version is None else state_version
     return BatchPolicyInput(
         state=_policy_input(
-            session_id, frame_id, legal_actions, hidden, generation_id=generation_id
+            session_id,
+            frame_id,
+            legal_actions,
+            hidden,
+            generation_id=generation_id,
+            speaker_active=speaker_active,
         ),
         state_epoch_id=epoch,
         listener_state_version=version,
@@ -935,13 +1093,13 @@ def test_batched_control6_matches_single_row_policy_for_each_real_row(batch_size
     base_logits = [
         [0.0, 1.0, 7.0, 12.0, -1.0, -2.0],
         [9.0, 0.0, 8.0, -1.0, 3.0, 2.0],
-        [-2.0, 0.0, 1.0, 2.0, 3.0, 10.0],
+        [-2.0, 10.0, 1.0, 2.0, 3.0, -10.0],
         [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
     ]
     base_legal_sets = [
         ("CONTINUE", "YIELD"),
         ("LISTEN", "BACKCHANNEL"),
-        ("SPEAK", "REPLAN"),
+        ("LISTEN", "SPEAK"),
         tuple(ACTIONS),
     ]
     logits = [base_logits[index % len(base_logits)] for index in range(batch_size)]
@@ -949,7 +1107,12 @@ def test_batched_control6_matches_single_row_policy_for_each_real_row(batch_size
     batch_adapter = _FixedBatchAdapter(logits)
     batch_policy = GemmaNativeControl6BatchPolicy(batch_adapter, checkpoint_path="cpu-test.pt")
     states = tuple(
-        _batch_policy_input(f"s{index}", 12 + index, legal_sets[index])
+        _batch_policy_input(
+            f"s{index}",
+            12 + index,
+            legal_sets[index],
+            speaker_active=(index % len(base_legal_sets) == 0),
+        )
         for index in range(batch_size)
     )
 
@@ -963,8 +1126,10 @@ def test_batched_control6_matches_single_row_policy_for_each_real_row(batch_size
             _FixedBatchAdapter([logits[index]]), checkpoint_path="cpu-test.pt"
         )
         single = single_policy.step(state)
-        assert decision.action is single.action
-        assert decision.confidence == single.confidence
+        # This low-level batched selector returns the current candidate. The
+        # session policy may apply two-tick SPEAK/YIELD hysteresis, so compare
+        # against that candidate rather than its held physical action.
+        assert decision.action.value == single.diagnostics["native_control6_effective_candidate"]
         assert decision.diagnostics["native_control6_raw_row_index"] == single.diagnostics[
             "native_control6_raw_row_index"
         ]
@@ -986,12 +1151,10 @@ def test_native_output_entry_binds_exact_first_query_rows_to_ordered_manifest(
     assert batch is not None
     manifest = batch.manifest
 
-    output_tensor = torch.zeros((batch_size, 4, HIDDEN_WIDTH), dtype=torch.bfloat16)
+    output_tensor = torch.zeros((batch_size, 2, HIDDEN_WIDTH), dtype=torch.bfloat16)
     for index in range(batch_size):
         output_tensor[index, 0].fill_(index + 1)
         output_tensor[index, 1].fill_(101 + index)
-        output_tensor[index, 2].fill_(201 + index)
-        output_tensor[index, 3].fill_(301 + index)
     native_output = NativeBatchOutput(
         manifest_id=manifest.manifest_id,
         generation=9,
@@ -1019,7 +1182,7 @@ def test_native_output_entry_binds_exact_first_query_rows_to_ordered_manifest(
 
     assert adapter.forward_calls == 1
     assert adapter.seen_hidden is not None
-    # Production uses the first hidden row from each Q=4 frame, matching
+    # Production uses the first hidden row from each Q=2 frame, matching
     # GemmaAudioTowerBackend._run_incremental_lm's hidden[:, 0, :] return.
     assert torch.equal(adapter.seen_hidden, output_tensor[:, 0, :].float())
 
@@ -1038,7 +1201,7 @@ def test_native_output_entry_rejects_caller_hidden_and_reordered_output_rows(
         manifest_id=manifest.manifest_id,
         generation=9,
         rows=manifest.rows,
-        tensor=torch.zeros((2, 4, HIDDEN_WIDTH), dtype=torch.bfloat16),
+        tensor=torch.zeros((2, 2, HIDDEN_WIDTH), dtype=torch.bfloat16),
         completion_event=object(),
     )
     policy_states = tuple(
@@ -1092,7 +1255,7 @@ def test_raw_control6_scores_use_one_real_native_q0_batch_and_preserve_single_po
 
     generator = torch.Generator().manual_seed(441 + batch_size)
     output_tensor = torch.randn(
-        (batch_size, 4, HIDDEN_WIDTH), generator=generator, dtype=torch.float32
+        (batch_size, 2, HIDDEN_WIDTH), generator=generator, dtype=torch.float32
     ).to(torch.bfloat16)
     output_tensor[:, 1:, :].fill_(20.0)  # Query zero is the trained policy input.
     native_output = NativeBatchOutput(
@@ -1108,9 +1271,9 @@ def test_raw_control6_scores_use_one_real_native_q0_batch_and_preserve_single_po
             super().__init__(rows, rank=4)
             self.forward_calls = 0
 
-        def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+        def forward(self, hidden: torch.Tensor, *, phase_t=None) -> torch.Tensor:
             self.forward_calls += 1
-            return super().forward(hidden)
+            return super().forward(hidden, phase_t=phase_t)
 
     torch.manual_seed(442)
     base_rows = torch.randn((len(ACTIONS), HIDDEN_WIDTH), dtype=torch.float32) * 0.01
@@ -1171,6 +1334,7 @@ def test_raw_control6_scores_use_one_real_native_q0_batch_and_preserve_single_po
             legal_sets[index % len(legal_sets)],
             output_tensor[index, 0, :].reshape(1, -1),
             generation_id=row.session_generation,
+            speaker_active=(index % len(legal_sets) == 3),
         )
         expected = single_policy.step(state)
         calls_before = single_adapter.forward_calls
@@ -1211,7 +1375,7 @@ def test_raw_control6_snapshot_rejects_nonfinite_scores_and_wrong_native_output(
     policy = GemmaNativeControl6BatchPolicy(adapter, checkpoint_path="cpu.pt")
     output = NativeBatchOutput(
         manifest_id="wrong-manifest", generation=1, rows=(),
-        tensor=torch.zeros((1, 4, HIDDEN_WIDTH), dtype=torch.bfloat16),
+        tensor=torch.zeros((1, 2, HIDDEN_WIDTH), dtype=torch.bfloat16),
         completion_event=object(),
     )
     manifest = ListenerBatchManifest(
@@ -1221,7 +1385,7 @@ def test_raw_control6_snapshot_rejects_nonfinite_scores_and_wrong_native_output(
                 checkpoint_sha256="b" * 64, topology_sha256="c" * 64,
                 native_library_sha256="d" * 64, native_abi_version=3,
                 batch_api_version=2, attention_backend_id=3, rmsnorm_backend_id=2,
-                max_seq_len=16_384, stream_q_len=4,
+                max_seq_len=16_384, stream_q_len=2,
             ),
             stream_identity="listener-cuda-stream-17", stream_priority=-1,
             dispatch_at_ns=1, max_coalesce_wait_ns=0, dispatch_reason="batch_full",
@@ -1238,7 +1402,7 @@ def test_raw_control6_snapshot_rejects_nonfinite_scores_and_wrong_native_output(
 
 
 @pytest.mark.parametrize("batch_size", [1, 2, 3, 4, 5, 8, 12])
-def test_batched_control6_actual_lora_cpu_forward_matches_single_row_calls(
+def test_batched_control6_actual_lora_cpu_forward_matches_single_row_logits(
     batch_size: int,
 ) -> None:
     torch.manual_seed(91)
@@ -1259,25 +1423,22 @@ def test_batched_control6_actual_lora_cpu_forward_matches_single_row_calls(
         )
         for index in range(batch_size)
     )
-    batched = GemmaNativeControl6BatchPolicy(
-        batch_adapter, checkpoint_path="cpu-actual-lora.pt"
-    ).step_batch(states)
-
-    singles = tuple(
-        GemmaNativeControl6Policy(
-            single_adapter, checkpoint_path="cpu-actual-lora.pt"
-        ).step(state.state)
-        for state in states
+    hidden_rows = torch.cat(
+        [state.state.native_control_hidden.reshape(1, HIDDEN_WIDTH) for state in states],
+        dim=0,
     )
-    for row, (actual, reference) in enumerate(zip(batched, singles, strict=True)):
-        assert actual.action is reference.action, row
-        assert actual.diagnostics["native_control6_raw_token_id"] == reference.diagnostics[
-            "native_control6_raw_token_id"
-        ], row
-        assert actual.diagnostics["native_control6_selected_token_id"] == reference.diagnostics[
-            "native_control6_selected_token_id"
-        ], row
-        assert actual.confidence == pytest.approx(reference.confidence, rel=1e-6, abs=1e-7), row
+    with torch.inference_mode():
+        batched_logits = batch_adapter(
+            hidden_rows, phase_t=torch.zeros((batch_size, 4), dtype=torch.float32)
+        )
+        single_logits = torch.cat([
+            single_adapter(
+                hidden_rows[index:index + 1],
+                phase_t=torch.zeros((1, 4), dtype=torch.float32),
+            )
+            for index in range(batch_size)
+        ], dim=0)
+    torch.testing.assert_close(batched_logits, single_logits, rtol=1e-6, atol=1e-7)
 
 
 def test_batched_control6_requires_unique_sessions_and_fresh_hidden() -> None:

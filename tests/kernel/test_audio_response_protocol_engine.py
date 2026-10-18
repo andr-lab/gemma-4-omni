@@ -554,6 +554,48 @@ def test_legacy_text_backchannel_still_uses_phrase_trie() -> None:
     assert result["text"] == "Capito"
 
 
+def test_generated_token_callback_gets_same_forward_hidden_and_never_eos() -> None:
+    engine = _engine()
+
+    class _ForwardSentinelThinker(_AudioThinker):
+        def __init__(self) -> None:
+            super().__init__()
+            self.forwarded: list[int] = []
+
+        def __call__(self, *, input_ids, **_kwargs):
+            ids = [int(value) for value in input_ids.reshape(-1).tolist()]
+            self.forwarded.extend(ids)
+            logits = torch.zeros((1, input_ids.shape[1], 5), dtype=torch.float32)
+            if ids == [1]:
+                logits[..., 4] = 10.0
+            else:
+                logits[..., 3] = 10.0
+            hidden = torch.full((1, input_ids.shape[1], 4), float(ids[-1]))
+            return SimpleNamespace(
+                logits=logits,
+                hidden_states=(hidden,),
+                past_key_values=object(),
+            )
+
+    thinker = _ForwardSentinelThinker()
+    engine.thinker = thinker
+    observed: list[tuple[int, float, tuple[int, ...]]] = []
+
+    def callback(_index: int, token_id: int, _text: str, hidden: torch.Tensor):
+        observed.append((token_id, float(hidden[0, 0, 0]), tuple(thinker.forwarded)))
+
+    result = engine.think(
+        [1],
+        max_new_tokens=3,
+        temperature=0.0,
+        on_generated_token=callback,
+    )
+
+    assert result["gen_ids"] == [4]
+    assert result["terminal_reason"] == "eos"
+    assert observed == [(4, 4.0, (1, 4))]
+
+
 def test_compound_token_with_bad_action_key_is_rejected_before_cache_forward() -> None:
     engine = _engine()
     engine.thinker = _CompoundBoundaryThinker()

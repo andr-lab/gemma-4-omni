@@ -161,7 +161,7 @@ def test_shadow_cache_promotion_preserves_native_continuation_and_scores() -> No
         attention_backend_id=GEMMA4_ATTN_NATIVE_SPLITK_GQA,
         rmsnorm_backend_id=GEMMA4_RMS_NATIVE_EXACT,
         max_seq_len=16_384,
-        stream_q_len=4,
+        stream_q_len=2,
     )
     session_id = f"cache-promotion-{uuid.uuid4().hex[:10]}"
     epoch = uuid.uuid4().hex
@@ -217,7 +217,7 @@ def test_shadow_cache_promotion_preserves_native_continuation_and_scores() -> No
     standard = NativeGemmaListenerLM(
         lm,
         max_seq_len=16_384,
-        stream_q_len=4,
+        stream_q_len=2,
         enable_cuda_graph=False,
         attention_backend=GEMMA4_ATTN_NATIVE_SPLITK_GQA,
         rmsnorm_backend=GEMMA4_RMS_NATIVE_EXACT,
@@ -263,7 +263,7 @@ def test_shadow_cache_promotion_preserves_native_continuation_and_scores() -> No
                 provider = NativeGemmaListenerLM(
                     lm,
                     max_seq_len=16_384,
-                    stream_q_len=4,
+                    stream_q_len=2,
                     enable_cuda_graph=False,
                     attention_backend=GEMMA4_ATTN_NATIVE_SPLITK_GQA,
                     rmsnorm_backend=GEMMA4_RMS_NATIVE_EXACT,

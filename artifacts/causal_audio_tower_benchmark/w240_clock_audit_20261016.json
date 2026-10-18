@@ -1,0 +1,1338 @@
+{
+  "status": "completed",
+  "started_at_utc": "2026-10-16T21:34:32.387462+00:00",
+  "source_script": "/tmp/benchmark_causal_audio_tower.py",
+  "experiment": "W240 CUDA Graph repeated timing + NVML telemetry; isolated tower; no serving/checkpoint changes",
+  "runtime": {
+    "torch": "2.12.1+cu130",
+    "torch_cuda": "13.0",
+    "transformers": "5.5.0",
+    "precision": "highest",
+    "allow_tf32": false
+  },
+  "timing_contract": {
+    "graph": "Gemma4AudioModel full forward captured at [1,240,128] BF16 with all-true mask",
+    "copy_scope": "GPU staging tensor -> static graph feature/mask buffers plus graph replay; excludes CPU->GPU transfer and Mel extraction",
+    "batch_events": "CUDA start/end events on caller current stream around 500 sequential replay(s), no synchronization inside loop; end event synchronized once",
+    "warmup": "10 eager forwards before capture, first replay recorded, then 10 graph warmups before bursts"
+  },
+  "gpu_before": {
+    "name": "NVIDIA GeForce RTX 3090",
+    "free_bytes": 4167696384,
+    "total_bytes": 25298141184,
+    "nvml": {
+      "t_monotonic_s": 4970389.049226969,
+      "phase": "preload",
+      "gpu_util_percent": 0,
+      "memory_util_percent": 0,
+      "sm_clock_mhz": 210,
+      "memory_clock_mhz": 405,
+      "power_w": 38.39,
+      "pstate": 8,
+      "temperature_c": 45,
+      "memory_used_bytes": 21328101376,
+      "memory_free_bytes": 4441702400
+    }
+  },
+  "weight_load": {
+    "missing_key_count": 0,
+    "mismatched_key_count": 0,
+    "unexpected_key_count": 1260,
+    "missing_keys": [],
+    "mismatched_keys": []
+  },
+  "gpu_after_load": {
+    "free_bytes": 3536453632,
+    "allocated_bytes": 609906176,
+    "reserved_bytes": 631242752
+  },
+  "validation": {
+    "method": "eager same-input forward, then GPU copy+graph replay on that same input, then compare refreshed static graph output",
+    "capture_warmup_forwards": 3,
+    "capture_wall_ms_excluded": 45.670279,
+    "input_shape": [
+      1,
+      240,
+      128
+    ],
+    "output_shape": [
+      1,
+      60,
+      1536
+    ],
+    "mask_true_rows": 240,
+    "graph_refresh_cuda_ms": 6.677504062652588,
+    "graph_refresh_wall_ms": 6.74109,
+    "eager_vs_refreshed_graph": {
+      "offline_shape": [
+        60,
+        1536
+      ],
+      "streaming_shape": [
+        60,
+        1536
+      ],
+      "same_shape": true,
+      "max_abs": 0.0,
+      "mean_abs": 0.0,
+      "rmse": 0.0,
+      "exact_equal_elements": 92160,
+      "element_count": 92160,
+      "whole_matrix_cosine": 1.0,
+      "per_row_cosine": {
+        "mean": 1.0,
+        "p05": 0.9999999999999998,
+        "p50": 1.0,
+        "min": 0.9999999999999998
+      },
+      "rows_with_abs_delta_over_1e_5": 0,
+      "first_differing_rows_over_1e_5": []
+    },
+    "weight_load_missing_key_count": 0,
+    "weight_load_mismatched_key_count": 0,
+    "note": "Replaces the earlier ad hoc comparison against the capture-time buffer before an explicit replay refresh; official sweep helper already performs the refresh."
+  },
+  "first_post_capture_replay": {
+    "cuda_ms": 7.475135803222656,
+    "wall_ms": 7.553584
+  },
+  "diagnostic_profiler": {
+    "scope": "one warmed eager full-tower forward; attribution only, not latency",
+    "operators": [
+      {
+        "operator": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::(anonymous namespace)::clamp_kernel_impl(at::TensorIteratorBase&)::{lambda()#1}::operator()() const::{lambda()#9}::operator()() const::{lambda(c10::BFloat16, c10::BFloat16, c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::(anonymous namespace)::clamp_kernel_impl(at::TensorIteratorBase&)::{lambda()#1}::operator()() const::{lambda()#9}::operator()() const::{lambda(c10::BFloat16, c10::BFloat16, c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::(anonymous namespace)::clamp_kernel_impl(at::TensorIteratorBase&)::{lambda()#1}::operator()() const::{lambda()#9}::operator()() const::{lambda(c10::BFloat16, c10::BFloat16, c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::(anonymous namespace)::clamp_kernel_impl(at::TensorIteratorBase&)::{lambda()#1}::operator()() const::{lambda()#9}::operator()() const::{lambda(c10::BFloat16, c10::BFloat16, c10::BFloat16)#1} const&)::{lambda(int)#1})",
+        "input_shapes": [],
+        "calls": 240,
+        "self_device_ms": 0.6275640000000184,
+        "self_cpu_ms": 0.0
+      },
+      {
+        "operator": "aten::clamp",
+        "input_shapes": [
+          [
+            1,
+            60,
+            1024
+          ],
+          [],
+          []
+        ],
+        "calls": 276,
+        "self_device_ms": 0.5958130000000328,
+        "self_cpu_ms": 3.180787999999873
+      },
+      {
+        "operator": "aten::mm",
+        "input_shapes": [
+          [
+            60,
+            1024
+          ],
+          [
+            1024,
+            1024
+          ]
+        ],
+        "calls": 61,
+        "self_device_ms": 0.5136659999999456,
+        "self_cpu_ms": 1.6497599999999688
+      },
+      {
+        "operator": "aten::mm",
+        "input_shapes": [
+          [
+            60,
+            4096
+          ],
+          [
+            4096,
+            1024
+          ]
+        ],
+        "calls": 24,
+        "self_device_ms": 0.4516140000000178,
+        "self_cpu_ms": 0.5196289999999808
+      },
+      {
+        "operator": "aten::mm",
+        "input_shapes": [
+          [
+            60,
+            1024
+          ],
+          [
+            1024,
+            4096
+          ]
+        ],
+        "calls": 24,
+        "self_device_ms": 0.3916200000000099,
+        "self_cpu_ms": 0.543711000000012
+      },
+      {
+        "operator": "aten::bmm",
+        "input_shapes": [
+          [
+            8,
+            60,
+            128
+          ],
+          [
+            8,
+            128,
+            13
+          ]
+        ],
+        "calls": 12,
+        "self_device_ms": 0.22448199999998905,
+        "self_cpu_ms": 0.22331600000001345
+      },
+      {
+        "operator": "aten::mm",
+        "input_shapes": [
+          [
+            60,
+            1024
+          ],
+          [
+            1024,
+            2048
+          ]
+        ],
+        "calls": 12,
+        "self_device_ms": 0.16633800000000337,
+        "self_cpu_ms": 0.33423500000000783
+      },
+      {
+        "operator": "void at::native::vectorized_elementwise_kernel<4, at::native::(anonymous namespace)::launch_clamp_scalar(at::TensorIteratorBase&, c10::Scalar, c10::Scalar, at::native::detail::ClampLimits)::{lambda()#1}::operator()() const::{lambda()#9}::operator()() const::{lambda(c10::BFloat16)#1}, std::array<char*, 2ul> >(int, at::native::(anonymous namespace)::launch_clamp_scalar(at::TensorIteratorBase&, c10::Scalar, c10::Scalar, at::native::detail::ClampLimits)::{lambda()#1}::operator()() const::{lambda()#9}::operator()() const::{lambda(c10::BFloat16)#1}, std::array<char*, 2ul>)",
+        "input_shapes": [],
+        "calls": 98,
+        "self_device_ms": 0.14326000000000477,
+        "self_cpu_ms": 0.0
+      },
+      {
+        "operator": "aten::clamp",
+        "input_shapes": [
+          [
+            1,
+            60,
+            4096
+          ],
+          [],
+          []
+        ],
+        "calls": 48,
+        "self_device_ms": 0.14019499999998516,
+        "self_cpu_ms": 0.517508000000018
+      },
+      {
+        "operator": "aten::mm",
+        "input_shapes": [
+          [
+            13,
+            1024
+          ],
+          [
+            1024,
+            1024
+          ]
+        ],
+        "calls": 12,
+        "self_device_ms": 0.10198400000000038,
+        "self_cpu_ms": 0.32948599999996625
+      },
+      {
+        "operator": "aten::bmm",
+        "input_shapes": [
+          [
+            40,
+            12,
+            128
+          ],
+          [
+            40,
+            128,
+            24
+          ]
+        ],
+        "calls": 12,
+        "self_device_ms": 0.039103999999997544,
+        "self_cpu_ms": 0.2656139999999632
+      },
+      {
+        "operator": "aten::bmm",
+        "input_shapes": [
+          [
+            40,
+            12,
+            24
+          ],
+          [
+            40,
+            24,
+            128
+          ]
+        ],
+        "calls": 12,
+        "self_device_ms": 0.035805999999995036,
+        "self_cpu_ms": 0.24195599999997103
+      },
+      {
+        "operator": "aten::clamp",
+        "input_shapes": [
+          [
+            1,
+            60,
+            2048
+          ],
+          [],
+          []
+        ],
+        "calls": 12,
+        "self_device_ms": 0.03078400000000511,
+        "self_cpu_ms": 0.1552919999999922
+      },
+      {
+        "operator": "aten::clamp_min",
+        "input_shapes": [
+          [
+            1,
+            128,
+            120,
+            64
+          ],
+          []
+        ],
+        "calls": 1,
+        "self_device_ms": 0.002655999999999949,
+        "self_cpu_ms": 0.01729999999999927
+      },
+      {
+        "operator": "aten::clamp_min",
+        "input_shapes": [
+          [
+            1,
+            32,
+            60,
+            32
+          ],
+          []
+        ],
+        "calls": 1,
+        "self_device_ms": 0.0013760000000002037,
+        "self_cpu_ms": 0.009700000000000273
+      },
+      {
+        "operator": "aten::to",
+        "input_shapes": [
+          [
+            1,
+            240
+          ],
+          [],
+          [],
+          [],
+          [],
+          [],
+          [],
+          []
+        ],
+        "calls": 1,
+        "self_device_ms": 0.0,
+        "self_cpu_ms": 0.004129999999999996
+      },
+      {
+        "operator": "aten::to",
+        "input_shapes": [
+          [
+            1,
+            1,
+            240,
+            128
+          ],
+          [],
+          [],
+          [],
+          []
+        ],
+        "calls": 1,
+        "self_device_ms": 0.0,
+        "self_cpu_ms": 0.0011100000000001274
+      },
+      {
+        "operator": "aten::to",
+        "input_shapes": [
+          [
+            1,
+            120
+          ],
+          [],
+          [],
+          [],
+          [],
+          [],
+          [],
+          []
+        ],
+        "calls": 1,
+        "self_device_ms": 0.0,
+        "self_cpu_ms": 0.0010399999999999637
+      },
+      {
+        "operator": "aten::to",
+        "input_shapes": [
+          [
+            1,
+            128,
+            120,
+            64
+          ],
+          [],
+          [],
+          [],
+          []
+        ],
+        "calls": 1,
+        "self_device_ms": 0.0,
+        "self_cpu_ms": 0.0006500000000000909
+      },
+      {
+        "operator": "aten::linear",
+        "input_shapes": [
+          [
+            1,
+            60,
+            1024
+          ],
+          [
+            1024,
+            1024
+          ],
+          []
+        ],
+        "calls": 61,
+        "self_device_ms": 0.0,
+        "self_cpu_ms": 0.20495599999993738
+      },
+      {
+        "operator": "aten::matmul",
+        "input_shapes": [
+          [
+            1,
+            60,
+            1024
+          ],
+          [
+            1024,
+            1024
+          ]
+        ],
+        "calls": 61,
+        "self_device_ms": 0.0,
+        "self_cpu_ms": 0.4675759999999891
+      },
+      {
+        "operator": "aten::to",
+        "input_shapes": [
+          [
+            1,
+            1,
+            512
+          ],
+          [],
+          [],
+          [],
+          [],
+          [],
+          [],
+          []
+        ],
+        "calls": 1,
+        "self_device_ms": 0.0,
+        "self_cpu_ms": 0.0009799999999995635
+      },
+      {
+        "operator": "aten::to",
+        "input_shapes": [
+          [
+            1,
+            13,
+            1024
+          ],
+          [],
+          [],
+          [],
+          []
+        ],
+        "calls": 1,
+        "self_device_ms": 0.0,
+        "self_cpu_ms": 0.0006600000000007639
+      },
+      {
+        "operator": "aten::to",
+        "input_shapes": [
+          [
+            1,
+            60
+          ],
+          [],
+          [],
+          [],
+          [],
+          []
+        ],
+        "calls": 1,
+        "self_device_ms": 0.0,
+        "self_cpu_ms": 0.0008900000000003274
+      },
+      {
+        "operator": "aten::to",
+        "input_shapes": [
+          [],
+          [],
+          [],
+          [],
+          [],
+          [],
+          [],
+          []
+        ],
+        "calls": 4,
+        "self_device_ms": 0.0,
+        "self_cpu_ms": 0.015329999999999927
+      },
+      {
+        "operator": "aten::to",
+        "input_shapes": [
+          [
+            1,
+            60,
+            1024
+          ],
+          [],
+          [],
+          [],
+          []
+        ],
+        "calls": 360,
+        "self_device_ms": 0.0,
+        "self_cpu_ms": 0.4349800000000687
+      },
+      {
+        "operator": "aten::_to_copy",
+        "input_shapes": [
+          [
+            1,
+            60,
+            1024
+          ],
+          [],
+          [],
+          [],
+          [],
+          [],
+          []
+        ],
+        "calls": 264,
+        "self_device_ms": 0.0,
+        "self_cpu_ms": 1.377439999999964
+      },
+      {
+        "operator": "aten::to",
+        "input_shapes": [
+          [
+            1,
+            60,
+            1
+          ],
+          [],
+          [],
+          [],
+          []
+        ],
+        "calls": 108,
+        "self_device_ms": 0.0,
+        "self_cpu_ms": 0.0262699999999968
+      },
+      {
+        "operator": "aten::to",
+        "input_shapes": [
+          [
+            1024
+          ],
+          [],
+          [],
+          [],
+          []
+        ],
+        "calls": 108,
+        "self_device_ms": 0.0,
+        "self_cpu_ms": 0.2724639999999563
+      },
+      {
+        "operator": "aten::_to_copy",
+        "input_shapes": [
+          [
+            1024
+          ],
+          [],
+          [],
+          [],
+          [],
+          [],
+          []
+        ],
+        "calls": 108,
+        "self_device_ms": 0.0,
+        "self_cpu_ms": 0.6370100000000366
+      }
+    ]
+  },
+  "bursts": {
+    "replay_only": {
+      "iterations": 500,
+      "total_cuda_event_ms": 2525.34423828125,
+      "mean_cuda_event_ms": 5.0506884765625,
+      "total_wall_ms": 2525.448818,
+      "mean_wall_ms": 5.050897635999999
+    },
+    "copy_plus_replay": {
+      "iterations": 500,
+      "total_cuda_event_ms": 2522.899169921875,
+      "mean_cuda_event_ms": 5.04579833984375,
+      "total_wall_ms": 2522.943296,
+      "mean_wall_ms": 5.045886592
+    }
+  },
+  "telemetry": {
+    "source": "NVML C API",
+    "period_ms": 100,
+    "samples": [
+      {
+        "t_monotonic_s": 4970399.952635224,
+        "phase": "replay_only",
+        "gpu_util_percent": 0,
+        "memory_util_percent": 0,
+        "sm_clock_mhz": 1860,
+        "memory_clock_mhz": 9501,
+        "power_w": 125.487,
+        "pstate": 2,
+        "temperature_c": 53,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970400.052865649,
+        "phase": "replay_only",
+        "gpu_util_percent": 0,
+        "memory_util_percent": 0,
+        "sm_clock_mhz": 1860,
+        "memory_clock_mhz": 9501,
+        "power_w": 125.487,
+        "pstate": 2,
+        "temperature_c": 53,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970400.153074863,
+        "phase": "replay_only",
+        "gpu_util_percent": 98,
+        "memory_util_percent": 20,
+        "sm_clock_mhz": 1860,
+        "memory_clock_mhz": 9501,
+        "power_w": 131.056,
+        "pstate": 2,
+        "temperature_c": 55,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970400.253269078,
+        "phase": "replay_only",
+        "gpu_util_percent": 98,
+        "memory_util_percent": 20,
+        "sm_clock_mhz": 1860,
+        "memory_clock_mhz": 9501,
+        "power_w": 131.056,
+        "pstate": 2,
+        "temperature_c": 55,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970400.353461942,
+        "phase": "replay_only",
+        "gpu_util_percent": 98,
+        "memory_util_percent": 20,
+        "sm_clock_mhz": 1860,
+        "memory_clock_mhz": 9501,
+        "power_w": 131.056,
+        "pstate": 2,
+        "temperature_c": 55,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970400.453653296,
+        "phase": "replay_only",
+        "gpu_util_percent": 98,
+        "memory_util_percent": 20,
+        "sm_clock_mhz": 1860,
+        "memory_clock_mhz": 9501,
+        "power_w": 131.056,
+        "pstate": 2,
+        "temperature_c": 55,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970400.553847251,
+        "phase": "replay_only",
+        "gpu_util_percent": 98,
+        "memory_util_percent": 20,
+        "sm_clock_mhz": 1860,
+        "memory_clock_mhz": 9501,
+        "power_w": 131.056,
+        "pstate": 2,
+        "temperature_c": 55,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970400.654054605,
+        "phase": "replay_only",
+        "gpu_util_percent": 100,
+        "memory_util_percent": 22,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 184.818,
+        "pstate": 2,
+        "temperature_c": 59,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970400.75424684,
+        "phase": "replay_only",
+        "gpu_util_percent": 100,
+        "memory_util_percent": 22,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 184.818,
+        "pstate": 2,
+        "temperature_c": 59,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970400.854434944,
+        "phase": "replay_only",
+        "gpu_util_percent": 100,
+        "memory_util_percent": 22,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 184.818,
+        "pstate": 2,
+        "temperature_c": 59,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970400.954624108,
+        "phase": "replay_only",
+        "gpu_util_percent": 100,
+        "memory_util_percent": 22,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 184.818,
+        "pstate": 2,
+        "temperature_c": 59,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970401.054825983,
+        "phase": "replay_only",
+        "gpu_util_percent": 100,
+        "memory_util_percent": 22,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 184.818,
+        "pstate": 2,
+        "temperature_c": 59,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970401.155052787,
+        "phase": "replay_only",
+        "gpu_util_percent": 100,
+        "memory_util_percent": 22,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 243.967,
+        "pstate": 2,
+        "temperature_c": 60,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970401.255259752,
+        "phase": "replay_only",
+        "gpu_util_percent": 100,
+        "memory_util_percent": 22,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 243.967,
+        "pstate": 2,
+        "temperature_c": 60,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970401.355467027,
+        "phase": "replay_only",
+        "gpu_util_percent": 100,
+        "memory_util_percent": 22,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 243.967,
+        "pstate": 2,
+        "temperature_c": 60,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970401.455673351,
+        "phase": "replay_only",
+        "gpu_util_percent": 100,
+        "memory_util_percent": 22,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 243.967,
+        "pstate": 2,
+        "temperature_c": 60,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970401.555879256,
+        "phase": "replay_only",
+        "gpu_util_percent": 100,
+        "memory_util_percent": 22,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 243.967,
+        "pstate": 2,
+        "temperature_c": 60,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970401.656105231,
+        "phase": "replay_only",
+        "gpu_util_percent": 100,
+        "memory_util_percent": 22,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 254.944,
+        "pstate": 2,
+        "temperature_c": 61,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970401.756312875,
+        "phase": "replay_only",
+        "gpu_util_percent": 100,
+        "memory_util_percent": 22,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 254.944,
+        "pstate": 2,
+        "temperature_c": 61,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970401.85652044,
+        "phase": "replay_only",
+        "gpu_util_percent": 100,
+        "memory_util_percent": 22,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 254.944,
+        "pstate": 2,
+        "temperature_c": 61,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970401.956729104,
+        "phase": "replay_only",
+        "gpu_util_percent": 100,
+        "memory_util_percent": 22,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 254.944,
+        "pstate": 2,
+        "temperature_c": 61,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970402.056935339,
+        "phase": "replay_only",
+        "gpu_util_percent": 100,
+        "memory_util_percent": 22,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 254.944,
+        "pstate": 2,
+        "temperature_c": 61,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970402.157141534,
+        "phase": "replay_only",
+        "gpu_util_percent": 100,
+        "memory_util_percent": 22,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 255.471,
+        "pstate": 2,
+        "temperature_c": 61,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970402.257347478,
+        "phase": "replay_only",
+        "gpu_util_percent": 100,
+        "memory_util_percent": 22,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 255.471,
+        "pstate": 2,
+        "temperature_c": 61,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970402.357554973,
+        "phase": "replay_only",
+        "gpu_util_percent": 100,
+        "memory_util_percent": 22,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 255.471,
+        "pstate": 2,
+        "temperature_c": 61,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970402.457766548,
+        "phase": "replay_only",
+        "gpu_util_percent": 100,
+        "memory_util_percent": 22,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 255.471,
+        "pstate": 2,
+        "temperature_c": 61,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970402.557975042,
+        "phase": "copy_plus_replay",
+        "gpu_util_percent": 100,
+        "memory_util_percent": 22,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 255.471,
+        "pstate": 2,
+        "temperature_c": 61,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970402.658200347,
+        "phase": "copy_plus_replay",
+        "gpu_util_percent": 99,
+        "memory_util_percent": 21,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 257.25,
+        "pstate": 2,
+        "temperature_c": 62,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970402.758407372,
+        "phase": "copy_plus_replay",
+        "gpu_util_percent": 99,
+        "memory_util_percent": 21,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 257.25,
+        "pstate": 2,
+        "temperature_c": 62,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970402.858614276,
+        "phase": "copy_plus_replay",
+        "gpu_util_percent": 99,
+        "memory_util_percent": 21,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 257.25,
+        "pstate": 2,
+        "temperature_c": 62,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970402.958825381,
+        "phase": "copy_plus_replay",
+        "gpu_util_percent": 99,
+        "memory_util_percent": 21,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 257.25,
+        "pstate": 2,
+        "temperature_c": 62,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970403.059052816,
+        "phase": "copy_plus_replay",
+        "gpu_util_percent": 99,
+        "memory_util_percent": 21,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 257.25,
+        "pstate": 2,
+        "temperature_c": 62,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970403.159262461,
+        "phase": "copy_plus_replay",
+        "gpu_util_percent": 100,
+        "memory_util_percent": 22,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 259.178,
+        "pstate": 2,
+        "temperature_c": 62,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970403.259471575,
+        "phase": "copy_plus_replay",
+        "gpu_util_percent": 100,
+        "memory_util_percent": 22,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 259.178,
+        "pstate": 2,
+        "temperature_c": 62,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970403.35967825,
+        "phase": "copy_plus_replay",
+        "gpu_util_percent": 100,
+        "memory_util_percent": 22,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 259.178,
+        "pstate": 2,
+        "temperature_c": 62,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970403.459885264,
+        "phase": "copy_plus_replay",
+        "gpu_util_percent": 100,
+        "memory_util_percent": 22,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 259.178,
+        "pstate": 2,
+        "temperature_c": 62,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970403.560093159,
+        "phase": "copy_plus_replay",
+        "gpu_util_percent": 100,
+        "memory_util_percent": 22,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 259.178,
+        "pstate": 2,
+        "temperature_c": 62,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970403.660301024,
+        "phase": "copy_plus_replay",
+        "gpu_util_percent": 100,
+        "memory_util_percent": 22,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 259.9,
+        "pstate": 2,
+        "temperature_c": 62,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970403.760508218,
+        "phase": "copy_plus_replay",
+        "gpu_util_percent": 100,
+        "memory_util_percent": 22,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 259.9,
+        "pstate": 2,
+        "temperature_c": 62,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970403.860714903,
+        "phase": "copy_plus_replay",
+        "gpu_util_percent": 100,
+        "memory_util_percent": 22,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 259.9,
+        "pstate": 2,
+        "temperature_c": 62,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970403.960922967,
+        "phase": "copy_plus_replay",
+        "gpu_util_percent": 100,
+        "memory_util_percent": 22,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 259.9,
+        "pstate": 2,
+        "temperature_c": 62,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970404.061131392,
+        "phase": "copy_plus_replay",
+        "gpu_util_percent": 100,
+        "memory_util_percent": 22,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 259.9,
+        "pstate": 2,
+        "temperature_c": 62,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970404.161338476,
+        "phase": "copy_plus_replay",
+        "gpu_util_percent": 100,
+        "memory_util_percent": 22,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 260.319,
+        "pstate": 2,
+        "temperature_c": 62,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970404.261545881,
+        "phase": "copy_plus_replay",
+        "gpu_util_percent": 100,
+        "memory_util_percent": 22,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 260.319,
+        "pstate": 2,
+        "temperature_c": 62,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970404.361751386,
+        "phase": "copy_plus_replay",
+        "gpu_util_percent": 100,
+        "memory_util_percent": 22,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 260.319,
+        "pstate": 2,
+        "temperature_c": 62,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970404.46195869,
+        "phase": "copy_plus_replay",
+        "gpu_util_percent": 100,
+        "memory_util_percent": 22,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 260.319,
+        "pstate": 2,
+        "temperature_c": 62,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970404.562164615,
+        "phase": "copy_plus_replay",
+        "gpu_util_percent": 100,
+        "memory_util_percent": 22,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 260.532,
+        "pstate": 2,
+        "temperature_c": 62,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970404.662372529,
+        "phase": "copy_plus_replay",
+        "gpu_util_percent": 100,
+        "memory_util_percent": 22,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 260.532,
+        "pstate": 2,
+        "temperature_c": 62,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970404.762579654,
+        "phase": "copy_plus_replay",
+        "gpu_util_percent": 100,
+        "memory_util_percent": 22,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 260.532,
+        "pstate": 2,
+        "temperature_c": 62,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970404.862787739,
+        "phase": "copy_plus_replay",
+        "gpu_util_percent": 100,
+        "memory_util_percent": 22,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 260.532,
+        "pstate": 2,
+        "temperature_c": 62,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      },
+      {
+        "t_monotonic_s": 4970404.962995773,
+        "phase": "copy_plus_replay",
+        "gpu_util_percent": 100,
+        "memory_util_percent": 22,
+        "sm_clock_mhz": 1995,
+        "memory_clock_mhz": 9501,
+        "power_w": 260.532,
+        "pstate": 2,
+        "temperature_c": 62,
+        "memory_used_bytes": 22396928000,
+        "memory_free_bytes": 3372875776
+      }
+    ],
+    "summary_by_phase": {
+      "replay_only": {
+        "sample_count": 26,
+        "gpu_util_percent": {
+          "min": 0,
+          "mean": 91.92307692307692,
+          "max": 100
+        },
+        "sm_clock_mhz": {
+          "min": 1860,
+          "mean": 1958.6538461538462,
+          "max": 1995
+        },
+        "memory_clock_mhz": {
+          "min": 9501,
+          "mean": 9501.0,
+          "max": 9501
+        },
+        "power_w": {
+          "min": 125.487,
+          "mean": 205.64549999999997,
+          "max": 255.471
+        },
+        "pstates": [
+          2
+        ]
+      },
+      "copy_plus_replay": {
+        "sample_count": 25,
+        "gpu_util_percent": {
+          "min": 99,
+          "mean": 99.8,
+          "max": 100
+        },
+        "sm_clock_mhz": {
+          "min": 1995,
+          "mean": 1995.0,
+          "max": 1995
+        },
+        "memory_clock_mhz": {
+          "min": 9501,
+          "mean": 9501.0,
+          "max": 9501
+        },
+        "power_w": {
+          "min": 255.471,
+          "mean": 259.2418800000001,
+          "max": 260.532
+        },
+        "pstates": [
+          2
+        ]
+      }
+    },
+    "errors": []
+  },
+  "gpu_after": {
+    "free_bytes": 3372875776,
+    "peak_allocated_bytes": 633903104,
+    "peak_reserved_bytes": 679477248
+  },
+  "completed_at_utc": "2026-10-16T21:34:48.338214+00:00",
+  "validation_corrected_at_utc": "2026-10-16T21:36:01.010212+00:00"
+}

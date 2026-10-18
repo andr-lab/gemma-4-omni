@@ -2,12 +2,13 @@
 from __future__ import annotations
 import asyncio, base64, hashlib, io, json, logging, os, queue, re, tempfile, threading, time, uuid
 import itertools
+from dataclasses import dataclass
 from contextlib import contextmanager, nullcontext
 from concurrent.futures import ThreadPoolExecutor
 from collections import Counter, deque
 from math import gcd
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 import numpy as np
 import torch
 from fastapi import FastAPI, File, UploadFile, WebSocket, WebSocketDisconnect
@@ -22,6 +23,7 @@ from duplex_kernel.audio_stream import (
 )
 from duplex_kernel.config import (
     ARIA_BACKCHANNEL_MAX_FRAMES,
+    ARIA_MAX_FRAMES,
     CODEC_SAMPLE_RATE,
     DEFAULT_VOICE,
     FIRST_INPUT_SCHEDULER_ANCHOR_ENABLED,
@@ -55,6 +57,7 @@ from duplex_kernel.listener_microbatch_serving import (
     commit_initial_semantic_prefix_state,
     initial_listener_session_state,
     make_listener_microbatch_worker,
+    make_unified_prefix_import,
     prepare_initial_semantic_prefix_async,
     semantic_prefix_importer,
 )
@@ -72,7 +75,10 @@ from duplex_kernel.turn_policy import (
 from duplex_kernel.turnhead_adapter import TurnHeadPolicy
 from duplex_kernel.gemma_policy import GemmaPolicy
 from duplex_kernel.duplex_control6 import DuplexControl6Policy, legal_control_actions
-from duplex_kernel.gemma_native_control6_policy import GemmaNativeControl6Policy
+from duplex_kernel.gemma_native_control6_policy import (
+    GemmaNativeControl6Policy,
+    legal_control_actions as native_control6_legal_actions,
+)
 from duplex_kernel.gemma_native_control6_policy import is_controller6_policy
 from duplex_kernel.native_control6_diagnostics import (
     attach_native_control6_zero_output_diagnostic,
@@ -95,6 +101,7 @@ from duplex_kernel.native_control6_prompt import (
 )
 from training.duplex_qlora.native_control6 import ACTIONS as NATIVE_CONTROL6_ACTIONS
 from duplex_kernel.engine import ListenerBacklogAdmission
+from duplex_kernel.unified_native_decoder import UnifiedNativeDecoder
 from duplex_kernel.models.thinker import normalize_eos_token_ids
 from duplex_kernel.action_conditioning import (
     action_control_marker_text,
@@ -112,7 +119,9 @@ from duplex_kernel.audio_response_conditioning import (
 from duplex_kernel.audio_response_protocol import (
     AUDIO_RESPONSE_ACTIONS,
     AUDIO_RESPONSE_PROTOCOL_V2,
+    AUDIO_RESPONSE_PROTOCOL_ENV,
     CONTROLLER_GUIDED_SAY_V1,
+    CONTROLLER_GUIDED_SAY_COMPAT_ENV,
     AUDIO_RESPONSE_V2_FAILURE_TRACE_MAX_RECORDS,
     AUDIO_RESPONSE_V2_MAX_ACTION_TOKENS,
     AUDIO_RESPONSE_V2_MAX_HEARD_TOKENS,
@@ -126,11 +135,17 @@ from duplex_kernel.audio_response_protocol import (
     controller_backchannel_candidate_allowed,
     controller_backchannel_should_stop,
     controller_guided_response_action,
+    audio_response_v2_say_token_char_spans,
     finish_audio_response_v2_with_say_hidden,
     normalize_audio_response_protocol,
+    resolve_audio_response_protocol,
     slice_controller_guided_say_hidden,
 )
-from duplex_kernel.response_intent_local import align_generated_response_hidden_to_qwen_tokens
+from duplex_kernel.response_intent_local import (
+    align_generated_response_hidden_to_qwen_tokens,
+    align_hidden_states_by_char_overlap,
+    qwen_assistant_text_offsets,
+)
 from duplex_kernel.backchannel_guard import (
     BackchannelAttemptLatch,
     peer_audio_event_key_for_frame,
@@ -140,7 +155,15 @@ from duplex_kernel.tts_quality_diagnostics import (
     DIAGNOSTIC_MAX_ACOUSTIC_FRAME_BUDGET,
     TTSQualityDiagnosticCapture,
 )
-from duplex_kernel.session import GenerationToken, SessionManager, DuplexSession
+from duplex_kernel.session import (
+    DuplexSession,
+    GemmaTokenTickPacer,
+    GenerationToken,
+    SessionManager,
+    SpokenTokenPacket,
+)
+from duplex_kernel.live_say import LiveQwenSayStream, TurnLocalQwenSayStream
+from duplex_kernel.tts_units import SpokenTextUnit, SpokenTextUnitAssembler
 from duplex_kernel.cpu_audio_archive import CPU_AUDIO_ARCHIVE_WORKER
 from duplex_kernel.native_partial_transcription import (
     NativePartialTranscriber,
@@ -151,12 +174,36 @@ from duplex_kernel.tool_parser import extract_tool_calls, tool_system_prompt
 from duplex_kernel.voices import resolve_voice_conditioning
 
 logger = logging.getLogger("duplex_kernel.server")
+
+
+@dataclass(frozen=True)
+class _ClosedTTSSegment:
+    """Event-loop fence emitted after one text-owned Qwen unit is fully drained."""
+
+    speaker_segment_id: str
+    source_tokens: tuple[dict[str, Any], ...]
 _NATIVE_CONTROL6_TRACE_ENABLED = os.environ.get("DUPLEX_NATIVE_CONTROL6_TRACE", "0").strip() == "1"
 _AUDIO_HISTORY_ARCHIVE_DEFER_ENV = "DUPLEX_AUDIO_HISTORY_ARCHIVE_DEFER"
 _LISTENER_MICROBATCH_ENABLED_ENV = "DUPLEX_LISTENER_MICROBATCH"
+_UNIFIED_KV_ENABLED_ENV = "DUPLEX_UNIFIED_KV"
+_SEMANTIC_SHADOW_ENABLED_ENV = "DUPLEX_LISTENER_MICROBATCH_SEMANTIC_SHADOW"
 NATIVE_LISTENER_PROFILE_STOP_TIMEOUT_S = 1.0
 _NATIVE_CONTROL6_SELECTION_TRACE_FIELDS = (
     "policy_fallback_reason",
+    "native_control6_effective_candidate",
+    "native_control6_effective_order",
+    "native_control6_effective_actions",
+    "native_control6_effective_members",
+    "native_control6_legal_effective_mass",
+    "native_control6_selected_effective_probability",
+    "native_control6_hysteresis_count",
+    "native_control6_hysteresis_pending",
+    "native_control6_hysteresis_applied_action",
+    "native_action_raw_probabilities",
+    "native_action_effective_order",
+    "native_action_effective_probabilities",
+    "native_action_legal_effective_probabilities",
+    "native_action_legal_effective_mass",
     "native_control6_raw_row_index",
     "native_control6_raw_token_id",
     "native_control6_raw_token",
@@ -223,7 +270,7 @@ def _native_control6_selection_fields(
             if name in diagnostics:
                 fields[name] = diagnostics[name]
         fields["native_control6_token_selection_scope"] = (
-            "six_projected_action_rows_not_full_vocabulary_autoregressive_sample"
+            "six_projected_rows_collapsed_to_physical_actions_not_full_vocabulary_sample"
         )
     return fields
 
@@ -498,11 +545,125 @@ _FRAME_RESIDUAL_RUNTIME_METRIC_TYPES = {
     "frame_residual_rms": float,
     "frame_residual_base_rms": float,
     "frame_residual_rms_to_base_ratio": float,
+    "frame_residual_live_first_last_hidden_cosine": float,
     "qwen_route": str,
     "qwen_prefix_slots_added": int,
     "qwen_semantic_text_unchanged": bool,
     "source": str,
 }
+
+_FRAME_RESIDUAL_LIVE_TRACE_FIELDS = {
+    "qwen_frame_step",
+    "gemma_token_id",
+    "gemma_kv_position",
+    "qwen_token_id",
+    "qwen_packet_token_index",
+    "qwen_packet_token_count",
+    "tail_hold",
+    "gemma_hidden_norm",
+    "gemma_hidden_cosine_previous_packet",
+}
+
+
+def _filter_frame_residual_live_hidden_trace(value: Any) -> list[dict[str, Any]]:
+    """Keep bounded scalar provenance for live Q1 steps; never expose tensors."""
+    if not isinstance(value, list):
+        return []
+    retained: list[dict[str, Any]] = []
+    integer_fields = {
+        "qwen_frame_step", "gemma_token_id", "gemma_kv_position",
+        "qwen_token_id", "qwen_packet_token_index", "qwen_packet_token_count",
+    }
+    for entry in value[:256]:
+        if not isinstance(entry, dict) or set(entry) != _FRAME_RESIDUAL_LIVE_TRACE_FIELDS:
+            continue
+        if type(entry.get("tail_hold")) is not bool:
+            continue
+        if any(
+            type(entry.get(key)) is not int or entry[key] < 0
+            for key in integer_fields
+        ):
+            continue
+        norm = entry.get("gemma_hidden_norm")
+        cosine = entry.get("gemma_hidden_cosine_previous_packet")
+        if type(norm) is not float or not np.isfinite(norm) or norm < 0:
+            continue
+        if cosine is not None and (
+            type(cosine) is not float or not np.isfinite(cosine) or not -1.000001 <= cosine <= 1.000001
+        ):
+            continue
+        clean = {key: entry[key] for key in _FRAME_RESIDUAL_LIVE_TRACE_FIELDS}
+        # A first packet has no previous packet for a cosine comparison.
+        clean["gemma_hidden_cosine_previous_packet"] = cosine
+        retained.append(clean)
+    return retained
+
+
+def _filter_turn_local_speech_runtime_metrics(values: dict[str, Any]) -> dict[str, Any]:
+    """Expose only bounded FIFO, token pacing and PCM queue evidence."""
+    retained: dict[str, Any] = {}
+    integer_limits = {
+        "turn_local_fifo_capacity": (4, 4),
+        "turn_local_fifo_remaining_packets": (0, 4),
+        "turn_local_fifo_peak_packets": (0, 4),
+        "turn_local_last_vocalized_kv_position": (0, 2**63 - 1),
+        "realtime_pcm_packet_queue_capacity": (4, 4),
+        "speaker_playout_buffer_max_frames": (1, 4096),
+        "native_q1_import_audio_frame_capacity": (1, 4096),
+        "native_q1_live_frame_cap": (1, 4096),
+    }
+    for key, (minimum, maximum) in integer_limits.items():
+        value = values.get(key)
+        if type(value) is int and minimum <= value <= maximum:
+            retained[key] = value
+    playback_ack = values.get("turn_local_vocalized_cursor_is_playback_ack")
+    if type(playback_ack) is bool and playback_ack is False:
+        retained["turn_local_vocalized_cursor_is_playback_ack"] = False
+
+    pacer = values.get("live_gemma_token_pacer")
+    pacer_fields = {"tick_ms", "max_tokens_per_tick", "total_tokens", "peak_tokens_in_tick"}
+    if isinstance(pacer, dict) and set(pacer) == pacer_fields:
+        if all(type(pacer.get(key)) is int for key in pacer_fields):
+            if (
+                pacer["tick_ms"] == 80
+                and pacer["max_tokens_per_tick"] == 2
+                and pacer["total_tokens"] >= 0
+                and 0 <= pacer["peak_tokens_in_tick"] <= 2
+            ):
+                retained["live_gemma_token_pacer"] = dict(pacer)
+    return retained
+
+
+def _format_turn_local_speech_summary(
+    session_prefix: str,
+    values: dict[str, Any],
+) -> str:
+    """Format one log row from turn-local metrics without retaining live state."""
+    pacer = values.get("live_gemma_token_pacer")
+    trace = values.get("frame_residual_live_hidden_trace")
+    return (
+        "[turn-local speech summary] session={} fifo_capacity={} fifo_peak={} "
+        "fifo_remaining={} last_vocalized_kv={} pacer_tokens={} "
+        "pacer_peak_per_tick={} tick_ms={} max_per_tick={} pcm_queue_capacity={} "
+        "q1_frames={} tail_hold_frames={} live_frame_cap={} hidden_trace_entries={} "
+        "first_last_hidden_cosine={}"
+    ).format(
+        str(session_prefix),
+        values.get("turn_local_fifo_capacity"),
+        values.get("turn_local_fifo_peak_packets"),
+        values.get("turn_local_fifo_remaining_packets"),
+        values.get("turn_local_last_vocalized_kv_position"),
+        pacer.get("total_tokens") if isinstance(pacer, dict) else None,
+        pacer.get("peak_tokens_in_tick") if isinstance(pacer, dict) else None,
+        pacer.get("tick_ms") if isinstance(pacer, dict) else None,
+        pacer.get("max_tokens_per_tick") if isinstance(pacer, dict) else None,
+        values.get("realtime_pcm_packet_queue_capacity"),
+        values.get("frame_residual_calls"),
+        values.get("frame_residual_tail_hold_calls"),
+        values.get("native_q1_live_frame_cap"),
+        len(trace) if isinstance(trace, list) else 0,
+        values.get("frame_residual_live_first_last_hidden_cosine"),
+    )
 
 
 def _submit_or_defer_audio_history_archive(
@@ -545,7 +706,14 @@ def _filter_frame_residual_runtime_metrics(values: dict[str, Any]) -> dict[str, 
             continue
         if expected_type is float and not np.isfinite(value):
             continue
+        if key == "frame_residual_live_first_last_hidden_cosine" and not -1.000001 <= value <= 1.000001:
+            continue
         retained[key] = value
+    trace = _filter_frame_residual_live_hidden_trace(
+        values.get("frame_residual_live_hidden_trace")
+    )
+    if trace:
+        retained["frame_residual_live_hidden_trace"] = trace
     return retained
 
 
@@ -750,6 +918,8 @@ def _controller_guided_say_generation_options(
     """Return the production request budgets for the selected response route."""
     action_value = getattr(action, "value", action)
     normalized_action = str(action_value).strip().upper() if action_value is not None else None
+    if normalized_action == ControlAction.BACKCHANNEL.value:
+        return {"max_tokens": 2, "_min_new_tokens": 0}
     is_vocal_action = normalized_action in {ControlAction.SPEAK.value, ControlAction.BACKCHANNEL.value}
     if direct_audio_candidate and response_protocol == AUDIO_RESPONSE_PROTOCOL_V2:
         max_tokens = AUDIO_RESPONSE_V2_MAX_NEW_TOKENS
@@ -799,7 +969,7 @@ POLICY_FRAME_MS = 80
 POLICY_FRAME_SAMPLES = USER_SAMPLE_RATE * POLICY_FRAME_MS // 1000
 DEFAULT_SPEAK_ENDPOINT_QUIET_MS = 800
 NATIVE_PARTIAL_ASR_ENV = "DUPLEX_NATIVE_PARTIAL_ASR"
-DUPLEX_CONTROLLER_GUIDED_SAY_ENV = "DUPLEX_CONTROLLER_GUIDED_SAY_V1"
+DUPLEX_CONTROLLER_GUIDED_SAY_ENV = CONTROLLER_GUIDED_SAY_COMPAT_ENV
 _ACTION_TOKEN_MAP = {
     "SPEAK": "<unused90>",
     "BACKCHANNEL": "<unused93>",
@@ -823,6 +993,61 @@ def _native_control6_policy_hidden_for_tick(
         and np.count_nonzero(pcm) == 0
     )
     return (None if no_input_tick else listener_hidden), no_input_tick
+
+
+def _native_control6_speaker_active(
+    *, active_response: bool, control_state: ControlState
+) -> bool:
+    """Resolve the one native Control6 speaking state for the whole policy tick."""
+    return bool(
+        active_response
+        or control_state in {
+            ControlState.SPEAKING,
+            ControlState.BACKCHANNELING,
+            ControlState.STOPPING,
+        }
+    )
+
+
+def _strict_env_switch(name: str, *, default: bool = False) -> bool:
+    """Read one explicit 0/1 switch without silently accepting typos."""
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    if value == "0":
+        return False
+    if value == "1":
+        return True
+    raise RuntimeError(f"{name} must be exactly '0' or '1'")
+
+
+def _listener_frame_is_voiced(pcm: Any) -> bool:
+    """Match the realtime endpoint tracker's causal RMS/peak thresholds."""
+    frame = np.asarray(pcm, dtype=np.float32).reshape(-1)
+    if not frame.size or not np.isfinite(frame).all():
+        return False
+    rms = float(np.sqrt(np.mean(np.square(frame, dtype=np.float64))))
+    peak = float(np.max(np.abs(frame)))
+    return rms >= 0.001 and peak >= 0.005
+
+
+def _unified_listener_frame_contract(
+    pcm: Any,
+    *,
+    assistant_turn_open: bool,
+    user_input_pending: bool,
+) -> tuple[int, str | None, bool]:
+    """Return logical-Q, ephemeral reason, and next-turn audio queue policy."""
+    if assistant_turn_open:
+        return 0, "assistant_turn_open", True
+    if not user_input_pending and not _listener_frame_is_voiced(pcm):
+        return 0, "prespeech_silence", False
+    return 2, None, False
+
+
+def _native_control6_endpoint_bypass_enabled(policy: Any) -> bool:
+    """Only native-row Control6 owns the early endpoint bypass path."""
+    return isinstance(policy, GemmaNativeControl6Policy)
 
 
 def _native_control6_decision_has_valid_input(
@@ -967,12 +1192,1026 @@ def _put_response_queue_bounded(
 
 
 def _configured_audio_response_protocol(engine: Any) -> str | None:
-    controller_mode = os.environ.get(DUPLEX_CONTROLLER_GUIDED_SAY_ENV, "0").strip()
-    if controller_mode not in {"0", "1"}:
-        raise ValueError(f"{DUPLEX_CONTROLLER_GUIDED_SAY_ENV} must be 0 or 1")
-    if controller_mode == "1":
-        return CONTROLLER_GUIDED_SAY_V1
-    return normalize_audio_response_protocol(getattr(engine, "audio_response_protocol", None))
+    del engine
+    return resolve_audio_response_protocol()
+
+
+def _require_unified_stable_audio_protocol(protocol: Any) -> str:
+    """Unified KV only supports the stable-system v2 prompt contract."""
+    normalized = normalize_audio_response_protocol(protocol)
+    if normalized != AUDIO_RESPONSE_PROTOCOL_V2:
+        raise RuntimeError(
+            "DUPLEX_UNIFIED_KV requires heard_action_say_v2: "
+            "controller_guided_say_v1 has a turn-varying system prompt and cannot "
+            "share the session's imported native KV prefix"
+        )
+    return normalized
+
+
+def _tokenize_template_text(tokenizer: Any, messages: list[dict[str, Any]], *, add_generation_prompt: bool) -> list[int]:
+    if not callable(getattr(tokenizer, "apply_chat_template", None)):
+        raise RuntimeError("unified prompt requires the loaded Gemma chat template")
+    if not callable(getattr(tokenizer, "encode", None)):
+        raise RuntimeError("unified prompt requires tokenizer.encode")
+    rendered = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=bool(add_generation_prompt),
+    )
+    token_ids = tokenizer.encode(str(rendered), add_special_tokens=False)
+    if hasattr(token_ids, "tolist"):
+        token_ids = token_ids.tolist()
+    if isinstance(token_ids, tuple):
+        token_ids = list(token_ids)
+    if not isinstance(token_ids, list) or (token_ids and isinstance(token_ids[0], list)):
+        raise TypeError("tokenizer.encode must return one flat token-ID sequence")
+    result: list[int] = []
+    for token_id in token_ids:
+        if isinstance(token_id, bool) or not isinstance(token_id, int) or token_id < 0:
+            raise TypeError("tokenizer.encode returned an invalid token ID")
+        result.append(int(token_id))
+    return result
+
+
+def _unified_audio_template_ids(engine: Any, session: DuplexSession, *, add_generation_prompt: bool) -> tuple[list[int], int, int, int]:
+    """Return tokenized one-user audio template and Gemma BOA/EOA IDs."""
+    tokenizer = getattr(engine, "tokenizer", None)
+    processor = getattr(getattr(engine, "_thinker_wrapper", None), "processor", None)
+    audio_marker = (
+        getattr(processor, "audio_token", None)
+        or getattr(tokenizer, "audio_token", None)
+        or "<|audio|>"
+    )
+    audio_marker = str(audio_marker).strip()
+    if not audio_marker:
+        raise RuntimeError("unified audio template requires the processor audio marker")
+    token_ids = _tokenize_template_text(
+        tokenizer,
+        [{"role": "user", "content": audio_marker}],
+        add_generation_prompt=add_generation_prompt,
+    )
+    marker_id_values = tokenizer.encode(audio_marker, add_special_tokens=False)
+    if hasattr(marker_id_values, "tolist"):
+        marker_id_values = marker_id_values.tolist()
+    if isinstance(marker_id_values, tuple):
+        marker_id_values = list(marker_id_values)
+    if not isinstance(marker_id_values, (tuple, list)) or len(marker_id_values) != 1:
+        raise RuntimeError("processor audio marker must map to exactly one tokenizer token")
+    marker_id = int(marker_id_values[0])
+    marker_positions = [index for index, value in enumerate(token_ids) if value == marker_id]
+    if len(marker_positions) != 1:
+        raise RuntimeError("one-user chat template must contain exactly one audio marker")
+    backend = getattr(getattr(session, "listener", None), "backend", None)
+    config = getattr(getattr(engine, "_thinker_wrapper", None), "config", None)
+    boa_token_id = getattr(backend, "boa_token_id", None)
+    if boa_token_id is None:
+        boa_token_id = getattr(config, "boa_token_id", None)
+    eoa_token_id = getattr(backend, "eoa_token_id", None)
+    if eoa_token_id is None:
+        eoa_token_id = getattr(config, "eoa_token_id", None)
+    if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in (boa_token_id, eoa_token_id)):
+        raise RuntimeError("unified audio template requires configured Gemma BOA and EOA token IDs")
+    return token_ids, marker_positions[0], int(boa_token_id), int(eoa_token_id)
+
+
+def _unified_turn_end_token_id(engine: Any) -> int:
+    """Read the chat turn-end ID from the loaded tokenizer's own metadata."""
+    tokenizer = getattr(engine, "tokenizer", None)
+    candidates: list[int] = []
+    for name in ("eot_id", "eot_token_id"):
+        value = getattr(tokenizer, name, None)
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise RuntimeError(f"loaded tokenizer exposes an invalid {name}")
+        candidates.append(int(value))
+    if not candidates:
+        eot_token = getattr(tokenizer, "eot_token", None)
+        convert = getattr(tokenizer, "convert_tokens_to_ids", None)
+        if isinstance(eot_token, str) and eot_token and callable(convert):
+            value = convert(eot_token)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise RuntimeError("loaded tokenizer cannot resolve its configured EOT token")
+            candidates.append(int(value))
+    if not candidates:
+        raise RuntimeError("unified audio template requires the loaded tokenizer's EOT token ID")
+    if len(set(candidates)) != 1:
+        raise RuntimeError("loaded tokenizer exposes conflicting EOT token IDs")
+    return candidates[0]
+
+
+def _validate_unified_audio_turn_end_suffix(
+    engine: Any,
+    suffix_ids: Sequence[int],
+) -> int:
+    """Require one configured EOT while preserving every template tail token."""
+    eot_token_id = _unified_turn_end_token_id(engine)
+    if sum(int(token_id) == eot_token_id for token_id in suffix_ids) != 1:
+        raise RuntimeError(
+            "unified audio template suffix must contain exactly one configured EOT token"
+        )
+    return eot_token_id
+
+
+def _build_unified_audio_response_suffix(engine: Any, session: DuplexSession) -> tuple[int, ...]:
+    """Build EOA + user turn end + assistant generation header without audio preprocessing."""
+    token_ids, marker_position, _boa_token_id, eoa_token_id = _unified_audio_template_ids(
+        engine, session, add_generation_prompt=True
+    )
+    template_suffix = token_ids[marker_position + 1 :]
+    _validate_unified_audio_turn_end_suffix(engine, template_suffix)
+    return (eoa_token_id, *template_suffix)
+
+
+def _build_unified_backchannel_response_suffix(
+    engine: Any,
+    session: DuplexSession,
+) -> tuple[int, ...]:
+    """Build an exact private-branch text prompt for a learned short backchannel."""
+    token_ids, marker_position, _boa_token_id, eoa_token_id = _unified_audio_template_ids(
+        engine, session, add_generation_prompt=True
+    )
+    template_suffix = tuple(int(value) for value in token_ids[marker_position + 1 :])
+    _validate_unified_audio_turn_end_suffix(engine, template_suffix)
+    tokenizer = getattr(engine, "tokenizer", None)
+    encode = getattr(tokenizer, "encode", None)
+    if not callable(encode):
+        raise RuntimeError("private backchannel requires the loaded Thinker tokenizer")
+    instruction = (
+        " Rispondi soltanto con un brevissimo cenno di ascolto in italiano. "
+        "Non aggiungere spiegazioni."
+    )
+    instruction_ids = encode(instruction, add_special_tokens=False)
+    if hasattr(instruction_ids, "tolist"):
+        instruction_ids = instruction_ids.tolist()
+    if isinstance(instruction_ids, tuple):
+        instruction_ids = list(instruction_ids)
+    if (
+        not isinstance(instruction_ids, (list, tuple))
+        or not instruction_ids
+        or any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in instruction_ids)
+    ):
+        raise RuntimeError("loaded Thinker tokenizer returned invalid private backchannel prompt IDs")
+    return (int(eoa_token_id), *(int(value) for value in instruction_ids), *template_suffix)
+
+
+def _build_unified_next_user_header(engine: Any, session: DuplexSession) -> tuple[int, ...]:
+    """Build the next user header through BOA, excluding the global BOS token."""
+    token_ids, marker_position, boa_token_id, _eoa_token_id = _unified_audio_template_ids(
+        engine, session, add_generation_prompt=False
+    )
+    header = token_ids[:marker_position]
+    backend = getattr(getattr(session, "listener", None), "backend", None)
+    config = getattr(getattr(engine, "_thinker_wrapper", None), "config", None)
+    bos_token_id = getattr(backend, "bos_token_id", None)
+    if bos_token_id is None:
+        bos_token_id = getattr(config, "bos_token_id", None)
+    if header and isinstance(bos_token_id, int) and header[0] == int(bos_token_id):
+        header = header[1:]
+    if not header:
+        raise RuntimeError("unified next-user header template is empty")
+    return (*header, boa_token_id)
+
+
+def _unified_end_of_turn_token_id(engine: Any, session: DuplexSession) -> int:
+    """Resolve the single EOT in the active template, allowing trailing whitespace IDs."""
+    token_ids, marker_position, _boa_token_id, _eoa_token_id = _unified_audio_template_ids(
+        engine, session, add_generation_prompt=False
+    )
+    suffix = token_ids[marker_position + 1 :]
+    return _validate_unified_audio_turn_end_suffix(engine, suffix)
+
+
+async def _finalize_unified_native_cache_branch(
+    worker: Any,
+    session_id: str,
+    branch: dict[str, Any],
+    *,
+    history_committed: bool,
+    close_ids: tuple[int, ...],
+    retry_timeout_s: float = 2.0,
+) -> Any:
+    """Close or roll back one native assistant branch, then drain queued audio.
+
+    The caller holds the per-session turn-transition lock. A successful close
+    consumes the branch's reserved suffix budget; any failed close attempts a
+    rollback to the user-turn boundary before reporting the error, so a
+    partially appended close suffix is never left as a live branch.
+    """
+    if branch.get("ephemeral_private"):
+        handle = branch.get("ephemeral_decode_handle")
+        release = getattr(worker, "end_ephemeral_decode", None)
+        if handle is None or not callable(release):
+            raise RuntimeError("private native branch lacks its ephemeral release contract")
+        release_future = asyncio.wrap_future(release(handle))
+        try:
+            await asyncio.shield(release_future)
+        except asyncio.CancelledError:
+            # Keep the native row alive until the owner has completed release;
+            # cancellation must not turn this slot into a use-after-free.
+            await asyncio.shield(release_future)
+            raise
+        branch["cache_position"] = int(getattr(handle, "cache_position", branch["cache_position"]))
+        branch["finalized"] = True
+        branch["private_slot_released"] = True
+        branch["history_committed"] = False
+        return None
+
+    listener_generation_id = int(branch["listener_generation_id"])
+    turn_start = int(branch["turn_start_cache_position"])
+    cache_cursor = int(branch["cache_position"])
+
+    async def current_snapshot() -> Any:
+        snapshot = await asyncio.wrap_future(worker.session_state(session_id))
+        if int(snapshot.generation_id) != listener_generation_id:
+            raise RuntimeError("unified finalizer lost its listener generation")
+        if int(snapshot.cache_position) < turn_start:
+            raise RuntimeError("unified finalizer observed a cursor before the user-turn boundary")
+        return snapshot
+
+    async def rollback_to_turn_start() -> None:
+        nonlocal cache_cursor
+        rollback_deadline = asyncio.get_running_loop().time() + retry_timeout_s
+        while True:
+            latest = await current_snapshot()
+            cache_cursor = int(latest.cache_position)
+            try:
+                rolled_back = await asyncio.wrap_future(worker.rollback_assistant_branch(
+                    session_id,
+                    expected_generation_id=listener_generation_id,
+                    expected_cache_position=cache_cursor,
+                    target_cache_position=turn_start,
+                ))
+                cache_cursor = int(rolled_back.cache_position)
+                branch["cache_position"] = cache_cursor
+                break
+            except RuntimeError as exc:
+                if (
+                    str(exc) not in {
+                        "assistant rollback requires a completed listener frame watermark",
+                        "assistant rollback cannot cross a shared listener tick",
+                    }
+                    or asyncio.get_running_loop().time() >= rollback_deadline
+                ):
+                    raise
+                await asyncio.sleep(0.002)
+
+    async def drain_after_rollback(*, user_turn_already_open: bool) -> Any:
+        nonlocal cache_cursor
+        drain_deadline = asyncio.get_running_loop().time() + retry_timeout_s
+        while True:
+            try:
+                drained = await asyncio.wrap_future(worker.drain_queued_audio(
+                    session_id,
+                    expected_generation_id=listener_generation_id,
+                    expected_cache_position=cache_cursor,
+                    user_turn_already_open=user_turn_already_open,
+                ))
+                branch["cache_position"] = int(drained.cache_position)
+                branch["queue_open"] = False
+                branch["finalized"] = True
+                branch["rollback_recovered"] = True
+                return drained
+            except RuntimeError as exc:
+                if (
+                    str(exc) not in {
+                        "queued-audio drain needs the assistant Q0 watermark to complete; retry after the prior tick",
+                        "queued-audio drain cannot overlap a shared listener tick",
+                    }
+                    or asyncio.get_running_loop().time() >= drain_deadline
+                ):
+                    raise
+                await asyncio.sleep(0.002)
+
+    async def append_spoken_prefix_after_rewind() -> None:
+        nonlocal cache_cursor
+        transition_ids = tuple(
+            int(value) for value in branch.get("transition_token_ids", ())
+        )
+        speech_ids = tuple(
+            int(value) for value in branch.get("spoken_prefix_token_ids", ())
+        )
+        if not transition_ids:
+            raise RuntimeError(
+                "spoken-prefix KV rebuild has no original assistant transition tokens"
+            )
+        if not speech_ids:
+            raise RuntimeError(
+                "spoken-prefix KV rebuild has no exact Gemma token IDs from a consumed segment"
+            )
+        rebuild_and_close_ids = (*transition_ids, *speech_ids, *tuple(close_ids))
+        reserve_deadline = asyncio.get_running_loop().time() + retry_timeout_s
+        while True:
+            try:
+                await asyncio.wrap_future(worker.reserve_tail_tokens(
+                    session_id,
+                    expected_generation_id=listener_generation_id,
+                    expected_cache_position=cache_cursor,
+                    token_count=len(rebuild_and_close_ids) + 2,
+                ))
+                break
+            except RuntimeError as exc:
+                if (
+                    str(exc) not in {
+                        "tail reservation requires a completed listener frame watermark",
+                        "tail reservation cannot overlap a shared listener tick",
+                    }
+                    or asyncio.get_running_loop().time() >= reserve_deadline
+                ):
+                    raise
+                await asyncio.sleep(0.002)
+
+        for start in range(0, len(rebuild_and_close_ids), 2):
+            token_group = tuple(
+                int(value) for value in rebuild_and_close_ids[start : start + 2]
+            )
+            append_started_ns = time.monotonic_ns()
+            while True:
+                owner_future = worker.append_text_tokens(
+                    session_id,
+                    token_group,
+                    expected_generation_id=listener_generation_id,
+                    expected_cache_position=cache_cursor,
+                    consume_reserved_tokens=len(token_group),
+                )
+                try:
+                    await asyncio.shield(asyncio.wrap_future(owner_future))
+                    break
+                except asyncio.CancelledError:
+                    await asyncio.shield(asyncio.wrap_future(owner_future))
+                    cache_cursor += len(token_group)
+                    branch["cache_position"] = cache_cursor
+                    raise
+                except RuntimeError as exc:
+                    if (
+                        str(exc) != "text append requires completed listener frame watermark"
+                        or time.monotonic_ns() - append_started_ns
+                        >= int(retry_timeout_s * 1e9)
+                    ):
+                        raise
+                    latest = await current_snapshot()
+                    if int(latest.cache_position) != cache_cursor:
+                        raise RuntimeError(
+                            "spoken-prefix KV rebuild observed an untracked cache append"
+                        ) from exc
+                    await asyncio.sleep(0.002)
+            cache_cursor += len(token_group)
+            branch["cache_position"] = cache_cursor
+        expected_exclusive_cursor = branch.get("spoken_prefix_exclusive_cursor")
+        rebuilt_prefix_cursor = cache_cursor - len(tuple(close_ids))
+        if (expected_exclusive_cursor is not None
+                and rebuilt_prefix_cursor != int(expected_exclusive_cursor)):
+            raise RuntimeError(
+                "rebuilt spoken prefix does not end at its acknowledged exclusive KV cursor"
+            )
+
+    async def rollback_and_drain() -> Any:
+        await rollback_to_turn_start()
+        acknowledged_text = str(branch.get("spoken_prefix_text", ""))
+        if acknowledged_text:
+            try:
+                if not tuple(branch.get("spoken_prefix_token_ids", ())):
+                    raise RuntimeError(
+                        "client-consumed spoken prefix has text but no original Gemma token IDs"
+                    )
+                await append_spoken_prefix_after_rewind()
+                drained = await drain_after_rollback(user_turn_already_open=False)
+            except BaseException as rebuild_error:
+                # Preserve the user turn boundary when canonical reconstruction
+                # cannot fit. The caller sees an error and can quarantine the
+                # branch; acknowledged text is never silently represented by raw JSON.
+                await rollback_to_turn_start()
+                drained = await drain_after_rollback(user_turn_already_open=True)
+                branch["history_committed"] = False
+                branch["spoken_prefix_rebuilt"] = False
+                raise RuntimeError(
+                    "spoken-prefix KV rebuild failed; branch was rolled back to the open user turn"
+                ) from rebuild_error
+            branch["spoken_prefix_rebuilt"] = True
+            branch["history_committed"] = False
+            return drained
+        drained = await drain_after_rollback(user_turn_already_open=True)
+        branch["history_committed"] = False
+        branch["spoken_prefix_rebuilt"] = False
+        return drained
+
+    if not history_committed:
+        drained = await rollback_and_drain()
+        return drained
+
+    close_error: BaseException | None = None
+    try:
+        latest = await current_snapshot()
+        latest_cursor = int(latest.cache_position)
+        if latest_cursor < cache_cursor:
+            raise RuntimeError("unified finalizer observed a backward cache cursor")
+        if latest_cursor > cache_cursor:
+            raise RuntimeError(
+                "unified finalizer observed an untracked cache append after Thinker completion"
+            )
+        cache_cursor = latest_cursor
+        branch["cache_position"] = cache_cursor
+        # Reassert capacity against the post-decode cursor and all queued Q2
+        # frames before the first close token can mutate native cache.
+        reserve_deadline = asyncio.get_running_loop().time() + retry_timeout_s
+        while True:
+            try:
+                await asyncio.wrap_future(worker.reserve_tail_tokens(
+                    session_id,
+                    expected_generation_id=listener_generation_id,
+                    expected_cache_position=cache_cursor,
+                    token_count=len(close_ids) + 2,
+                ))
+                break
+            except RuntimeError as exc:
+                if (
+                    str(exc) not in {
+                        "tail reservation requires a completed listener frame watermark",
+                        "tail reservation cannot overlap a shared listener tick",
+                    }
+                    or asyncio.get_running_loop().time() >= reserve_deadline
+                ):
+                    raise
+                await asyncio.sleep(0.002)
+        for start in range(0, len(close_ids), 2):
+            token_group = tuple(int(value) for value in close_ids[start : start + 2])
+            owner_future = worker.append_text_tokens(
+                session_id,
+                token_group,
+                expected_generation_id=listener_generation_id,
+                expected_cache_position=cache_cursor,
+                consume_reserved_tokens=len(token_group),
+            )
+            try:
+                await asyncio.shield(asyncio.wrap_future(owner_future))
+            except asyncio.CancelledError:
+                await asyncio.shield(asyncio.wrap_future(owner_future))
+                cache_cursor += len(token_group)
+                branch["cache_position"] = cache_cursor
+                raise
+            cache_cursor += len(token_group)
+            branch["cache_position"] = cache_cursor
+    except BaseException as exc:
+        close_error = exc
+
+    if close_error is not None:
+        try:
+            await rollback_and_drain()
+        except BaseException as recovery_error:
+            raise RuntimeError(
+                "unified native close failed and assistant-branch rollback/audio drain also failed; "
+                "the session must remain quarantined"
+            ) from recovery_error
+        raise RuntimeError(
+            "unified native close failed; assistant branch was rolled back and queued audio was "
+            "drained before the session was quarantined"
+        ) from close_error
+
+    drain_deadline = asyncio.get_running_loop().time() + retry_timeout_s
+    while True:
+        try:
+            drained = await asyncio.wrap_future(worker.drain_queued_audio(
+                session_id,
+                expected_generation_id=listener_generation_id,
+                expected_cache_position=cache_cursor,
+                user_turn_already_open=False,
+            ))
+            branch["cache_position"] = int(drained.cache_position)
+            branch["queue_open"] = False
+            branch["finalized"] = True
+            branch["history_committed"] = True
+            return drained
+        except RuntimeError as exc:
+            if (
+                str(exc) not in {
+                    "queued-audio drain needs the assistant Q0 watermark to complete; retry after the prior tick",
+                    "queued-audio drain cannot overlap a shared listener tick",
+                }
+                or asyncio.get_running_loop().time() >= drain_deadline
+            ):
+                try:
+                    await rollback_and_drain()
+                except BaseException as recovery_error:
+                    raise RuntimeError(
+                        "unified native audio drain failed after close; rollback/audio recovery also "
+                        "failed and the session must remain quarantined"
+                    ) from recovery_error
+                raise RuntimeError(
+                    "unified native audio drain failed after close; branch was rolled back and "
+                    "queued audio was drained before the session was quarantined"
+                ) from exc
+            await asyncio.sleep(0.002)
+
+
+def _consume_unified_native_text_append_result(
+    result: Any,
+    *,
+    timings_ns: dict[str, int] | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Join the native LM-head stream before exposing its tensors to sampling.
+
+    The worker records ``ready_event`` after the LM head on its listener
+    stream. A stream wait keeps the dependency asynchronous; record_stream
+    keeps the allocator from recycling either output while this consumer
+    stream is still reading it.
+    """
+    try:
+        logits = result.logits
+        hidden = result.final_norm_hidden
+        ready_event = result.ready_event
+    except AttributeError as exc:
+        raise RuntimeError(
+            "unified native text append must return logits, final_norm_hidden, and ready_event"
+        ) from exc
+
+    logits_device = getattr(logits, "device", None)
+    logits_is_cuda = bool(
+        getattr(logits, "is_cuda", getattr(logits_device, "type", None) == "cuda")
+    )
+    hidden_device = getattr(hidden, "device", logits_device)
+    hidden_is_cuda = bool(
+        getattr(hidden, "is_cuda", getattr(hidden_device, "type", None) == "cuda")
+    )
+    if logits_is_cuda != hidden_is_cuda or (
+        logits_is_cuda and hidden_device != logits_device
+    ):
+        raise RuntimeError("unified native text outputs must share one CUDA device")
+    if not logits_is_cuda:
+        if ready_event is not None:
+            raise RuntimeError("CPU unified native text outputs cannot carry a CUDA ready_event")
+        return logits, hidden
+    if ready_event is None:
+        raise RuntimeError("CUDA unified native text append is missing its ready_event")
+
+    consumer_stream = torch.cuda.current_stream(device=logits_device)
+    if timings_ns is not None:
+        timings_ns["consumer_wait_event_started_ns"] = time.monotonic_ns()
+    consumer_stream.wait_event(ready_event)
+    if timings_ns is not None:
+        timings_ns["consumer_wait_event_enqueued_ns"] = time.monotonic_ns()
+    logits.record_stream(consumer_stream)
+    hidden.record_stream(consumer_stream)
+    if timings_ns is not None:
+        timings_ns["consumer_record_stream_returned_ns"] = time.monotonic_ns()
+    return logits, hidden
+
+
+def _run_unified_native_thinker(
+    engine: Any,
+    session: DuplexSession,
+    request: dict[str, Any],
+    *,
+    worker: Any,
+    transition_token_ids: tuple[int, ...],
+    think_kwargs: dict[str, Any],
+    generation_id: int | None,
+    branch: dict[str, Any],
+) -> dict[str, Any]:
+    """Decode the Thinker suffix through the listener's native cache owner."""
+    listener_generation_id = int(branch["listener_generation_id"])
+    private_handle = branch.get("ephemeral_decode_handle")
+    private_transition_remaining = (
+        len(tuple(transition_token_ids)) if private_handle is not None else 0
+    )
+    cache_cursor = int(
+        private_handle.source_cache_position
+        if private_handle is not None
+        else branch["cache_position"]
+    )
+    current = worker.session_state(session.session_id).result(timeout=5.0)
+    if int(current.generation_id) != listener_generation_id:
+        raise RuntimeError("unified Thinker branch lost its listener generation")
+    if private_handle is not None:
+        if (
+            private_handle.parent_session_id != session.session_id
+            or int(private_handle.parent_generation_id) != listener_generation_id
+            or int(private_handle.source_cache_position) != cache_cursor
+        ):
+            raise RuntimeError("private Thinker branch identity differs from its listener source")
+        branch["cache_position"] = cache_cursor
+        branch["turn_start_cache_position"] = cache_cursor
+    elif int(branch.get("native_token_append_count", 0)) == 0:
+        cache_cursor = int(current.cache_position)
+        branch["cache_position"] = cache_cursor
+        branch["turn_start_cache_position"] = cache_cursor
+    branch["transition_token_ids"] = tuple(int(value) for value in transition_token_ids)
+    branch["spoken_prefix_base_cursor"] = cache_cursor + len(tuple(transition_token_ids))
+    if not tuple(branch.get("client_consumed_segments", ())):
+        branch["spoken_prefix_exclusive_cursor"] = int(branch["spoken_prefix_base_cursor"])
+    token_timings: dict[str, int] = {}
+    thinker_metrics: dict[str, Any] = {}
+    stop_check = think_kwargs.get("stop_check")
+    native_profile: dict[str, Any] = {
+        "clock": "server monotonic_ns",
+        "policy_decision_at_ns": branch.get("policy_decision_at_ns"),
+        "queue_open_requested_ns": branch.get("queue_open_requested_ns"),
+        "queue_open_ready_ns": branch.get("queue_open_ready_ns"),
+        "append_steps": [],
+        "sampling_steps": [],
+    }
+    branch["unified_native_profile"] = native_profile
+
+    def publish_profile() -> None:
+        if thinker_metrics:
+            token_timings["thinker_runtime_metrics"] = dict(thinker_metrics)
+        token_timings["unified_native_profile"] = {
+            **native_profile,
+            "append_steps": [dict(step) for step in native_profile["append_steps"]],
+            "sampling_steps": [dict(step) for step in native_profile["sampling_steps"]],
+        }
+        callback = request.get("_on_thinker_metrics")
+        if callable(callback):
+            callback(dict(token_timings))
+
+    async def forward_native_tokens(token_ids: list[int]):
+        nonlocal cache_cursor, private_transition_remaining
+        retry_deadline = time.monotonic() + 2.0
+        append_call_ns = time.monotonic_ns()
+        if private_handle is not None:
+            is_private_transition = private_transition_remaining > 0
+            if is_private_transition:
+                if len(token_ids) > private_transition_remaining:
+                    raise RuntimeError("private transition append exceeded its exact suffix boundary")
+                owner_future = worker.append_private_transition_tokens(
+                    private_handle,
+                    token_ids,
+                    expected_cache_position=cache_cursor,
+                )
+                private_transition_remaining -= len(token_ids)
+            else:
+                owner_future = worker.append_private_tokens(
+                    private_handle,
+                    token_ids,
+                    expected_cache_position=cache_cursor,
+                )
+            wrapped = asyncio.wrap_future(owner_future)
+            try:
+                result = await asyncio.shield(wrapped)
+            except asyncio.CancelledError:
+                result = await asyncio.shield(wrapped)
+                cache_cursor = int(result.cache_position)
+                branch["cache_position"] = cache_cursor
+                raise
+            cache_cursor = int(result.cache_position)
+            branch["cache_position"] = cache_cursor
+            received_ns = time.monotonic_ns()
+            step_profile: dict[str, Any] = {
+                "phase": "private_transition" if is_private_transition else "private_generated_token",
+                "logical_token_count": len(token_ids),
+                "append_call_ns": append_call_ns,
+                "future_result_received_ns": received_ns,
+                "owner_future_wait_ns": max(0, received_ns - append_call_ns),
+                "private_cache_position": cache_cursor,
+            }
+            worker_timings = getattr(result, "timings_ns", None)
+            if isinstance(worker_timings, Mapping):
+                step_profile.update({str(key): int(value) for key, value in worker_timings.items()})
+            pair = _consume_unified_native_text_append_result(result, timings_ns=step_profile)
+            step_profile["consumer_returned_ns"] = time.monotonic_ns()
+            native_profile["append_steps"].append(step_profile)
+            return pair
+        while True:
+            owner_future = worker.append_text_tokens(
+                session.session_id,
+                token_ids,
+                expected_generation_id=listener_generation_id,
+                expected_cache_position=cache_cursor,
+            )
+            wrapped = asyncio.wrap_future(owner_future)
+            try:
+                result = await asyncio.shield(wrapped)
+            except asyncio.CancelledError:
+                result = await asyncio.shield(wrapped)
+                cache_cursor += len(token_ids)
+                branch["cache_position"] = cache_cursor
+                branch["native_token_append_count"] = int(
+                    branch.get("native_token_append_count", 0)
+                ) + len(token_ids)
+                raise
+            except RuntimeError as exc:
+                if str(exc) == "text append requires completed listener frame watermark":
+                    if time.monotonic() >= retry_deadline or (
+                        callable(stop_check) and stop_check()
+                    ):
+                        raise
+                    latest = worker.session_state(session.session_id).result(timeout=5.0)
+                    if int(latest.generation_id) != listener_generation_id:
+                        raise RuntimeError(
+                            "unified Thinker branch lost its listener generation"
+                        ) from exc
+                    if int(latest.cache_position) != cache_cursor:
+                        raise RuntimeError(
+                            "unified listener cache cursor changed while waiting for a frame watermark"
+                        ) from exc
+                    await asyncio.sleep(0.002)
+                    continue
+                if (
+                    str(exc)
+                    != "unified text append lost its generation/cache-position compare-and-swap"
+                    or int(branch.get("native_token_append_count", 0)) != 0
+                    or time.monotonic() >= retry_deadline
+                ):
+                    raise
+                latest = worker.session_state(session.session_id).result(timeout=5.0)
+                if int(latest.generation_id) != listener_generation_id:
+                    raise RuntimeError("unified Thinker branch lost its listener generation") from exc
+                if int(latest.cache_position) < cache_cursor:
+                    raise RuntimeError("unified listener cache cursor moved backwards") from exc
+                cache_cursor = int(latest.cache_position)
+                branch["cache_position"] = cache_cursor
+                branch["turn_start_cache_position"] = cache_cursor
+                await asyncio.sleep(0.002)
+                continue
+            cache_cursor += len(token_ids)
+            branch["cache_position"] = cache_cursor
+            branch["native_token_append_count"] = int(
+                branch.get("native_token_append_count", 0)
+            ) + len(token_ids)
+            received_ns = time.monotonic_ns()
+            step_profile: dict[str, Any] = {
+                "phase": "suffix" if not branch.get("first_logits_ready") else "generated_token",
+                "logical_token_count": len(token_ids),
+                "append_call_ns": append_call_ns,
+                "future_result_received_ns": received_ns,
+                "owner_future_wait_ns": max(0, received_ns - append_call_ns),
+            }
+            worker_timings = getattr(result, "timings_ns", None)
+            if isinstance(worker_timings, Mapping):
+                step_profile.update({str(key): int(value) for key, value in worker_timings.items()})
+                owner_started_ns = worker_timings.get("owner_started_ns")
+                if isinstance(owner_started_ns, int):
+                    step_profile["owner_queue_wait_ns"] = max(0, owner_started_ns - append_call_ns)
+            pair = _consume_unified_native_text_append_result(
+                result,
+                timings_ns=step_profile,
+            )
+            step_profile["consumer_returned_ns"] = time.monotonic_ns()
+            native_profile["append_steps"].append(step_profile)
+            return pair
+
+    async def on_first_logits_ready(event: Any) -> None:
+        branch["first_logits_ready"] = True
+        token_timings["thinker_first_logits_ready_at_ns"] = int(event.ready_ns)
+        native_profile["first_logits_callback_ns"] = time.monotonic_ns()
+        publish_profile()
+
+    async def on_native_token(
+        token_id: int,
+        _hidden: torch.Tensor,
+        timing: Any,
+    ) -> None:
+        record = request.get("_on_thinker_token_id")
+        if callable(record):
+            record(int(token_id))
+        if "first_thinker_token_at_ns" not in token_timings:
+            token_timings["first_thinker_token_at_ns"] = time.monotonic_ns()
+            token_timings["first_thinker_token_hidden_ready_at_ns"] = int(
+                timing.token_hidden_ready_ns
+            )
+            token_timings["first_thinker_token_sampled_at_ns"] = int(timing.sampled_ns)
+            token_timings["first_thinker_token_forward_started_at_ns"] = int(
+                timing.token_forward_started_ns
+            )
+            native_profile["first_token_callback_ns"] = int(
+                token_timings["first_thinker_token_at_ns"]
+            )
+            # This callback exposes the post-forward token to the response
+            # owner; the websocket action is emitted later by the protocol.
+            native_profile["first_token_model_callback_ns"] = time.monotonic_ns()
+            publish_profile()
+
+    raw_candidate_guard = think_kwargs.get("on_candidate_token")
+    candidate_guard_trace: list[dict[str, Any]] = []
+    if callable(raw_candidate_guard):
+        def observed_candidate_guard(token_id: int, text: str, terminal: bool) -> bool:
+            try:
+                accepted = bool(raw_candidate_guard(token_id, text, terminal))
+            except BaseException as exc:
+                candidate_guard_trace.append({
+                    "token_id": int(token_id),
+                    "text": str(text)[:120],
+                    "terminal": bool(terminal),
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
+                raise
+            candidate_guard_trace.append({
+                "token_id": int(token_id),
+                "text": str(text)[:120],
+                "terminal": bool(terminal),
+                "accepted": accepted,
+            })
+            return accepted
+
+        think_kwargs["on_candidate_token"] = observed_candidate_guard
+
+    sampler = engine.build_thinker_sampler(
+        temperature=float(think_kwargs["temperature"]),
+        top_p=float(think_kwargs["top_p"]),
+        repetition_penalty=float(request.get("repetition_penalty", 1.15)),
+        min_new_tokens=int(think_kwargs["min_new_tokens"]),
+        action=None,
+        runtime_metrics=thinker_metrics,
+        on_generation_start=think_kwargs.get("on_generation_start"),
+        on_generated_token=think_kwargs.get("on_generated_token"),
+        on_candidate_token=think_kwargs.get("on_candidate_token"),
+        on_candidate_fallback=think_kwargs.get("on_candidate_fallback"),
+        on_action_logits_probe=think_kwargs.get("on_action_logits_probe"),
+        state=session,
+        generation_id=(int(generation_id) if generation_id is not None else None),
+    )
+
+    def _append_sampling_profile(
+        stage: str,
+        started_ns: int,
+        *,
+        candidate: Any = None,
+        history_length: int | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        finished_ns = time.monotonic_ns()
+        record: dict[str, Any] = {
+            "stage": stage,
+            "started_ns": int(started_ns),
+            "finished_ns": finished_ns,
+            "duration_ns": max(0, finished_ns - int(started_ns)),
+        }
+        if history_length is not None:
+            record["generated_history_length"] = int(history_length)
+        if isinstance(candidate, (tuple, list)) and len(candidate) == 3:
+            record["candidate_id"] = int(candidate[1])
+        if error is not None:
+            record["error"] = f"{type(error).__name__}: {error}"
+        native_profile["sampling_steps"].append(record)
+        if error is not None:
+            publish_profile()
+
+    raw_sample_token = sampler.sample_token
+
+    def profiled_sample_token(logits: torch.Tensor, generated_ids: Sequence[int]):
+        started_ns = time.monotonic_ns()
+        try:
+            candidate = raw_sample_token(logits, generated_ids)
+        except BaseException as exc:
+            _append_sampling_profile(
+                "sample_token",
+                started_ns,
+                history_length=len(generated_ids),
+                error=exc,
+            )
+            raise
+        _append_sampling_profile(
+            "sample_token",
+            started_ns,
+            candidate=candidate,
+            history_length=len(generated_ids),
+        )
+        return candidate
+
+    sampler.sample_token = profiled_sample_token
+    raw_sample_initial = sampler.sample_initial
+
+    def profiled_sample_initial(logits: torch.Tensor, generated_ids: Sequence[int] = ()):
+        started_ns = time.monotonic_ns()
+        try:
+            candidate = raw_sample_initial(logits, generated_ids)
+        except BaseException as exc:
+            _append_sampling_profile(
+                "sample_initial",
+                started_ns,
+                history_length=len(generated_ids),
+                error=exc,
+            )
+            raise
+        _append_sampling_profile(
+            "sample_initial",
+            started_ns,
+            candidate=candidate,
+            history_length=len(generated_ids),
+        )
+        return candidate
+
+    sampler.sample_initial = profiled_sample_initial
+    raw_select_valid_candidate = sampler.select_valid_candidate
+
+    def profiled_select_valid_candidate(candidate: Any, **kwargs: Any):
+        candidate_guard_trace.clear()
+        started_ns = time.monotonic_ns()
+        generated_ids = kwargs.get("generated_ids", ())
+        try:
+            selected = raw_select_valid_candidate(candidate, **kwargs)
+        except BaseException as exc:
+            diagnostic: dict[str, Any] = {
+                "stage": "select_valid_candidate",
+                "started_ns": int(started_ns),
+                "finished_ns": time.monotonic_ns(),
+                "generated_ids": [int(value) for value in generated_ids],
+                "guard_outcomes": list(candidate_guard_trace),
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+            if isinstance(candidate, (tuple, list)) and len(candidate) == 3:
+                diagnostic["sampled_candidate_id"] = int(candidate[1])
+                scores = candidate[2]
+                if isinstance(scores, torch.Tensor) and scores.numel():
+                    count = min(64, int(scores.numel()))
+                    top_scores, top_ids = torch.topk(scores.reshape(-1), k=count)
+                    diagnostic["top64_ids"] = [int(value) for value in top_ids.detach().cpu().tolist()]
+                    diagnostic["top64_scores"] = [
+                        float(value) for value in top_scores.detach().float().cpu().tolist()
+                    ]
+            snapshot_callback = request.get("_audio_response_v2_diagnostic_snapshot")
+            if callable(snapshot_callback):
+                try:
+                    diagnostic["protocol_state"] = snapshot_callback()
+                except BaseException as snapshot_error:
+                    diagnostic["protocol_state_error"] = (
+                        f"{type(snapshot_error).__name__}: {snapshot_error}"
+                    )
+            native_profile["first_guard_failure"] = diagnostic
+            thinker_metrics.update({
+                key: value for key, value in sampler.runtime_metrics.items()
+                if isinstance(key, str)
+            })
+            finished_ns = int(diagnostic["finished_ns"])
+            diagnostic["duration_ns"] = max(0, finished_ns - started_ns)
+            publish_profile()
+            raise
+        _append_sampling_profile(
+            "select_valid_candidate",
+            started_ns,
+            candidate=selected,
+            history_length=len(generated_ids),
+        )
+        return selected
+
+    sampler.select_valid_candidate = profiled_select_valid_candidate
+    decoder = UnifiedNativeDecoder(
+        getattr(engine, "thinker", None),
+        forward_tokens=forward_native_tokens,
+        sampler=sampler,
+        monotonic_ns=time.monotonic_ns,
+        eos_token_ids=sampler.eos_token_ids,
+    )
+    decoded = asyncio.run(decoder.decode(
+        transition_token_ids=transition_token_ids,
+        max_new_tokens=int(think_kwargs["max_new_tokens"]),
+        stop_check=think_kwargs.get("stop_check"),
+        first_logits_ready=on_first_logits_ready,
+        on_token=on_native_token,
+    ))
+    publish_profile()
+    # Preserve engine.think's raw trace contract: EOS is observable for
+    # provenance, but the decoder never forwards it or gives it Talker hidden.
+    if decoded.termination_reason == "eos" and decoded.terminal_token_id is not None:
+        record = request.get("_on_thinker_token_id")
+        if callable(record):
+            record(int(decoded.terminal_token_id))
+    generated_ids = [int(item.token_id) for item in decoded.generated_tokens]
+    generated_hidden = [item.hidden for item in decoded.generated_tokens]
+    if generated_hidden:
+        hidden = torch.cat(generated_hidden, dim=1)
+    else:
+        thinker_config = getattr(getattr(engine, "thinker", None), "config", None)
+        text_config = (
+            thinker_config.get_text_config(decoder=True)
+            if callable(getattr(thinker_config, "get_text_config", None))
+            else thinker_config
+        )
+        hidden_size = int(getattr(text_config, "hidden_size", 1536))
+        hidden = torch.empty(
+            (1, 0, hidden_size),
+            device=getattr(engine, "device", "cpu"),
+            dtype=getattr(engine, "dtype", torch.float32),
+        )
+    protocol_text = str(engine.tokenizer.decode(generated_ids, skip_special_tokens=True))
+    branch["generated_token_count"] = int(decoded.committed_count)
+    return {
+        "text": protocol_text,
+        "protocol_text": protocol_text,
+        "gen_ids": generated_ids,
+        "hidden": hidden,
+        "hidden_prompt_len": 0,
+        "prompt_len": 0,
+        "past_key_values": None,
+        "terminal_reason": decoded.termination_reason,
+        "cancelled": decoded.termination_reason == "cancelled",
+        "runtime_metrics": {
+            **thinker_metrics,
+            "unified_native_profile": {
+                **native_profile,
+                "append_steps": [dict(step) for step in native_profile["append_steps"]],
+                "sampling_steps": [dict(step) for step in native_profile["sampling_steps"]],
+            },
+            "unified_native_cache": {
+                "listener_generation_id": listener_generation_id,
+                "turn_start_cache_position": int(branch["turn_start_cache_position"]),
+                "cache_position_after_decode": cache_cursor,
+                "transition_token_count": int(decoded.transition_token_count),
+                "committed_generated_tokens": int(decoded.committed_count),
+                "terminal_reason": decoded.termination_reason,
+                "owner_action": decoded.owner_action,
+            },
+        },
+    }
 
 
 def _response_projector_mode(engine: Any) -> str:
@@ -1091,6 +2330,260 @@ def _record_audio_response_v2_private_failure(
         )
         temp_path.write_text(payload, encoding="utf-8")
         temp_path.replace(path)
+
+
+def _record_turn_local_vocalized_prefix(
+    branch: dict[str, Any] | None,
+    generation_id: int,
+    kv_position: int | None,
+    text: str,
+) -> None:
+    """Publish an ACKed text prefix only to its owning response generation.
+
+    A missing cursor is the frozen empty FIFO snapshot before any Qwen ACK.
+    It must not manufacture a KV position or an assistant prefix.
+    """
+    if not isinstance(branch, dict):
+        return
+    lock = branch.get("spoken_prefix_lock")
+    if lock is None:
+        return
+    with lock:
+        if int(branch.get("session_generation_id", -1)) != int(generation_id):
+            return
+        normalized_text = str(text)
+        if kv_position is None:
+            if normalized_text:
+                raise RuntimeError("spoken text has no acknowledged KV cursor")
+            return
+        previous = branch.get("spoken_prefix_kv_position")
+        if previous is not None and int(kv_position) < int(previous):
+            raise RuntimeError("turn-local spoken-prefix KV cursor moved backwards")
+        branch["spoken_prefix_kv_position"] = int(kv_position)
+        branch["spoken_prefix_text"] = normalized_text
+
+
+def _record_client_consumed_pcm(
+    branch: dict[str, Any] | None,
+    acknowledgement: dict[str, Any],
+) -> bool:
+    """Record one complete, client-consumed PCM segment against its exact marker.
+
+    The ACK sequence is a client event counter; it is deliberately independent
+    from AudioPacket.packet_id.  The only accepted range is the complete range
+    previously announced by ``response.audio.segment_done``.  This signal
+    describes logical client/device-buffer consumption, never acoustic output.
+    """
+    if not isinstance(branch, dict) or not isinstance(acknowledgement, dict):
+        return False
+    if acknowledgement.get("type") != "client_consumed_pcm":
+        return False
+    response_id = str(branch.get("response_id", ""))
+    segment_id = acknowledgement.get("speaker_segment_id")
+    generation_value = acknowledgement.get("generation_id")
+    start_sample = acknowledgement.get("start_sample")
+    end_sample = acknowledgement.get("end_sample")
+    sample_rate = acknowledgement.get("sample_rate")
+    sequence = acknowledgement.get("sequence")
+    if (
+        isinstance(generation_value, bool) or not isinstance(generation_value, int)
+        or isinstance(start_sample, bool) or not isinstance(start_sample, int)
+        or isinstance(end_sample, bool) or not isinstance(end_sample, int)
+        or isinstance(sample_rate, bool) or not isinstance(sample_rate, int)
+        or isinstance(sequence, bool) or not isinstance(sequence, int)
+    ):
+        return False
+    if (
+        not response_id
+        or acknowledgement.get("response_id") != response_id
+        or generation_value != branch.get("session_generation_id")
+        or not isinstance(segment_id, str)
+        or not segment_id
+        or acknowledgement.get("consumption_semantics") != "logical_client_device_buffer"
+        or start_sample < 0
+        or end_sample <= start_sample
+        or sample_rate != CODEC_SAMPLE_RATE
+        or sequence < 0
+        or sequence <= int(branch.get("client_consumed_pcm_sequence", -1))
+    ):
+        return False
+    segments = branch.get("playback_segments")
+    if not isinstance(segments, dict):
+        return False
+    segment = segments.get(segment_id)
+    if not isinstance(segment, dict):
+        return False
+    if (
+        segment.get("response_id") != response_id
+        or segment.get("generation_id") != generation_value
+        or segment.get("speaker_segment_id") != segment_id
+        or segment.get("sample_rate") != sample_rate
+        or segment.get("start_sample") != start_sample
+        or segment.get("end_sample") != end_sample
+        or segment.get("emitted_end_sample") != end_sample
+        or segment.get("done_emitted") is not True
+    ):
+        return False
+    completed = set(branch.get("client_consumed_segments", ()))
+    if segment_id in completed:
+        return False
+    if not _commit_client_consumed_segment(branch, segment_id):
+        return False
+    branch["client_consumed_pcm_sequence"] = sequence
+    branch["client_consumed_segments"] = tuple((*completed, segment_id))
+    branch.setdefault("client_consumed_pcm_events", []).append({
+        "response_id": response_id,
+        "generation_id": generation_value,
+        "speaker_segment_id": segment_id,
+        "start_sample": start_sample,
+        "end_sample": end_sample,
+        "sample_rate": sample_rate,
+        "sequence": sequence,
+        "consumption_semantics": "logical_client_device_buffer",
+    })
+    return True
+
+
+def _commit_client_consumed_segment(branch: dict[str, Any], segment_id: str) -> bool:
+    segments = branch.get("playback_segments")
+    segment = segments.get(segment_id) if isinstance(segments, dict) else None
+    if not isinstance(segment, dict):
+        return False
+    completed = set(branch.get("client_consumed_segments", ()))
+    if segment_id in completed:
+        return False
+    packets = tuple(segment.get("token_packets", ()))
+    cursor = int(branch.get(
+        "spoken_prefix_exclusive_cursor",
+        branch.get("spoken_prefix_base_cursor", branch.get("turn_start_cache_position", 0)),
+    ))
+    prefix_ids = list(int(value) for value in branch.get("spoken_prefix_token_ids", ()))
+    prefix_parts = list(branch.get("spoken_prefix_text_parts", ()))
+    for packet in packets:
+        if not isinstance(packet, dict):
+            return False
+        token_id = packet.get("token_id")
+        token_cursor = packet.get("exclusive_kv_cursor")
+        text_piece = packet.get("text_piece")
+        if (isinstance(token_id, bool) or not isinstance(token_id, int) or token_id < 0
+                or isinstance(token_cursor, bool) or not isinstance(token_cursor, int)
+                or token_cursor != cursor + 1 or not isinstance(text_piece, str)):
+            return False
+        prefix_ids.append(token_id)
+        prefix_parts.append(text_piece)
+        cursor = token_cursor
+    branch["spoken_prefix_token_ids"] = tuple(prefix_ids)
+    branch["spoken_prefix_exclusive_cursor"] = cursor
+    branch["spoken_prefix_text_parts"] = tuple(prefix_parts)
+    branch["spoken_prefix_text"] = "".join(prefix_parts)
+    branch["client_consumed_pcm_alignment"] = "complete_segment_only; intra_segment_alignment_missing"
+    branch.setdefault("client_consumed_pcm_metrics", {})["intra_segment_alignment_missing"] = True
+    return True
+
+
+def _record_emitted_pcm_packet(branch: dict[str, Any], packet: Any) -> None:
+    """Track exact server-emitted sample ranges per speaker subsegment."""
+    if not isinstance(branch, dict):
+        return
+    try:
+        response_id = str(branch["response_id"])
+        generation_id = int(branch["session_generation_id"])
+        segment_id = str(packet.speaker_segment_id)
+        packet_generation = int(packet.generation_id)
+        start_sample = int(packet.start_sample)
+        end_sample = int(packet.end_sample)
+        packet_id = int(packet.packet_id)
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("emitted PCM packet has no complete segment identity") from exc
+    if (
+        not response_id or not segment_id or packet_generation != generation_id
+        or start_sample < 0 or end_sample <= start_sample or packet_id < 0
+    ):
+        raise RuntimeError("emitted PCM packet has an invalid sample range or identity")
+    segments = branch.setdefault("playback_segments", {})
+    if not isinstance(segments, dict):
+        raise RuntimeError("playback segment registry is not a mapping")
+    segment = segments.setdefault(segment_id, {
+        "response_id": response_id,
+        "generation_id": generation_id,
+        "speaker_segment_id": segment_id,
+        "start_sample": start_sample,
+        "end_sample": None,
+        "emitted_end_sample": start_sample,
+        "sample_rate": CODEC_SAMPLE_RATE,
+        "done_emitted": False,
+        "token_packets": (),
+        "packet_ids": [],
+    })
+    if (
+        segment.get("response_id") != response_id
+        or segment.get("generation_id") != generation_id
+        or segment.get("speaker_segment_id") != segment_id
+        or segment.get("sample_rate") != CODEC_SAMPLE_RATE
+        or segment.get("done_emitted") is True
+        or start_sample != int(segment.get("emitted_end_sample", -1))
+    ):
+        raise RuntimeError("emitted PCM packet is stale, non-contiguous, or follows segment_done")
+    segment["emitted_end_sample"] = end_sample
+    segment["packet_ids"].append(packet_id)
+
+
+def _complete_client_pcm_segment(
+    branch: dict[str, Any],
+    *,
+    speaker_segment_id: str,
+    token_packets: Sequence[Mapping[str, Any]] = (),
+) -> dict[str, Any] | None:
+    """Close one emitted unit and return its wire marker with exact sample bounds."""
+    if not isinstance(branch, dict):
+        return None
+    segment_id = str(speaker_segment_id)
+    segments = branch.get("playback_segments")
+    segment = segments.get(segment_id) if isinstance(segments, dict) else None
+    if not isinstance(segment, dict) or segment.get("done_emitted") is True:
+        return None
+    start_sample = segment.get("start_sample")
+    end_sample = segment.get("emitted_end_sample")
+    generation_id = segment.get("generation_id")
+    response_id = segment.get("response_id")
+    if (
+        isinstance(start_sample, bool) or not isinstance(start_sample, int)
+        or isinstance(end_sample, bool) or not isinstance(end_sample, int)
+        or end_sample <= start_sample
+        or generation_id != branch.get("session_generation_id")
+        or response_id != branch.get("response_id")
+    ):
+        return None
+    owned_packets = tuple(dict(packet) for packet in token_packets)
+    segment.update({
+        "end_sample": end_sample,
+        "done_emitted": True,
+        "token_packets": owned_packets,
+    })
+    return {
+        "type": "response.audio.segment_done",
+        "response_id": str(response_id),
+        "generation_id": int(generation_id),
+        "speaker_segment_id": segment_id,
+        "start_sample": int(start_sample),
+        "end_sample": int(end_sample),
+        "sample_rate": CODEC_SAMPLE_RATE,
+    }
+
+
+def _require_closed_tts_codec_eos(metrics: Mapping[str, Any]) -> None:
+    """Require sampled codec EOS before a closed TTS unit can advance KV."""
+    if not isinstance(metrics, Mapping) or metrics.get("eos_detected") is not True:
+        raise RuntimeError("Qwen Talker closed-unit segment did not reach codec EOS")
+
+
+def _turn_local_vocalized_prefix_snapshot(branch: dict[str, Any]) -> tuple[int | None, str]:
+    lock = branch.get("spoken_prefix_lock")
+    if lock is None:
+        return None, str(branch.get("spoken_prefix_text", ""))
+    with lock:
+        position = branch.get("spoken_prefix_kv_position")
+        return (None if position is None else int(position), str(branch.get("spoken_prefix_text", "")))
 
 
 def _wait_for_listener_backlog_admission(
@@ -1549,6 +3042,223 @@ def _prepare_direct_audio_processor_inputs(
         if key in processor_audio_inputs
     }
     return ids, tensors, (time.perf_counter() - started) * 1000.0
+
+
+def _build_unified_listener_prefix_token_ids(
+    engine: Any,
+    session: DuplexSession,
+    *,
+    instruction_override: str | None = None,
+) -> tuple[int, ...]:
+    """Serialize the real session system/history/user-audio prefix through BOA.
+
+    This only uses the tokenizer and the processor's audio marker. It does not
+    call the audio processor, audio tower, or any cache forward.
+    """
+    tokenizer = getattr(engine, "tokenizer", None)
+    processor = getattr(getattr(engine, "_thinker_wrapper", None), "processor", None)
+    if tokenizer is None or not callable(getattr(tokenizer, "apply_chat_template", None)):
+        raise RuntimeError("unified listener prefix requires the loaded Gemma tokenizer")
+    if not callable(getattr(tokenizer, "encode", None)):
+        raise RuntimeError("unified listener prefix requires tokenizer.encode")
+    audio_marker = (
+        getattr(processor, "audio_token", None)
+        or getattr(tokenizer, "audio_token", None)
+        or "<|audio|>"
+    )
+    audio_marker = str(audio_marker).strip()
+    if not audio_marker:
+        raise RuntimeError("unified listener prefix requires the processor's audio marker")
+    history = [
+        dict(message)
+        for message in getattr(session, "history", ())
+        if isinstance(message, dict)
+        and message.get("role") in {"user", "assistant"}
+        and isinstance(message.get("content"), str)
+        and message["content"].strip()
+    ]
+    protocol = _require_unified_stable_audio_protocol(
+        _configured_audio_response_protocol(engine)
+    )
+    messages = build_audio_response_protocol_v2_messages(
+        history_messages=history,
+        audio_token=audio_marker,
+        session_instructions=(
+            getattr(session, "instructions", None)
+            if instruction_override is None
+            else instruction_override
+        ),
+    )
+
+    rendered = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=False,
+    )
+    token_ids = tokenizer.encode(str(rendered), add_special_tokens=False)
+    if hasattr(token_ids, "tolist"):
+        token_ids = token_ids.tolist()
+    if isinstance(token_ids, tuple):
+        token_ids = list(token_ids)
+    if not isinstance(token_ids, list) or (token_ids and isinstance(token_ids[0], list)):
+        raise TypeError("tokenizer.encode must return one flat token-ID sequence")
+    token_ids = [int(token_id) for token_id in token_ids]
+    marker_ids = tokenizer.encode(audio_marker, add_special_tokens=False)
+    if hasattr(marker_ids, "tolist"):
+        marker_ids = marker_ids.tolist()
+    if isinstance(marker_ids, tuple):
+        marker_ids = list(marker_ids)
+    if not isinstance(marker_ids, list) or len(marker_ids) != 1:
+        raise RuntimeError("processor audio marker must map to one tokenizer token")
+    marker_id = int(marker_ids[0])
+    marker_positions = [index for index, token_id in enumerate(token_ids) if token_id == marker_id]
+    if not marker_positions:
+        raise RuntimeError("chat template did not preserve the final user audio marker")
+    boa_token_id = getattr(getattr(session, "listener", None), "backend", None)
+    boa_token_id = getattr(boa_token_id, "boa_token_id", None)
+    if boa_token_id is None:
+        model_config = getattr(getattr(engine, "_thinker_wrapper", None), "config", None)
+        boa_token_id = getattr(model_config, "boa_token_id", None)
+    if isinstance(boa_token_id, bool) or not isinstance(boa_token_id, int) or boa_token_id < 0:
+        raise RuntimeError("unified listener prefix requires Gemma's configured BOA token ID")
+    prefix_ids = tuple(token_ids[:marker_positions[-1]] + [int(boa_token_id)])
+    if not 1 <= len(prefix_ids) <= NATIVE_CONTROL6_PREFIX_MAX_TOKENS:
+        raise RuntimeError(
+            "unified listener system/user/BOA prefix exceeds native prefix capacity: "
+            f"{len(prefix_ids)}>{NATIVE_CONTROL6_PREFIX_MAX_TOKENS}"
+        )
+    return prefix_ids
+
+
+def _unified_instruction_refresh_ineligible_reason(
+    session: DuplexSession,
+    binding: Mapping[str, Any],
+    dispatcher: Any,
+) -> str | None:
+    """Require a truly untouched frame-zero session before changing its text prefix."""
+    state = getattr(session, "listener_state", None)
+    if state is None:
+        return "unified listener state is unavailable"
+    if dispatcher is None or not callable(getattr(dispatcher, "has_pending_work", None)):
+        return "unified listener dispatcher is unavailable"
+    if binding.get("generation") is None or binding.get("batch_cache_position") is None:
+        return "unified listener generation or cache cursor is unavailable"
+
+    with session._generation_lock:
+        if session.active_response or session.policy_response_pending:
+            return "unified KV instructions can only change before an assistant turn starts"
+    with state._lock:
+        if (
+            int(state.next_frame_id) != 0
+            or int(state.listener_input_frames) != 0
+            or int(state.listener_state_version) != 0
+            or int(state.gemma_lm_audio_frames) != 0
+            or bool(state.semantic_audio_soft_history)
+        ):
+            return "unified KV instructions can only change before the first audio frame"
+    ingress = getattr(session, "audio_ingress", None)
+    stats_method = getattr(ingress, "stats", None)
+    if not callable(stats_method):
+        return "unified audio ingress state is unavailable"
+    ingress_stats = stats_method()
+    if not isinstance(ingress_stats, dict):
+        return "unified audio ingress state is unavailable"
+    if (
+        int(ingress_stats.get("input_samples_received", 0)) != 0
+        or int(ingress_stats.get("input_frames_enqueued", 0)) != 0
+        or int(getattr(ingress, "qsize", 0)) != 0
+        or int(getattr(ingress, "pending_samples", 0)) != 0
+    ):
+        return "unified KV instructions can only change before audio is admitted"
+    if dispatcher.has_pending_work(session.session_id):
+        return "unified KV instructions cannot change while a listener frame is pending"
+    return None
+
+
+async def _refresh_unified_prefix_for_instruction_update(
+    engine: Any,
+    session: DuplexSession,
+    *,
+    instructions: str,
+    worker: Any,
+    binding: dict[str, Any],
+    dispatcher: Any,
+) -> dict[str, Any]:
+    """Atomically replace a unified frame-zero prefix for a changed instruction."""
+    requested = str(instructions)
+    old_instructions = str(session.instructions)
+    if requested == old_instructions:
+        return {"status": "unchanged", "prefix_len": int(binding.get("batch_cache_position", 0))}
+    reason = _unified_instruction_refresh_ineligible_reason(session, binding, dispatcher)
+    if reason is not None:
+        raise ValueError(reason)
+    refresh = getattr(worker, "refresh_unified_prefix_before_audio", None)
+    if not callable(refresh):
+        raise RuntimeError("unified listener owner does not support instruction-prefix refresh")
+
+    with session._generation_lock:
+        if str(session.instructions) != old_instructions:
+            raise RuntimeError("session instructions changed while preparing the unified prefix")
+        old_revision = int(session.semantic_context_revision)
+        prefix_token_ids = _build_unified_listener_prefix_token_ids(
+            engine,
+            session,
+            instruction_override=requested,
+        )
+        prefix_import = make_unified_prefix_import(
+            session.listener.backend,
+            prefix_token_ids,
+        )
+        expected_generation_id = int(binding["generation"])
+        expected_cache_position = int(binding["batch_cache_position"])
+        if not session.update_instructions(requested):
+            raise RuntimeError("session instructions changed before prefix refresh")
+        new_revision = int(session.semantic_context_revision)
+
+    def rollback_instruction_revision() -> None:
+        with session._generation_lock:
+            if (
+                str(session.instructions) == requested
+                and int(session.semantic_context_revision) == new_revision
+            ):
+                session.instructions = old_instructions
+                session.semantic_context_revision = old_revision
+
+    def commit_prefix_binding() -> None:
+        binding["batch_cache_position"] = len(prefix_token_ids)
+        binding["semantic_prefix_importer"] = prefix_import
+
+    owner_future = None
+    try:
+        owner_future = asyncio.wrap_future(refresh(
+            session.session_id,
+            prefix_token_ids,
+            new_revision=new_revision,
+            expected_generation_id=expected_generation_id,
+            expected_cache_position=expected_cache_position,
+            prefix_import=prefix_import,
+        ))
+        await asyncio.shield(owner_future)
+    except asyncio.CancelledError:
+        if owner_future is None:
+            rollback_instruction_revision()
+            raise
+        try:
+            await asyncio.shield(owner_future)
+        except BaseException:
+            rollback_instruction_revision()
+            raise
+        commit_prefix_binding()
+        raise
+    except BaseException:
+        rollback_instruction_revision()
+        raise
+    commit_prefix_binding()
+    return {
+        "status": "refreshed",
+        "prefix_len": len(prefix_token_ids),
+        "revision": new_revision,
+    }
 
 
 def _apply_direct_replan_transaction(
@@ -2313,9 +4023,25 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
     # the app factory has no public production bypass switch.
     enforce_production_listener = bool(getattr(engine, "enforce_production_listener", True))
     listener_silence_skip_enabled = bool(getattr(engine, "enable_listener_silence_skip", False))
-    shared_listener_microbatch_enabled = (
+    unified_kv_enabled = _strict_env_switch(_UNIFIED_KV_ENABLED_ENV)
+    shared_listener_microbatch_enabled = unified_kv_enabled or (
         os.environ.get(_LISTENER_MICROBATCH_ENABLED_ENV, "0").strip() == "1"
     )
+    if unified_kv_enabled:
+        _require_unified_stable_audio_protocol(_configured_audio_response_protocol(engine))
+        # The unified path has one native cache owner. The legacy semantic
+        # shadow and fair listener handoff both create competing cache/lock
+        # paths, so close them before the shared worker is constructed.
+        os.environ[_SEMANTIC_SHADOW_ENABLED_ENV] = "0"
+        thinker_lock = getattr(engine, "_thinker_lock", None)
+        if hasattr(thinker_lock, "listener_pair_lock_handoff_enabled"):
+            thinker_lock.listener_pair_lock_handoff_enabled = False
+
+    def _native_semantic_prefix_enabled() -> bool:
+        return bool(
+            not unified_kv_enabled
+            and getattr(engine, "native_control6_semantic_prefix_enabled", True)
+        )
     inference_lock = threading.Lock()  # GPU model is single-stream by design.
     inference_execution_gate = _InferenceExecutionGate()
     engine_synthesis_owner = _EngineSynthesisOwner()
@@ -2366,7 +4092,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
             if waiting is not None:
                 waiting.clear()
 
-    def _shared_listener_batch(rows: tuple[SharedListenerInput, ...]):
+    def _shared_listener_batch_rows(rows: tuple[SharedListenerInput, ...]):
         worker = shared_listener_worker_holder.get("worker")
         if worker is None:
             raise RuntimeError("shared listener worker is not running")
@@ -2387,9 +4113,17 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     f"ingress/listener cursor mismatch for {row.session_id}: "
                     f"frame={frame.frame_id}, cursor={sess.listener_state.next_input_frame_id}"
                 )
+            policy_context_provider = binding.get("policy_context_provider")
+            policy_context = (
+                policy_context_provider(frame, row.tick)
+                if callable(policy_context_provider)
+                else None
+            )
+            if policy_context is not None:
+                row.tick._policy_prehead_context = policy_context
             if (
                 isinstance(sess.turn_policy, GemmaNativeControl6Policy)
-                and bool(getattr(engine, "native_control6_semantic_prefix_enabled", True))
+                and _native_semantic_prefix_enabled()
             ):
                 pending_provider = binding.get("pending_speak_provider")
                 pending_speak = pending_provider() if callable(pending_provider) else None
@@ -2427,6 +4161,29 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
             reference = sess.assistant_reference_buffer.visible_for(
                 listener_frame_id=int(frame.frame_id)
             )
+            logical_q_len = 2
+            ephemeral_reason = None
+            queue_audio_for_next_turn = False
+            if unified_kv_enabled:
+                with sess._generation_lock:
+                    # Pending policy is still an open user turn. Its frames
+                    # stay Q2 until the response opens the owner-side audio
+                    # queue and publishes active_response under the transition
+                    # lock below.
+                    assistant_turn_open = bool(sess.active_response)
+                    user_input_pending = bool(
+                        sess.pending_user_onset_frame_id is not None
+                        or sess.reserved_user_onset_frame_id is not None
+                    )
+                (
+                    logical_q_len,
+                    ephemeral_reason,
+                    queue_audio_for_next_turn,
+                ) = _unified_listener_frame_contract(
+                    frame.pcm,
+                    assistant_turn_open=assistant_turn_open,
+                    user_input_pending=user_input_pending,
+                )
             binding["references"][int(frame.frame_id)] = reference
             frames.append(ListenerFrame(
                 session_id=row.session_id,
@@ -2435,10 +4192,32 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                 frame_id=int(frame.frame_id),
                 ready_at_ns=int(frame.enqueue_ns),
                 pcm=frame.pcm,
+                logical_q_len=logical_q_len,
+                ephemeral_reason=ephemeral_reason,
+                queue_audio_for_next_turn=queue_audio_for_next_turn,
                 reference_pcm=None if reference is None else reference.pcm,
                 reference_frame_id=None if reference is None else int(reference.frame_id),
+                policy_context=policy_context,
             ))
         return worker.submit_tick(frames)
+
+    def _shared_listener_batch(rows: tuple[SharedListenerInput, ...]):
+        if not unified_kv_enabled or not rows:
+            return _shared_listener_batch_rows(rows)
+        locks_by_id: dict[int, Any] = {}
+        for row in rows:
+            binding = shared_listener_bindings.get(row.session_id)
+            lock = None if binding is None else binding.get("unified_turn_transition_lock")
+            if lock is not None:
+                locks_by_id[id(lock)] = lock
+        locks = [locks_by_id[key] for key in sorted(locks_by_id)]
+        for lock in locks:
+            lock.acquire()
+        try:
+            return _shared_listener_batch_rows(rows)
+        finally:
+            for lock in reversed(locks):
+                lock.release()
 
     def _shared_listener_row_result(
         row: SharedListenerInput,
@@ -2698,7 +4477,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
         """Recheck the frame-zero admission preconditions without CUDA work."""
         state = sess.listener_state
         ingress = sess.audio_ingress
-        if request.current_frame_id != 0 or request.replay_q4 or request.replay_frame_ids:
+        if request.current_frame_id != 0 or request.replay_q2 or request.replay_frame_ids:
             return "not_a_frame_zero_empty_history_request"
         with state._lock:
             if (
@@ -2758,7 +4537,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
             or dispatcher is None
             or worker is None
             or not isinstance(sess.turn_policy, GemmaNativeControl6Policy)
-            or not bool(getattr(engine, "native_control6_semantic_prefix_enabled", True))
+            or not _native_semantic_prefix_enabled()
         ):
             return result
 
@@ -2886,6 +4665,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
         *,
         record_scheduler_stage: Callable[[str, float | None], None],
         pending_speak_provider: Callable[[], dict[str, Any] | None] | None = None,
+        policy_context_provider: Callable[[Any, Any], Any | None] | None = None,
     ) -> None:
         async with shared_listener_lifecycle_lock:
             if sess.listener is None or sess.listener_state is None:
@@ -2895,9 +4675,16 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
             semantic_request_holder: dict[str, Any] = {"request": None}
             prefix_importer = None
             initial_cache_position = 34
-            if (
+            if unified_kv_enabled:
+                prefix_token_ids = _build_unified_listener_prefix_token_ids(engine, sess)
+                initial_cache_position = len(prefix_token_ids)
+                prefix_importer = make_unified_prefix_import(
+                    sess.listener.backend,
+                    prefix_token_ids,
+                )
+            elif (
                 isinstance(sess.turn_policy, GemmaNativeControl6Policy)
-                and bool(getattr(engine, "native_control6_semantic_prefix_enabled", True))
+                and _native_semantic_prefix_enabled()
             ):
                 initial_request = build_native_control6_semantic_prefix_request(
                     engine,
@@ -2925,9 +4712,8 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                         if isinstance(sess.turn_policy, GemmaNativeControl6Policy)
                         else None
                     ),
-                    semantic_prefix_enabled=bool(
-                        getattr(engine, "native_control6_semantic_prefix_enabled", True)
-                    ),
+                    semantic_prefix_enabled=_native_semantic_prefix_enabled(),
+                    unified_kv_enabled=unified_kv_enabled,
                 )
                 await asyncio.wrap_future(worker.start())
                 dispatcher = SharedListenerTickDispatcher(
@@ -2946,16 +4732,8 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                 sess.listener.backend, "_listener_microbatch_runtime_info", {}
             )
             if isinstance(sess.turn_policy, GemmaNativeControl6Policy):
-                if not isinstance(runtime_info, dict) or not runtime_info.get(
-                    "native_control6_raw_batch_scoring"
-                ):
-                    raise RuntimeError(
-                        "shared native Control6 requires its trained adapter in the batch runtime"
-                    )
-                if runtime_info.get("native_control6_checkpoint_path") != sess.turn_policy.checkpoint_path:
-                    raise RuntimeError(
-                        "shared Control6 sessions must use the batch scorer's loaded checkpoint"
-                    )
+                if not isinstance(runtime_info, dict) or runtime_info.get("stream_q_len") != 2:
+                    raise RuntimeError("shared native Control6 requires the Q=2 listener runtime")
             assert dispatcher is not None
             generation = 1  # stable for this listener state epoch; turn generations are separate
             semantic_request_holder["listener_generation_id"] = generation
@@ -3003,9 +4781,11 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                 "session": sess,
                 "generation": generation,
                 "batch_cache_position": int(initial_cache_position),
+                "unified_turn_transition_lock": threading.Lock(),
                 "references": {},
                 "record_scheduler_stage": record_scheduler_stage,
                 "pending_speak_provider": pending_speak_provider,
+                "policy_context_provider": policy_context_provider,
                 "semantic_request_holder": semantic_request_holder,
                 "semantic_prefix_importer": prefix_importer,
             }
@@ -3175,7 +4955,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
         if isinstance(policy, GemmaNativeControl6Policy):
             metadata = getattr(engine, "native_control6_semantic_prefix_metadata", None)
             prefix_enabled = bool(
-                getattr(engine, "native_control6_semantic_prefix_enabled", False)
+                _native_semantic_prefix_enabled()
                 and isinstance(metadata, dict)
                 and metadata.get("semantic_prefix_schema_version") == NATIVE_CONTROL6_PREFIX_SCHEMA_VERSION
                 and metadata.get("semantic_prefix_contract") == NATIVE_CONTROL6_PREFIX_CONTRACT
@@ -3413,8 +5193,53 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
         normalized_action = str(action).strip().upper() if action is not None else None
         direct_audio_pcm = request.get("_direct_audio_pcm")
         direct_audio = direct_audio_pcm is not None
+        audio_requested = "audio" in (request.get("modalities") or ["text"])
         response_protocol = _configured_audio_response_protocol(engine) if direct_audio else None
+        unified_native = bool(unified_kv_enabled and direct_audio)
+        unified_branch = request.get("_unified_native_branch") if unified_native else None
+        private_backchannel_active = bool(
+            unified_native
+            and normalized_action == ControlAction.BACKCHANNEL.value
+            and isinstance(unified_branch, dict)
+            and unified_branch.get("ephemeral_decode_handle") is not None
+        )
+        if unified_native and (
+            not isinstance(unified_branch, dict)
+            or not (
+                unified_branch.get("queue_open")
+                or unified_branch.get("ephemeral_decode_handle") is not None
+            )
+            or response_protocol != AUDIO_RESPONSE_PROTOCOL_V2
+        ):
+            raise RuntimeError("unified native direct-audio response lacks an open v2 cache branch")
         controller_guided_say = response_protocol == CONTROLLER_GUIDED_SAY_V1
+        live_say_active = bool(
+            controller_guided_say
+            and direct_audio
+            and audio_requested
+            and normalized_action in {
+                ControlAction.SPEAK.value,
+                ControlAction.BACKCHANNEL.value,
+            }
+        )
+        frame_residual_adapter = getattr(engine, "frame_residual_adapter", None)
+        frame_residual_enabled = bool(getattr(engine, "frame_residual_adapter_enabled", False))
+        frame_residual_candidate = bool(
+            frame_residual_enabled
+            and frame_residual_adapter is not None
+            and audio_requested
+            and normalized_action in {
+                ControlAction.SPEAK.value,
+                ControlAction.BACKCHANNEL.value,
+            }
+        )
+        live_v2_say_active = bool(
+            response_protocol == AUDIO_RESPONSE_PROTOCOL_V2
+            and unified_native
+            and direct_audio
+            and audio_requested
+            and normalized_action == ControlAction.SPEAK.value
+        )
         v9_conditioning_source = getattr(engine, "v9_conditioning_source", "live_generated")
         if v9_conditioning_source == "audio_prefill_frame_raw" and not controller_guided_say:
             raise RuntimeError(
@@ -3476,7 +5301,15 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
             prompt_messages[1:1] = auxiliary_system_messages
         processor_audio_inputs = None
         audio_prepare_ms = 0.0
-        if direct_audio:
+        if unified_native:
+            ids = list(
+                _build_unified_backchannel_response_suffix(engine, sess)
+                if private_backchannel_active
+                else _build_unified_audio_response_suffix(engine, sess)
+            )
+            processor_audio_inputs = None
+            audio_prepare_ms = 0.0
+        elif direct_audio:
             ids, processor_audio_inputs, audio_prepare_ms = _prepare_direct_audio_processor_inputs(
                 engine,
                 language=request.get("language") or sess.language,
@@ -3497,6 +5330,376 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
             chat = _append_native_action_token(chat, normalized_action)
             ids = engine.tokenizer(chat, return_tensors="pt")["input_ids"][0].tolist()
         cond = _resolve_request_voice_conditioning(engine, sess, request)
+        live_say_stream: Any | None = None
+        live_say_thread: threading.Thread | None = None
+        live_say_thread_lock = threading.Lock()
+        live_say_cancel = threading.Event()
+        live_tts_unit_assembler: SpokenTextUnitAssembler | None = None
+        live_tts_unit_queue: queue.Queue[Any] | None = None
+        live_tts_unit_sentinel = object()
+        live_tts_unit_metrics: list[dict[str, Any]] = []
+        live_tts_unit_wavs: list[np.ndarray] = []
+        live_tts_visible_text_parts: list[str] = []
+        live_tts_active_stream: dict[str, TurnLocalQwenSayStream | None] = {"value": None}
+        live_say_eos_text_id: int | None = None
+        live_say_result: dict[str, Any] = {}
+        live_say_timing: dict[str, int | None] = {
+            "consumer_started_at_ns": None,
+            "thinker_returned_at_ns": None,
+        }
+        thinker_first_token_id: int | None = None
+        live_say_tokenizer = None
+        if live_say_active or live_v2_say_active:
+            talker_wrapper = getattr(engine, "talker", None)
+            processor = getattr(talker_wrapper, "proc", None)
+            live_say_tokenizer = getattr(processor, "tokenizer", None)
+            eos_text_id = getattr(getattr(talker_wrapper, "cfg", None), "tts_eos_token_id", None)
+            if live_say_tokenizer is None or (live_say_active and processor is None):
+                raise RuntimeError("live controller-guided SAY requires native Qwen tokenizer and processor")
+            if isinstance(eos_text_id, bool) or not isinstance(eos_text_id, int):
+                raise RuntimeError("live controller-guided SAY requires native Qwen text EOS token id")
+            live_say_eos_text_id = int(eos_text_id)
+            if live_say_active:
+                live_say_stream = LiveQwenSayStream(
+                    qwen_tokenizer=live_say_tokenizer,
+                    qwen_processor=processor,
+                    text_eos_token_id=eos_text_id,
+                    max_tokens=ARIA_MAX_FRAMES,
+                    queue_capacity=16,
+                )
+            elif live_v2_say_active:
+                live_tts_unit_assembler = SpokenTextUnitAssembler(max_words=2)
+                live_tts_unit_queue = queue.Queue(maxsize=2)
+
+            def live_say_talker_worker() -> None:
+                try:
+                    if live_v2_say_active:
+                        if live_tts_unit_queue is None or live_say_tokenizer is None:
+                            raise RuntimeError("closed-unit Qwen worker is not initialized")
+                        live_say_timing["consumer_started_at_ns"] = time.perf_counter_ns()
+                        while not live_say_cancel.is_set():
+                            try:
+                                unit_item = live_tts_unit_queue.get(timeout=0.05)
+                            except queue.Empty:
+                                continue
+                            if unit_item is live_tts_unit_sentinel:
+                                break
+                            if not isinstance(unit_item, SpokenTextUnit):
+                                raise TypeError("closed-unit queue contains a non-SpokenTextUnit item")
+                            unit = unit_item
+                            unit_index = len(live_tts_unit_metrics)
+                            unit_segment_id = (
+                                str(request.get("_generation_token").speaker_segment_id)
+                                if unit_index == 0 and request.get("_generation_token") is not None
+                                else f"{request.get('_generation_token').speaker_segment_id}.tts{unit_index}"
+                            )
+                            begin_segment = request.get("_begin_audio_segment")
+                            finish_segment = request.get("_finish_audio_segment")
+                            if not callable(begin_segment) or not callable(finish_segment):
+                                raise RuntimeError("closed TTS unit lacks audio segment callbacks")
+                            if unit_index:
+                                sess.speech_fifo.begin_segment(generation_id=int(generation_id))
+                            begin_segment(unit_segment_id)
+                            unit_stream = TurnLocalQwenSayStream(
+                                qwen_tokenizer=live_say_tokenizer,
+                                text_eos_token_id=int(live_say_eos_text_id),
+                                fifo=sess.speech_fifo,
+                                generation_id=int(generation_id),
+                                max_tokens=ARIA_MAX_FRAMES,
+                                on_packet_consumed=lambda cursor, text: (
+                                    unified_branch.update({
+                                        "qwen_forward_ack_exclusive_cursor": int(cursor),
+                                        "qwen_forward_ack_text": str(text),
+                                    })
+                                    if isinstance(unified_branch, dict) else None
+                                ),
+                            )
+                            live_tts_active_stream["value"] = unit_stream
+                            unit_feed_error: list[BaseException] = []
+
+                            def feed_closed_unit() -> None:
+                                try:
+                                    for packet in unit.token_packets:
+                                        unit_stream.feed_packet(
+                                            packet,
+                                            stop_check=lambda: bool(
+                                                live_say_cancel.is_set()
+                                                or sess.stop_requested
+                                                or (
+                                                    request.get("_stop_check")
+                                                    and request["_stop_check"]()
+                                                )
+                                            ),
+                                        )
+                                    unit_stream.finish(final_text=unit.text)
+                                except BaseException as exc:
+                                    unit_feed_error.append(exc)
+                                    unit_stream.fail(exc)
+
+                            feed_thread = threading.Thread(
+                                target=feed_closed_unit,
+                                name=f"closed-say-feed-{unit_index}",
+                                daemon=True,
+                            )
+                            feed_thread.start()
+                            try:
+                                initial_token = unit_stream.take_initial_token(
+                                    stop_check=lambda: bool(
+                                        live_say_cancel.is_set()
+                                        or sess.stop_requested
+                                        or (
+                                            request.get("_stop_check")
+                                            and request["_stop_check"]()
+                                        )
+                                    ),
+                                )
+                            except BaseException:
+                                unit_stream.cancel()
+                                feed_thread.join(timeout=2.0)
+                                raise
+                            unit_metrics: dict[str, Any] = {
+                                "unit_index": unit_index,
+                                "speaker_segment_id": unit_segment_id,
+                                "text": unit.text,
+                                "source_token_ids": list(unit.token_ids),
+                                "exclusive_kv_cursor": int(unit.exclusive_kv_cursor),
+                                "started_at_ns": time.perf_counter_ns(),
+                            }
+                            h_pfx = torch.empty((1, 0, 2048), device=engine.device, dtype=engine.dtype)
+                            talker_kwargs: dict[str, Any] = {
+                                "n_words": max(1, len(unit.text.split())),
+                                "voice_conditioning": cond,
+                                "stop_check": lambda: bool(
+                                    live_say_cancel.is_set()
+                                    or sess.stop_requested
+                                    or (request.get("_stop_check") and request["_stop_check"]())
+                                ),
+                                "state": sess,
+                                "on_audio_chunk": request.get("_on_audio_chunk"),
+                                "generation_id": generation_id,
+                                "talk_context": request.get("_talk_context"),
+                                "metrics": unit_metrics,
+                                "listener_admission_wait": listener_admission_wait,
+                                "raw_text_token_ids": [int(initial_token.token_id)],
+                                "include_text_eos": False,
+                                "live_qwen_text_stream": unit_stream,
+                                "max_frames": ARIA_BACKCHANNEL_MAX_FRAMES if normalized_action == ControlAction.BACKCHANNEL.value else ARIA_MAX_FRAMES,
+                            }
+                            if frame_residual_candidate:
+                                talker_kwargs["live_frame_residual_hidden_stream"] = unit_stream
+                                talker_kwargs["frame_residual_response_hidden"] = None
+                            if normalized_action == ControlAction.BACKCHANNEL.value:
+                                talker_kwargs["min_frames"] = 2
+                            try:
+                                with _diagnostic_talker_rng_scope(engine):
+                                    wav = engine.talk(unit.text, h_pfx, **talker_kwargs)
+                            except BaseException as exc:
+                                unit_stream.fail(exc)
+                                feed_thread.join(timeout=2.0)
+                                raise
+                            feed_thread.join(timeout=5.0)
+                            if feed_thread.is_alive():
+                                unit_stream.cancel()
+                                feed_thread.join(timeout=2.0)
+                                raise RuntimeError(
+                                    "closed TTS unit producer remained blocked after Talker completion"
+                                )
+                            if unit_feed_error:
+                                raise unit_feed_error[0]
+                            unit_metrics["ended_at_ns"] = time.perf_counter_ns()
+                            if live_say_cancel.is_set() or sess.stop_requested:
+                                unit_stream.cancel()
+                                break
+                            if not unit_stream.codec_eos_allowed:
+                                raise RuntimeError(
+                                    "Qwen Talker ended before text EOS, codec EOS, and closed-unit drain"
+                                )
+                            # ``codec_eos_allowed`` only says that the source
+                            # text stream sent EOS and drained.  It does not
+                            # prove that the Talker sampled its codec EOS:
+                            # reaching the acoustic frame budget can return a
+                            # normal WAV without a terminal codec token.  A
+                            # segment marker advances the canonical Gemma KV
+                            # watermark, so only the Talker's explicit EOS
+                            # metric is sufficient ownership evidence.
+                            _require_closed_tts_codec_eos(unit_metrics)
+                            source_tokens = tuple({
+                                "token_id": int(source.token_id),
+                                "exclusive_kv_cursor": int(source.exclusive_kv_cursor),
+                                "text_piece": str(source.text_piece),
+                            } for source in unit.source_tokens)
+                            finish_segment(unit_segment_id, source_tokens)
+                            live_tts_active_stream["value"] = None
+                            live_tts_unit_metrics.append(unit_metrics)
+                            if isinstance(wav, np.ndarray) and wav.size:
+                                live_tts_unit_wavs.append(np.asarray(wav, dtype=np.float32).reshape(-1))
+                        live_say_result.update({
+                            "wav": (
+                                np.concatenate(live_tts_unit_wavs)
+                                if live_tts_unit_wavs else np.zeros(0, dtype=np.float32)
+                            ),
+                            "metrics": {
+                                "closed_tts_unit_count": len(live_tts_unit_metrics),
+                                "closed_tts_units": [dict(row) for row in live_tts_unit_metrics],
+                                "unit_boundary_policy": "max_2_words_at_original_gemma_token_boundary",
+                                "unit_text_eos_and_codec_drain": True,
+                                "live_qwen_token_cursor_start": 1,
+                                "live_qwen_text_eos_consumed": bool(
+                                    live_tts_unit_metrics
+                                    and all(bool(row.get("eos_detected")) for row in live_tts_unit_metrics)
+                                ),
+                                "response_wav_concatenated_from_closed_units": True,
+                            },
+                        })
+                        return
+
+                    assert live_say_stream is not None
+                    live_say_timing["consumer_started_at_ns"] = time.perf_counter_ns()
+                    initial_token = live_say_stream.take_initial_token(
+                        stop_check=lambda: bool(
+                            live_say_cancel.is_set()
+                            or sess.stop_requested
+                            or (request.get("_stop_check") and request["_stop_check"]())
+                        ),
+                    )
+                    talker_metrics: dict[str, Any] = {}
+                    h_pfx = torch.empty((1, 0, 2048), device=engine.device, dtype=engine.dtype)
+                    prefill_text = live_say_stream.visible_text
+                    if not prefill_text:
+                        raise RuntimeError("live Qwen token 0 was published without visible SAY text")
+                    talker_kwargs: dict[str, Any] = {
+                        "n_words": 1,
+                        "voice_conditioning": cond,
+                        "stop_check": lambda: bool(
+                            live_say_cancel.is_set()
+                            or sess.stop_requested
+                            or (request.get("_stop_check") and request["_stop_check"]())
+                        ),
+                        "state": sess,
+                        "on_audio_chunk": request.get("_on_audio_chunk"),
+                        "generation_id": generation_id,
+                        "talk_context": request.get("_talk_context"),
+                        "metrics": talker_metrics,
+                        "listener_admission_wait": listener_admission_wait,
+                        "raw_text_token_ids": [int(initial_token.token_id)],
+                        "include_text_eos": False,
+                        "live_qwen_text_stream": live_say_stream,
+                        "max_frames": (
+                            ARIA_BACKCHANNEL_MAX_FRAMES
+                            if normalized_action == ControlAction.BACKCHANNEL.value
+                            else ARIA_MAX_FRAMES
+                        ),
+                    }
+                    if frame_residual_candidate:
+                        talker_kwargs["live_frame_residual_hidden_stream"] = live_say_stream
+                        talker_kwargs["frame_residual_response_hidden"] = None
+                    if normalized_action == ControlAction.BACKCHANNEL.value:
+                        talker_kwargs["min_frames"] = 2
+                    with _diagnostic_talker_rng_scope(engine):
+                        wav = engine.talk(prefill_text, h_pfx, **talker_kwargs)
+                    if not live_say_stream.codec_eos_allowed and not live_say_cancel.is_set():
+                        raise RuntimeError("live Qwen Talker ended before native text EOS and tail drain")
+                    live_say_result.update({"wav": wav, "metrics": talker_metrics})
+                    if live_say_cancel.is_set():
+                        live_say_stream.cancel()
+                except BaseException as exc:
+                    active_stream = live_tts_active_stream.get("value")
+                    if live_say_cancel.is_set() or sess.stop_requested:
+                        if active_stream is not None:
+                            active_stream.cancel()
+                        return
+                    live_say_result["error"] = exc
+                    live_say_cancel.set()
+                    if active_stream is not None:
+                        active_stream.fail(exc)
+                    elif live_say_stream is not None:
+                        live_say_stream.fail(exc)
+                    elif live_v2_say_active:
+                        sess.speech_fifo.clear()
+
+            def start_live_say_talker() -> None:
+                nonlocal live_say_thread
+                with live_say_thread_lock:
+                    if live_say_thread is not None:
+                        return
+                    live_say_thread = threading.Thread(
+                        target=live_say_talker_worker,
+                        name=f"controller-guided-say-{getattr(sess, 'session_id', 'session')}",
+                        daemon=True,
+                    )
+                    live_say_thread.start()
+
+            def enqueue_live_v2_unit(unit: SpokenTextUnit) -> None:
+                if live_tts_unit_queue is None:
+                    raise RuntimeError("closed TTS unit queue is unavailable")
+                while True:
+                    if live_say_cancel.is_set() or sess.stop_requested:
+                        raise RuntimeError("closed TTS unit enqueue cancelled")
+                    if request.get("_stop_check") and request["_stop_check"]():
+                        raise RuntimeError("closed TTS unit enqueue lost its response generation")
+                    try:
+                        live_tts_unit_queue.put(unit, timeout=0.05)
+                        break
+                    except queue.Full:
+                        continue
+                start_live_say_talker()
+
+            def finish_live_v2_units() -> None:
+                if live_tts_unit_assembler is None or live_tts_unit_queue is None:
+                    raise RuntimeError("closed TTS unit assembler is unavailable")
+                for unit in live_tts_unit_assembler.finish():
+                    enqueue_live_v2_unit(unit)
+                if live_say_thread is None:
+                    if live_tts_unit_queue.empty():
+                        return
+                    start_live_say_talker()
+                while True:
+                    try:
+                        live_tts_unit_queue.put(live_tts_unit_sentinel, timeout=0.05)
+                        break
+                    except queue.Full:
+                        if live_say_cancel.is_set():
+                            return
+                if live_say_thread is not None:
+                    live_say_thread.join()
+                    if live_say_thread.is_alive():
+                        raise RuntimeError("closed TTS unit worker did not stop after EOS")
+
+            def cancel_live_v2_units(error: BaseException | None = None) -> None:
+                live_say_cancel.set()
+                if error is not None and live_tts_active_stream.get("value") is not None:
+                    live_tts_active_stream["value"].fail(error)
+                else:
+                    sess.speech_fifo.clear()
+                if live_tts_unit_queue is not None:
+                    while True:
+                        try:
+                            live_tts_unit_queue.get_nowait()
+                        except queue.Empty:
+                            break
+                    try:
+                        live_tts_unit_queue.put_nowait(live_tts_unit_sentinel)
+                    except queue.Full:
+                        pass
+                # Cancellation is a fence, not a synchronous drain: a YIELD
+                # must return control without waiting for the Talker lease.
+                # FIFO clear wakes a blocked unit producer; generation checks
+                # reject any late PCM callback from the daemon worker.
+
+            def live_say_generated_token(
+                _token_index: int,
+                _token_id: int,
+                token_text: str,
+                token_hidden: Any,
+            ) -> None:
+                nonlocal thinker_first_token_id
+                if thinker_first_token_id is None:
+                    thinker_first_token_id = int(_token_id)
+                assert live_say_stream is not None
+                live_say_stream.feed_piece(token_text, token_hidden)
+                if token_text and live_say_stream.visible_text:
+                    start_live_say_talker()
+
         diagnostic_talker_seed = getattr(engine, "diagnostic_talker_seed", None)
         streamed_audio: list[np.ndarray] = []
         duplex_realtime = bool(request.get("_duplex_realtime"))
@@ -3513,7 +5716,11 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                 allowed_actions=response_allowed_actions,
                 backchannel_say_phrases=backchannel_say_phrases,
             )
-            if direct_audio and response_protocol == AUDIO_RESPONSE_PROTOCOL_V2
+            if (
+                direct_audio
+                and response_protocol == AUDIO_RESPONSE_PROTOCOL_V2
+                and not private_backchannel_active
+            )
             else None
         )
         response_v2_action_constraint = (
@@ -3525,6 +5732,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
             )
             if response_v2_collector is not None else None
         )
+        live_v2_token_pacer = GemmaTokenTickPacer() if live_v2_say_active else None
         runtime_callback = request.get("_runtime_metrics_callback")
         held_marker_suffix = ""
         raw_stream_text: list[str] = []
@@ -3570,6 +5778,9 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
 
         think_kwargs: dict[str, Any] = {
             "max_new_tokens": (
+                2
+                if private_backchannel_active
+                else
                 AUDIO_RESPONSE_V2_MAX_NEW_TOKENS
                 if response_v2_collector is not None
                 else int(request.get("max_tokens", 64))
@@ -3620,9 +5831,16 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                 _token_index: int,
                 _token_id: int,
                 token_text: str,
-                _token_hidden: Any,
+                token_hidden: Any,
             ) -> tuple[int, str] | None:
                 controller_backchannel_text.append(str(token_text))
+                if live_say_active:
+                    live_say_generated_token(
+                        _token_index,
+                        _token_id,
+                        token_text,
+                        token_hidden,
+                    )
                 if controller_backchannel_should_stop("".join(controller_backchannel_text)):
                     return controller_backchannel_eos_id, "structure"
                 return None
@@ -3650,6 +5868,8 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
             think_kwargs["on_generated_token"] = controller_backchannel_generated_token
             think_kwargs["on_candidate_token"] = controller_backchannel_candidate
             think_kwargs["on_candidate_fallback"] = controller_backchannel_fallback
+        elif live_say_active:
+            think_kwargs["on_generated_token"] = live_say_generated_token
         v9_dual_audio_context_enabled = bool(
             response_v2_collector is not None
             and getattr(engine, "v9_dual_audio_context_experimental", False)
@@ -3715,19 +5935,22 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     return None
                 return response_v2_action_constraint.initial_token_id()
 
-            def collect_v2_token(
+            def collect_v2_token_core(
                 token_index: int,
                 token_id: int,
                 token_text: str,
                 token_hidden: Any,
-            ) -> int | tuple[int, str] | None:
+            ) -> tuple[int | tuple[int, str] | None, str]:
+                nonlocal thinker_first_token_id
+                if thinker_first_token_id is None:
+                    thinker_first_token_id = int(token_id)
                 if (
                     (generation_id is not None and not sess.is_generation_current(generation_id=generation_id))
                     or (request.get("_stop_check") and request["_stop_check"]())
                 ):
                     response_v2_collector.cancel()
-                    return None
-                response_v2_collector.feed_token(
+                    return None, ""
+                visible_say_delta = response_v2_collector.feed_token(
                     token_index=token_index,
                     token_id=token_id,
                     text=token_text,
@@ -3736,11 +5959,90 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                 assert response_v2_action_constraint is not None
                 forced_id = response_v2_action_constraint.next_token_id(response_v2_collector)
                 if forced_id is None:
-                    return None
-                return forced_id, str(response_v2_action_constraint.last_forced_kind or "structure")
+                    return None, visible_say_delta
+                return (
+                    forced_id,
+                    str(response_v2_action_constraint.last_forced_kind or "structure"),
+                ), visible_say_delta
+
+            def collect_v2_token(
+                token_index: int,
+                token_id: int,
+                token_text: str,
+                token_hidden: Any,
+            ) -> int | tuple[int, str] | None:
+                forced, _visible_say_delta = collect_v2_token_core(
+                    token_index, token_id, token_text, token_hidden
+                )
+                return forced
+
+            async def collect_v2_token_live(
+                token_index: int,
+                token_id: int,
+                token_text: str,
+                token_hidden: Any,
+            ) -> int | tuple[int, str] | None:
+                assert live_v2_token_pacer is not None
+                await live_v2_token_pacer.acquire(
+                    stop_check=lambda: bool(
+                        (generation_id is not None and not sess.is_generation_current(generation_id=generation_id))
+                        or (request.get("_stop_check") and request["_stop_check"]())
+                    )
+                )
+                forced, visible_say_delta = collect_v2_token_core(
+                    token_index, token_id, token_text, token_hidden
+                )
+                action = response_v2_collector.parser.action
+                if live_v2_say_active:
+                    if not isinstance(unified_branch, dict):
+                        raise RuntimeError("live v2 SAY richiede l'owner unified KV del turno")
+                    if live_tts_unit_assembler is None:
+                        raise RuntimeError("live v2 SAY lacks its closed-unit assembler")
+                    exclusive_kv_cursor = int(unified_branch["cache_position"])
+                    source_text = (
+                        str(visible_say_delta)
+                        if action in {ControlAction.SPEAK.value, ControlAction.BACKCHANNEL.value}
+                        else ""
+                    )
+                    if source_text:
+                        live_tts_visible_text_parts.append(source_text)
+                    speech_packet: SpokenTokenPacket | None = None
+                    if source_text:
+                        hidden = token_hidden
+                        if not isinstance(hidden, torch.Tensor):
+                            raise TypeError("Gemma v2 post-token hidden deve essere Tensor")
+                        if hidden.ndim == 3 and tuple(hidden.shape[:2]) == (1, 1):
+                            hidden = hidden[:, 0, :]
+                        if tuple(hidden.shape) != (1, 1536):
+                            raise ValueError(
+                                f"Gemma v2 post-token hidden shape non valida: {tuple(hidden.shape)}"
+                            )
+                        speech_packet = SpokenTokenPacket(
+                            token_id=int(token_id),
+                            text_piece=source_text,
+                            gemma_hidden_1536=hidden,
+                            exclusive_kv_cursor=exclusive_kv_cursor,
+                        )
+                        with unified_branch["spoken_prefix_lock"]:
+                            unified_branch["segment_token_packets"].append({
+                                "token_id": int(token_id),
+                                "exclusive_kv_cursor": exclusive_kv_cursor,
+                                "text_piece": source_text,
+                            })
+                    completed_units = live_tts_unit_assembler.push_source(
+                        token_id=int(token_id),
+                        exclusive_kv_cursor=exclusive_kv_cursor,
+                        text_piece=source_text,
+                        speech_packet=speech_packet,
+                    )
+                    for unit in completed_units:
+                        await asyncio.to_thread(enqueue_live_v2_unit, unit)
+                return forced
 
             think_kwargs["on_generation_start"] = start_v2_generation
-            think_kwargs["on_generated_token"] = collect_v2_token
+            think_kwargs["on_generated_token"] = (
+                collect_v2_token_live if live_v2_say_active else collect_v2_token
+            )
             if (
                 normalized_action == ControlAction.BACKCHANNEL.value
                 and _claim_audio_response_v2_action_probe()
@@ -3825,8 +6127,37 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                 return None
 
             think_kwargs["on_candidate_fallback"] = fallback_v2_candidate
+
+        def stop_live_say_worker(error: BaseException | None = None) -> None:
+            if live_v2_say_active:
+                cancel_live_v2_units(error)
+                return
+            if live_say_stream is None:
+                return
+            live_say_cancel.set()
+            if error is None:
+                live_say_stream.cancel()
+            else:
+                live_say_stream.fail(error)
+            if live_say_thread is not None and live_say_thread.is_alive():
+                live_say_thread.join(timeout=2.0)
+                if live_say_thread.is_alive():
+                    raise RuntimeError("live SAY worker did not stop within the bounded join")
+
         try:
-            think = engine.think(ids, **think_kwargs)
+            if unified_native:
+                think = _run_unified_native_thinker(
+                    engine,
+                    sess,
+                    request,
+                    worker=unified_branch["worker"],
+                    transition_token_ids=tuple(int(value) for value in ids),
+                    think_kwargs=think_kwargs,
+                    generation_id=(int(generation_id) if generation_id is not None else None),
+                    branch=unified_branch,
+                )
+            else:
+                think = engine.think(ids, **think_kwargs)
         except Exception as exc:
             empty_eos_think = (
                 _empty_controller_say_think_from_eos(exc, prompt_len=len(ids))
@@ -3835,6 +6166,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
             if empty_eos_think is not None:
                 think = empty_eos_think
             else:
+                stop_live_say_worker(exc)
                 if response_v2_collector is not None:
                     reason = (
                         exc.reason if isinstance(exc, AudioResponseProtocolError)
@@ -3870,9 +6202,43 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                             reason,
                         )
                 raise
+        if live_say_stream is not None:
+            live_say_timing["thinker_returned_at_ns"] = time.perf_counter_ns()
+        if live_say_active:
+            if think.get("cancelled"):
+                stop_live_say_worker()
+            elif think.get("terminal_reason") != "eos":
+                incomplete = RuntimeError(
+                    "controller-guided live SAY requires Thinker EOS before Qwen text flush"
+                )
+                stop_live_say_worker(incomplete)
+                raise incomplete
+            else:
+                try:
+                    final_callback_text = re.sub(
+                        r"\s*<unused\d+>\s*", " ", str(think.get("text", ""))
+                    )
+                    final_callback_text = re.sub(r"[ \t]+", " ", final_callback_text).strip()
+                    if final_callback_text.strip():
+                        live_say_stream.finish(final_text=final_callback_text)
+                        if live_say_thread is not None:
+                            live_say_thread.join()
+                        if "error" in live_say_result:
+                            raise live_say_result["error"]
+                    else:
+                        stop_live_say_worker()
+                except BaseException as exc:
+                    stop_live_say_worker(exc)
+                    raise
         runtime_metrics: dict[str, Any] = {
             "thinker": dict(think.get("runtime_metrics", {})),
         }
+        if controller_guided_say:
+            runtime_metrics["heard_transcript"] = {
+                "status": "absent_from_controller_guided_say_v1",
+                "source": None,
+                "note": "this response protocol does not generate an ASR transcript",
+            }
         if response_v2_collector is not None and "action_pool_fallbacks" in locals():
             action_pool_overrides = min(
                 int(action_pool_fallbacks[0]),
@@ -3906,6 +6272,19 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
         response_action_value: str | None = None
         frame_residual_response_hidden: torch.Tensor | None = None
         frame_residual_alignment_metrics: dict[str, Any] | None = None
+        if private_backchannel_active:
+            generated_ids = think.get("gen_ids")
+            if not isinstance(generated_ids, (tuple, list)) or len(generated_ids) > 2:
+                raise RuntimeError("private backchannel exceeded its two sampled-token budget")
+            response_action_value = ControlAction.BACKCHANNEL.value
+            response_prompt_len = 0
+            runtime_metrics["private_backchannel_decode"] = {
+                "status": "decoded",
+                "forked_native_kv": True,
+                "generated_token_ids": [int(value) for value in generated_ids],
+                "sampled_text_token_limit": 2,
+                "canonical_listener_mutated": False,
+            }
 
         def empty_vocal_say_result() -> dict[str, Any]:
             no_speech_metrics = {
@@ -3959,7 +6338,20 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
             generated_text = re.sub(r"\s*<unused\d+>\s*", " ", generated_text)
             generated_text = re.sub(r"[ \t]+", " ", generated_text).strip()
             generated_say_hidden_tokens = int(response_hidden.shape[1])
-            if bool(getattr(engine, "frame_residual_adapter_enabled", False)):
+            if live_say_active and frame_residual_candidate:
+                frame_residual_alignment_metrics = {
+                    "source": "same_forward_live_gemma_hidden",
+                    "source_protocol": CONTROLLER_GUIDED_SAY_V1,
+                    "response_action": normalized_action,
+                    "qwen_raw_text_tokens": int(
+                        live_say_stream.observed_qwen_token_count
+                        if live_say_stream is not None else 0
+                    ),
+                    "alignment": "causal_character_overlap_mean",
+                    "qwen_route": "plain_native_audio_q1",
+                    "qwen_prefix_slots_added": 0,
+                }
+            elif bool(getattr(engine, "frame_residual_adapter_enabled", False)):
                 special_ids = {int(token_id) for token_id in (getattr(engine.tokenizer, "all_special_ids", ()) or ())} | set(range(256000, 256007))
                 visible_generated_ids = [int(token_id) for token_id in generated_ids if int(token_id) not in special_ids]
                 processor = getattr(getattr(engine, "talker", None), "proc", None)
@@ -3983,6 +6375,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                 )
                 controller_metrics = {
                     "response_protocol": CONTROLLER_GUIDED_SAY_V1,
+                    "first_thinker_token_id": thinker_first_token_id,
                     "status": "backchannel_say_accepted" if backchannel_ok else "backchannel_say_rejected",
                     "wake_action": normalized_action,
                     "response_action": response_action_value,
@@ -4021,6 +6414,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                 response_hidden, response_prompt_len, replay_metrics = replay_result
             controller_metrics = {
                 "response_protocol": CONTROLLER_GUIDED_SAY_V1,
+                "first_thinker_token_id": thinker_first_token_id,
                 "status": "controller_action_fixed",
                 "wake_action": normalized_action,
                 "response_action": response_action_value,
@@ -4062,6 +6456,8 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                 or (generation_id is not None and not sess.is_generation_current(generation_id=generation_id))
                 or (request.get("_stop_check") and request["_stop_check"]())
             ):
+                if live_v2_say_active:
+                    stop_live_say_worker()
                 response_v2_collector.cancel()
                 return {
                     "text": "", "tool_calls": [], "wav": None, "elapsed": 0.0,
@@ -4077,6 +6473,8 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                 )
                 response_action_value = str(parsed_response["action"])
             except AudioResponseProtocolError as exc:
+                if live_v2_say_active:
+                    stop_live_say_worker(exc)
                 _record_audio_response_v2_private_failure(
                     collector=response_v2_collector,
                     reason=exc.reason,
@@ -4090,6 +6488,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                 response_v2_collector.cancel()
                 protocol_metrics = {
                     "response_protocol": AUDIO_RESPONSE_PROTOCOL_V2,
+                    "first_thinker_token_id": thinker_first_token_id,
                     "status": "rejected",
                     "failure_reason": exc.reason,
                 }
@@ -4111,8 +6510,11 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     bool(response_v2_collector.heard_truncated),
                 )
             if parsed_disposition == "deferred_until_endpoint":
+                if live_v2_say_active:
+                    stop_live_say_worker()
                 runtime_metrics["audio_response_protocol"] = {
                     "response_protocol": AUDIO_RESPONSE_PROTOCOL_V2,
+                    "first_thinker_token_id": thinker_first_token_id,
                     "status": "deferred_until_endpoint",
                     "wake_action": normalized_action or "",
                     "response_action": parsed_response["action"],
@@ -4134,11 +6536,39 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     "_skip_history_commit": True,
                 }
             if parsed_disposition == "stale_generation":
+                if live_v2_say_active:
+                    stop_live_say_worker()
                 return {
                     "text": "", "tool_calls": [], "wav": None, "elapsed": 0.0,
                     "cancelled": True, "runtime_metrics": runtime_metrics,
                     "_skip_history_commit": True,
                 }
+            if live_v2_say_active:
+                validated_say = str(parsed_response["say"])
+                if (
+                    parsed_response["action"] in {
+                        ControlAction.SPEAK.value,
+                        ControlAction.BACKCHANNEL.value,
+                    }
+                    and validated_say
+                ):
+                    if "".join(live_tts_visible_text_parts) != validated_say:
+                        raise RuntimeError(
+                            "closed-unit Gemma SAY source differs from validated v2 text"
+                        )
+                    if live_tts_unit_assembler is None:
+                        raise RuntimeError(
+                            "validated v2 SAY did not initialize its closed-unit assembler"
+                        )
+                    try:
+                        finish_live_v2_units()
+                        if "error" in live_say_result:
+                            raise live_say_result["error"]
+                    except BaseException as exc:
+                        stop_live_say_worker(exc)
+                        raise
+                else:
+                    stop_live_say_worker()
             say_tokens = response_v2_collector.say_tokens
             response_prompt_len = 0
             generated_text = parsed_response["say"]
@@ -4157,6 +6587,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
             generated_token_count = len(think.get("gen_ids", []))
             runtime_metrics["audio_response_protocol"] = {
                 "response_protocol": AUDIO_RESPONSE_PROTOCOL_V2,
+                "first_thinker_token_id": thinker_first_token_id,
                 "status": "valid",
                 "response_action": parsed_response["action"],
                 "wake_action": normalized_action or "",
@@ -4259,6 +6690,8 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
             )
             held_marker_suffix = ""
         if request.get("_stop_check") and request["_stop_check"]():
+            if live_v2_say_active:
+                stop_live_say_worker()
             return {
                 "text": "", "tool_calls": [], "wav": None, "elapsed": 0.0,
                 "cancelled": True, "runtime_metrics": runtime_metrics,
@@ -4272,13 +6705,14 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
             ControlAction.BACKCHANNEL.value,
         }
         if is_vocal_action and not text.strip():
+            if live_v2_say_active:
+                stop_live_say_worker()
             return empty_vocal_say_result()
         if request.get("_generation_token") is not None:
             sess.record_planned_text(request["_generation_token"], text)
         is_backchannel_action = normalized_action == ControlAction.BACKCHANNEL.value
         frame_residual_adapter = getattr(engine, "frame_residual_adapter", None)
         frame_residual_enabled = bool(getattr(engine, "frame_residual_adapter_enabled", False))
-        audio_requested = "audio" in (request.get("modalities") or ["text"])
         frame_residual_candidate = bool(
             frame_residual_enabled
             and frame_residual_adapter is not None
@@ -4288,9 +6722,44 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
         if (is_vocal_action or frame_residual_candidate) and audio_requested:
             if frame_residual_enabled != (frame_residual_adapter is not None):
                 raise RuntimeError("frame_residual_adapter_load_state_inconsistent")
-            if frame_residual_candidate and response_v2_collector is not None:
-                raise RuntimeError("frame_residual_adapter_requires_plain_or_controller_guided_say")
-            if frame_residual_candidate and frame_residual_response_hidden is None:
+            if (
+                frame_residual_candidate
+                and response_v2_collector is not None
+                and not live_v2_say_active
+            ):
+                say_tokens = response_v2_collector.say_tokens
+                say_spans = audio_response_v2_say_token_char_spans(
+                    say_tokens,
+                    generated_text,
+                )
+                processor = getattr(getattr(engine, "talker", None), "proc", None)
+                qwen_tokenizer = getattr(processor, "tokenizer", None)
+                if processor is None or qwen_tokenizer is None:
+                    raise RuntimeError("frame_residual_qwen_text_alignment_dependencies_missing")
+                qwen_token_ids, qwen_offsets = qwen_assistant_text_offsets(
+                    generated_text,
+                    tokenizer=qwen_tokenizer,
+                    processor=processor,
+                )
+                frame_residual_response_hidden = align_hidden_states_by_char_overlap(
+                    response_hidden,
+                    say_spans,
+                    qwen_offsets,
+                )
+                frame_residual_alignment_metrics = {
+                    "source": "validated_v2_say_posttoken_hidden",
+                    "source_protocol": AUDIO_RESPONSE_PROTOCOL_V2,
+                    "response_action": str(parsed_response["action"]),
+                    "gemma_say_hidden_tokens": int(response_hidden.shape[1]),
+                    "qwen_raw_text_tokens": len(qwen_token_ids),
+                    "text_chars": len(generated_text),
+                    "alignment": "collector_say_span_character_overlap_mean",
+                }
+            if (
+                frame_residual_candidate
+                and frame_residual_response_hidden is None
+                and not (live_say_active or live_v2_say_active)
+            ):
                 if any(marker in generated_text for marker in private_control_markers):
                     raise _PrivateControlLeakError(normalized_action or "", generated_text)
                 if controller_guided_say:
@@ -4414,7 +6883,38 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
             # Qwen's own audio-query hidden states.  The live listener remains
             # available to policy/cancellation but is never a phonetic Talker
             # input for protocol v2.
-            if frame_residual_candidate:
+            if live_say_active or live_v2_say_active:
+                h_pfx = torch.empty((1, 0, 2048), device=engine.device, dtype=engine.dtype)
+                runtime_metrics["v9_prefix_route"] = {
+                    "source": "controller_guided_live_qwen_text_no_prefix",
+                    "prefix_frame_count": 0,
+                    "prefix_kv_slots": 0,
+                }
+                if frame_residual_candidate:
+                    runtime_metrics["frame_residual_adapter"] = dict(
+                        frame_residual_alignment_metrics or {}
+                    )
+                    runtime_metrics["frame_residual_adapter"].update({
+                        "candidate": "frame_residual_q1_query_film_v2"
+                        if str(getattr(frame_residual_adapter, "architecture_id", ""))
+                        == "response_hidden_q1_query_film_v2"
+                        else "frame_residual_q1_input_v1",
+                        "adapter_mode": str(
+                            getattr(frame_residual_adapter, "architecture_id", "unknown")
+                        ),
+                        "qwen_semantic_text_unchanged": True,
+                        "qwen_route": "plain_native_audio_q1",
+                        "checkpoint": getattr(
+                            engine, "frame_residual_adapter_resolved_path", None
+                        ),
+                    })
+                    if callable(runtime_callback):
+                        runtime_callback(
+                            "frame_residual_adapter",
+                            runtime_metrics["frame_residual_adapter"],
+                        )
+                policy_hidden = sess.listener_hidden if duplex_realtime else None
+            elif frame_residual_candidate:
                 if frame_residual_response_hidden is None:
                     raise RuntimeError("frame_residual_response_hidden_alignment_missing")
                 h_pfx = torch.empty((1, 0, 2048), device=engine.device, dtype=engine.dtype)
@@ -4650,6 +7150,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
             policy_hidden = h_pfx
         controller_stateful_pool = bool(
             controller_guided_say
+            and not live_say_active
             and not frame_residual_candidate
             and not bool(getattr(engine, "ablate_response_projector", False))
             and response_v2_collector is None
@@ -4672,7 +7173,82 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     sess.stale_session_mutations += 1
         wav = None
         if "audio" in (request.get("modalities") or ["text"]):
-            if is_backchannel and not use_stateful_speaker:
+            if live_say_active or live_v2_say_active:
+                if live_say_thread is None:
+                    raise RuntimeError("live SAY ended without starting its Qwen Talker consumer")
+                if "error" in live_say_result:
+                    raise live_say_result["error"]
+                wav = live_say_result.get("wav")
+                talker_metrics = dict(live_say_result.get("metrics") or {})
+                talker_metrics.update({
+                    "response_text_conditioning_source": (
+                        (
+                            "audio_response_protocol_v2.live_turn_local_qwen_text_tail"
+                            if live_v2_say_active
+                            else "controller_guided_say_v1.live_native_qwen_text_tail"
+                        )
+                    ),
+                    "live_qwen_token_cursor_start": 1,
+                    "live_qwen_text_eos_consumed": bool(
+                        live_say_stream.codec_eos_allowed
+                        if live_say_stream is not None else False
+                    ),
+                    "live_say_consumer_started_at_ns": live_say_timing.get(
+                        "consumer_started_at_ns"
+                    ),
+                    "live_say_thinker_returned_at_ns": live_say_timing.get(
+                        "thinker_returned_at_ns"
+                    ),
+                    "live_say_consumer_started_before_thinker_return": bool(
+                        live_say_timing.get("consumer_started_at_ns") is not None
+                        and live_say_timing.get("thinker_returned_at_ns") is not None
+                        and int(live_say_timing["consumer_started_at_ns"])
+                        < int(live_say_timing["thinker_returned_at_ns"])
+                    ),
+                    "listener_v9_talker_injection_frames": 0,
+                })
+                if live_v2_say_active:
+                    talker_metrics.update({
+                        "turn_local_fifo_capacity": int(sess.speech_fifo.capacity),
+                        "turn_local_fifo_remaining_packets": len(sess.speech_fifo),
+                        "turn_local_fifo_peak_packets": int(sess.speech_fifo.peak_depth),
+                        "turn_local_last_vocalized_kv_position": (
+                            sess.speech_fifo.last_vocalized_kv_position
+                        ),
+                        "turn_local_vocalized_cursor_is_playback_ack": False,
+                        "live_gemma_token_pacer": (
+                            live_v2_token_pacer.snapshot()
+                            if live_v2_token_pacer is not None else {}
+                        ),
+                        "realtime_pcm_packet_queue_capacity": REALTIME_AUDIO_PACKET_CAPACITY,
+                        "speaker_playout_buffer_max_frames": 256,
+                    })
+                    logger.info("%s", _format_turn_local_speech_summary(
+                        sess.session_id[:8], talker_metrics
+                    ))
+                runtime_metrics["talker"] = talker_metrics
+                if frame_residual_candidate:
+                    residual_fields = {
+                        key: value for key, value in talker_metrics.items()
+                        if key.startswith("frame_residual_")
+                    }
+                    residual_fields.update({
+                        "status": (
+                            "applied"
+                            if int(talker_metrics.get("frame_residual_calls", 0)) > 0
+                            else "no_q1_audio_steps"
+                        ),
+                        "qwen_route": "plain_native_audio_q1",
+                        "qwen_prefix_slots_added": 0,
+                        "qwen_semantic_text_unchanged": True,
+                        "source": "same_forward_live_gemma_hidden",
+                    })
+                    runtime_metrics["frame_residual_adapter"] = residual_fields
+                    if callable(runtime_callback):
+                        runtime_callback("frame_residual_adapter", residual_fields)
+                if callable(runtime_callback):
+                    runtime_callback("talker", talker_metrics)
+            elif is_backchannel and not use_stateful_speaker:
                 talker_metrics: dict[str, Any] = (
                     {
                         "diagnostic_rng_seed": int(diagnostic_talker_seed),
@@ -4881,7 +7457,11 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                         "qwen_route": "plain_native_audio_q1",
                         "qwen_prefix_slots_added": 0,
                         "qwen_semantic_text_unchanged": True,
-                        "source": "gemma_assistant_response_posttoken_hidden",
+                        "source": (
+                            "validated_v2_say_posttoken_hidden"
+                            if response_v2_collector is not None
+                            else "gemma_assistant_response_posttoken_hidden"
+                        ),
                     })
                     runtime_metrics["frame_residual_adapter"] = residual_fields
                     if callable(runtime_callback):
@@ -4892,6 +7472,8 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                 if response_v2_collector is not None or controller_guided_say:
                     talker_metrics.update({
                         "response_text_conditioning_source": (
+                            f"{response_protocol}.say_hidden_q1_input_residual"
+                            if frame_residual_candidate and response_v2_collector is not None else
                             "controller_guided_say_v1.response_hidden_q1_input_residual"
                             if frame_residual_candidate else
                             f"{CONTROLLER_GUIDED_SAY_V1}.generated_say_hidden_v9.stateless_prefill"
@@ -5140,7 +7722,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
             })
         semantic_prefix_enabled = bool(
             getattr(engine, "enable_gemma_native_control6_policy", False)
-            and getattr(engine, "native_control6_semantic_prefix_enabled", False)
+            and _native_semantic_prefix_enabled()
             and semantic_prefix_metadata_valid
         )
         frame_residual_adapter = getattr(engine, "frame_residual_adapter", None)
@@ -5163,6 +7745,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
         return {
             "status": "ok",
             "engine_loaded": bool(getattr(engine, "loaded", False)),
+            "unified_kv_enabled": unified_kv_enabled,
             "first_input_scheduler_anchor_enabled": FIRST_INPUT_SCHEDULER_ANCHOR_ENABLED,
             "ready_frame_scheduler_dispatch_enabled": READY_FRAME_SCHEDULER_DISPATCH_ENABLED,
             "listener_pair_lock_handoff_setting": os.environ.get(
@@ -5504,6 +8087,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
             sessions.close(sess.session_id)
             raise
         response_task: asyncio.Task | None = None
+        playback_ack_branches: dict[str, dict[str, Any]] = {}
         # Archival ASR is process-shared CPU work; no per-session model copy or
         # inference_lock use. The session owns two bounded FIFO PCM slots.
         audio_archive_lock = threading.RLock()
@@ -5787,6 +8371,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
             }
             protocol_fields = {
                 "response_protocol",
+                "first_thinker_token_id",
                 "wake_action",
                 "response_action",
                 "selected_action",
@@ -5828,6 +8413,9 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                 "backchannel_say_lexicon_constrained",
                 "backchannel_say_lexicon_phrase_count",
                 "backchannel_say_lexicon_rejections",
+                "live_say_consumer_started_at_ns",
+                "live_say_thinker_returned_at_ns",
+                "live_say_consumer_started_before_thinker_return",
                 "failure_reason",
                 "status",
                 "queue_kind",
@@ -5868,6 +8456,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     or (key == "structure_forced" and isinstance(value, bool))
                     or (key == "bounded_output" and isinstance(value, bool))
                     or (key in {"assistant_text_committed", "talker_started"} and isinstance(value, bool))
+                    or (key == "live_say_consumer_started_before_thinker_return" and isinstance(value, bool))
                     or (
                         key in {
                             "predecode_candidate_checks",
@@ -5894,6 +8483,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
             }
             _retain_archive_transcript_commitment(measured, phase=phase, values=values)
             measured.update(_filter_frame_residual_runtime_metrics(values))
+            measured.update(_filter_turn_local_speech_runtime_metrics(values))
             graph_requested = values.get("native_talker_q1_graph_requested")
             if type(graph_requested) is bool:
                 measured["native_talker_q1_graph_requested"] = graph_requested
@@ -6520,6 +9110,36 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                         consumed_event["listener_silence_skipped"] = bool(
                             getattr(output, "silence_skipped", False)
                         )
+                        logical_q_len = getattr(output, "logical_q_len", None)
+                        ephemeral_reason = getattr(output, "ephemeral_reason", None)
+                        if ephemeral_reason is not None:
+                            consumed_event["ephemeral_reason"] = str(ephemeral_reason)
+                        consumed_event["queue_audio_for_next_turn"] = bool(
+                            getattr(output, "queue_audio_for_next_turn", False)
+                        )
+                        cache_after = getattr(output, "listener_cache_position", None)
+                        valid_after = getattr(output, "listener_valid_history_tokens", None)
+                        if isinstance(logical_q_len, int) and not isinstance(logical_q_len, bool):
+                            consumed_event["logical_q_len"] = logical_q_len
+                            if isinstance(cache_after, int) and not isinstance(cache_after, bool):
+                                consumed_event["listener_cache_position_after"] = cache_after
+                                consumed_event["listener_cache_position_before"] = (
+                                    cache_after - logical_q_len
+                                )
+                            if isinstance(valid_after, int) and not isinstance(valid_after, bool):
+                                consumed_event["listener_valid_history_tokens_after"] = valid_after
+                                consumed_event["listener_valid_history_tokens_before"] = (
+                                    valid_after - logical_q_len
+                                )
+                        for field in (
+                            "kv_rollback_tokens",
+                            "kv_rollback_enqueue_ms",
+                            "native_cache_current_position_after",
+                            "native_cache_valid_kv_len_after",
+                        ):
+                            value = getattr(output, field, None)
+                            if value is not None:
+                                consumed_event[field] = value
                     if silence_skip_fallback_reason is not None:
                         consumed_event["listener_silence_skip_fallback_reason"] = silence_skip_fallback_reason
                     scheduler_events.put_nowait(consumed_event)
@@ -6894,21 +9514,20 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                 )
                 sess.last_listener_output = output
 
-        def scheduler_policy(frame: Any, tick: Any) -> None:
-            """Policy callback invoked only by DuplexScheduler's tick thread."""
-            nonlocal pending_speak
-            nonlocal peer_audio_event_key
-            nonlocal latest_policy_frame_id, replan_edge_latched, replan_non_event_ticks
-            nonlocal replan_edge_generation_id
-            nonlocal replan_handoff_pending
+        def _prepare_policy_tick_state(frame: Any, tick: Any) -> dict[str, Any]:
+            """Apply the per-frame mutable scheduler updates exactly once.
+
+            Shared native Control6 needs its immutable pre-head snapshot before
+            the owner worker evaluates this frame. The scheduler callback then
+            reuses this record after the listener result is committed.
+            """
+            nonlocal pending_speak, peer_audio_event_key, latest_policy_frame_id
             nonlocal partial_last_snapshot_frame
-            if native_listener_output_faulted.is_set():
-                return
-            if frame is None:
-                return
             with policy_cooldown_lock:
                 latest_policy_frame_id = max(latest_policy_frame_id, int(frame.frame_id))
-            new_voice_onset, speech_endpoint = speech_tracker.observe(int(frame.frame_id), frame.pcm)
+            new_voice_onset, speech_endpoint = speech_tracker.observe(
+                int(frame.frame_id), frame.pcm
+            )
             if new_voice_onset:
                 sess.observe_user_onset(int(frame.frame_id))
             peer_audio_event_key = peer_audio_event_key_for_frame(
@@ -6988,108 +9607,258 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                 response_audio_admission.update_input_frame_locked(int(frame.frame_id))
             with sess._generation_lock:
                 policy = sess.turn_policy
-                if policy is None:
-                    return
                 policy_revision = sess._policy_revision
-                sess.append_policy_audio(frame.frame_id, frame.pcm)
-                if (
-                    speech_endpoint
-                    and speech_tracker.run_onset_frame_id is not None
-                    and speech_tracker.endpoint_source_cutoff_sample_id is not None
-                ):
-                    sess.pin_completed_utterance_audio(
-                        int(speech_tracker.run_onset_frame_id),
-                        int(frame.frame_id),
-                        source_cutoff_sample_id=int(
-                            speech_tracker.endpoint_source_cutoff_sample_id
-                        ),
-                        generation_id=int(sess.session_generation_id),
-                    )
-                acoustic_user_history = None
-                acoustic_assistant_reference = None
-                if (
-                    isinstance(policy, DuplexControl6Policy)
-                    and policy.requires_acoustic_phase
-                ):
-                    current_listener_output = sess.last_listener_output
-                    current_frame_id = int(frame.frame_id)
-                    query_reused = bool(
-                        current_listener_output is not None
-                        and getattr(current_listener_output, "silence_skipped", False)
-                        and int(getattr(current_listener_output, "frame_id", -1)) == current_frame_id
-                        and int(getattr(current_listener_output, "source_frame_id", -1))
-                        == int(sess.listener_audio_frame_id if sess.listener_audio_frame_id is not None else -2)
-                    )
-                    with sess.listener_state._lock:
-                        observed_user_frames = tuple(sess.listener_state.user_pcm_history)
+                turn_generation_id = int(sess.session_generation_id)
+                if policy is not None:
+                    sess.append_policy_audio(frame.frame_id, frame.pcm)
                     if (
-                        current_listener_output is None
-                        or int(getattr(current_listener_output, "frame_id", -1)) != current_frame_id
-                        or sess.listener_audio_queries is None
-                        or (
-                            not query_reused
-                            and sess.listener_audio_frame_id != current_frame_id
-                        )
-                        or (
-                            query_reused
-                            and sess.listener_audio_frame_id is not None
-                            and sess.listener_audio_frame_id >= current_frame_id
-                        )
-                        or not observed_user_frames
-                        or any(np.asarray(value).shape != (POLICY_FRAME_SAMPLES,) for value in observed_user_frames)
-                        or not np.array_equal(np.asarray(observed_user_frames[-1]), np.asarray(frame.pcm))
+                        speech_endpoint
+                        and speech_tracker.run_onset_frame_id is not None
+                        and speech_tracker.endpoint_source_cutoff_sample_id is not None
                     ):
-                        logger.debug(
-                            "[realtime %s] skip acoustic Control6 frame=%d: causal PCM snapshot mismatch",
-                            sess.session_id[:8],
+                        sess.pin_completed_utterance_audio(
+                            int(speech_tracker.run_onset_frame_id),
                             int(frame.frame_id),
+                            source_cutoff_sample_id=int(
+                                speech_tracker.endpoint_source_cutoff_sample_id
+                            ),
+                            generation_id=int(sess.session_generation_id),
                         )
-                        return
-                    # The listener step has appended this tick to its rolling
-                    # history. Reconstruct the head input from at most four
-                    # prior observed frames plus the scheduler's current PCM so
-                    # the 400 ms window is explicitly anchored at frame t.
-                    prior_user_frames = observed_user_frames[-5:-1]
-                    acoustic_user_history = np.concatenate((
-                        *(np.asarray(value, dtype=np.float32) for value in prior_user_frames),
-                        np.asarray(frame.pcm, dtype=np.float32),
-                    )).copy()
-                    reference = sess.assistant_reference_buffer.visible_for(
-                        listener_frame_id=current_frame_id
+            prepared = {
+                "new_voice_onset": bool(new_voice_onset),
+                "speech_endpoint": bool(speech_endpoint),
+                "policy": policy,
+                "policy_revision": int(policy_revision),
+                "turn_generation_id": turn_generation_id,
+                "audio_appended": policy is not None,
+            }
+            tick._policy_tick_prepared = prepared
+            return prepared
+
+        def _shared_native_policy_context(frame: Any, tick: Any) -> Any | None:
+            prepared = _prepare_policy_tick_state(frame, tick)
+            policy = prepared["policy"]
+            if not isinstance(policy, GemmaNativeControl6Policy):
+                return None
+            from duplex_kernel.gemma_native_control6_batch_policy import PolicyPreHeadContext
+            from duplex_kernel.native_control6_phase import native_control6_phase_t
+
+            with sess._generation_lock:
+                turn_generation_id = int(prepared["turn_generation_id"])
+                pending_onset = sess.pending_user_onset_frame_id
+                last_answered_onset = sess.last_answered_onset_frame_id
+                response_pending = bool(sess.policy_response_pending)
+                active_response = bool(sess.active_response)
+                control_state = sess.control_state
+                speaker_segment_id = sess.speaker_segment_id
+            speaker_active = _native_control6_speaker_active(
+                active_response=active_response,
+                control_state=control_state,
+            )
+            user_turn_pending = _user_turn_is_unanswered(
+                pending_onset, last_answered_onset
+            )
+            peer_turn_active = bool(speech_tracker.voice_run_active)
+            legal_actions = native_control6_legal_actions(
+                speaker_active=speaker_active,
+                user_turn_pending=user_turn_pending,
+                peer_turn_active=peer_turn_active,
+            )
+            frame_id = int(frame.frame_id)
+            visible_assistant = {
+                int(item.frame_id): item
+                for item in sess.assistant_reference_buffer.visible_frames_for(
+                    listener_frame_id=frame_id
+                )
+            }
+            assistant_prior = visible_assistant.get(frame_id - 1)
+            assistant_preceding = visible_assistant.get(frame_id - 2)
+            phase_t = native_control6_phase_t(
+                listener_frame_id=frame_id,
+                user_pcm_current=frame.pcm,
+                assistant_pcm_prior=(None if assistant_prior is None else assistant_prior.pcm),
+                assistant_prior_frame_id=(None if assistant_prior is None else assistant_prior.frame_id),
+                assistant_pcm_preceding=(
+                    None if assistant_preceding is None else assistant_preceding.pcm
+                ),
+                assistant_preceding_frame_id=(
+                    None if assistant_preceding is None else assistant_preceding.frame_id
+                ),
+            )
+            no_input_tick = bool(
+                speaker_active
+                and np.asarray(frame.pcm).shape == (POLICY_FRAME_SAMPLES,)
+                and np.count_nonzero(frame.pcm) == 0
+            )
+            state = PolicyInput(
+                session_id=sess.session_id,
+                frame_id=frame_id,
+                user_pcm=frame.pcm,
+                speaker_active=speaker_active,
+                generation_id=turn_generation_id,
+                speaker_segment_id=speaker_segment_id,
+                legal_actions=tuple(legal_actions),
+                native_control_phase_t=phase_t,
+                native_control_no_input_tick=no_input_tick,
+            )
+            binding = shared_listener_bindings.get(sess.session_id)
+            if binding is None:
+                raise RuntimeError("native policy snapshot has no shared listener registration")
+            return PolicyPreHeadContext(
+                policy=policy,
+                policy_input=state,
+                tick_id=(sess.session_id, turn_generation_id, frame_id),
+                captured_at_ns=time.monotonic_ns(),
+                listener_generation_id=int(binding["generation"]),
+            )
+
+        def scheduler_policy(frame: Any, tick: Any) -> None:
+            """Policy callback invoked only by DuplexScheduler's tick thread."""
+            nonlocal pending_speak
+            nonlocal peer_audio_event_key
+            nonlocal latest_policy_frame_id, replan_edge_latched, replan_non_event_ticks
+            nonlocal replan_edge_generation_id
+            nonlocal replan_handoff_pending
+            nonlocal partial_last_snapshot_frame
+            if native_listener_output_faulted.is_set():
+                return
+            if frame is None:
+                return
+            prepared = getattr(tick, "_policy_tick_prepared", None)
+            if not isinstance(prepared, dict):
+                prepared = _prepare_policy_tick_state(frame, tick)
+            new_voice_onset = bool(prepared["new_voice_onset"])
+            speech_endpoint = bool(prepared["speech_endpoint"])
+            policy = prepared["policy"]
+            policy_revision = int(prepared["policy_revision"])
+            if policy is None:
+                return
+            with sess._generation_lock:
+                if (
+                    sess._policy_revision != policy_revision
+                    or sess.turn_policy is not policy
+                    or sess.session_generation_id != int(prepared["turn_generation_id"])
+                ):
+                    # The immutable pre-head context was captured before the
+                    # worker call; a session mutation after enqueue must not
+                    # make the scheduler run policy against a different state.
+                    sess.stale_session_mutations += 1
+                    return
+            if not bool(prepared.get("audio_appended")):
+                with sess._generation_lock:
+                    sess.append_policy_audio(frame.frame_id, frame.pcm)
+                    if (
+                        speech_endpoint
+                        and speech_tracker.run_onset_frame_id is not None
+                        and speech_tracker.endpoint_source_cutoff_sample_id is not None
+                    ):
+                        sess.pin_completed_utterance_audio(
+                            int(speech_tracker.run_onset_frame_id),
+                            int(frame.frame_id),
+                            source_cutoff_sample_id=int(
+                                speech_tracker.endpoint_source_cutoff_sample_id
+                            ),
+                            generation_id=int(sess.session_generation_id),
+                        )
+            acoustic_user_history = None
+            acoustic_assistant_reference = None
+            if (
+                isinstance(policy, DuplexControl6Policy)
+                and policy.requires_acoustic_phase
+            ):
+                current_listener_output = sess.last_listener_output
+                current_frame_id = int(frame.frame_id)
+                query_reused = bool(
+                    current_listener_output is not None
+                    and getattr(current_listener_output, "silence_skipped", False)
+                    and int(getattr(current_listener_output, "frame_id", -1)) == current_frame_id
+                    and int(getattr(current_listener_output, "source_frame_id", -1))
+                    == int(sess.listener_audio_frame_id if sess.listener_audio_frame_id is not None else -2)
+                )
+                with sess.listener_state._lock:
+                    observed_user_frames = tuple(sess.listener_state.user_pcm_history)
+                if (
+                    current_listener_output is None
+                    or int(getattr(current_listener_output, "frame_id", -1)) != current_frame_id
+                    or sess.listener_audio_queries is None
+                    or (
+                        not query_reused
+                        and sess.listener_audio_frame_id != current_frame_id
                     )
-                    acoustic_assistant_reference = (
-                        None if reference is None else np.asarray(reference.pcm, dtype=np.float32).copy()
+                    or (
+                        query_reused
+                        and sess.listener_audio_frame_id is not None
+                        and sess.listener_audio_frame_id >= current_frame_id
                     )
-                legal_actions: tuple[str, ...] | None = None
-                pending_onset: int | None = None
-                last_answered_onset: int | None = None
-                response_pending_for_policy = False
-                active_response_for_policy = False
-                user_turn_pending = False
-                pending_plan = False
-                peer_turn_active = bool(speech_tracker.voice_run_active)
-                backchannel_available = False
-                if is_controller6_policy(policy):
-                    with sess._generation_lock:
-                        pending_onset = sess.pending_user_onset_frame_id
-                        last_answered_onset = sess.last_answered_onset_frame_id
-                        response_pending_for_policy = bool(sess.policy_response_pending)
-                        active_response_for_policy = bool(sess.active_response)
-                    user_turn_pending = _user_turn_is_unanswered(
-                        pending_onset, last_answered_onset
+                    or not observed_user_frames
+                    or any(np.asarray(value).shape != (POLICY_FRAME_SAMPLES,) for value in observed_user_frames)
+                    or not np.array_equal(np.asarray(observed_user_frames[-1]), np.asarray(frame.pcm))
+                ):
+                    logger.debug(
+                        "[realtime %s] skip acoustic Control6 frame=%d: causal PCM snapshot mismatch",
+                        sess.session_id[:8],
+                        int(frame.frame_id),
                     )
-                    pending_plan = bool(
-                        pending_speak is not None
-                        and pending_onset is not None
-                        and int(pending_speak.get("voice_run_onset_frame_id", -1))
-                        == int(pending_onset)
+                    return
+                # The listener step has appended this tick to its rolling
+                # history. Reconstruct the head input from at most four
+                # prior observed frames plus the scheduler's current PCM so
+                # the 400 ms window is explicitly anchored at frame t.
+                prior_user_frames = observed_user_frames[-5:-1]
+                acoustic_user_history = np.concatenate((
+                    *(np.asarray(value, dtype=np.float32) for value in prior_user_frames),
+                    np.asarray(frame.pcm, dtype=np.float32),
+                )).copy()
+                reference = sess.assistant_reference_buffer.visible_for(
+                    listener_frame_id=current_frame_id
+                )
+                acoustic_assistant_reference = (
+                    None if reference is None else np.asarray(reference.pcm, dtype=np.float32).copy()
+                )
+            legal_actions: tuple[str, ...] | None = None
+            pending_onset: int | None = None
+            last_answered_onset: int | None = None
+            response_pending_for_policy = False
+            active_response_for_policy = False
+            native_speaker_active_for_policy = False
+            user_turn_pending = False
+            pending_plan = False
+            peer_turn_active = bool(speech_tracker.voice_run_active)
+            backchannel_available = False
+            if is_controller6_policy(policy):
+                with sess._generation_lock:
+                    pending_onset = sess.pending_user_onset_frame_id
+                    last_answered_onset = sess.last_answered_onset_frame_id
+                    response_pending_for_policy = bool(sess.policy_response_pending)
+                    active_response_for_policy = bool(sess.active_response)
+                    control_state_for_policy = sess.control_state
+                if isinstance(policy, GemmaNativeControl6Policy):
+                    native_speaker_active_for_policy = _native_control6_speaker_active(
+                        active_response=active_response_for_policy,
+                        control_state=control_state_for_policy,
                     )
-                    backchannel_available = bool(
-                        peer_audio_event_key is not None
-                        and not backchannel_attempt_latch.has_attempted(peer_audio_event_key)
-                        and not active_response_for_policy
-                        and not response_pending_for_policy
+                user_turn_pending = _user_turn_is_unanswered(
+                    pending_onset, last_answered_onset
+                )
+                pending_plan = bool(
+                    pending_speak is not None
+                    and pending_onset is not None
+                    and int(pending_speak.get("voice_run_onset_frame_id", -1))
+                    == int(pending_onset)
+                )
+                backchannel_available = bool(
+                    peer_audio_event_key is not None
+                    and not backchannel_attempt_latch.has_attempted(peer_audio_event_key)
+                    and not active_response_for_policy
+                    and not response_pending_for_policy
+                )
+                if isinstance(policy, GemmaNativeControl6Policy):
+                    legal_actions = native_control6_legal_actions(
+                        speaker_active=native_speaker_active_for_policy,
+                        user_turn_pending=user_turn_pending,
+                        peer_turn_active=peer_turn_active,
                     )
+                else:
                     legal_actions = legal_control_actions(
                         active_response=active_response_for_policy,
                         response_pending=response_pending_for_policy,
@@ -7100,131 +9869,187 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                             response_pending_for_policy or pending_plan
                         ),
                     )
-                native_control_hidden = None
-                native_control_hidden_frame_id = None
-                native_control_hidden_at_ns = None
-                native_control_no_input_tick = False
-                native_control6_raw_scores = None
-                native_listener_generation = None
-                if isinstance(policy, GemmaNativeControl6Policy):
-                    with sess._generation_lock:
-                        native_output = sess.last_listener_output
-                    source_frame = _native_control6_listener_source_frame_id(native_output)
-                    if (
-                        native_output is not None
-                        and getattr(native_output, "frame_id", None) == int(frame.frame_id)
-                    ):
-                        if _native_control6_listener_output_is_fresh_for_frame(
-                            native_output,
-                            int(frame.frame_id),
-                            source_frame_id=source_frame,
-                        ):
-                            native_control_hidden = getattr(native_output, "gemma_hidden_t", None)
-                            native_control_hidden_frame_id = int(source_frame)
-                            available_at = getattr(native_output, "source_available_at_ns", None)
-                            native_control_hidden_at_ns = int(available_at) if available_at is not None else None
-                            candidate_scores = getattr(
-                                native_output, "native_control6_raw_scores", None
-                            )
-                            if candidate_scores is not None:
-                                if (
-                                    getattr(candidate_scores, "session_id", None) != sess.session_id
-                                    or getattr(candidate_scores, "frame_id", None) != int(frame.frame_id)
-                                    or getattr(candidate_scores, "session_generation", None)
-                                    != getattr(native_output, "listener_generation_id", None)
-                                    or getattr(candidate_scores, "state_epoch_id", None)
-                                    != getattr(native_output, "listener_state_epoch_id", None)
-                                    or getattr(candidate_scores, "listener_state_version", None)
-                                    != int(native_output.listener_state_version) - 1
-                                    or getattr(candidate_scores, "sequence_position", None)
-                                    != int(getattr(native_output, "listener_sequence_position", -1)) - 1
-                                    or getattr(candidate_scores, "cache_position", None)
-                                    != int(getattr(native_output, "listener_cache_position", -1)) - 4
-                                    or getattr(candidate_scores, "checkpoint_path", None)
-                                    != policy.checkpoint_path
-                                ):
-                                    raise RuntimeError(
-                                        "batched native Control6 score provenance does not match the fresh listener row"
-                                    )
-                                native_control6_raw_scores = candidate_scores
-                                native_listener_generation = int(
-                                    native_output.listener_generation_id
-                                )
-                            elif shared_listener_microbatch_enabled:
-                                raise RuntimeError(
-                                    "shared native Control6 row is missing batched raw-score provenance"
-                                )
-                        elif (
-                            bool(getattr(native_output, "silence_skipped", False))
-                            and source_frame is not None
-                            and source_frame < int(frame.frame_id)
-                        ):
-                            current_pcm = np.asarray(frame.pcm)
-                            reference = sess.assistant_reference_buffer.visible_for(listener_frame_id=int(frame.frame_id))
-                            reference_pcm = None if reference is None else np.asarray(reference.pcm)
-                            native_control_no_input_tick = bool(
-                                current_pcm.shape == (POLICY_FRAME_SAMPLES,)
-                                and reference_pcm is not None
-                                and reference_pcm.shape == (POLICY_FRAME_SAMPLES,)
-                                and np.count_nonzero(current_pcm) == 0
-                                and np.count_nonzero(reference_pcm) == 0
-                            )
-                    native_control_hidden, exact_zero_active_tick = (
-                        _native_control6_policy_hidden_for_tick(
-                            user_pcm=frame.pcm,
-                            speaker_active=active_response_for_policy,
-                            listener_hidden=native_control_hidden,
-                        )
+            native_control_hidden = None
+            native_control_hidden_frame_id = None
+            native_control_hidden_at_ns = None
+            native_control_phase = None
+            native_control_no_input_tick = False
+            native_control6_raw_scores = None
+            native_listener_generation = None
+            if isinstance(policy, GemmaNativeControl6Policy):
+                from duplex_kernel.native_control6_phase import native_control6_phase_t
+
+                current_frame_id = int(frame.frame_id)
+                visible_assistant = {
+                    int(item.frame_id): item
+                    for item in sess.assistant_reference_buffer.visible_frames_for(
+                        listener_frame_id=current_frame_id
                     )
-                    if exact_zero_active_tick:
-                        native_control_hidden_frame_id = None
-                        native_control_hidden_at_ns = None
-                        native_control_no_input_tick = True
-                policy_input = PolicyInput(
-                    session_id=sess.session_id,
-                    frame_id=frame.frame_id,
-                    user_pcm=frame.pcm,
-                    speaker_active=(
+                }
+                assistant_prior = visible_assistant.get(current_frame_id - 1)
+                assistant_preceding = visible_assistant.get(current_frame_id - 2)
+                native_control_phase = native_control6_phase_t(
+                    listener_frame_id=current_frame_id,
+                    user_pcm_current=frame.pcm,
+                    assistant_pcm_prior=(None if assistant_prior is None else assistant_prior.pcm),
+                    assistant_prior_frame_id=(None if assistant_prior is None else assistant_prior.frame_id),
+                    assistant_pcm_preceding=(
+                        None if assistant_preceding is None else assistant_preceding.pcm
+                    ),
+                    assistant_preceding_frame_id=(
+                        None if assistant_preceding is None else assistant_preceding.frame_id
+                    ),
+                )
+                with sess._generation_lock:
+                    native_output = sess.last_listener_output
+                source_frame = _native_control6_listener_source_frame_id(native_output)
+                if (
+                    native_output is not None
+                    and getattr(native_output, "frame_id", None) == int(frame.frame_id)
+                ):
+                    if _native_control6_listener_output_is_fresh_for_frame(
+                        native_output,
+                        int(frame.frame_id),
+                        source_frame_id=source_frame,
+                    ):
+                        native_control_hidden = getattr(native_output, "gemma_hidden_t", None)
+                        native_control_hidden_frame_id = int(source_frame)
+                        available_at = getattr(native_output, "source_available_at_ns", None)
+                        native_control_hidden_at_ns = int(available_at) if available_at is not None else None
+                        candidate_scores = getattr(
+                            native_output, "native_control6_raw_scores", None
+                        )
+                        if candidate_scores is not None:
+                            if (
+                                getattr(candidate_scores, "session_id", None) != sess.session_id
+                                or getattr(candidate_scores, "frame_id", None) != int(frame.frame_id)
+                                or getattr(candidate_scores, "session_generation", None)
+                                != getattr(native_output, "listener_generation_id", None)
+                                or getattr(candidate_scores, "state_epoch_id", None)
+                                != getattr(native_output, "listener_state_epoch_id", None)
+                                or getattr(candidate_scores, "listener_state_version", None)
+                                != int(native_output.listener_state_version) - 1
+                                or getattr(candidate_scores, "sequence_position", None)
+                                != int(getattr(native_output, "listener_sequence_position", -1)) - 1
+                                or getattr(candidate_scores, "cache_position", None)
+                                != int(getattr(native_output, "listener_cache_position", -1)) - 2
+                                or getattr(candidate_scores, "checkpoint_path", None)
+                                != policy.checkpoint_path
+                            ):
+                                raise RuntimeError(
+                                    "batched native Control6 score provenance does not match the fresh listener row"
+                                )
+                            native_control6_raw_scores = candidate_scores
+                            native_listener_generation = int(
+                                native_output.listener_generation_id
+                            )
+                    elif (
+                        bool(getattr(native_output, "silence_skipped", False))
+                        and source_frame is not None
+                        and source_frame < int(frame.frame_id)
+                    ):
+                        current_pcm = np.asarray(frame.pcm)
+                        reference = sess.assistant_reference_buffer.visible_for(listener_frame_id=int(frame.frame_id))
+                        reference_pcm = None if reference is None else np.asarray(reference.pcm)
+                        native_control_no_input_tick = bool(
+                            current_pcm.shape == (POLICY_FRAME_SAMPLES,)
+                            and reference_pcm is not None
+                            and reference_pcm.shape == (POLICY_FRAME_SAMPLES,)
+                            and np.count_nonzero(current_pcm) == 0
+                            and np.count_nonzero(reference_pcm) == 0
+                        )
+                native_control_hidden, exact_zero_active_tick = (
+                    _native_control6_policy_hidden_for_tick(
+                        user_pcm=frame.pcm,
+                        speaker_active=native_speaker_active_for_policy,
+                        listener_hidden=native_control_hidden,
+                    )
+                )
+                if exact_zero_active_tick:
+                    native_control_hidden_frame_id = None
+                    native_control_hidden_at_ns = None
+                    native_control_no_input_tick = True
+            policy_input = PolicyInput(
+                session_id=sess.session_id,
+                frame_id=frame.frame_id,
+                user_pcm=frame.pcm,
+                speaker_active=(
+                    native_speaker_active_for_policy
+                    if isinstance(policy, GemmaNativeControl6Policy)
+                    else (
                         sess.active_response
-                        or (sess.policy_response_pending and not isinstance(policy, GemmaNativeControl6Policy))
+                        or sess.policy_response_pending
                         or sess.control_state in {
                             ControlState.SPEAKING,
                             ControlState.BACKCHANNELING,
                             ControlState.STOPPING,
                         }
-                    ),
-                    generation_id=sess.session_generation_id,
-                    speaker_segment_id=sess.speaker_segment_id,
-                    listener_hidden=(
-                        sess.listener_hidden
-                        if _listener_v9_stream_for_engine(engine) is not None
-                        and getattr(sess.listener_hidden, "shape", ())[-1:] == (2048,)
-                        else None
-                    ),
-                    listener_audio_queries=(
-                        sess.listener_audio_queries if isinstance(policy, DuplexControl6Policy) else None
-                    ),
-                    listener_frame_id=(
-                        sess.listener_audio_frame_id if isinstance(policy, DuplexControl6Policy) else None
-                    ),
-                    listener_query_reused=bool(
-                        isinstance(policy, DuplexControl6Policy)
-                        and sess.last_listener_output is not None
-                        and getattr(sess.last_listener_output, "silence_skipped", False)
-                        and int(getattr(sess.last_listener_output, "frame_id", -1)) == int(frame.frame_id)
-                    ),
-                    listener_hidden_frame_id=sess.listener_hidden_frame_id,
-                    listener_hidden_at_ns=sess.listener_hidden_at_ns,
-                    user_pcm_history=acoustic_user_history,
-                    assistant_reference_pcm=acoustic_assistant_reference,
-                    legal_actions=legal_actions,
-                    native_control_hidden=native_control_hidden,
-                    native_control_hidden_frame_id=native_control_hidden_frame_id,
-                    native_control_hidden_at_ns=native_control_hidden_at_ns,
-                    native_control_no_input_tick=native_control_no_input_tick,
-                    native_control6_raw_scores=native_control6_raw_scores,
-                    native_listener_generation=native_listener_generation,
+                    )
+                ),
+                generation_id=sess.session_generation_id,
+                speaker_segment_id=sess.speaker_segment_id,
+                listener_hidden=(
+                    sess.listener_hidden
+                    if _listener_v9_stream_for_engine(engine) is not None
+                    and getattr(sess.listener_hidden, "shape", ())[-1:] == (2048,)
+                    else None
+                ),
+                listener_audio_queries=(
+                    sess.listener_audio_queries if isinstance(policy, DuplexControl6Policy) else None
+                ),
+                listener_frame_id=(
+                    sess.listener_audio_frame_id if isinstance(policy, DuplexControl6Policy) else None
+                ),
+                listener_query_reused=bool(
+                    isinstance(policy, DuplexControl6Policy)
+                    and sess.last_listener_output is not None
+                    and getattr(sess.last_listener_output, "silence_skipped", False)
+                    and int(getattr(sess.last_listener_output, "frame_id", -1)) == int(frame.frame_id)
+                ),
+                listener_hidden_frame_id=sess.listener_hidden_frame_id,
+                listener_hidden_at_ns=sess.listener_hidden_at_ns,
+                user_pcm_history=acoustic_user_history,
+                assistant_reference_pcm=acoustic_assistant_reference,
+                legal_actions=legal_actions,
+                native_control_hidden=native_control_hidden,
+                native_control_hidden_frame_id=native_control_hidden_frame_id,
+                native_control_hidden_at_ns=native_control_hidden_at_ns,
+                native_control_phase_t=native_control_phase,
+                native_control_no_input_tick=native_control_no_input_tick,
+                native_control6_raw_scores=native_control6_raw_scores,
+                native_listener_generation=native_listener_generation,
+            )
+            prehead_context = getattr(tick, "_policy_prehead_context", None)
+            if shared_listener_microbatch_enabled and isinstance(
+                policy, GemmaNativeControl6Policy
+            ):
+                from duplex_kernel.gemma_native_control6_batch_policy import PolicyPreHeadContext
+
+                if not isinstance(prehead_context, PolicyPreHeadContext):
+                    raise RuntimeError(
+                        "shared native Control6 tick reached policy callback without its immutable pre-head context"
+                    )
+                binding = shared_listener_bindings.get(sess.session_id)
+                if binding is None:
+                    raise RuntimeError("shared native Control6 decision lost its listener registration")
+                expected_tick = (
+                    sess.session_id,
+                    int(sess.session_generation_id),
+                    int(frame.frame_id),
                 )
+                if (
+                    prehead_context.policy is not policy
+                    or prehead_context.tick_id != expected_tick
+                    or int(prehead_context.listener_generation_id)
+                    != int(binding.get("generation", -1))
+                ):
+                    raise RuntimeError(
+                        "shared native Control6 pre-head context is stale or belongs to another listener generation"
+                    )
+                policy_input = prehead_context.policy_input
+                legal_actions = tuple(policy_input.legal_actions or ())
+                native_speaker_active_for_policy = bool(policy_input.speaker_active)
+                native_control_no_input_tick = bool(policy_input.native_control_no_input_tick)
             with policy_causality_lock:
                 if (
                     replan_edge_latched
@@ -7370,10 +10195,139 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
             }
             decision = None
             native_policy_error: Exception | None = None
+            worker_native_hidden_valid = False
+            worker_native_output = None
             policy_started = time.perf_counter()
             try:
                 try:
-                    decision = sess.run_turn_policy(policy, policy_revision, policy_input)
+                    if (
+                        shared_listener_microbatch_enabled
+                        and isinstance(policy, GemmaNativeControl6Policy)
+                    ):
+                        worker_native_output = getattr(tick, "microbatch_output", None)
+                        if worker_native_output is None:
+                            raise RuntimeError(
+                                "shared native Control6 decision has no committed worker output"
+                            )
+                        decision = getattr(worker_native_output, "policy_decision", None)
+                        if decision is None:
+                            raise RuntimeError(
+                                "shared native Control6 worker returned no policy decision"
+                            )
+                        diagnostics = decision.diagnostics
+                        provenance = (
+                            diagnostics.get("native_output_provenance")
+                            if isinstance(diagnostics, dict)
+                            else None
+                        )
+                        binding = shared_listener_bindings.get(sess.session_id)
+                        expected_listener_generation = (
+                            int(binding.get("generation", -1)) if binding is not None else -1
+                        )
+                        if (
+                            binding is None
+                            or decision.session != sess.session_id
+                            or decision.generation_id != policy_input.generation_id
+                            or decision.frame_id != int(policy_input.frame_id)
+                            or decision.listener_frame_id != int(policy_input.frame_id)
+                            or not isinstance(provenance, dict)
+                            or provenance.get("canonical_session_id") != sess.session_id
+                            or provenance.get("listener_generation_id") != expected_listener_generation
+                            or provenance.get("turn_generation_id") != policy_input.generation_id
+                            or provenance.get("state_epoch_id") != str(sess.listener_state.state_epoch_id)
+                            or provenance.get("frame_id") != int(policy_input.frame_id)
+                            or provenance.get("listener_state_version")
+                            != int(worker_native_output.listener_state_version) - 1
+                        ):
+                            raise RuntimeError(
+                                "shared native Control6 decision provenance differs from its active turn/listener frame"
+                            )
+                        view = getattr(worker_native_output, "decision_view", None)
+                        selected_health = (
+                            getattr(view, "native_output_health", None)
+                            if view is not None
+                            else getattr(worker_native_output, "native_output_health", None)
+                        )
+                        if view is not None:
+                            source_output = getattr(view, "native_output", None)
+                            source_manifest = getattr(view, "manifest", None)
+                            source_row = (
+                                source_manifest.rows[0]
+                                if source_manifest is not None
+                                and getattr(source_manifest, "rows", None)
+                                else None
+                            )
+                            selected_manifest_id = getattr(source_manifest, "manifest_id", None)
+                            selected_output_generation = getattr(source_output, "generation", None)
+                        else:
+                            source_output = None
+                            source_manifest = None
+                            source_row = getattr(selected_health, "row", None)
+                            selected_manifest_id = provenance.get("manifest_id")
+                            selected_output_generation = provenance.get("output_generation")
+                        if (
+                            selected_health is None
+                            or not bool(getattr(selected_health, "checked", False))
+                            or bool(getattr(selected_health, "nonfinite", True))
+                            or getattr(selected_health, "status", None) != "healthy"
+                            or not isinstance(selected_manifest_id, str)
+                            or not selected_manifest_id
+                            or isinstance(selected_output_generation, bool)
+                            or not isinstance(selected_output_generation, int)
+                            or getattr(selected_health, "generation", None)
+                            != selected_output_generation
+                            or getattr(selected_health, "row", None) != source_row
+                            or source_row is None
+                            or source_row.session_generation != expected_listener_generation
+                            or source_row.state_epoch_id != str(sess.listener_state.state_epoch_id)
+                            or source_row.frame_id != int(policy_input.frame_id)
+                            or source_row.listener_state_version
+                            != int(worker_native_output.listener_state_version) - 1
+                        ):
+                            raise RuntimeError(
+                                "selected native Control6 decision row lacks matching healthy output provenance"
+                            )
+                        if view is not None:
+                            view_source_row = getattr(view, "source_row", None)
+                            fork_row = getattr(view, "fork_row", None)
+                            if (
+                                view_source_row is None
+                                or fork_row is None
+                                or view_source_row.session_id != sess.session_id
+                                or view_source_row.session_generation != expected_listener_generation
+                                or view_source_row.state_epoch_id != str(sess.listener_state.state_epoch_id)
+                                or view_source_row.frame_id != int(policy_input.frame_id)
+                                or source_row.session_id != fork_row.session_id
+                                or not source_row.session_id.startswith("__q2view__")
+                                or source_row.logical_q_len != 2
+                                or not bool(worker_native_output.queue_audio_for_next_turn)
+                            ):
+                                raise RuntimeError(
+                                    "temporary Q2 decision view is not bound to the current canonical speaking frame"
+                                )
+                        native_output_health_result = {
+                            "checked": True,
+                            "status": "healthy",
+                            "manifest_id": selected_manifest_id,
+                            "output_generation": selected_output_generation,
+                            "native_session_id": source_row.session_id,
+                            "frame_id": source_row.frame_id,
+                            "listener_state_version": source_row.listener_state_version,
+                        }
+                        native_control_hidden = (
+                            getattr(view, "gemma_hidden_t", None)
+                            if view is not None
+                            else getattr(worker_native_output, "gemma_hidden_t", None)
+                        )
+                        native_control_hidden_frame_id = int(policy_input.frame_id)
+                        native_control_hidden_at_ns = time.monotonic_ns()
+                        worker_native_hidden_valid = not bool(
+                            policy_input.native_control_no_input_tick
+                        )
+                    else:
+                        decision = sess.run_turn_policy(
+                            policy, policy_revision, policy_input
+                        )
                 except (RuntimeError, ValueError) as exc:
                     if not (
                         isinstance(policy, GemmaNativeControl6Policy)
@@ -7386,20 +10340,25 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     "policy_wall_ms", (time.perf_counter() - policy_started) * 1000.0
                 )
             fresh_native_hidden = bool(
-                policy_input.native_control_hidden is not None
-                and policy_input.native_control_hidden_frame_id is not None
-                and int(policy_input.native_control_hidden_frame_id) == int(policy_input.frame_id)
+                worker_native_hidden_valid
+                or (
+                    policy_input.native_control_hidden is not None
+                    and policy_input.native_control_hidden_frame_id is not None
+                    and int(policy_input.native_control_hidden_frame_id)
+                    == int(policy_input.frame_id)
+                )
             )
             if isinstance(policy, GemmaNativeControl6Policy) and fresh_native_hidden:
                 if shared_listener_microbatch_enabled:
-                    binding = shared_listener_bindings.get(sess.session_id)
-                    native_output_health_result = native_control6_validate_listener_output_health(
-                        native_output,
-                        session_id=sess.session_id,
-                        generation_id=int(binding.get("generation", -1)) if binding else -1,
-                        state_epoch_id=str(sess.listener_state.state_epoch_id),
-                        frame_id=int(policy_input.frame_id),
-                    )
+                    if worker_native_output is None:
+                        binding = shared_listener_bindings.get(sess.session_id)
+                        native_output_health_result = native_control6_validate_listener_output_health(
+                            native_output,
+                            session_id=sess.session_id,
+                            generation_id=int(binding.get("generation", -1)) if binding else -1,
+                            state_epoch_id=str(sess.listener_state.state_epoch_id),
+                            frame_id=int(policy_input.frame_id),
+                        )
                 else:
                     native_output_health_result = native_control6_verify_scored_output_health(
                         getattr(sess.listener_state, "gemma_lm_native", None),
@@ -7437,8 +10396,8 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                         "native_control6_class_match": isinstance(policy, GemmaNativeControl6Policy),
                         "native_control6_step_called": True,
                         "native_control6_head_scored": False,
-                        "native_control_hidden_supplied": policy_input.native_control_hidden is not None,
-                        "native_control_hidden_frame_id": policy_input.native_control_hidden_frame_id,
+                        "native_control_hidden_supplied": fresh_native_hidden,
+                        "native_control_hidden_frame_id": native_control_hidden_frame_id,
                         "native_control_no_input_tick": bool(policy_input.native_control_no_input_tick),
                         "legal_actions": list(legal_actions or ()),
                         "user_turn_pending": bool(user_turn_pending),
@@ -7460,7 +10419,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
             )
             native_control6_head_scored = bool(
                 native_control6_step_called
-                and policy_input.native_control_hidden is not None
+                and fresh_native_hidden
                 and not (
                     isinstance(decision.diagnostics, dict)
                     and decision.diagnostics.get("no_input_tick") is True
@@ -7493,8 +10452,8 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     "native_control6_class_match": native_control6_class_match,
                     "native_control6_step_called": native_control6_step_called,
                     "native_control6_head_scored": native_control6_head_scored,
-                    "native_control_hidden_supplied": policy_input.native_control_hidden is not None,
-                    "native_control_hidden_frame_id": policy_input.native_control_hidden_frame_id,
+                    "native_control_hidden_supplied": fresh_native_hidden,
+                    "native_control_hidden_frame_id": native_control_hidden_frame_id,
                     "frame_id": int(decision.frame_id),
                     "policy_decision_at_ns": policy_decision_at_ns,
                     "listener_hidden_frame_id": policy_input.listener_hidden_frame_id,
@@ -7544,6 +10503,8 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                         "listener_hidden_frame_id",
                         "listener_hidden_at_ns",
                         "response_lora_applied",
+                        "native_output_provenance",
+                        "decision_view_fallback_reason",
                         "calibration_applied",
                         "calibration_margin",
                         "calibration_threshold",
@@ -7795,10 +10756,17 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     return
                 if decision.action == ControlAction.HARD_STOP:
                     pending_speak = None
+                elif isinstance(policy, GemmaNativeControl6Policy) and decision.action == ControlAction.SPEAK:
+                    # Native Control6 may take the turn while the peer is still
+                    # speaking; do not replace its decision with a deferred
+                    # endpoint-triggered SPEAK from an earlier tick.
+                    pending_speak = None
                 deferred_speak = None
                 gate_decision = decision
                 if decision.action == ControlAction.SPEAK:
-                    if speech_tracker.voice_run_active:
+                    if speech_tracker.voice_run_active and not isinstance(
+                        policy, GemmaNativeControl6Policy
+                    ):
                         if pending_speak is None:
                             pending_speak = {
                                 "source_frame_id": int(decision.frame_id),
@@ -7818,7 +10786,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     ):
                         publish_decision(accepted=False, rejection_reason="no_new_user_utterance")
                         return
-                if pending_speak_ready:
+                if pending_speak_ready and not isinstance(policy, GemmaNativeControl6Policy):
                     deferred_speak = dict(pending_speak)
                     gate_decision = PolicyDecision(
                         action=ControlAction.SPEAK,
@@ -7956,7 +10924,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     committed = np.empty(0, dtype=np.float32)
                     direct_audio_context: dict[str, Any] | None = None
                     if gate.action == ControlAction.SPEAK:
-                        controller6_speak = is_controller6_policy(policy)
+                        controller6_speak = _native_control6_endpoint_bypass_enabled(policy)
                         onset_frame_id = (
                             int(sess.pending_user_onset_frame_id)
                             if controller6_speak and sess.pending_user_onset_frame_id is not None
@@ -8105,6 +11073,14 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                                 else policy_input.frame_id
                             ),
                             "source": str(decision.source),
+                        }
+                    if gate.action == ControlAction.BACKCHANNEL:
+                        trigger_frame = int(decision.frame_id)
+                        intent_origin = {
+                            "source_frame_id": trigger_frame,
+                            "endpoint_frame_id": int(policy_input.frame_id),
+                            "source": str(decision.source),
+                            **(intent_origin or {}),
                         }
                     if direct_audio_context is not None:
                         intent_origin = {**(intent_origin or {}), **direct_audio_context}
@@ -8447,6 +11423,11 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                 sess,
                 record_scheduler_stage=record_scheduler_stage,
                 pending_speak_provider=lambda: pending_speak,
+                policy_context_provider=(
+                    _shared_native_policy_context
+                    if isinstance(sess.turn_policy, GemmaNativeControl6Policy)
+                    else None
+                ),
             )
             session_runtime_metrics["scheduler"]["shared_listener_microbatch_enabled"] = True
             session_runtime_metrics["scheduler"]["listener_tick_period_ms"] = 80
@@ -8538,6 +11519,222 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     else None
                 ),
             )
+            playback_ack_branches[response_id] = {
+                "response_id": response_id,
+                "session_generation_id": int(token.session_generation_id),
+                "speaker_segment_id": str(token.speaker_segment_id),
+                "playback_segments": {},
+                "segment_token_packets": [],
+                "spoken_prefix_token_ids": (),
+                "spoken_prefix_exclusive_cursor": 0,
+                "spoken_prefix_text": "",
+                "client_consumed_pcm_sequence": -1,
+                "client_consumed_segments": (),
+                "spoken_prefix_lock": threading.Lock(),
+            }
+            while len(playback_ack_branches) > 8:
+                playback_ack_branches.pop(next(iter(playback_ack_branches)))
+            unified_native_branch: dict[str, Any] | None = None
+            unified_transition_lock: Any | None = None
+            unified_close_ids: tuple[int, ...] | None = None
+            if unified_kv_enabled and response_uses_direct_audio:
+                binding = shared_listener_bindings.get(sess.session_id)
+                worker = shared_listener_worker_holder.get("worker")
+                if binding is None or worker is None:
+                    sess.end_response(token)
+                    await send_ws({
+                        "type": "error",
+                        "response_id": response_id,
+                        "error": {
+                            "code": "UNIFIED_NATIVE_CACHE_UNAVAILABLE",
+                            "message": "unified direct-audio response requires its registered native listener owner",
+                        },
+                    })
+                    return
+                unified_transition_lock = binding["unified_turn_transition_lock"]
+                unified_transition_lock.acquire()
+                try:
+                    if action == ControlAction.BACKCHANNEL:
+                        begin_deadline = asyncio.get_running_loop().time() + 2.0
+                        private_handle = None
+                        while private_handle is None:
+                            if closing or not sess.is_generation_current(token):
+                                raise RuntimeError(
+                                    "private backchannel fork lost the response generation"
+                                )
+                            listener_snapshot = await asyncio.wrap_future(
+                                worker.session_state(sess.session_id)
+                            )
+                            try:
+                                private_handle = await asyncio.wrap_future(
+                                    worker.begin_ephemeral_decode(
+                                        sess.session_id,
+                                        expected_generation_id=int(listener_snapshot.generation_id),
+                                        expected_cache_position=int(listener_snapshot.cache_position),
+                                    )
+                                )
+                            except RuntimeError as exc:
+                                if (
+                                    str(exc) not in {
+                                        "private decode fork requires a completed listener frame watermark",
+                                        "unified native operation lost its generation/cache-position compare-and-swap",
+                                    }
+                                    or asyncio.get_running_loop().time() >= begin_deadline
+                                ):
+                                    raise
+                                await asyncio.sleep(0.002)
+                        unified_native_branch = {
+                            "worker": worker,
+                            "response_id": response_id,
+                            "speaker_segment_id": str(token.speaker_segment_id),
+                            "session_generation_id": int(token.session_generation_id),
+                            "listener_generation_id": int(private_handle.parent_generation_id),
+                            "cache_position": int(private_handle.source_cache_position),
+                            "turn_start_cache_position": int(private_handle.source_cache_position),
+                            "queue_open": False,
+                            "ephemeral_private": True,
+                            "ephemeral_decode_handle": private_handle,
+                            "finalized": False,
+                            "ended_response": False,
+                            "transition_lock": unified_transition_lock,
+                            "close_ids": (),
+                            "policy_decision_at_ns": (
+                                int(intent_origin["policy_decision_at_ns"])
+                                if isinstance(intent_origin, dict)
+                                and intent_origin.get("policy_decision_at_ns") is not None
+                                else None
+                            ),
+                            "queue_open_requested_ns": None,
+                            "queue_open_ready_ns": time.monotonic_ns(),
+                            "generated_token_count": 0,
+                            "native_token_append_count": 0,
+                        }
+                        playback_ack_branches[response_id] = unified_native_branch
+                    else:
+                        unified_close_ids = (
+                            _unified_end_of_turn_token_id(engine, sess),
+                            *_build_unified_next_user_header(engine, sess),
+                        )
+                        queue_open_requested_ns = time.monotonic_ns()
+                        begin_deadline = asyncio.get_running_loop().time() + 2.0
+                        while True:
+                            if closing or not sess.is_generation_current(token):
+                                raise RuntimeError("unified cache queue opening lost the response generation")
+                            listener_snapshot = await asyncio.wrap_future(
+                                worker.session_state(sess.session_id)
+                            )
+                            try:
+                                opened_snapshot = await asyncio.wrap_future(
+                                    worker.begin_assistant_audio_queue(
+                                        sess.session_id,
+                                        expected_generation_id=int(listener_snapshot.generation_id),
+                                        expected_cache_position=int(listener_snapshot.cache_position),
+                                        reserve_tail_tokens=len(unified_close_ids) + 2,
+                                    )
+                                )
+                            except RuntimeError as exc:
+                                if (
+                                    str(exc) not in {
+                                        "assistant audio queue must open at an idle frame boundary",
+                                        "unified native operation lost its generation/cache-position compare-and-swap",
+                                    }
+                                    or asyncio.get_running_loop().time() >= begin_deadline
+                                ):
+                                    raise
+                                await asyncio.sleep(0.002)
+                                continue
+                            unified_native_branch = {
+                                "worker": worker,
+                                "response_id": response_id,
+                                "speaker_segment_id": str(token.speaker_segment_id),
+                                "session_generation_id": int(token.session_generation_id),
+                                "listener_generation_id": int(opened_snapshot.generation_id),
+                                "cache_position": int(opened_snapshot.cache_position),
+                                "turn_start_cache_position": int(opened_snapshot.cache_position),
+                                "queue_open": True,
+                                "finalized": False,
+                                "ended_response": False,
+                                "history_committed": False,
+                                "transition_lock": unified_transition_lock,
+                                "close_ids": unified_close_ids,
+                                "reserved_close_tokens": len(unified_close_ids) + 2,
+                                "transition_token_ids": (),
+                                "spoken_prefix_text": "",
+                                "spoken_prefix_kv_position": None,
+                                "spoken_prefix_token_ids": (),
+                                "spoken_prefix_exclusive_cursor": int(opened_snapshot.cache_position),
+                                "spoken_prefix_text_parts": (),
+                                "playback_segments": {},
+                                "segment_token_packets": [],
+                                "client_consumed_pcm_sequence": -1,
+                                "client_consumed_segments": (),
+                                "client_consumed_pcm_events": [],
+                                "spoken_prefix_rebuilt": False,
+                                "spoken_prefix_lock": threading.Lock(),
+                                "generated_token_count": 0,
+                                "native_token_append_count": 0,
+                                "policy_decision_at_ns": (
+                                    int(intent_origin["policy_decision_at_ns"])
+                                    if isinstance(intent_origin, dict)
+                                    and intent_origin.get("policy_decision_at_ns") is not None
+                                    else None
+                                ),
+                                "queue_open_requested_ns": queue_open_requested_ns,
+                                "queue_open_ready_ns": time.monotonic_ns(),
+                            }
+                            playback_ack_branches[response_id] = unified_native_branch
+                            break
+                except BaseException as exc:
+                    unified_transition_lock.release()
+                    sess.end_response(token)
+                    if user_turn_onset_frame_id is not None:
+                        sess.cancel_user_onset_response(user_turn_onset_frame_id)
+                    if isinstance(exc, asyncio.CancelledError):
+                        raise
+                    logger.exception(
+                        "[realtime %s %s] failed to open unified native audio queue",
+                        sess.session_id[:8],
+                        response_id,
+                    )
+                    await send_ws({
+                        "type": "error",
+                        "response_id": response_id,
+                        "error": {
+                            "code": "UNIFIED_NATIVE_CACHE_UNAVAILABLE",
+                            "message": str(exc)[:240],
+                        },
+                    })
+                    return
+
+            async def finalize_unified_native_cache(*, history_committed: bool) -> None:
+                branch = unified_native_branch
+                if branch is None or branch.get("finalized"):
+                    return
+                transition_lock = branch["transition_lock"]
+                transition_lock.acquire()
+                try:
+                    worker = branch["worker"]
+                    if int(branch.get("client_consumed_pcm_sequence", -1)) < 0:
+                        branch["client_playback_limitation"] = (
+                            "no client_consumed_pcm ACK; only the last confirmed complete-segment prefix is retained"
+                        )
+                        update_response_runtime_metrics(response_id, "client_consumed_pcm", {
+                            "status": "no_playback_ack",
+                            "prefix_policy": "retain_last_confirmed_prefix_only",
+                            "logical_client_consumption_only": True,
+                        })
+                    await _finalize_unified_native_cache_branch(
+                        worker,
+                        sess.session_id,
+                        branch,
+                        history_committed=history_committed,
+                        close_ids=tuple(branch["close_ids"]),
+                    )
+                finally:
+                    if not branch.get("ended_response"):
+                        sess.end_response(token)
+                        branch["ended_response"] = True
+                    transition_lock.release()
 
             def response_listener_admission_wait() -> None:
                 listener_admission_wait(token)
@@ -8690,6 +11887,8 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                         sess.speaker_segment.control_opened = True
                         sess.speaker_segment.control_action = ControlAction.BACKCHANNEL.value
                         sess.speaker_segment.control_frames_remaining = 4
+            if unified_transition_lock is not None:
+                unified_transition_lock.release()
             logger.info("[realtime %s] start %s audio_samples=%d auto=%s", sess.session_id[:8], response_id, committed_audio.size, sess.auto_response)
             playout: SpeakerPlayoutBuffer | None = None
             packetizer: NetworkPacketizer | None = None
@@ -8827,6 +12026,10 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                             int(archive_id_holder["archive_id"]), response_id
                         )
                 if controller_guided_say_response and action is not None:
+                    policy_decision_at_ns = (
+                        intent_origin.get("policy_decision_at_ns")
+                        if isinstance(intent_origin, dict) else None
+                    )
                     await send_ws({
                         "type": "response.action_selected",
                         "response_id": response_id,
@@ -8835,9 +12038,13 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                         "deferred_until_endpoint": False,
                         "selection_source": "80ms_controller",
                         "response_protocol": CONTROLLER_GUIDED_SAY_V1,
+                        **({"policy_decision_at_ns": int(policy_decision_at_ns)}
+                           if isinstance(policy_decision_at_ns, int) else {}),
                     }, token)
                 next_generated_frame_id = 0
                 streamed_chunks = 0
+                first_tts_audio_chunk_pcm_at_ns: int | None = None
+                active_output_segment_id = {"value": str(token.speaker_segment_id)}
                 def packetize_frames_as_packets(frames: list[PlayoutFrame]) -> list[AudioPacket]:
                     if packetizer is None:
                         raise RuntimeError("packetizer non inizializzato")
@@ -8900,7 +12107,11 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     return True
 
                 def on_audio_chunk_with_horizon(chunk: np.ndarray, conditioning_frame_id: int) -> None:
-                    nonlocal next_generated_frame_id
+                    nonlocal next_generated_frame_id, first_tts_audio_chunk_pcm_at_ns
+                    if first_tts_audio_chunk_pcm_at_ns is None:
+                        # Same monotonic clock as Control6's policy_decision_at_ns.
+                        # This latch is before playout, packetization, and WS relay.
+                        first_tts_audio_chunk_pcm_at_ns = time.monotonic_ns()
                     array = np.asarray(chunk, dtype=np.float32)
                     packets_to_enqueue: list[AudioPacket] = []
                     def enqueue_ready() -> None:
@@ -8909,7 +12120,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                             array,
                             first_frame_id=next_generated_frame_id,
                             generation_id=token.session_generation_id,
-                            speaker_segment_id=token.speaker_segment_id,
+                            speaker_segment_id=str(active_output_segment_id["value"]),
                         )
                         next_generated_frame_id += len(generated)
                         ready = playout.release_ready(conditioning_frame_id=int(conditioning_frame_id))
@@ -8929,6 +12140,61 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     # stateful path supplies the real V9 horizon explicitly.
                     horizon = max(-1, next_generated_frame_id - 1)
                     on_audio_chunk_with_horizon(chunk, horizon)
+
+                def begin_audio_segment(segment_id: str) -> None:
+                    nonlocal next_generated_frame_id
+                    normalized_segment_id = str(segment_id)
+                    if not normalized_segment_id:
+                        raise ValueError("closed TTS segment requires an identity")
+                    if normalized_segment_id == active_output_segment_id["value"]:
+                        return
+                    if playout is None or packetizer is None:
+                        raise RuntimeError("closed TTS segment has no playout or packetizer")
+                    playout.begin_segment(
+                        generation_id=token.session_generation_id,
+                        speaker_segment_id=normalized_segment_id,
+                    )
+                    active_output_segment_id["value"] = normalized_segment_id
+                    next_generated_frame_id = 0
+
+                def finish_audio_segment(
+                    segment_id: str,
+                    source_tokens: Sequence[Mapping[str, Any]],
+                ) -> None:
+                    normalized_segment_id = str(segment_id)
+                    if normalized_segment_id != active_output_segment_id["value"]:
+                        raise RuntimeError("closed TTS segment does not own the active playout")
+                    if playout is None or packetizer is None:
+                        raise RuntimeError("closed TTS segment has no playout or packetizer")
+                    packets = packetize_frames_as_packets(
+                        playout.flush_segment(
+                            generation_id=token.session_generation_id,
+                            speaker_segment_id=normalized_segment_id,
+                        )
+                    )
+                    packets.extend(packetizer.flush_segment(
+                        token.session_generation_id,
+                        normalized_segment_id,
+                    ))
+                    burst_items = len(packets) + 1
+                    for packet in packets:
+                        if not queue_response_output(
+                            packet,
+                            queue_kind="audio",
+                            output_queue=audio_queue,
+                            burst_items=burst_items,
+                        ):
+                            return
+                    marker = _ClosedTTSSegment(
+                        speaker_segment_id=normalized_segment_id,
+                        source_tokens=tuple(dict(row) for row in source_tokens),
+                    )
+                    queue_response_output(
+                        marker,
+                        queue_kind="audio",
+                        output_queue=audio_queue,
+                        burst_items=burst_items,
+                    )
 
                 def on_text_chunk(chunk: str) -> None:
                     cleaned_chunk = re.sub(r"<unused\d+>", " ", str(chunk))
@@ -8968,6 +12234,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                         "server_emit_started_at_ns": server_emit_started_at_ns,
                         "raw_source_audio_quality": _raw_source_audio_quality(packet.pcm),
                         "packet_id": packet.packet_id,
+                        "sequence": packet.packet_id,
                         "generation_id": packet.generation_id,
                         "speaker_segment_id": packet.speaker_segment_id,
                         "first_frame_id": packet.first_frame_id,
@@ -8991,8 +12258,26 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                         return False
                     with policy_causality_lock:
                         response_audio_admission.mark_audio_sent_locked(frame_count)
+                    ack_branch = playback_ack_branches.get(response_id)
+                    if ack_branch is not None:
+                        _record_emitted_pcm_packet(ack_branch, packet)
                     streamed_chunks += 1
                     return True
+
+                async def emit_audio_queue_item(item: Any) -> bool:
+                    if isinstance(item, AudioPacket):
+                        return await emit_audio_packet(item)
+                    if not isinstance(item, _ClosedTTSSegment):
+                        raise TypeError("realtime audio queue contains an unsupported item")
+                    ack_branch = playback_ack_branches.get(response_id)
+                    if ack_branch is None:
+                        return True
+                    marker = _complete_client_pcm_segment(
+                        ack_branch,
+                        speaker_segment_id=item.speaker_segment_id,
+                        token_packets=item.source_tokens,
+                    )
+                    return marker is None or await send_ws(marker, token)
 
                 async def emit_text_chunk(chunk: str) -> bool:
                     sent = await send_ws(
@@ -9010,10 +12295,38 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                         return False
                     return True
 
+                policy_decision_at_ns = (
+                    int(intent_origin["policy_decision_at_ns"])
+                    if isinstance(intent_origin, dict)
+                    and intent_origin.get("policy_decision_at_ns") is not None
+                    else None
+                )
+
+                def publish_thinker_metrics(values: dict[str, Any]) -> None:
+                    metrics = dict(values)
+                    if policy_decision_at_ns is not None:
+                        metrics["policy_decision_at_ns"] = policy_decision_at_ns
+                    update_response_runtime_metrics(response_id, "thinker_metrics", metrics)
+                    event = {
+                        "type": "response.thinker_metrics",
+                        "response_id": response_id,
+                        **metrics,
+                    }
+                    sent = asyncio.run_coroutine_threadsafe(
+                        send_ws(event, token), response_event_loop
+                    ).result(timeout=5.0)
+                    if not sent:
+                        raise RuntimeError("thinker timing event lost its response generation")
+
                 def infer_ws():
                     nonlocal empty_asr_cooldown_until_frame
+                    frame_residual_v2_response = bool(
+                        direct_audio_v2_response
+                        and bool(getattr(engine, "frame_residual_adapter_enabled", False))
+                        and getattr(engine, "frame_residual_adapter", None) is not None
+                    )
                     use_talk_context_pool = bool(
-                        controller_guided_say_response
+                        (controller_guided_say_response or frame_residual_v2_response)
                         and getattr(engine, "response_talk_context_pool", None) is not None
                     )
                     with _response_talk_context(
@@ -9176,6 +12489,8 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                                     ),
                                     "_generation_id": token.session_generation_id,
                                     "_generation_token": token,
+                                    "_unified_native_branch": unified_native_branch,
+                                    "_on_thinker_metrics": publish_thinker_metrics,
                                     "_talk_context": talk_context,
                                     "_input_transcript_context": (
                                         dict(intent_origin["_input_transcript_context"])
@@ -9208,6 +12523,8 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                                     ),
                                     "_on_audio_chunk": on_audio_chunk,
                                     "_on_audio_chunk_with_horizon": on_audio_chunk_with_horizon,
+                                    "_begin_audio_segment": begin_audio_segment,
+                                    "_finish_audio_segment": finish_audio_segment,
                                     "_on_text_chunk": on_text_chunk,
                                     "_on_thinker_token_id": lambda token_id: record_thinker_token_id(response_id, token_id),
                                     "_listener_admission_wait": (
@@ -9263,7 +12580,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     except queue.Empty:
                         await asyncio.sleep(0.005)
                     else:
-                        if not await emit_audio_packet(chunk_wav):
+                        if not await emit_audio_queue_item(chunk_wav):
                             return
                     try:
                         chunk_text = text_queue.get_nowait()
@@ -9319,13 +12636,53 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                                        "response_id": response_id,
                                        "runtime_metrics": runtime_metrics_event(response_id, result)}, token)
                     return
+                if yielded and live_v2_say_active:
+                    # Only fully closed, text-owned TTS units may survive YIELD.
+                    # Keep queued packets through the last segment marker and
+                    # discard any PCM from an unfinished unit without flushing it.
+                    queued_audio: list[Any] = []
+                    while True:
+                        try:
+                            queued_audio.append(audio_queue.get_nowait())
+                        except queue.Empty:
+                            break
+                    last_closed_index = max(
+                        (
+                            index for index, item in enumerate(queued_audio)
+                            if isinstance(item, _ClosedTTSSegment)
+                        ),
+                        default=-1,
+                    )
+                    for item in queued_audio[: last_closed_index + 1]:
+                        if not await emit_audio_queue_item(item):
+                            return
+                    active_segment = str(active_output_segment_id["value"])
+                    if playout is not None:
+                        playout.cancel_segment(
+                            generation_id=token.session_generation_id,
+                            speaker_segment_id=active_segment,
+                        )
+                    if packetizer is not None:
+                        packetizer.cancel_segment(
+                            token.session_generation_id,
+                            active_segment,
+                        )
+                    _drain_queue(text_queue)
+                    await send_ws({
+                        "type": "response.cancelled",
+                        "reason": "yield",
+                        "response_id": response_id,
+                        "generation_id": token.session_generation_id,
+                        "runtime_metrics": runtime_metrics_event(response_id, result),
+                    }, token)
+                    return
                 # YIELD is different: release accepted packets before flush output.
                 while True:
                     try:
                         chunk_wav = audio_queue.get_nowait()
                     except queue.Empty:
                         break
-                    if not await emit_audio_packet(chunk_wav):
+                    if not await emit_audio_queue_item(chunk_wav):
                         return
                 if discard_fenced_output():
                     return
@@ -9390,6 +12747,34 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                         if not await emit_audio_packet(packet):
                             return
                 response_done_at_monotonic_ns = time.monotonic_ns()
+                ack_branch = playback_ack_branches.get(response_id)
+                if ack_branch is not None:
+                    response_audio_complete = bool(
+                        not result.get("cancelled")
+                        and not yielded
+                        and result.get("status") not in {"no_speech", "deferred_until_endpoint"}
+                    )
+                    if response_audio_complete:
+                        # Until the live SAY producer exposes closed text-owned
+                        # TTS units, this response-level segment deliberately
+                        # carries no Gemma token ownership. The marker is still
+                        # useful to the client playback queue, but an ACK cannot
+                        # advance the canonical KV prefix without that mapping.
+                        marker = _complete_client_pcm_segment(
+                            ack_branch,
+                            speaker_segment_id=str(token.speaker_segment_id),
+                        )
+                        if marker is not None and not await send_ws(marker, token):
+                            return
+                    update_response_runtime_metrics(response_id, "client_consumed_pcm", {
+                        "alignment": "complete_closed_tts_unit_only",
+                        "text_owned_tts_units_available": False,
+                        "logical_client_consumption_only": True,
+                        "confirmed_segments": list(ack_branch.get("client_consumed_segments", ())),
+                        "confirmed_exclusive_kv_cursor": ack_branch.get(
+                            "spoken_prefix_exclusive_cursor"
+                        ),
+                    })
                 if response_uses_direct_audio and not archive_assistant_finalized["value"]:
                     with sess._generation_lock:
                         segment = sess.speaker_segment
@@ -9405,6 +12790,22 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                             and segment.segment_id == token.speaker_segment_id
                             else 0
                         )
+                    v2_metrics = (
+                        (result.get("runtime_metrics") or {}).get("audio_response_protocol")
+                        if isinstance(result.get("runtime_metrics"), dict) else None
+                    )
+                    unified_speak_valid = bool(
+                        not unified_kv_enabled
+                        or (
+                            action == ControlAction.SPEAK
+                            and isinstance(v2_metrics, dict)
+                            and v2_metrics.get("response_protocol") == AUDIO_RESPONSE_PROTOCOL_V2
+                            and v2_metrics.get("status") == "valid"
+                            and str(v2_metrics.get("response_action", "")).upper()
+                            == ControlAction.SPEAK.value
+                            and not result.get("_skip_history_commit")
+                        )
+                    )
                     assistant_completed = bool(
                         emitted_assistant_text
                         and emitted_audio_frames > 0
@@ -9412,6 +12813,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                         and not result.get("tool_calls")
                         and not yielded
                         and result.get("status") != "no_speech"
+                        and unified_speak_valid
                     )
                     assistant_status = (
                         "completed" if assistant_completed
@@ -9443,6 +12845,12 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     else:
                         archived_assistant = False
                     archive_assistant_finalized["value"] = bool(archived_assistant)
+                    if unified_native_branch is not None:
+                        unified_native_branch["history_committed"] = bool(
+                            assistant_completed
+                            and archived_assistant
+                            and unified_speak_valid
+                        )
                     update_response_runtime_metrics(response_id, "audio_history_archive_assistant", {
                         "status": assistant_status,
                         "assistant_text_committed": bool(archived_assistant and committed_assistant_text),
@@ -9454,6 +12862,10 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     "response_done_at_monotonic_ns": response_done_at_monotonic_ns,
                     "runtime_metrics": runtime_metrics_event(response_id, result),
                 }
+                if first_tts_audio_chunk_pcm_at_ns is not None:
+                    done_event["t_first_audio_chunk_pcm_at_ns"] = int(
+                        first_tts_audio_chunk_pcm_at_ns
+                    )
                 if result.get("status") == "no_speech":
                     done_event["status"] = "no_speech"
                     done_event["audio_samples"] = 0
@@ -9643,25 +13055,49 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     # A cancelled/failed response has no verified transcript;
                     # complete it as empty so session history stays unchanged.
                     if not archive_assistant_finalized["value"]:
-                        with sess._generation_lock:
-                            assistant_status = (
-                                "cancelled"
-                                if sess.stop_requested
-                                or sess.stop_reason in {
-                                    ControlAction.YIELD.value,
-                                    ControlAction.REPLAN.value,
-                                    ControlAction.HARD_STOP.value,
-                                }
-                                else "absent"
+                        spoken_prefix = ""
+                        _spoken_position = None
+                        if direct_audio_v2_response and unified_native_branch is not None:
+                            _spoken_position = unified_native_branch.get(
+                                "spoken_prefix_exclusive_cursor"
                             )
+                            spoken_prefix = str(
+                                unified_native_branch.get("spoken_prefix_text", "")
+                            )
+                            if int(unified_native_branch.get("client_consumed_pcm_sequence", -1)) < 0:
+                                unified_native_branch["client_playback_limitation"] = (
+                                    "no client_consumed_pcm ACK; only the last confirmed complete-segment prefix is retained"
+                                )
+                                update_response_runtime_metrics(response_id, "client_consumed_pcm", {
+                                    "status": "no_playback_ack",
+                                    "prefix_policy": "retain_last_confirmed_prefix_only",
+                                    "logical_client_consumption_only": True,
+                                })
+                        if spoken_prefix:
+                            assistant_status = "partial"
+                        else:
+                            with sess._generation_lock:
+                                assistant_status = (
+                                    "cancelled"
+                                    if sess.stop_requested
+                                    or sess.stop_reason in {
+                                        ControlAction.YIELD.value,
+                                        ControlAction.REPLAN.value,
+                                        ControlAction.HARD_STOP.value,
+                                    }
+                                    else "absent"
+                                )
                         archive_assistant_finalized["value"] = sess.update_audio_history_archive_assistant(
                             archive_id,
-                            "",
+                            spoken_prefix,
                             status=assistant_status,
                         )
                         update_response_runtime_metrics(response_id, "audio_history_archive_assistant", {
                             "status": assistant_status,
-                            "assistant_text_committed": False,
+                            "assistant_text_committed": bool(spoken_prefix),
+                            "spoken_prefix_kv_position": (
+                                _spoken_position if spoken_prefix else None
+                            ),
                         })
                 # A failed response ends this worker, not the input/listener
                 # generation. Invalidating the session here can race a valid
@@ -9675,7 +13111,39 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                 with response_controls_lock:
                     if response_controls.get(response_id) is control:
                         response_controls.pop(response_id, None)
-                sess.end_response(token)
+                if unified_native_branch is not None:
+                    finalize_task = asyncio.create_task(finalize_unified_native_cache(
+                        history_committed=bool(unified_native_branch.get("history_committed"))
+                    ))
+                    try:
+                        await asyncio.shield(finalize_task)
+                    except asyncio.CancelledError:
+                        try:
+                            await asyncio.shield(finalize_task)
+                        except Exception:
+                            logger.exception(
+                                "[realtime %s %s] unified native cache cleanup failed during cancellation",
+                                sess.session_id[:8],
+                                response_id,
+                            )
+                    except Exception as exc:
+                        logger.exception(
+                            "[realtime %s %s] unified native cache finalization failed",
+                            sess.session_id[:8],
+                            response_id,
+                        )
+                        fail_native_listener_output_health(
+                            -1,
+                            {
+                                "status": "unified_cache_finalization_failed",
+                                "error": str(exc),
+                            },
+                        )
+                        if not unified_native_branch.get("ended_response"):
+                            sess.end_response(token)
+                            unified_native_branch["ended_response"] = True
+                elif not (unified_native_branch and unified_native_branch.get("ended_response")):
+                    sess.end_response(token)
                 if native_partial_worker is not None and native_partial_asr_enabled.is_set():
                     native_partial_worker.resume()
 
@@ -9892,9 +13360,71 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     await send_ws({"type": "error", "error": {"code": "INVALID_EVENT", "message": str(exc)}})
                     continue
                 et = ev.get("type")
-                if et == "session.update":
+                if et == "client_consumed_pcm":
+                    ack_response_id = ev.get("response_id")
+                    branch = playback_ack_branches.get(str(ack_response_id or ""))
+                    if branch is None or not sess.is_generation_current(
+                        generation_id=ev.get("generation_id")
+                        if isinstance(ev.get("generation_id"), int)
+                        and not isinstance(ev.get("generation_id"), bool)
+                        else None,
+                        response_id=str(ack_response_id or ""),
+                    ):
+                        accepted = False
+                    else:
+                        with branch.get("spoken_prefix_lock", nullcontext()):
+                            accepted = _record_client_consumed_pcm(branch, ev)
+                    if not accepted:
+                        await send_ws({
+                            "type": "error",
+                            "response_id": str(ack_response_id or ""),
+                            "error": {
+                                "code": "STALE_CLIENT_CONSUMPTION_ACK",
+                            "message": "client_consumed_pcm identity, sequence, or closed segment range is stale or mismatched",
+                            },
+                        })
+                    else:
+                        update_response_runtime_metrics(str(ack_response_id), "client_consumed_pcm", {
+                            "status": "accepted",
+                            "logical_client_consumption_only": True,
+                            "response_id": str(ack_response_id),
+                            "generation_id": int(ev["generation_id"]),
+                            "speaker_segment_id": str(ev["speaker_segment_id"]),
+                            "start_sample": int(ev["start_sample"]),
+                            "end_sample": int(ev["end_sample"]),
+                            "sample_rate": int(ev["sample_rate"]),
+                            "sequence": int(ev["sequence"]),
+                            "consumption_semantics": "logical_client_device_buffer",
+                            "confirmed_exclusive_kv_cursor": branch.get(
+                                "spoken_prefix_exclusive_cursor"
+                            ),
+                        })
+                elif et == "session.update":
                     cfg = ev.get("session", {})
                     extra = cfg.get("extra_body", {}) or {}
+                    requested_instructions = str(cfg.get("instructions", sess.instructions))
+                    instructions_changed = requested_instructions != str(sess.instructions)
+                    if unified_kv_enabled and instructions_changed:
+                        binding = shared_listener_bindings.get(sess.session_id)
+                        dispatcher = shared_listener_dispatcher_holder.get("dispatcher")
+                        reason = (
+                            "unified listener session is unavailable"
+                            if binding is None
+                            else _unified_instruction_refresh_ineligible_reason(
+                                sess,
+                                binding,
+                                dispatcher,
+                            )
+                        )
+                        if reason is not None:
+                            await send_ws({
+                                "type": "error",
+                                "error": {
+                                    "code": "INVALID_SESSION_UPDATE",
+                                    "message": reason[:240],
+                                },
+                            })
+                            continue
                     requested_voice = str(cfg.get("voice", sess.voice))
                     requested_voice_style = cfg.get("voice_style", sess.voice_style)
                     requested_auto_response = bool(
@@ -10096,7 +13626,32 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                         else:
                             loaded_event["run_id"] = runtime["run_id"]
                         await send_ws(loaded_event)
-                    sess.update_instructions(str(cfg.get("instructions", sess.instructions)))
+                    if unified_kv_enabled and instructions_changed:
+                        binding = shared_listener_bindings.get(sess.session_id)
+                        dispatcher = shared_listener_dispatcher_holder.get("dispatcher")
+                        worker = shared_listener_worker_holder.get("worker")
+                        try:
+                            if binding is None:
+                                raise RuntimeError("unified listener session is unavailable")
+                            await _refresh_unified_prefix_for_instruction_update(
+                                engine,
+                                sess,
+                                instructions=requested_instructions,
+                                worker=worker,
+                                binding=binding,
+                                dispatcher=dispatcher,
+                            )
+                        except Exception as exc:
+                            await send_ws({
+                                "type": "error",
+                                "error": {
+                                    "code": "INVALID_SESSION_UPDATE",
+                                    "message": str(exc)[:240],
+                                },
+                            })
+                            continue
+                    else:
+                        sess.update_instructions(requested_instructions)
                     diagnostic_fixture = cfg.get("tts_quality_diagnostic_fixture")
                     sess.tts_quality_diagnostic_fixture = (
                         str(diagnostic_fixture)

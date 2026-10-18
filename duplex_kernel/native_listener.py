@@ -118,10 +118,10 @@ def parse_attention_backend(value: str) -> int:
 
 
 def validate_cuda_graph_attention_backend(enable_cuda_graph: bool, attention_backend: int) -> None:
-    """Graph replay currently preserves only the native CUSTOM Q4 route."""
+    """Graph replay currently preserves only the native CUSTOM Q2 route."""
     if enable_cuda_graph and int(attention_backend) != GEMMA4_ATTN_CUSTOM:
         raise RuntimeError(
-            "CUDA Graph Q4 richiede GEMMA4_ATTENTION_BACKEND=CUSTOM; "
+            "CUDA Graph Q2 richiede GEMMA4_ATTENTION_BACKEND=CUSTOM; "
             "backend ATEN/NATIVE_SPLITK resta sul percorso legacy"
         )
 
@@ -741,7 +741,7 @@ class NativeGemmaListenerLM:
         language_model: Any,
         *,
         max_seq_len: int = 4096,
-        stream_q_len: int = 4,
+        stream_q_len: int = AUDIO_FEATURES_PER_FRAME,
         enable_cuda_graph: bool = False,
         attention_backend: str | int | None = None,
         rmsnorm_backend: str | int | None = None,
@@ -756,8 +756,10 @@ class NativeGemmaListenerLM:
         self.enable_cuda_graph = bool(enable_cuda_graph)
         self.max_seq_len = int(max_seq_len)
         self.stream_q_len = int(stream_q_len)
-        if self.stream_q_len != 4:
-            raise ValueError("il backend Gemma nativo richiede stream_q_len=4")
+        if self.stream_q_len != AUDIO_FEATURES_PER_FRAME:
+            raise ValueError(
+                f"il backend Gemma nativo richiede stream_q_len={AUDIO_FEATURES_PER_FRAME}"
+            )
         if self.max_seq_len < AUDIO_START_AFTER_TEXT + self.stream_q_len:
             raise ValueError("max_seq_len troppo piccolo per prefix canonico + un frame")
         self._attention_backend_env_present = bool(
@@ -917,7 +919,7 @@ class NativeGemmaListenerLM:
             dtype=torch.bfloat16,
             device=self._model_device,
         )
-        # Accept the non-contiguous Q=4 view produced by the rolling audio
+        # Accept the non-contiguous Q=2 view produced by the rolling audio
         # tensor without allocating a temporary on every frame.
         self._frame_input = torch.empty_like(self.output_tensor)
 
@@ -1811,7 +1813,7 @@ class NativeGemmaListenerLM:
                 )
             if current_position < prefix_len or (current_position - prefix_len) % self.stream_q_len:
                 raise ValueError(
-                    "current_position deve essere prefix_len più un multiplo della lunghezza Q4"
+                    "current_position deve essere prefix_len più un multiplo della lunghezza Q2"
                 )
             if self._import_cache_with_prefix is None:
                 raise RuntimeError(
@@ -2275,7 +2277,7 @@ class NativeGemmaListenerLM:
     ) -> torch.Tensor:
         """Run the isolated native split-K GQA primitive (backend ID 3).
 
-        The diagnostic contract uses production q-major Q=[1,4,8,512],
+        The diagnostic contract uses production q-major Q=[1,2,8,512],
         K/V=[1,1,K,512], causal masking from ``base_position``, and an
         optional canonical int64 prefix mask.  A caller-provided ``output``
         keeps allocation outside timed calls; production execution uses the
@@ -2286,7 +2288,7 @@ class NativeGemmaListenerLM:
             self._require_cuda_tensor(tensor, name=name, dtype=torch.bfloat16)
             if not tensor.is_contiguous() or tensor.ndim != 4:
                 raise ValueError(f"{name} deve essere CUDA BF16 contiguo rank-4")
-        if tuple(query.shape) != (1, 4, 8, 512):
+        if tuple(query.shape) != (1, self.stream_q_len, 8, 512):
             raise ValueError(f"query split-K q-major inatteso: {tuple(query.shape)}")
         if tuple(key.shape) != tuple(value.shape) or int(key.shape[0]) != 1 or int(key.shape[1]) != 1 or int(key.shape[3]) != 512:
             raise ValueError("K/V split-K incompatibili")
@@ -2295,7 +2297,7 @@ class NativeGemmaListenerLM:
         if not math.isfinite(float(scale)):
             raise ValueError("scale split-K deve essere finito")
         base_position = int(base_position)
-        if base_position < 0 or base_position + 4 > self.max_seq_len:
+        if base_position < 0 or base_position + self.stream_q_len > self.max_seq_len:
             raise ValueError("base_position split-K fuori capacita")
         prefix_len = 0
         prefix_meta_ptr = None
@@ -2529,9 +2531,9 @@ class NativeGemmaListenerLM:
         profile_frame_id: int | None = None,
         profile_host_context: dict[str, Any] | None = None,
     ) -> torch.Tensor:
-        """Executes one continuous 80 ms audio frame (Q=4 soft tokens).
+        """Executes one continuous 80 ms audio frame (Q=2 soft tokens).
 
-        Returns a borrowed persistent output view [1, 4, 1536]. It remains
+        Returns a borrowed persistent output view [1, 2, 1536]. It remains
         valid until the next native invocation or ``close()``; consumers must
         finish using it before advancing the executor again.
         """

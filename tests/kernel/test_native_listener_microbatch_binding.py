@@ -1,4 +1,4 @@
-"""CPU-only checks for the ABI3-backed listener-microbatch v2 candidate.
+"""CPU-only checks for the ABI3-backed listener-microbatch v5 candidate.
 
 These tests validate the ctypes/C layout and statically ensure that the batch
 entry point dispatches the shared N-row layer path. They do not claim CUDA
@@ -53,6 +53,7 @@ def _load_binding_with_cpu_stubs():
         native_context_id: int
         cache_position: int
         valid_history_tokens: int
+        logical_q_len: int = 2
 
     class ListenerBatchManifest:
         pass
@@ -119,6 +120,18 @@ class NativeListenerMicrobatchBindingTests(unittest.TestCase):
     def setUpClass(cls):
         cls.binding, cls.Row = _load_binding_with_cpu_stubs()
 
+    def base_capabilities(self):
+        b = self.binding
+        return (
+            b.BATCH_CAPABILITIES_V1
+            | b.BATCH_DYNAMIC_CAPABILITY
+            | b.BATCH_OUTPUT_HEALTH_CAPABILITY
+            | b.BATCH_LOGICAL_Q_CAPABILITY
+            | b.BATCH_TOKEN_EMBEDDING_CAPABILITY
+            | b.BATCH_TAIL_REWIND_CAPABILITY
+            | b.BATCH_QUEUED_AUDIO_REPLAY_CAPABILITY
+        )
+
     def test_layer0_trace_capability_is_optional_and_has_fixed_stage_inventory(self):
         b = self.binding
         self.assertEqual(b.BATCH_TRACE_CAPABILITY, 0x100)
@@ -137,15 +150,15 @@ class NativeListenerMicrobatchBindingTests(unittest.TestCase):
         b = self.binding
         self.assertEqual(
             b.trace_reference_layout("L0_Q_NORM", n=2),
-            {"actual_rows": 8 * 8, "reference_rows": 4 * 8, "dim": 256},
+            {"actual_rows": 4 * 8, "reference_rows": 2 * 8, "dim": 256},
         )
         self.assertEqual(
             b.trace_reference_layout("AUDIO_PLE_RMS", n=2),
-            {"actual_rows": 2 * 4 * 35, "reference_rows": 4 * 35, "dim": 256},
+            {"actual_rows": 2 * 2 * 35, "reference_rows": 2 * 35, "dim": 256},
         )
         self.assertEqual(
             b.trace_reference_layout("L0_INPUT_NORM", n=2),
-            {"actual_rows": 8, "reference_rows": 4, "dim": 1536},
+            {"actual_rows": 4, "reference_rows": 2, "dim": 1536},
         )
 
     def test_batched_native_rms_keeps_reference_tree_and_launches_all_actual_rows(self):
@@ -191,7 +204,7 @@ class NativeListenerMicrobatchBindingTests(unittest.TestCase):
         )
         self.assertIn('"GEMMA4_NATIVE_Q4_GEMV4": os.environ.get("GEMMA4_NATIVE_Q4_GEMV4")', probe)
 
-    def test_trace_frame_pad_captures_four_distinct_source_rows_and_guards_reference(self):
+    def test_trace_frame_pad_captures_two_distinct_source_rows_and_guards_reference(self):
         contract = (NATIVE_DIR / "gemma4_listener_batch_contract.h").read_text(encoding="utf-8")
         implementation = (NATIVE_DIR / "gemma4_listener_microbatch_impl.inc").read_text(encoding="utf-8")
         kernels = (NATIVE_DIR / "gemma4_listener_kernels.cuh").read_text(encoding="utf-8")
@@ -210,9 +223,9 @@ class NativeListenerMicrobatchBindingTests(unittest.TestCase):
         self.assertLess(reference.index("gemma4_batch_trace_frame_pad_input_valid("),
                         reference.index("kernel_repeat_frame_pad_ple_bf16<<<"))
         self.assertIn("token % GEMMA4_STREAM_Q_LEN", kernels)
-        source_rows = (11, 23, 47, 89)
+        source_rows = (11, 23)
         mapped = [source_rows[token % self.binding.LISTENER_STREAM_Q_LEN] for token in range(8)]
-        self.assertEqual(mapped, [11, 23, 47, 89, 11, 23, 47, 89])
+        self.assertEqual(mapped, [11, 23, 11, 23, 11, 23, 11, 23])
         self.assertIn("input_rows != GEMMA4_BATCH_TRACE_Q_LEN", contract)
         self.assertIn("required_input_elements <= available_input_elements", contract)
 
@@ -264,7 +277,7 @@ class NativeListenerMicrobatchBindingTests(unittest.TestCase):
             else:
                 info.flags |= b.TRACE_FLAG_REFERENCE_CAPTURED
             info.row_count = 2
-            info.q_len = 4
+            info.q_len = b.LISTENER_STREAM_Q_LEN
             info.input0_rows = 2
             info.input0_cols = 1
             info.actual_rows = 2
@@ -324,10 +337,11 @@ class NativeListenerMicrobatchBindingTests(unittest.TestCase):
             "actual_bits": b"AAAA", "reference_bits": b"RRRR",
         })
         bad_frame_pad_capture = True
-        with self.assertRaisesRegex(RuntimeError, "all four immutable source rows"):
+        with self.assertRaisesRegex(RuntimeError, "both immutable source rows"):
             trace.probe_trace_read_all()
 
     def test_trace_feature_symbols_are_configured_only_when_advertised(self):
+        api_version = self.binding.BATCH_API_VERSION
         class FakeFunction:
             def __init__(self, value=0):
                 self.value = value
@@ -341,7 +355,7 @@ class NativeListenerMicrobatchBindingTests(unittest.TestCase):
             def __init__(self, capabilities):
                 self.functions = {
                     "gemma4_listener_abi_version": FakeFunction(3),
-                    "gemma4_listener_batch_api_version": FakeFunction(2),
+                    "gemma4_listener_batch_api_version": FakeFunction(api_version),
                     "gemma4_listener_batch_capabilities": FakeFunction(capabilities),
                 }
 
@@ -350,11 +364,11 @@ class NativeListenerMicrobatchBindingTests(unittest.TestCase):
                     raise AttributeError(name)
                 return self.functions.setdefault(name, FakeFunction())
 
-        unadvertised = FakeLibrary(0x67F)
+        unadvertised = FakeLibrary(self.base_capabilities())
         features = self.binding._configure_native_api(unadvertised)
         self.assertFalse(features.trace)
         self.assertNotIn("gemma4_listener_batch_trace_api_version", unadvertised.functions)
-        advertised = FakeLibrary(0x77F)
+        advertised = FakeLibrary(self.base_capabilities() | self.binding.BATCH_TRACE_CAPABILITY)
         with self.assertRaises(AttributeError):
             self.binding._configure_native_api(advertised)
 
@@ -392,8 +406,12 @@ class NativeListenerMicrobatchBindingTests(unittest.TestCase):
         self.assertEqual(b.BATCH_PROBE_CAPABILITY, 0x80)
         self.assertEqual(b.BATCH_PROBE_API_VERSION, 1)
         self.assertEqual(b.BATCH_GEMM_GRAPH_CAPABILITY, 0x800)
+        self.assertEqual(b.BATCH_LOGICAL_Q_CAPABILITY, 0x2000)
+        self.assertEqual(b.BATCH_TOKEN_EMBEDDING_CAPABILITY, 0x4000)
 
     def test_base_batch_api_accepts_seven_bit_capability_without_probe_exports(self):
+        api_version = self.binding.BATCH_API_VERSION
+        base_capabilities = self.base_capabilities()
         class FakeFunction:
             def __init__(self, value=0):
                 self.value = value
@@ -407,8 +425,8 @@ class NativeListenerMicrobatchBindingTests(unittest.TestCase):
             def __init__(self):
                 self.functions = {
                     "gemma4_listener_abi_version": FakeFunction(3),
-                    "gemma4_listener_batch_api_version": FakeFunction(2),
-                    "gemma4_listener_batch_capabilities": FakeFunction(0x67F),
+                    "gemma4_listener_batch_api_version": FakeFunction(api_version),
+                    "gemma4_listener_batch_capabilities": FakeFunction(base_capabilities),
                 }
 
             def __getattr__(self, name):
@@ -417,8 +435,8 @@ class NativeListenerMicrobatchBindingTests(unittest.TestCase):
                 return self.functions.setdefault(name, FakeFunction())
 
         library = FakeLibrary()
-        has_probe = self.binding._configure_native_api(library)
-        self.assertFalse(has_probe)
+        features = self.binding._configure_native_api(library)
+        self.assertFalse(features.probe)
         self.assertNotIn("gemma4_listener_batch_probe_api_version", library.functions)
 
         batch = object.__new__(self.binding.NativeGemmaListenerMicrobatch)
@@ -426,7 +444,7 @@ class NativeListenerMicrobatchBindingTests(unittest.TestCase):
         batch._closed = False
         batch._poisoned = False
         batch._ctx = ctypes.c_void_p(123)
-        batch._probe_api_available = has_probe
+        batch._probe_api_available = features.probe
         calls = []
         batch._lib = types.SimpleNamespace(
             gemma4_listener_batch_probe_arm=lambda *_args: calls.append("arm") or 0,
@@ -435,7 +453,7 @@ class NativeListenerMicrobatchBindingTests(unittest.TestCase):
             batch.probe_arm()
         self.assertEqual(calls, [])
 
-    def test_probe_exports_are_configured_only_when_feature_bit_is_advertised(self):
+    def test_pre_v5_or_missing_logical_q_capability_fails_at_startup(self):
         class FakeFunction:
             def __init__(self, value=0):
                 self.value = value
@@ -446,22 +464,25 @@ class NativeListenerMicrobatchBindingTests(unittest.TestCase):
                 return self.value
 
         class FakeLibrary:
-            def __init__(self):
+            def __init__(self, api_version, capabilities):
                 self.functions = {
                     "gemma4_listener_abi_version": FakeFunction(3),
-                    "gemma4_listener_batch_api_version": FakeFunction(2),
-                    "gemma4_listener_batch_capabilities": FakeFunction(0x6FF),
-                    "gemma4_listener_batch_probe_api_version": FakeFunction(1),
+                    "gemma4_listener_batch_api_version": FakeFunction(api_version),
+                    "gemma4_listener_batch_capabilities": FakeFunction(capabilities),
                 }
 
             def __getattr__(self, name):
                 return self.functions.setdefault(name, FakeFunction())
 
-        library = FakeLibrary()
-        self.assertTrue(self.binding._configure_native_api(library))
-        self.assertIsNotNone(library.functions["gemma4_listener_batch_probe_arm"].argtypes)
+        with self.assertRaisesRegex(RuntimeError, "API version mismatch"):
+            self.binding._configure_native_api(FakeLibrary(self.binding.BATCH_API_VERSION - 1, self.base_capabilities()))
+        with self.assertRaisesRegex(RuntimeError, "requires logical-Q"):
+            self.binding._configure_native_api(
+                FakeLibrary(self.binding.BATCH_API_VERSION, 0x67F)
+            )
 
-    def test_gemm_graph_exports_are_optional_and_configured_only_when_advertised(self):
+    def test_api5_requires_explicit_model_projected_token_ple_capability(self):
+        api_version = self.binding.BATCH_API_VERSION
         class FakeFunction:
             def __init__(self, value=0):
                 self.value = value
@@ -475,18 +496,75 @@ class NativeListenerMicrobatchBindingTests(unittest.TestCase):
             def __init__(self, capabilities):
                 self.functions = {
                     "gemma4_listener_abi_version": FakeFunction(3),
-                    "gemma4_listener_batch_api_version": FakeFunction(2),
+                    "gemma4_listener_batch_api_version": FakeFunction(api_version),
                     "gemma4_listener_batch_capabilities": FakeFunction(capabilities),
                 }
 
             def __getattr__(self, name):
                 return self.functions.setdefault(name, FakeFunction())
 
-        legacy = FakeLibrary(0x67F)
+        with self.assertRaisesRegex(RuntimeError, "requires model-projected token PLE"):
+            self.binding._configure_native_api(FakeLibrary(
+                self.base_capabilities() & ~self.binding.BATCH_TOKEN_EMBEDDING_CAPABILITY
+            ))
+
+    def test_probe_exports_are_configured_only_when_feature_bit_is_advertised(self):
+        api_version = self.binding.BATCH_API_VERSION
+        capabilities = self.base_capabilities() | self.binding.BATCH_PROBE_CAPABILITY
+        class FakeFunction:
+            def __init__(self, value=0):
+                self.value = value
+                self.restype = None
+                self.argtypes = None
+
+            def __call__(self, *_args):
+                return self.value
+
+        class FakeLibrary:
+            def __init__(self):
+                self.functions = {
+                    "gemma4_listener_abi_version": FakeFunction(3),
+                    "gemma4_listener_batch_api_version": FakeFunction(api_version),
+                    "gemma4_listener_batch_capabilities": FakeFunction(capabilities),
+                    "gemma4_listener_batch_probe_api_version": FakeFunction(1),
+                }
+
+            def __getattr__(self, name):
+                return self.functions.setdefault(name, FakeFunction())
+
+        library = FakeLibrary()
+        features = self.binding._configure_native_api(library)
+        self.assertTrue(features.probe)
+        self.assertIsNotNone(library.functions["gemma4_listener_batch_probe_arm"].argtypes)
+
+    def test_gemm_graph_exports_are_optional_and_configured_only_when_advertised(self):
+        api_version = self.binding.BATCH_API_VERSION
+        base_capabilities = self.base_capabilities()
+        class FakeFunction:
+            def __init__(self, value=0):
+                self.value = value
+                self.restype = None
+                self.argtypes = None
+
+            def __call__(self, *_args):
+                return self.value
+
+        class FakeLibrary:
+            def __init__(self, capabilities):
+                self.functions = {
+                    "gemma4_listener_abi_version": FakeFunction(3),
+                    "gemma4_listener_batch_api_version": FakeFunction(api_version),
+                    "gemma4_listener_batch_capabilities": FakeFunction(capabilities),
+                }
+
+            def __getattr__(self, name):
+                return self.functions.setdefault(name, FakeFunction())
+
+        legacy = FakeLibrary(base_capabilities)
         self.assertFalse(self.binding._configure_native_api(legacy).gemm_graphs)
         self.assertNotIn("gemma4_listener_batch_prepare_gemm_graphs", legacy.functions)
 
-        graph_library = FakeLibrary(0xE7F)
+        graph_library = FakeLibrary(base_capabilities | self.binding.BATCH_GEMM_GRAPH_CAPABILITY)
         features = self.binding._configure_native_api(graph_library)
         self.assertTrue(features.gemm_graphs)
         self.assertEqual(
@@ -499,6 +577,8 @@ class NativeListenerMicrobatchBindingTests(unittest.TestCase):
         )
 
     def test_cache_copy_export_is_optional_and_configured_only_when_advertised(self):
+        api_version = self.binding.BATCH_API_VERSION
+        base_capabilities = self.base_capabilities()
         class FakeFunction:
             def __init__(self, value=0):
                 self.value = value
@@ -512,18 +592,18 @@ class NativeListenerMicrobatchBindingTests(unittest.TestCase):
             def __init__(self, capabilities):
                 self.functions = {
                     "gemma4_listener_abi_version": FakeFunction(3),
-                    "gemma4_listener_batch_api_version": FakeFunction(2),
+                    "gemma4_listener_batch_api_version": FakeFunction(api_version),
                     "gemma4_listener_batch_capabilities": FakeFunction(capabilities),
                 }
 
             def __getattr__(self, name):
                 return self.functions.setdefault(name, FakeFunction())
 
-        legacy = FakeLibrary(0x67F)
+        legacy = FakeLibrary(base_capabilities)
         self.assertFalse(self.binding._configure_native_api(legacy).cache_copy)
         self.assertNotIn("gemma4_listener_batch_copy_session_cache_async", legacy.functions)
 
-        copy_library = FakeLibrary(0x167F)
+        copy_library = FakeLibrary(base_capabilities | self.binding.BATCH_CACHE_COPY_CAPABILITY)
         features = self.binding._configure_native_api(copy_library)
         self.assertTrue(features.cache_copy)
         function = copy_library.functions["gemma4_listener_batch_copy_session_cache_async"]
@@ -641,7 +721,7 @@ class NativeListenerMicrobatchBindingTests(unittest.TestCase):
         batch._active_output_generation = None
         batch._probe_api_available = True
         batch._last_probe_info = None
-        payloads = [bytes([0x10 + index]) * (8 * 1536 * 2) for index in range(3)]
+        payloads = [bytes([0x10 + index]) * (4 * 1536 * 2) for index in range(3)]
 
         def read_rms(_ctx, input_ptr, input_len, actual_ptr, actual_len,
                      split_ptr, split_len, info_ptr):
@@ -650,7 +730,7 @@ class NativeListenerMicrobatchBindingTests(unittest.TestCase):
                 ctypes.memmove(ptr, payload, len(payload))
             info = info_ptr._obj
             info.state = 2
-            info.row_count = 8
+            info.row_count = 4
             info.rms_dim = 1536
             info.rms_backend_id = 2
             info.rms_batched_block_x = 64
@@ -666,7 +746,7 @@ class NativeListenerMicrobatchBindingTests(unittest.TestCase):
             gemma4_listener_batch_probe_read_rms=read_rms,
         )
         metadata, arrays = batch.probe_read_rms()
-        self.assertEqual(metadata["row_count"], 8)
+        self.assertEqual(metadata["row_count"], 4)
         self.assertEqual(metadata["rms_batched_block_x"], 64)
         self.assertEqual(metadata["rms_reference_block_x"], 128)
         self.assertEqual(metadata["forward_generation"], 9)
@@ -829,7 +909,7 @@ class NativeListenerMicrobatchBindingTests(unittest.TestCase):
         row = self.Row(
             session_id="sid", session_generation=7, state_epoch_id="epoch",
             frame_id=4, listener_state_version=9, sequence_position=5,
-            native_context_id=81, cache_position=38, valid_history_tokens=38,
+            native_context_id=81, cache_position=36, valid_history_tokens=36,
         )
         output = b.NativeBatchOutput(
             manifest_id="manifest", generation=1, rows=(row,), tensor=None,
@@ -847,15 +927,15 @@ class NativeListenerMicrobatchBindingTests(unittest.TestCase):
                 slot=0, session_id="sid", native_context_id=81, generation=7,
                 epoch_text="epoch", epoch_numeric=b._epoch_id_u64("epoch"),
                 expected_frame_id=5, expected_state_version=10,
-                expected_sequence_position=6, cache_position=42,
-                valid_history_tokens=42, prefix_len=34,
+                expected_sequence_position=6, cache_position=38,
+                valid_history_tokens=38, prefix_len=34,
             )
         }
         seen = []
 
-        def output_health(_ctx, generation, rows, row_count, out_nonfinite):
+        def output_health(_ctx, generation, rows, logical_q_lens, row_count, out_nonfinite):
             seen.append((int(generation.value), int(row_count.value),
-                         b._c_row_values(rows[0])))
+                         b._c_row_values(rows[0]), int(logical_q_lens[0])))
             ctypes.cast(out_nonfinite, ctypes.POINTER(ctypes.c_int))[0] = 0
             return 0
 
@@ -863,7 +943,7 @@ class NativeListenerMicrobatchBindingTests(unittest.TestCase):
             gemma4_listener_batch_output_health=output_health,
         )
         snapshots = batch.verify_output_health(output)
-        self.assertEqual(seen, [(1, 1, b._c_row_values(b._row_to_c(row)))])
+        self.assertEqual(seen, [(1, 1, b._c_row_values(b._row_to_c(row)), 2)])
         self.assertEqual(len(snapshots), 1)
         self.assertIs(snapshots[0].row, row)
         self.assertEqual(snapshots[0].status, "healthy")
@@ -877,12 +957,12 @@ class NativeListenerMicrobatchBindingTests(unittest.TestCase):
         row = self.Row(
             session_id="sid", session_generation=7, state_epoch_id="epoch",
             frame_id=4, listener_state_version=9, sequence_position=5,
-            native_context_id=81, cache_position=38, valid_history_tokens=38,
+            native_context_id=81, cache_position=36, valid_history_tokens=36,
         )
         row2 = self.Row(
             session_id="sid-2", session_generation=8, state_epoch_id="epoch-2",
             frame_id=6, listener_state_version=11, sequence_position=7,
-            native_context_id=82, cache_position=38, valid_history_tokens=38,
+            native_context_id=82, cache_position=36, valid_history_tokens=36,
         )
         batch = object.__new__(b.NativeGemmaListenerMicrobatch)
         batch._owner_thread_id = threading.get_ident()
@@ -896,15 +976,15 @@ class NativeListenerMicrobatchBindingTests(unittest.TestCase):
                 slot=0, session_id="sid", native_context_id=81, generation=7,
                 epoch_text="epoch", epoch_numeric=b._epoch_id_u64("epoch"),
                 expected_frame_id=5, expected_state_version=10,
-                expected_sequence_position=6, cache_position=42,
-                valid_history_tokens=42, prefix_len=34,
+                expected_sequence_position=6, cache_position=38,
+                valid_history_tokens=38, prefix_len=34,
             ),
             "sid-2": b._SessionBinding(
                 slot=1, session_id="sid-2", native_context_id=82, generation=8,
                 epoch_text="epoch-2", epoch_numeric=b._epoch_id_u64("epoch-2"),
                 expected_frame_id=7, expected_state_version=12,
-                expected_sequence_position=8, cache_position=42,
-                valid_history_tokens=42, prefix_len=34,
+                expected_sequence_position=8, cache_position=38,
+                valid_history_tokens=38, prefix_len=34,
             ),
         }
         batch._lib = types.SimpleNamespace(
@@ -919,6 +999,113 @@ class NativeListenerMicrobatchBindingTests(unittest.TestCase):
                          ("nonfinite_guard", "nonfinite_guard"))
         self.assertTrue(all(item.nonfinite for item in snapshots))
         self.assertTrue(batch._poisoned)
+
+    def test_output_health_checks_q0_q1_and_q2_committed_positions(self):
+        b = self.binding
+        for logical_q_len in (0, 1, 2):
+            with self.subTest(logical_q_len=logical_q_len):
+                row = self.Row(
+                    session_id="sid", session_generation=7, state_epoch_id="epoch",
+                    frame_id=4, listener_state_version=9, sequence_position=5,
+                    native_context_id=81, cache_position=36, valid_history_tokens=36,
+                    logical_q_len=logical_q_len,
+                )
+                output = b.NativeBatchOutput(
+                    manifest_id="manifest", generation=1, rows=(row,), tensor=None,
+                    completion_event=None, logical_q_lens=(logical_q_len,),
+                )
+                batch = object.__new__(b.NativeGemmaListenerMicrobatch)
+                batch._owner_thread_id = threading.get_ident()
+                batch._closed = False
+                batch._poisoned = False
+                batch._ctx = ctypes.c_void_p(123)
+                batch._active_output_generation = None
+                batch._last_health_generation = 0
+                batch._session_by_id = {
+                    "sid": b._SessionBinding(
+                        slot=0, session_id="sid", native_context_id=81, generation=7,
+                        epoch_text="epoch", epoch_numeric=b._epoch_id_u64("epoch"),
+                        expected_frame_id=5, expected_state_version=10,
+                        expected_sequence_position=6,
+                        cache_position=36 + logical_q_len,
+                        valid_history_tokens=36 + logical_q_len, prefix_len=34,
+                    )
+                }
+                seen = []
+
+                def output_health(_ctx, generation, rows, logical_q_lens, row_count, out_nonfinite):
+                    row_values = b._c_row_values(rows[0])
+                    q_len = int(logical_q_lens[0])
+                    seen.append((int(generation.value), row_values[6], q_len, int(row_count.value)))
+                    ctypes.cast(out_nonfinite, ctypes.POINTER(ctypes.c_int))[0] = 0
+                    return 0 if row_values[6] + q_len == 36 + logical_q_len else -4
+
+                batch._lib = types.SimpleNamespace(
+                    gemma4_listener_batch_output_health=output_health,
+                )
+                snapshots = batch.verify_output_health(output)
+                self.assertEqual(seen, [(1, 36, logical_q_len, 1)])
+                self.assertEqual(snapshots[0].status, "healthy")
+
+    def test_embedded_text_output_health_preserves_audio_identity(self):
+        b = self.binding
+        row = self.Row(
+            session_id="sid", session_generation=7, state_epoch_id="epoch",
+            frame_id=4, listener_state_version=9, sequence_position=5,
+            native_context_id=81, cache_position=36, valid_history_tokens=36,
+            logical_q_len=1,
+        )
+        batch = object.__new__(b.NativeGemmaListenerMicrobatch)
+        batch._owner_thread_id = threading.get_ident()
+        batch._closed = False
+        batch._poisoned = False
+        batch._ctx = ctypes.c_void_p(123)
+        batch._active_output_generation = None
+        batch._last_health_generation = 0
+        batch._session_by_id = {
+            "sid": b._SessionBinding(
+                slot=0, session_id="sid", native_context_id=81, generation=7,
+                epoch_text="epoch", epoch_numeric=b._epoch_id_u64("epoch"),
+                expected_frame_id=4, expected_state_version=9,
+                expected_sequence_position=5, cache_position=37,
+                valid_history_tokens=37, prefix_len=34,
+            )
+        }
+        batch._lib = types.SimpleNamespace(
+            gemma4_listener_batch_output_health=lambda _ctx, _gen, _rows, _qlens, _count, out: (
+                ctypes.cast(out, ctypes.POINTER(ctypes.c_int)).__setitem__(0, 0) or 0
+            ),
+        )
+        output = b.NativeBatchOutput(
+            manifest_id="manifest", generation=1, rows=(row,), tensor=None,
+            completion_event=None, logical_q_lens=(1,), embedded_text_input=True,
+            preserves_listener_cursors=True,
+        )
+        result = batch.verify_output_health(output)
+        self.assertEqual(result[0].status, "healthy")
+
+    def test_text_append_counter_contract_is_separate_from_audio_ticks(self):
+        source = (NATIVE_DIR / "gemma4_listener_microbatch_impl.inc").read_text(encoding="utf-8")
+        step = source.split("static int gemma4_listener_batch_step_core(", 1)[1].split(
+            "int gemma4_listener_batch_step_async(", 1
+        )[0]
+        truncate = source.split("int gemma4_listener_batch_truncate_after_step_async(", 1)[1].split(
+            "int gemma4_listener_batch_output_acquire(", 1
+        )[0]
+        health = source.split("int gemma4_listener_batch_output_health(", 1)[1].split(
+            "int gemma4_listener_batch_output_abandon_async(", 1
+        )[0]
+        self.assertIn("if (embedded_text_input)", step)
+        text_path = step.split("if (embedded_text_input) {", 1)[1].split("} else {", 1)[0]
+        audio_path = step.split("} else {", 1)[1]
+        self.assertIn("per_layer_inputs", text_path)
+        self.assertNotIn("gemma4_batch_run_per_session_gemm", text_path)
+        self.assertIn("gemma4_batch_run_per_session_gemm", audio_path)
+        self.assertIn("output_embedded_text_input = embedded_text_input", step)
+        self.assertIn("embedded_text_input && logical_q_len == 0u", truncate)
+        self.assertIn("state.expected_frame_id != pre_step_row->frame_id", truncate)
+        self.assertIn("preserve_listener_cursors ? preserved_identity_matches : audio_identity_matches", health)
+        self.assertIn("batch->output_embedded_text_input = false", health)
 
     def test_output_health_c_api_is_latest_generation_and_exact_row_bound(self):
         header = (NATIVE_DIR / "gemma4_listener_microbatch.h").read_text(encoding="utf-8")
@@ -935,6 +1122,8 @@ class NativeListenerMicrobatchBindingTests(unittest.TestCase):
             "valid_history_tokens",
         ):
             self.assertIn(f"row.{field} != expected.{field}", health)
+        self.assertIn("const uint32_t *logical_q_lens", health)
+        self.assertIn("state.current_position != row.cache_position + logical_q_len", health)
         self.assertIn("gemma4_listener_output_health(batch->model, out_nonfinite)", health)
         self.assertIn("UINT64_C(1024)", source)
 
@@ -1124,7 +1313,7 @@ class NativeListenerMicrobatchBindingTests(unittest.TestCase):
         self.assertIn("for (int layer = 0; layer < GEMMA4_NUM_LAYERS; ++layer)", source)
         self.assertIn("gemma4_batch_execute_layer(batch, row_count, layer, listener_stream)", source)
         start = source.index("static int gemma4_batch_execute_layer(")
-        end = source.index("int gemma4_listener_batch_step_async(", start)
+        end = source.index("static int gemma4_listener_batch_step_core(", start)
         layer_body = source[start:end]
         per_session_gemms = re.findall(
             r"gemma4_batch_run_per_session_gemm\((.*?)\)", layer_body, re.S,
@@ -1134,6 +1323,21 @@ class NativeListenerMicrobatchBindingTests(unittest.TestCase):
         self.assertIn("run_linear_cublas(lane.handle", source)
         self.assertIn("rows % rows_per_session != 0", source)
         self.assertNotIn("gemma4_listener_step_async(", source)
+
+    def test_embedded_text_path_uses_complete_ple_and_skips_audio_projection(self):
+        source = (NATIVE_DIR / "gemma4_listener_microbatch_impl.inc").read_text(encoding="utf-8")
+        core = source.split("static int gemma4_listener_batch_step_core(", 1)[1].split(
+            "int gemma4_listener_batch_step_async(", 1
+        )[0]
+        self.assertIn("GEMMA4_STREAM_Q_LEN, GEMMA4_NUM_LAYERS, GEMMA4_PLE_DIM", core)
+        text_branch = core.split("if (embedded_text_input) {", 1)[1].split("} else {", 1)[0]
+        self.assertIn("cudaMemcpyAsync(batch->projected_ple, per_layer_inputs", text_branch)
+        self.assertNotIn("frame_pad_ple_ptr", text_branch)
+        self.assertNotIn("per_layer_model_proj_w", text_branch)
+        self.assertNotIn("per_layer_input_scale", text_branch)
+        self.assertIn("run_rmsnorm_exact_or_custom(ctx, batch->hidden_a, ctx->weights.final_norm_w", core)
+        self.assertIn("gemma4_listener_batch_step_embedded_async", source)
+        self.assertIn("BATCH_TOKEN_EMBEDDING_CAPABILITY", BINDING_PATH.read_text(encoding="utf-8"))
 
     def test_native_capacity_growth_checks_overflow_and_commits_transactionally(self):
         source = (NATIVE_DIR / "gemma4_listener_microbatch_impl.inc").read_text(encoding="utf-8")

@@ -164,7 +164,7 @@ def test_listener_batch_matches_locked_abi3_for_arbitrary_positive_n() -> None:
         provider = NativeGemmaListenerLM(
             lm,
             max_seq_len=16_384,
-            stream_q_len=4,
+            stream_q_len=2,
             enable_cuda_graph=False,
             attention_backend=3,
             rmsnorm_backend=2,
@@ -258,7 +258,7 @@ def test_listener_batch_matches_locked_abi3_for_arbitrary_positive_n() -> None:
         attention_backend_id=3,
         rmsnorm_backend_id=2,
         max_seq_len=16_384,
-        stream_q_len=4,
+        stream_q_len=2,
     )
     backend = GemmaAudioTowerBackend(thinker, device=str(device), use_native_lm=False)
     frontend = ListenerMicrobatchAudioFrontend(
@@ -323,7 +323,7 @@ def test_listener_batch_matches_locked_abi3_for_arbitrary_positive_n() -> None:
         provider = NativeGemmaListenerLM(
             lm,
             max_seq_len=16_384,
-            stream_q_len=4,
+            stream_q_len=2,
             enable_cuda_graph=False,
             attention_backend=3,
             rmsnorm_backend=2,
@@ -389,7 +389,7 @@ def test_listener_batch_matches_locked_abi3_for_arbitrary_positive_n() -> None:
                 "L0_LAYER_SCALE": ("tap_layer_scaled", "hidden"),
             }
             debug_provider = NativeGemmaListenerLM(
-                lm, max_seq_len=16_384, stream_q_len=4,
+                lm, max_seq_len=16_384, stream_q_len=2,
                 enable_cuda_graph=False, attention_backend=3, rmsnorm_backend=2,
             )
             try:
@@ -451,7 +451,7 @@ def test_listener_batch_matches_locked_abi3_for_arbitrary_positive_n() -> None:
         provider = NativeGemmaListenerLM(
             lm,
             max_seq_len=16_384,
-            stream_q_len=4,
+            stream_q_len=2,
             enable_cuda_graph=False,
             attention_backend=3,
             rmsnorm_backend=2,

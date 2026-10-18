@@ -920,6 +920,225 @@ async def test_mode_b_reports_max_duration_when_cancel_replacement_wait_expires_
     assert all(ws_a.appended_frame_is_silence[2:])
 
 
+class _StreamingScenarioWebSocket:
+    """Socket fake that publishes one identified PCM segment after each commit."""
+
+    def __init__(self, audio_24k: np.ndarray, *, segment_done_delay_s: float = 0.0) -> None:
+        import asyncio
+
+        self.audio_24k = audio_24k
+        self.segment_done_delay_s = segment_done_delay_s
+        self.queue = asyncio.Queue()
+        self.queue.put_nowait(json.dumps({"type": "session.created"}))
+        self.sent: list[tuple[dict, int]] = []
+        self.session_updates: list[dict] = []
+        self.commit_count = 0
+        self.pending_tasks = []
+        self.first_response_done = __import__("asyncio").Event()
+        self.closed = False
+
+    async def recv(self) -> str:
+        item = await self.queue.get()
+        if item is None:
+            raise EOFError("websocket closed")
+        return item
+
+    async def send(self, data: str) -> None:
+        message = json.loads(data)
+        self.sent.append((message, __import__("time").monotonic_ns()))
+        if message.get("type") == "session.update":
+            self.session_updates.append(message["session"])
+            assert message["session"]["auto_response"] is True
+            assert message["session"]["turn_policy"] in ("none", "gemma_native_control6")
+            assert message["session"]["input_audio_buffer_acknowledgements"] is True
+            self.queue.put_nowait(json.dumps({"type": "session.updated"}))
+        elif message.get("type") == "input_audio_buffer.commit":
+            self.commit_count += 1
+            response_id = f"stream_resp_{self.commit_count}"
+            if self.commit_count == 1:
+                self.queue.put_nowait(json.dumps({"type": "response.created", "response_id": response_id}))
+                self.queue.put_nowait(json.dumps({
+                    "type": "response.output_text.delta",
+                    "response_id": response_id,
+                    "delta": "Itinerario in preparazione.",
+                    "policy_diagnostics": {
+                        "raw_action": "SPEAK",
+                        "legal_action": "SPEAK",
+                        "selected_action": "SPEAK",
+                        "applied_action": "SPEAK",
+                    },
+                }))
+                self.queue.put_nowait(_make_mock_wav_delta(response_id, self.audio_24k))
+                segment_done = {
+                    "type": "response.audio.segment_done",
+                    "response_id": response_id,
+                    "generation_id": 1,
+                    "speaker_segment_id": "seg_001",
+                    "start_sample": 0,
+                    "end_sample": int(self.audio_24k.size),
+                    "sample_rate": 24000,
+                }
+
+                async def finish_response_after_segment_done() -> None:
+                    if self.segment_done_delay_s > 0:
+                        await __import__("asyncio").sleep(self.segment_done_delay_s)
+                    self.queue.put_nowait(json.dumps(segment_done))
+                    self.queue.put_nowait(json.dumps({"type": "response.done", "response_id": response_id}))
+                    self.first_response_done.set()
+
+                if self.segment_done_delay_s > 0:
+                    self.pending_tasks.append(__import__("asyncio").create_task(finish_response_after_segment_done()))
+                else:
+                    await finish_response_after_segment_done()
+            else:
+                async def start_replacement_after_old_response_finishes() -> None:
+                    await self.first_response_done.wait()
+                    self.queue.put_nowait(json.dumps({"type": "response.created", "response_id": response_id}))
+                    self.queue.put_nowait(json.dumps({"type": "response.done", "response_id": response_id}))
+
+                self.pending_tasks.append(
+                    __import__("asyncio").create_task(start_replacement_after_old_response_finishes())
+                )
+
+    async def close(self) -> None:
+        self.closed = True
+        if self.pending_tasks:
+            await __import__("asyncio").gather(*self.pending_tasks, return_exceptions=True)
+        self.queue.put_nowait(None)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        await self.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("segment_done_delay_s", [0.0, 0.24])
+async def test_streaming_scenario_schedules_correction_from_consumed_pcm_and_acks_after_playback(
+    tmp_path: Path,
+    segment_done_delay_s: float,
+) -> None:
+    from client.duplex_dialogue_harness import StreamingDialogueScenario, StreamingDialogueStep
+
+    tone_24k = np.sin(2 * np.pi * 220.0 * np.linspace(0, 0.16, 3840, dtype=np.float32))
+    ws = _StreamingScenarioWebSocket(tone_24k, segment_done_delay_s=segment_done_delay_s)
+
+    async def connector(url: str, **kwargs):
+        return ws
+
+    orchestrator = DialogueOrchestrator(
+        config=DialogueConfig(
+            max_duration_s=2.0,
+            silence_timeout_s=0.05,
+            frame_pacing_s=0.02,
+            streaming_voice_profile="custom_stream_voice",
+        ),
+        output_dir=tmp_path / "streaming_scenario",
+        ws_connect_fn=connector,
+    )
+    scenario = StreamingDialogueScenario(
+        scenario_id="correction_after_consumption",
+        system_prompt="Rispondi in italiano.",
+        steps=[
+            StreamingDialogueStep(
+                step_id="initial",
+                pcm_16k=np.full(FRAME_SAMPLES_16K, 0.2, dtype=np.float32),
+                expected_text="Milano",
+            ),
+            StreamingDialogueStep(
+                step_id="correction",
+                pcm_16k=np.full(FRAME_SAMPLES_16K, 0.3, dtype=np.float32),
+                expected_text="Torino",
+                after_first_consumed_s=0.01,
+            ),
+        ],
+    )
+
+    result = await orchestrator.run_streaming_scenario(scenario)
+
+    assert result["status"] == "COMPLETED"
+    assert ws.session_updates[0]["voice"] == "custom_stream_voice"
+    assert ws.commit_count == 2
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "streaming_scenario" / "dialogue_events.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    first_pcm = next(event for event in events if event["event_type"] == "client_pcm_consumed")
+    correction_started = next(
+        event for event in events
+        if event["event_type"] == "streaming_input_step_started"
+        and event["details"]["step_id"] == "correction"
+    )
+    assert correction_started["timestamp_ns"] >= first_pcm["timestamp_ns"] + 10_000_000
+    correction_timing = result["timing"]["correction_timing"]
+    assert correction_timing["old_response_ids_at_first_correction_sample"] == ["stream_resp_1"]
+    assert correction_timing["stop_latency_first_correction_sample_to_last_old_consumed_pcm_ms"] > 0.0
+    assert correction_timing["last_old_response_pcm_consumed_ns"] >= correction_timing["first_sample_sent_ns"]
+
+    ack = next(message for message, _sent_ns in ws.sent if message.get("type") == "client_consumed_pcm")
+    assert ack["consumption_semantics"] == "logical_client_device_buffer"
+    assert ack["start_sample"] == 0
+    assert ack["end_sample"] == tone_24k.size
+    assert ack["speaker_segment_id"] == "seg_001"
+    full_segment_consumed = next(
+        event for event in events
+        if event["event_type"] == "client_pcm_consumed"
+        and event["details"]["cumulative_consumed_samples"] >= tone_24k.size
+    )
+    segment_done = next(
+        event for event in events
+        if event["event_type"] == "response.audio.segment_done"
+    )
+    if segment_done_delay_s == 0.0:
+        assert segment_done["timestamp_ns"] <= full_segment_consumed["timestamp_ns"]
+    else:
+        assert full_segment_consumed["timestamp_ns"] <= segment_done["timestamp_ns"]
+    ack_sent = next(
+        event for event in events
+        if event["event_type"] == "client_consumed_pcm_sent"
+    )
+    assert ack_sent["timestamp_ns"] >= full_segment_consumed["timestamp_ns"]
+    policy = next(event for event in events if event["event_type"] == "policy_diagnostics")
+    assert policy["details"]["selected_action"] == "SPEAK"
+
+
+def test_streaming_cli_passes_voice_profile_override(monkeypatch, tmp_path: Path) -> None:
+    import client.duplex_dialogue_harness as harness
+
+    assert harness.DialogueConfig().streaming_voice_profile == "gemma"
+    captured: dict = {}
+    scenario = object()
+
+    class StubOrchestrator:
+        def __init__(self, *, config, output_dir) -> None:
+            captured["config"] = config
+
+        async def run_streaming_scenario(self, requested_scenario):
+            captured["scenario"] = requested_scenario
+            return {"status": "COMPLETED"}
+
+    monkeypatch.setattr(
+        harness,
+        "streaming_scenario_from_fixtures",
+        lambda name, fixture_dir: scenario,
+    )
+    monkeypatch.setattr(harness, "DialogueOrchestrator", StubOrchestrator)
+
+    exit_code = harness.main([
+        "--stream-scenario", "A",
+        "--fixture-dir", str(tmp_path),
+        "--output-dir", str(tmp_path / "out"),
+        "--voice-profile", "custom_stream_voice",
+    ])
+
+    assert exit_code == 0
+    assert captured["scenario"] is scenario
+    assert captured["config"].streaming_voice_profile == "custom_stream_voice"
+
+
 @pytest.mark.anyio
 async def test_mode_b_fails_closed_on_duplicate_created_after_cancel(tmp_path: Path) -> None:
     from dialogue_eval.scenarios import SCENARIO_NAME_NUMBER

@@ -1,0 +1,23 @@
+{
+  "name": "A_initial_milano",
+  "request": {
+    "model": "gemma-4-omni-duplex",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Consigliami un itinerario di tre giorni a Milano."
+      }
+    ],
+    "stream": false,
+    "temperature": 0.2,
+    "max_tokens": 384
+  },
+  "status": 500,
+  "elapsed_ms": 12226.608600001782,
+  "response": {
+    "error": {
+      "code": "INFERENCE_ERROR",
+      "message": "inferenza fallita"
+    }
+  }
+}

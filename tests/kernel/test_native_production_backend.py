@@ -17,6 +17,21 @@ def test_production_resolver_defaults_to_ordered_backend(monkeypatch) -> None:
     assert resolve_native_attention_backend() == GEMMA4_ATTN_NATIVE_SPLITK_GQA
 
 
+def test_ordered_full_attention_query_rows_follow_native_q2_geometry() -> None:
+    root = Path(__file__).resolve().parents[2]
+    ordered_header = (root / "native" / "gemma4_listener_microbatch" /
+                      "gemma4_listener_attention_ordered.cuh").read_text(encoding="utf-8")
+    ordered_source = (root / "native" / "gemma4_listener_microbatch" /
+                     "gemma4_listener_attention_ordered.cu").read_text(encoding="utf-8")
+    batch_source = (root / "native" / "gemma4_listener_microbatch" /
+                    "gemma4_listener_microbatch_impl.inc").read_text(encoding="utf-8")
+    assert '#include "generated_topology.h"' in ordered_header
+    assert "#define GEMMA4_ORDERED_QUERY_ROWS GEMMA4_STREAM_Q_LEN" in ordered_header
+    assert "static_assert(GEMMA4_STREAM_Q_LEN == 2)" in ordered_source
+    assert "GEMMA4_ORDERED_QUERY_ROWS 4" not in ordered_header
+    assert "visible > GEMMA4_ORDERED_MIN_KEYS_EXCLUSIVE" in batch_source
+
+
 def test_production_resolver_preserves_explicit_oracle(monkeypatch) -> None:
     monkeypatch.setenv("GEMMA4_ATTENTION_BACKEND", "garbage")
     assert resolve_native_attention_backend("ATEN_REPEAT_EXACT") == GEMMA4_ATTN_ATEN_REPEAT_EXACT

@@ -1,0 +1,8 @@
+{
+  "engine": "faster-whisper",
+  "model": "Systran/faster-whisper-small cached local",
+  "device": "cpu int8",
+  "language": "it",
+  "duration": 8.72,
+  "text": "Aspetta, sei davvero sicuro di voler cancellare tutto se vuoi procedo subito?"
+}

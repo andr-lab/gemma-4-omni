@@ -30,7 +30,7 @@ import numpy as np
 SUPPORTED_BATCHES = (1, 2, 4)
 LAYER_COUNT = 35
 HIDDEN_SIZE = 1536
-Q_PER_FRAME = 4
+Q_PER_FRAME = 2
 PREFIX_LEN = 34
 MAX_SEQ_LEN = 16_384
 MAX_SLIDING_WINDOW = 512
@@ -615,7 +615,7 @@ def _record_native_operator_trace(
         "trace_api_version": 1,
         "stage_count": len(stage_reports),
         "diagnostic_row_count": 8,
-        "row_mapping": "manifest order; N=2 sessions x Q=4 tokens, no padding rows",
+        "row_mapping": "manifest order; N=2 sessions x Q=2 tokens, no padding rows",
         "stage_comparisons": stage_reports,
         "first_mismatch": first_mismatch,
         "attention_reference": "DEFERRED",
@@ -1173,7 +1173,7 @@ def _run_gpu(args: argparse.Namespace) -> int:
             lm.config, prefix_embeds, prefix_attention, past_key_values=None,
             position_ids=positions,
         )
-        oracle = ShapeStableGemmaListenerLM(lm, target_length=291, stream_length=4)
+        oracle = ShapeStableGemmaListenerLM(lm, target_length=291, stream_length=Q_PER_FRAME)
         prefix_cache = oracle.forward(
             inputs_embeds=prefix_embeds,
             per_layer_inputs=prefix_ple,
@@ -1276,7 +1276,8 @@ def _run_gpu(args: argparse.Namespace) -> int:
             audio_frontend = ListenerMicrobatchAudioFrontend(
                 backend.gemma_model, backend._extract_single_frame,
                 device=device, dtype=torch.bfloat16,
-                audio_tower_row_runner=backend.run_audio_tower_q4,
+                mel_window_rows=backend.mel_window_rows,
+                audio_tower_row_runner=backend.run_audio_tower_q2,
             )
             stage = f"N{n}:encode_distinct_frontend_rows"
             with torch.cuda.stream(listener_stream), torch.inference_mode():
@@ -1311,7 +1312,7 @@ def _run_gpu(args: argparse.Namespace) -> int:
                 fence.synchronize()
                 expected_position = PREFIX_LEN + Q_PER_FRAME
                 if baseline_provider.current_position != expected_position:
-                    raise RuntimeError("ABI3 baseline cursor did not advance exactly Q=4")
+                    raise RuntimeError("ABI3 baseline cursor did not advance exactly Q=2")
                 reference_positions.append(baseline_provider.current_position)
                 reference_outputs.append(_bf16_bits(hidden)[0])
                 stage = f"N{n}:reference_kv_export_row{index}"

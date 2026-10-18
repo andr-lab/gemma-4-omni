@@ -35,8 +35,13 @@ from pathlib import Path
 import queue
 import threading
 import time
+import sys
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import wave
+
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 import numpy as np
 
@@ -414,6 +419,8 @@ class DialogueConfig:
         ws_url: str = "ws://localhost:8000/v1/realtime?duplex=1",
         voice_a: str = "male_it",
         voice_b: str = "female_it",
+        streaming_voice_profile: str = "gemma",
+        streaming_turn_policy: str = "gemma_native_control6",
         turn_policy: str = "none",
         instructions_a: str = "Sei Marco, un cliente che interagisce in modo chiaro e naturale.",
         instructions_b: str = "Sei un assistente AI accogliente e professionale. Rispondi in modo conciso.",
@@ -428,6 +435,12 @@ class DialogueConfig:
         self.ws_url = ws_url
         self.voice_a = voice_a
         self.voice_b = voice_b
+        self.streaming_voice_profile = str(streaming_voice_profile).strip()
+        if not self.streaming_voice_profile:
+            raise ValueError("streaming_voice_profile deve essere non vuoto")
+        self.streaming_turn_policy = str(streaming_turn_policy).strip()
+        if not self.streaming_turn_policy:
+            raise ValueError("streaming_turn_policy deve essere non vuoto")
         self.turn_policy = turn_policy
         self.instructions_a = instructions_a
         self.instructions_b = instructions_b
@@ -444,6 +457,95 @@ class DecodedAudioPacket:
     end_sample: int
     sample_rate: int
     pcm: np.ndarray
+
+
+@dataclass(frozen=True)
+class StreamingDialogueStep:
+    """One user audio phrase in a concurrently streamed single-session scenario."""
+
+    step_id: str
+    pcm_16k: np.ndarray
+    expected_text: str
+    start_after_s: float = 0.0
+    after_first_consumed_s: Optional[float] = None
+    commit_after: bool = True
+
+    def __post_init__(self) -> None:
+        if not self.step_id:
+            raise ValueError("step_id non può essere vuoto")
+        if self.start_after_s < 0 or (
+            self.after_first_consumed_s is not None and self.after_first_consumed_s < 0
+        ):
+            raise ValueError("gli offset temporali dello scenario devono essere non negativi")
+        if self.start_after_s and self.after_first_consumed_s is not None:
+            raise ValueError("usare un solo riferimento temporale per ogni step")
+        pcm = np.asarray(self.pcm_16k, dtype=np.float32).reshape(-1)
+        if pcm.size == 0 or not np.isfinite(pcm).all():
+            raise ValueError(f"PCM non valido nello step {self.step_id}")
+        if np.any(np.abs(pcm) > 1.0):
+            raise ValueError(f"PCM fuori [-1, 1] nello step {self.step_id}")
+        object.__setattr__(self, "pcm_16k", pcm)
+
+
+@dataclass(frozen=True)
+class StreamingDialogueScenario:
+    """Reusable single-user-session stream with phrase-boundary commits."""
+
+    scenario_id: str
+    system_prompt: str
+    steps: List[StreamingDialogueStep]
+    auto_response: bool = True
+    turn_policy: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if not self.scenario_id or not self.steps:
+            raise ValueError("scenario_id e almeno uno step sono richiesti")
+        step_ids = [step.step_id for step in self.steps]
+        if len(set(step_ids)) != len(step_ids):
+            raise ValueError("step_id duplicati nello scenario")
+
+
+def streaming_scenario_from_fixtures(
+    name: str,
+    fixture_dir: Path = Path("artifacts/turn_local_rollback_harness_20261018/inputs_16k"),
+) -> StreamingDialogueScenario:
+    """Load the reusable A correction or B long-utterance scenario fixtures."""
+    normalized = str(name).strip().upper()
+    fixture_dir = Path(fixture_dir)
+    if normalized == "A":
+        return StreamingDialogueScenario(
+            scenario_id="A_milano_correction_torino",
+            system_prompt="Sei un assistente AI accogliente. Rispondi in italiano.",
+            steps=[
+                StreamingDialogueStep(
+                    step_id="initial_milano",
+                    pcm_16k=read_scenario_audio_wav(fixture_dir / "A_initial_milano.wav"),
+                    expected_text="Consigliami un itinerario di tre giorni a Milano",
+                ),
+                StreamingDialogueStep(
+                    step_id="correction_torino",
+                    pcm_16k=read_scenario_audio_wav(fixture_dir / "A_correction_torino.wav"),
+                    expected_text="Scusa, intendevo dire Torino, non Milano",
+                    after_first_consumed_s=1.5,
+                ),
+            ],
+        )
+    if normalized == "B":
+        return StreamingDialogueScenario(
+            scenario_id="B_docker_long_utterance",
+            system_prompt="Sei un assistente AI accogliente. Rispondi in italiano.",
+            steps=[
+                StreamingDialogueStep(
+                    step_id="docker_15s_with_pause",
+                    pcm_16k=read_scenario_audio_wav(fixture_dir / "B_docker_15s_pause300.wav"),
+                    expected_text=(
+                        "Sto avviando il servizio. Docker è il software per i container. "
+                        "Uso Python e CUDA."
+                    ),
+                ),
+            ],
+        )
+    raise ValueError(f"Scenario streaming sconosciuto: {name!r}; usare A o B")
 
 
 def decode_response_audio(event: Dict[str, Any]) -> DecodedAudioPacket:
@@ -558,6 +660,847 @@ class DialogueOrchestrator:
             raise RuntimeError(f"session update rejected for {speaker_name}: {updated!r}")
         await asyncio.sleep(0.1)
         return updated
+
+    async def run_streaming_scenario(
+        self,
+        scenario: StreamingDialogueScenario,
+    ) -> Dict[str, Any]:
+        """Stream user phrases, assistant events, and logical playback on one WS session."""
+        from client.openai_duplex_client import BoundedPCMPlayback, decode_response_audio as decode_playback_packet
+
+        self.event_logger.log(
+            "streaming_scenario_started",
+            details={
+                "scenario_id": scenario.scenario_id,
+                "auto_response": scenario.auto_response,
+                "turn_policy": scenario.turn_policy or self.config.streaming_turn_policy,
+                "voice_profile": self.config.streaming_voice_profile,
+                "frame_pacing_s": self.config.frame_pacing_s,
+                "playback_consumption_semantics": "logical_client_device_buffer",
+            },
+        )
+        ws_ctx = await self._connect_ws(self.config.ws_url)
+        result: Dict[str, Any] = {}
+        async with ws_ctx as ws:
+            await self._setup_session(
+                ws,
+                speaker_name="A",
+                voice=self.config.streaming_voice_profile,
+                instructions=scenario.system_prompt,
+                turn_policy=scenario.turn_policy or self.config.streaming_turn_policy,
+                auto_response=scenario.auto_response,
+                input_audio_buffer_acknowledgements=True,
+                input_audio_buffer_conditioning_acknowledgements=True,
+            )
+
+            playback = BoundedPCMPlayback()
+            ack_queue: asyncio.Queue[Dict[str, Any]] = asyncio.Queue()
+            stop_tasks = asyncio.Event()
+            producer_finished = asyncio.Event()
+            first_pcm_consumed = asyncio.Event()
+            frame_consumed_event = asyncio.Event()
+            send_lock = asyncio.Lock()
+            event_lock = asyncio.Lock()
+            state: Dict[str, Any] = {
+                "input_active": False,
+                "input_frame_id": 0,
+                "frames_consumed": 0,
+                "ingress_acks_observed": False,
+                "ingress_sample_cursor": 0,
+                "playback_samples_consumed": 0,
+                "active_responses": set(),
+                "response_generations": {},
+                "responses": {},
+                "transcripts": {},
+                "step_schedule": {},
+                "policy_diagnostics": [],
+                "consumed_acknowledgements": [],
+                "commit_timestamps_ns": [],
+                "server_errors": [],
+                "last_event_ns": time.monotonic_ns(),
+                "last_commit_ns": None,
+                "last_terminal_ns": None,
+                "first_response_created_ns": None,
+                "first_audio_delta_ns": None,
+                "first_pcm_consumed_ns": None,
+                "last_consumed_ns_by_response": {},
+                "shadow_tracker_errors": [],
+                "first_ack_sent_ns": None,
+                "stop_ns": None,
+                "stop_reason": "running",
+                "producer_errors": [],
+            }
+            run_started_ns = time.monotonic_ns()
+            duration_limit_s = max(0.01, float(self.config.max_duration_s))
+            transcription_tasks: List[asyncio.Task] = []
+            shadow_chunks: collections.deque[Dict[str, Any]] = collections.deque()
+            shadow_active_response: Optional[str] = None
+            shadow_completed_responses: Set[str] = set()
+            shadow_generation_id: Optional[int] = None
+
+            def shadow_drop(predicate: Callable[[Dict[str, Any]], bool]) -> None:
+                kept = collections.deque()
+                for chunk in shadow_chunks:
+                    if not predicate(chunk):
+                        kept.append(chunk)
+                shadow_chunks.clear()
+                shadow_chunks.extend(kept)
+
+            def shadow_begin_response(response_id: str) -> None:
+                nonlocal shadow_active_response
+                if (
+                    shadow_active_response is not None
+                    and shadow_active_response != response_id
+                    and shadow_active_response not in shadow_completed_responses
+                ):
+                    previous = shadow_active_response
+                    shadow_drop(lambda chunk: chunk["response_id"] == previous)
+                shadow_active_response = response_id
+                shadow_completed_responses.discard(response_id)
+
+            def shadow_advance_generation(generation_id: int) -> None:
+                nonlocal shadow_generation_id
+                if shadow_generation_id is not None and generation_id < shadow_generation_id:
+                    return
+                if shadow_generation_id is None or generation_id > shadow_generation_id:
+                    shadow_drop(
+                        lambda chunk: (
+                            chunk["generation_id"] < generation_id
+                            and chunk["response_id"] not in shadow_completed_responses
+                        )
+                    )
+                    shadow_generation_id = generation_id
+
+            def shadow_cancel_response(response_id: Optional[str], generation_id: Optional[int]) -> None:
+                nonlocal shadow_active_response
+                if response_id is None:
+                    shadow_chunks.clear()
+                    shadow_completed_responses.clear()
+                    shadow_active_response = None
+                    return
+                shadow_drop(
+                    lambda chunk: chunk["response_id"] == response_id
+                    and (generation_id is None or chunk["generation_id"] == generation_id)
+                )
+                shadow_completed_responses.discard(response_id)
+                remaining_generations = state["response_generations"].get(response_id, set())
+                if shadow_active_response == response_id and (generation_id is None or not remaining_generations):
+                    shadow_active_response = None
+
+            def shadow_consume(sample_count: int, consumed_ns: int) -> List[Dict[str, Any]]:
+                remaining = int(sample_count)
+                portions: List[Dict[str, Any]] = []
+                while remaining > 0 and shadow_chunks:
+                    chunk = shadow_chunks[0]
+                    available = int(chunk["end_sample"] - chunk["start_sample"] - chunk["offset"])
+                    count = min(remaining, available)
+                    start_sample = int(chunk["start_sample"] + chunk["offset"])
+                    end_sample = start_sample + count
+                    chunk["offset"] += count
+                    remaining -= count
+                    state["last_consumed_ns_by_response"][chunk["response_id"]] = consumed_ns
+                    portions.append({
+                        "response_id": chunk["response_id"],
+                        "generation_id": chunk["generation_id"],
+                        "speaker_segment_id": chunk["speaker_segment_id"],
+                        "start_sample": start_sample,
+                        "end_sample": end_sample,
+                        "sample_rate": chunk["sample_rate"],
+                    })
+                    if chunk["offset"] == chunk["end_sample"] - chunk["start_sample"]:
+                        shadow_chunks.popleft()
+                if remaining:
+                    state["shadow_tracker_errors"].append(
+                        f"playback copied {sample_count} samples without {remaining} samples of segment metadata"
+                    )
+                return portions
+
+            async def send_input_frame(
+                frame: np.ndarray,
+                *,
+                source: str,
+                step_id: str = "",
+                source_sample_start: Optional[int] = None,
+                source_sample_end: Optional[int] = None,
+                padded_samples: int = 0,
+            ) -> None:
+                frame_id = int(state["input_frame_id"])
+                ingress_start = int(state["ingress_sample_cursor"])
+                ingress_end = ingress_start + FRAME_SAMPLES_16K
+                step_timing = state["step_schedule"].get(step_id, {})
+                is_correction_first_sample = (
+                    source == "scenario_audio"
+                    and source_sample_start == 0
+                    and step_timing.get("reference") == "first_client_pcm_consumed"
+                )
+                if state.get("ingress_acks_observed", False):
+                    while (
+                        state["input_frame_id"] - state.get("frames_consumed", 0) >= 3
+                        and not stop_tasks.is_set()
+                    ):
+                        frame_consumed_event.clear()
+                        try:
+                            await asyncio.wait_for(frame_consumed_event.wait(), timeout=0.1)
+                        except asyncio.TimeoutError:
+                            break
+
+                message = {
+                    "type": "input_audio_buffer.append",
+                    "audio": base64.b64encode(float_to_pcm16_bytes(frame)).decode("ascii"),
+                }
+                async with send_lock:
+                    if is_correction_first_sample:
+                        # Snapshot the old playback tail and put the correction frame
+                        # on the wire under the same event fence. A cancel cannot
+                        # make the snapshot stale between those two operations.
+                        async with event_lock:
+                            step_timing["old_response_ids_at_first_correction_sample"] = sorted(
+                                {chunk["response_id"] for chunk in shadow_chunks}
+                            )
+                            await ws.send(json.dumps(message))
+                            sent_ns = time.monotonic_ns()
+                            step_timing["first_sample_sent_ns"] = sent_ns
+                    else:
+                        await ws.send(json.dumps(message))
+                        sent_ns = time.monotonic_ns()
+                    self.event_logger.log(
+                        "raw_ws_send",
+                        speaker="user",
+                        turn_index=frame_id,
+                        details=message,
+                    )
+                    self.recorder.record_input("A", frame)
+                    self.event_logger.log(
+                        "input_audio_frame_sent",
+                        speaker="user",
+                        turn_index=frame_id,
+                        details={
+                            "ingress_frame_id": frame_id,
+                            "source": source,
+                            "step_id": step_id,
+                            "sent_ns": sent_ns,
+                            "sample_rate": SAMPLE_RATE_INPUT,
+                            "sample_count": FRAME_SAMPLES_16K,
+                            "ingress_start_sample": ingress_start,
+                            "ingress_end_sample": ingress_end,
+                            "source_start_sample": source_sample_start,
+                            "source_end_sample": source_sample_end,
+                            "padded_samples": int(padded_samples),
+                        },
+                    )
+                state["input_frame_id"] = frame_id + 1
+                state["ingress_sample_cursor"] = ingress_end
+
+            async def record_asr(step: StreamingDialogueStep) -> None:
+                transcript, available, error = await self._transcribe_input_audio(step.pcm_16k)
+                state["transcripts"][step.step_id] = {
+                    "expected_text": step.expected_text,
+                    "asr_transcript": transcript,
+                    "asr_available": available,
+                    "sample_rate": SAMPLE_RATE_INPUT,
+                    "sample_count": int(step.pcm_16k.size),
+                    "source_sample_start": 0,
+                    "source_sample_end": int(step.pcm_16k.size),
+                    **({"asr_error": error} if error else {}),
+                }
+                self.event_logger.log(
+                    "input_audio_transcribed",
+                    speaker="user",
+                    details={"step_id": step.step_id, **state["transcripts"][step.step_id]},
+                )
+
+            async def input_producer() -> None:
+                try:
+                    for step in scenario.steps:
+                        if step.after_first_consumed_s is not None:
+                            try:
+                                await asyncio.wait_for(
+                                    first_pcm_consumed.wait(),
+                                    timeout=max(0.01, duration_limit_s - (time.monotonic_ns() - run_started_ns) / 1e9),
+                                )
+                            except asyncio.TimeoutError:
+                                state["stop_reason"] = "first_pcm_timeout"
+                                return
+                            anchor_ns = int(state["first_pcm_consumed_ns"] or time.monotonic_ns())
+                            target_ns = anchor_ns + int(step.after_first_consumed_s * 1e9)
+                            await asyncio.sleep(max(0.0, (target_ns - time.monotonic_ns()) / 1e9))
+                            schedule = {
+                                "reference": "first_client_pcm_consumed",
+                                "target_offset_s": step.after_first_consumed_s,
+                                "anchor_ns": anchor_ns,
+                                "target_ns": target_ns,
+                            }
+                        elif step.start_after_s > 0:
+                            target_ns = run_started_ns + int(step.start_after_s * 1e9)
+                            await asyncio.sleep(max(0.0, (target_ns - time.monotonic_ns()) / 1e9))
+                            schedule = {
+                                "reference": "scenario_start",
+                                "target_offset_s": step.start_after_s,
+                                "target_ns": target_ns,
+                            }
+                        else:
+                            schedule = {"reference": "scenario_start", "target_offset_s": 0.0}
+
+                        step_start_ns = time.monotonic_ns()
+                        state["step_schedule"][step.step_id] = {
+                            **schedule,
+                            "actual_start_ns": step_start_ns,
+                        }
+                        self.event_logger.log(
+                            "streaming_input_step_started",
+                            speaker="user",
+                            details={
+                                "step_id": step.step_id,
+                                "expected_text": step.expected_text,
+                                "source_sample_count": int(step.pcm_16k.size),
+                                **schedule,
+                            },
+                        )
+                        state["input_active"] = True
+                        total_frames = math.ceil(step.pcm_16k.size / FRAME_SAMPLES_16K)
+                        for frame_index in range(total_frames):
+                            source_start = frame_index * FRAME_SAMPLES_16K
+                            source_end = min(source_start + FRAME_SAMPLES_16K, step.pcm_16k.size)
+                            source_chunk = step.pcm_16k[source_start:source_end]
+                            frame = np.zeros(FRAME_SAMPLES_16K, dtype=np.float32)
+                            frame[:source_chunk.size] = source_chunk
+                            await send_input_frame(
+                                frame,
+                                source="scenario_audio",
+                                step_id=step.step_id,
+                                source_sample_start=source_start,
+                                source_sample_end=source_end,
+                                padded_samples=FRAME_SAMPLES_16K - int(source_chunk.size),
+                            )
+                            if frame_index + 1 < total_frames:
+                                await asyncio.sleep(self.config.frame_pacing_s)
+
+                        if step.commit_after:
+                            async with send_lock:
+                                commit_message = {"type": "input_audio_buffer.commit"}
+                                await ws.send(json.dumps(commit_message))
+                                commit_ns = time.monotonic_ns()
+                                self.event_logger.log(
+                                    "raw_ws_send",
+                                    speaker="user",
+                                    details=commit_message,
+                                )
+                            state["last_commit_ns"] = commit_ns
+                            state["commit_timestamps_ns"].append(commit_ns)
+                            state["step_schedule"][step.step_id]["commit_ns"] = commit_ns
+                            self.event_logger.log(
+                                "input_audio_buffer_commit_sent",
+                                speaker="user",
+                                details={
+                                    "step_id": step.step_id,
+                                    "timestamp_ns": commit_ns,
+                                    "phrase_sample_count": int(step.pcm_16k.size),
+                                    "ingress_frame_count": int(state["input_frame_id"]),
+                                },
+                            )
+                        state["input_active"] = False
+                        transcription_tasks.append(asyncio.create_task(record_asr(step)))
+                    producer_finished.set()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    state["producer_errors"].append(f"{type(exc).__name__}: {exc}")
+                    state["stop_reason"] = "input_error"
+                finally:
+                    state["input_active"] = False
+                    producer_finished.set()
+
+            async def playback_reader() -> None:
+                while not stop_tasks.is_set():
+                    tick_start = time.monotonic()
+                    outdata = np.zeros(FRAME_SAMPLES_24K, dtype=np.float32)
+                    copied = playback.read_into(outdata)
+                    if copied:
+                        now_ns = time.monotonic_ns()
+                        state["playback_samples_consumed"] += copied
+                        cumulative = int(state["playback_samples_consumed"])
+                        consumed_segments = shadow_consume(copied, now_ns)
+                        self.event_logger.log(
+                            "client_pcm_consumed",
+                            speaker="assistant",
+                            details={
+                                "copied_samples": int(copied),
+                                "cumulative_consumed_samples": cumulative,
+                                "sample_rate": SAMPLE_RATE_OUTPUT,
+                                "callback_samples": FRAME_SAMPLES_24K,
+                                "consumption_semantics": "logical_client_device_buffer",
+                                "consumed_segments": consumed_segments,
+                            },
+                        )
+                        if state["first_pcm_consumed_ns"] is None:
+                            state["first_pcm_consumed_ns"] = now_ns
+                            first_pcm_consumed.set()
+                        for ack in playback.drain_client_consumed_pcm_acks():
+                            await ack_queue.put(ack)
+                    elapsed = time.monotonic() - tick_start
+                    await asyncio.sleep(max(0.0, self.config.frame_pacing_s - elapsed))
+
+            async def ack_sender() -> None:
+                while not stop_tasks.is_set() or not ack_queue.empty():
+                    try:
+                        ack = await asyncio.wait_for(ack_queue.get(), timeout=0.05)
+                    except asyncio.TimeoutError:
+                        continue
+                    async with send_lock:
+                        async with event_lock:
+                            if not playback.accept_client_consumed_pcm_ack(ack):
+                                self.event_logger.log(
+                                    "client_consumed_pcm_ack_discarded",
+                                    speaker="assistant",
+                                    details=ack,
+                                )
+                                continue
+                            await ws.send(json.dumps(ack))
+                            sent_ns = time.monotonic_ns()
+                        self.event_logger.log(
+                            "raw_ws_send",
+                            speaker="assistant",
+                            details=ack,
+                        )
+                    state["consumed_acknowledgements"].append({**ack, "sent_ns": sent_ns})
+                    if state["first_ack_sent_ns"] is None:
+                        state["first_ack_sent_ns"] = sent_ns
+                    self.event_logger.log(
+                        "client_consumed_pcm_sent",
+                        speaker="assistant",
+                        details={**ack, "sent_ns": sent_ns},
+                    )
+
+            async def playback_silence_ticks() -> None:
+                silence = np.zeros(FRAME_SAMPLES_16K, dtype=np.float32)
+                while not stop_tasks.is_set():
+                    await asyncio.sleep(self.config.frame_pacing_s)
+                    if (
+                        (state["active_responses"] or playback.pending_samples > 0)
+                        and not state["input_active"]
+                        and (
+                            not state.get("ingress_acks_observed", False)
+                            or state["input_frame_id"] - state.get("frames_consumed", 0) < 3
+                        )
+                    ):
+                        await send_input_frame(silence, source="assistant_playback_silence")
+
+            producer_task = asyncio.create_task(input_producer())
+            playback_task = asyncio.create_task(playback_reader())
+            ack_task = asyncio.create_task(ack_sender())
+            silence_task = asyncio.create_task(playback_silence_ticks())
+            last_event_ns = time.monotonic_ns()
+            max_duration_ns = int(duration_limit_s * 1e9)
+            quiet_timeout_ns = int(max(0.01, self.config.silence_timeout_s) * 1e9)
+
+            try:
+                while True:
+                    now_ns = time.monotonic_ns()
+                    elapsed_ns = now_ns - run_started_ns
+                    if elapsed_ns >= max_duration_ns:
+                        state["stop_reason"] = "max_duration"
+                        break
+                    if state["producer_errors"]:
+                        state["stop_reason"] = "input_error"
+                        break
+                    completion_ready = (
+                        producer_finished.is_set()
+                        and state["last_commit_ns"] is not None
+                        and state["last_terminal_ns"] is not None
+                        and state["last_terminal_ns"] >= state["last_commit_ns"]
+                        and not state["active_responses"]
+                        and playback.pending_samples == 0
+                        and ack_queue.empty()
+                    )
+                    if completion_ready:
+                        state["stop_reason"] = "response_terminal"
+                        break
+                    if (
+                        producer_finished.is_set()
+                        and not state["active_responses"]
+                        and playback.pending_samples == 0
+                        and now_ns - last_event_ns >= quiet_timeout_ns
+                    ):
+                        state["stop_reason"] = "quiet_timeout"
+                        break
+                    remaining_s = max(0.001, (max_duration_ns - elapsed_ns) / 1e9)
+                    try:
+                        raw_msg = await asyncio.wait_for(ws.recv(), timeout=min(0.05, remaining_s))
+                    except asyncio.TimeoutError:
+                        continue
+                    except EOFError:
+                        state["stop_reason"] = "websocket_closed"
+                        break
+
+                    received_ns = time.monotonic_ns()
+                    last_event_ns = received_ns
+                    state["last_event_ns"] = received_ns
+                    msg = json.loads(raw_msg)
+                    mtype = str(msg.get("type", "unknown"))
+                    self.event_logger.log(mtype, speaker="assistant", details=msg)
+                    response_id = msg.get("response_id")
+
+                    if mtype == "response.created":
+                        response_id = str(response_id or "")
+                        if response_id:
+                            async with event_lock:
+                                playback.begin_response(response_id)
+                                shadow_begin_response(response_id)
+                            state["active_responses"].add(response_id)
+                            response = state["responses"].setdefault(response_id, {
+                                "response_id": response_id,
+                                "created_ns": received_ns,
+                            "created_after_commit_ns": next(
+                                (commit_ns for commit_ns in reversed(state["commit_timestamps_ns"])
+                                 if commit_ns <= received_ns),
+                                None,
+                            ),
+                                "text": "",
+                                "audio_packets": [],
+                            })
+                            response["created_ns"] = received_ns
+                            state["response_generations"].setdefault(response_id, set())
+                        response["created_after_commit_ns"] = next(
+                            (commit_ns for commit_ns in reversed(state["commit_timestamps_ns"])
+                             if commit_ns <= received_ns),
+                            None,
+                        )
+                        if state["first_response_created_ns"] is None:
+                            state["first_response_created_ns"] = received_ns
+                    elif mtype == "speaker.segment.opened":
+                        generation_id = msg.get("generation_id")
+                        if isinstance(generation_id, int) and not isinstance(generation_id, bool):
+                            async with event_lock:
+                                playback.advance_generation(generation_id)
+                                shadow_advance_generation(generation_id)
+                                if response_id:
+                                    state["response_generations"].setdefault(str(response_id), set()).add(
+                                        generation_id
+                                    )
+                    elif mtype == "response.audio.delta":
+                        if state["first_audio_delta_ns"] is None:
+                            state["first_audio_delta_ns"] = received_ns
+                        packet = decode_playback_packet(msg)
+                        async with event_lock:
+                            accepted = playback.enqueue_packet(
+                                response_id=packet.response_id,
+                                generation_id=packet.generation_id,
+                                speaker_segment_id=packet.speaker_segment_id,
+                                packet_id=packet.packet_id,
+                                first_frame_id=packet.first_frame_id,
+                                last_frame_id=packet.last_frame_id,
+                                start_sample=packet.start_sample,
+                                end_sample=packet.end_sample,
+                                pcm=packet.pcm,
+                                sample_rate=packet.sample_rate,
+                            )
+                            if accepted:
+                                state["response_generations"].setdefault(packet.response_id, set()).add(
+                                    packet.generation_id
+                                )
+                                shadow_advance_generation(packet.generation_id)
+                                shadow_chunks.append({
+                                    "response_id": packet.response_id,
+                                    "generation_id": packet.generation_id,
+                                    "speaker_segment_id": packet.speaker_segment_id,
+                                    "start_sample": packet.start_sample,
+                                    "end_sample": packet.end_sample,
+                                    "sample_rate": packet.sample_rate,
+                                    "offset": 0,
+                                })
+                        if accepted:
+                            self.recorder.record_output("A", packet.pcm)
+                            response = state["responses"].setdefault(packet.response_id, {
+                                "response_id": packet.response_id,
+                                "text": "",
+                                "audio_packets": [],
+                            })
+                            response.setdefault("first_audio_delta_ns", received_ns)
+                            response["audio_packets"].append({
+                                "packet_id": packet.packet_id,
+                                "generation_id": packet.generation_id,
+                                "speaker_segment_id": packet.speaker_segment_id,
+                                "start_sample": packet.start_sample,
+                                "end_sample": packet.end_sample,
+                                "sample_rate": packet.sample_rate,
+                            })
+                    elif mtype == "response.audio.segment_done":
+                        async with event_lock:
+                            playback.complete_segment(
+                                response_id=str(msg.get("response_id", "")),
+                                generation_id=int(msg["generation_id"]),
+                                speaker_segment_id=str(msg.get("speaker_segment_id", "")),
+                                start_sample=int(msg["start_sample"]),
+                                end_sample=int(msg["end_sample"]),
+                                sample_rate=int(msg["sample_rate"]),
+                            )
+                            for ack in playback.drain_client_consumed_pcm_acks():
+                                await ack_queue.put(ack)
+                    elif mtype in {
+                        "response.output_text.delta",
+                        "response.audio_transcript.delta",
+                        "response.output_audio_transcript.delta",
+                    }:
+                        if response_id:
+                            response = state["responses"].setdefault(str(response_id), {
+                                "response_id": str(response_id),
+                                "text": "",
+                                "audio_packets": [],
+                            })
+                            response["text"] += str(msg.get("delta", ""))
+                    elif mtype == "response.done":
+                        if response_id:
+                            async with event_lock:
+                                playback.complete_response(str(response_id))
+                            state["active_responses"].discard(str(response_id))
+                            state["response_generations"].pop(str(response_id), None)
+                            shadow_completed_responses.add(str(response_id))
+                            if shadow_active_response == str(response_id):
+                                shadow_active_response = None
+                        state["last_terminal_ns"] = received_ns
+                    elif mtype in {"response.cancelled", "audio.cancelled"}:
+                        generation_id = msg.get("generation_id")
+                        async with event_lock:
+                            playback.cancel_response(
+                                None if response_id is None else str(response_id),
+                                int(generation_id) if generation_id is not None else None,
+                            )
+                            shadow_cancel_response(
+                                None if response_id is None else str(response_id),
+                                int(generation_id) if generation_id is not None else None,
+                            )
+                        if response_id:
+                            response_key = str(response_id)
+                            known_generations = state["response_generations"].get(response_key, set())
+                            if generation_id is None:
+                                known_generations.clear()
+                            else:
+                                known_generations.discard(int(generation_id))
+                            if not known_generations:
+                                state["response_generations"].pop(response_key, None)
+                                state["active_responses"].discard(response_key)
+                                self.timeline_a.cancel_response(response_key)
+                        state["last_terminal_ns"] = received_ns
+                        self.event_logger.log(
+                            "response_stop_observed",
+                            speaker="assistant",
+                            details={
+                                "response_id": response_id,
+                                "generation_id": generation_id,
+                                "reason": msg.get("reason", "cancelled"),
+                                "timestamp_ns": received_ns,
+                            },
+                        )
+                    elif mtype == "input_audio_buffer.consumed":
+                        state["ingress_acks_observed"] = True
+                        state["frames_consumed"] = state.get("frames_consumed", 0) + 1
+                        frame_consumed_event.set()
+                        self.event_logger.log(
+                            "input_audio_frame_consumed",
+                            speaker="user",
+                            turn_index=int(msg.get("frame_id", -1)),
+                            details={
+                                "frame_id": msg.get("frame_id"),
+                                "listener_output_frame_id": msg.get("listener_output_frame_id"),
+                                "timestamp_ns": received_ns,
+                            },
+                        )
+                    elif mtype == "input_audio_buffer.conditioning_available":
+                        self.event_logger.log(
+                            "input_audio_conditioning_available",
+                            speaker="user",
+                            turn_index=int(msg.get("frame_id", -1)),
+                            details=msg,
+                        )
+                    elif mtype == "error":
+                        error = msg.get("error", {})
+                        state["server_errors"].append(
+                            dict(error) if isinstance(error, dict) else {"message": str(error)}
+                        )
+
+                    for container in (msg, msg.get("policy"), msg.get("policy_diagnostics"), msg.get("details")):
+                        if not isinstance(container, dict):
+                            continue
+                        policy_fields = {
+                            key: container[key]
+                            for key in (
+                                "raw_action", "legal_action", "selected_action", "applied_action",
+                                "policy_raw_action", "policy_legal_action",
+                                "policy_selected_action", "policy_applied_action",
+                            )
+                            if key in container
+                        }
+                        if policy_fields:
+                            state["policy_diagnostics"].append({
+                                "timestamp_ns": received_ns,
+                                "response_id": response_id,
+                                **policy_fields,
+                            })
+                            self.event_logger.log(
+                                "policy_diagnostics",
+                                speaker="assistant",
+                                details={"response_id": response_id, **policy_fields},
+                            )
+                            break
+            finally:
+                state["stop_ns"] = time.monotonic_ns()
+                if state["stop_reason"] == "running":
+                    state["stop_reason"] = "stopped"
+                self.event_logger.log(
+                    "streaming_scenario_stopped",
+                    details={
+                        "scenario_id": scenario.scenario_id,
+                        "stop_reason": state["stop_reason"],
+                        "timestamp_ns": state["stop_ns"],
+                        "elapsed_ms": (state["stop_ns"] - run_started_ns) / 1e6,
+                    },
+                )
+                stop_tasks.set()
+                for task in (producer_task, playback_task, silence_task):
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(producer_task, playback_task, silence_task, return_exceptions=True)
+                await ack_task
+                if transcription_tasks:
+                    await asyncio.gather(*transcription_tasks, return_exceptions=True)
+
+        wav_files = self.recorder.finalize()
+        self.event_logger.close()
+        first_pcm_ns = state["first_pcm_consumed_ns"]
+        first_audio_ns = state["first_audio_delta_ns"]
+        first_policy_speak_ns = next(
+            (
+                int(item["timestamp_ns"])
+                for item in state["policy_diagnostics"]
+                if str(item.get("applied_action", item.get("policy_applied_action", ""))).upper() == "SPEAK"
+                and first_pcm_ns is not None
+                and int(item["timestamp_ns"]) <= first_pcm_ns
+            ),
+            None,
+        )
+        correction_step = next(
+            (
+                (step_id, step_timing)
+                for step_id, step_timing in state["step_schedule"].items()
+                if step_timing.get("reference") == "first_client_pcm_consumed"
+            ),
+            None,
+        )
+        correction_timing: Optional[Dict[str, Any]] = None
+        if correction_step is not None:
+            correction_id, timing = correction_step
+            commit_ns = timing.get("commit_ns")
+            correction_responses = [
+                response for response in state["responses"].values()
+                if commit_ns is not None and response.get("created_after_commit_ns") == commit_ns
+            ]
+            correction_response_ids = {response["response_id"] for response in correction_responses}
+            consumed_ack_ns = min(
+                (
+                    int(ack["client_monotonic_ns"])
+                    for ack in state["consumed_acknowledgements"]
+                    if ack.get("response_id") in correction_response_ids
+                ),
+                default=None,
+            )
+            correction_timing = {
+                "step_id": correction_id,
+                "started_ns": timing.get("actual_start_ns"),
+                "first_sample_sent_ns": timing.get("first_sample_sent_ns"),
+                "commit_ns": commit_ns,
+                "old_response_ids_at_first_correction_sample": timing.get(
+                    "old_response_ids_at_first_correction_sample", []
+                ),
+                "last_old_response_pcm_consumed_ns": max(
+                    (
+                        int(state["last_consumed_ns_by_response"][response_id])
+                        for response_id in timing.get("old_response_ids_at_first_correction_sample", [])
+                        if response_id in state["last_consumed_ns_by_response"]
+                    ),
+                    default=None,
+                ),
+                "first_response_created_ns": min(
+                    (int(response["created_ns"]) for response in correction_responses),
+                    default=None,
+                ),
+                "first_audio_delta_ns": min(
+                    (int(response["first_audio_delta_ns"]) for response in correction_responses
+                     if response.get("first_audio_delta_ns") is not None),
+                    default=None,
+                ),
+                "first_consumed_segment_ack_ns": consumed_ack_ns,
+                "commit_to_first_consumed_segment_ack_ms": (
+                    (consumed_ack_ns - commit_ns) / 1e6 if consumed_ack_ns is not None else None
+                ),
+            }
+            first_sample_sent_ns = correction_timing["first_sample_sent_ns"]
+            last_old_consumed_ns = correction_timing["last_old_response_pcm_consumed_ns"]
+            correction_timing["stop_latency_first_correction_sample_to_last_old_consumed_pcm_ms"] = (
+                (last_old_consumed_ns - first_sample_sent_ns) / 1e6
+                if first_sample_sent_ns is not None
+                and last_old_consumed_ns is not None
+                and last_old_consumed_ns >= first_sample_sent_ns
+                else None
+            )
+        first_committed_response = min(
+            (
+                response for response in state["responses"].values()
+                if response.get("created_after_commit_ns") is not None
+            ),
+            key=lambda response: int(response["created_ns"]),
+            default=None,
+        )
+        result = {
+            "status": (
+                "COMPLETED" if state["stop_reason"] == "response_terminal"
+                else "INCOMPLETE" if state["stop_reason"] == "quiet_timeout"
+                else "STOPPED"
+            ),
+            "mode": "single_session_streaming",
+            "scenario_id": scenario.scenario_id,
+            "stop_reason": state["stop_reason"],
+            "input_steps": state["step_schedule"],
+            "input_transcripts": state["transcripts"],
+            "responses": list(state["responses"].values()),
+            "consumed_acknowledgements": state["consumed_acknowledgements"],
+            "policy_diagnostics": state["policy_diagnostics"],
+            "server_errors": state["server_errors"],
+            "playback_shadow_tracker_errors": state["shadow_tracker_errors"],
+            "last_consumed_pcm_ns_by_response": state["last_consumed_ns_by_response"],
+            "timing": {
+                "scenario_started_ns": run_started_ns,
+                "first_response_created_ns": state["first_response_created_ns"],
+                "first_response_created_after_commit_ms": (
+                    (int(first_committed_response["created_ns"])
+                     - int(first_committed_response["created_after_commit_ns"])) / 1e6
+                    if first_committed_response is not None
+                    else None
+                ),
+                "first_audio_delta_ns": first_audio_ns,
+                "first_audio_delta_after_response_created_ms": (
+                    (first_audio_ns - state["first_response_created_ns"]) / 1e6
+                    if first_audio_ns is not None and state["first_response_created_ns"] is not None else None
+                ),
+                "first_client_pcm_consumed_ns": first_pcm_ns,
+                "policy_speak_to_first_client_pcm_consumed_ms": (
+                    (first_pcm_ns - first_policy_speak_ns) / 1e6
+                    if first_pcm_ns is not None and first_policy_speak_ns is not None else None
+                ),
+                "correction_timing": correction_timing,
+                "first_client_consumed_pcm_ack_sent_ns": state["first_ack_sent_ns"],
+                "last_response_terminal_ns": state["last_terminal_ns"],
+                "stop_ns": state["stop_ns"],
+                "client_consumption_semantics": "logical_client_device_buffer",
+            },
+            "ingress_frames_sent": int(state["input_frame_id"]),
+            "logical_pcm_samples_consumed": int(state["playback_samples_consumed"]),
+            "wav_files": {key: str(path) for key, path in wav_files.items()},
+            "events_jsonl": str(self.output_dir / "dialogue_events.jsonl"),
+        }
+        report_path = self.output_dir / "streaming_dialogue_report.json"
+        report_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        result["report_json"] = str(report_path)
+        return result
 
     async def run_mode_a(
         self,
@@ -1698,3 +2641,53 @@ class DialogueOrchestrator:
                 "markdown_report": md_report,
                 "wav_files": saved_wavs,
             }
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    """Run a reusable real-time A or B fixture scenario against one WS session."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Streaming single-session duplex dialogue scenarios")
+    parser.add_argument("--stream-scenario", choices=("A", "B"), required=True)
+    parser.add_argument(
+        "--fixture-dir",
+        type=Path,
+        default=Path("artifacts/turn_local_rollback_harness_20261018/inputs_16k"),
+    )
+    parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument("--ws-url", default="ws://localhost:8000/v1/realtime?duplex=1")
+    parser.add_argument(
+        "--voice-profile",
+        default="gemma",
+        help="Installed server voice profile for the single-session streaming scenario (default: gemma)",
+    )
+    parser.add_argument(
+        "--turn-policy",
+        default="gemma_native_control6",
+        help="Server turn policy for streaming (default: gemma_native_control6)",
+    )
+    parser.add_argument("--max-duration-s", type=float, default=120.0)
+    parser.add_argument("--silence-timeout-s", type=float, default=3.0)
+    parser.add_argument("--frame-pacing-s", type=float, default=0.080)
+    args = parser.parse_args(argv)
+
+    scenario = streaming_scenario_from_fixtures(args.stream_scenario, args.fixture_dir)
+    output_dir = args.output_dir or Path("artifacts") / (
+        f"streaming_dialogue_{scenario.scenario_id}_{time.strftime('%Y%m%d_%H%M%S')}"
+    )
+    config = DialogueConfig(
+        max_duration_s=args.max_duration_s,
+        silence_timeout_s=args.silence_timeout_s,
+        frame_pacing_s=args.frame_pacing_s,
+        ws_url=args.ws_url,
+        streaming_voice_profile=args.voice_profile,
+        streaming_turn_policy=args.turn_policy,
+    )
+    orchestrator = DialogueOrchestrator(config=config, output_dir=output_dir)
+    result = asyncio.run(orchestrator.run_streaming_scenario(scenario))
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0 if result["status"] == "COMPLETED" else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

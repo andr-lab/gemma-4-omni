@@ -231,6 +231,12 @@ class ListenerMicrobatchCoordinator:
                 raise RuntimeError(
                     "queued frame no longer matches the committed per-session frame cursor"
                 )
+            if state.cache_position > LISTENER_MAX_SEQ_LEN - LISTENER_Q_PER_FRAME:
+                raise RuntimeError(
+                    "native listener physical Q2 capacity exhausted before dispatch; "
+                    f"session={state.session_id}, cache_position={state.cache_position}, "
+                    f"max_seq_len={LISTENER_MAX_SEQ_LEN}. No implicit re-prefill is available."
+                )
             rows.append(BatchRowDescriptor(
                 session_id=state.session_id,
                 session_generation=state.generation_id,
@@ -245,6 +251,9 @@ class ListenerMicrobatchCoordinator:
                 reference_pcm_sha256=frame.reference_pcm_sha256,
                 frame_ready_at_ns=frame.ready_at_ns,
                 reference_frame_id=frame.reference_frame_id,
+                logical_q_len=frame.logical_q_len,
+                ephemeral_reason=frame.ephemeral_reason,
+                queue_audio_for_next_turn=frame.queue_audio_for_next_turn,
             ))
             rows_frames.append(frame)
 
@@ -392,17 +401,15 @@ class ListenerMicrobatchCoordinator:
                         raise RuntimeError(
                             "stale batch completion; per-session state changed in flight"
                         )
-                    expected_cache_position = (
-                        descriptor.cache_position + LISTENER_Q_PER_FRAME
-                    )
+                    expected_cache_position = descriptor.cache_position + descriptor.logical_q_len
                     if update.cache_position > LISTENER_MAX_SEQ_LEN:
                         raise ValueError(
                             f"updated cache_position exceeds max_seq_len={LISTENER_MAX_SEQ_LEN}"
                         )
                     if update.cache_position != expected_cache_position:
                         raise ValueError(
-                            "batch update must advance cache_position by exactly "
-                            f"Q={LISTENER_Q_PER_FRAME}"
+                            "batch update cache_position must advance by logical "
+                            f"Q={descriptor.logical_q_len} (physical Q={LISTENER_Q_PER_FRAME})"
                         )
                     if update.valid_history_tokens != update.cache_position:
                         raise ValueError(
@@ -530,6 +537,96 @@ class ListenerMicrobatchCoordinator:
             state.cache_position = cache_position
             state.valid_history_tokens = cache_position
             self._condition.notify_all()
+
+    def advance_cache_position(
+        self,
+        session_id: str,
+        *,
+        token_count: int,
+        expected_generation_id: int,
+        expected_cache_position: int,
+    ) -> ListenerSessionSnapshot:
+        """Commit native text tokens while preserving listener frame identity.
+
+        This is called only by the single GPU owner after its embedded-text
+        forward and output-health check have succeeded. Queued listener frames
+        are allowed: they are admitted later from the new cache cursor.
+        """
+        if isinstance(token_count, bool) or not isinstance(token_count, int) or token_count not in (1, 2):
+            raise ValueError("text token_count must be one or two")
+        for name, value in (
+            ("expected_generation_id", expected_generation_id),
+            ("expected_cache_position", expected_cache_position),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        with self._condition:
+            self._assert_owner_locked()
+            if self._active_batch is not None:
+                raise RuntimeError("text append requires no active listener batch")
+            if session_id in self._inflight_sessions:
+                raise RuntimeError("text append cannot overlap an in-flight listener row")
+            state = self._states.get(session_id)
+            if state is None:
+                raise KeyError(f"unknown listener session: {session_id}")
+            if state.closed or state.poisoned_reason is not None:
+                raise RuntimeError("text append requires a live, healthy listener session")
+            if (
+                state.generation_id != expected_generation_id
+                or state.cache_position != expected_cache_position
+                or state.valid_history_tokens != expected_cache_position
+            ):
+                raise RuntimeError("text append lost its generation/cache-position compare-and-swap")
+            if state.cache_position > LISTENER_MAX_SEQ_LEN - LISTENER_Q_PER_FRAME:
+                raise RuntimeError(
+                    "native listener physical Q2 capacity exhausted before text append; "
+                    f"session={session_id}, cache_position={state.cache_position}, "
+                    f"max_seq_len={LISTENER_MAX_SEQ_LEN}"
+                )
+            state.cache_position += token_count
+            state.valid_history_tokens = state.cache_position
+            self._condition.notify_all()
+            return snapshot_listener_state(state)
+
+    def rewind_cache_position(
+        self,
+        session_id: str,
+        *,
+        target_cache_position: int,
+        expected_generation_id: int,
+        expected_cache_position: int,
+    ) -> ListenerSessionSnapshot:
+        """Commit an owner-ordered assistant-branch rollback without changing audio time."""
+        for name, value in (
+            ("target_cache_position", target_cache_position),
+            ("expected_generation_id", expected_generation_id),
+            ("expected_cache_position", expected_cache_position),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        with self._condition:
+            self._assert_owner_locked()
+            if self._active_batch is not None:
+                raise RuntimeError("assistant rollback requires no active listener batch")
+            if session_id in self._inflight_sessions or self._queues.get(session_id):
+                raise RuntimeError("assistant rollback cannot cross queued or in-flight listener frames")
+            state = self._states.get(session_id)
+            if state is None:
+                raise KeyError(f"unknown listener session: {session_id}")
+            if state.closed or state.poisoned_reason is not None:
+                raise RuntimeError("assistant rollback requires a live, healthy listener session")
+            if (
+                state.generation_id != expected_generation_id
+                or state.cache_position != expected_cache_position
+                or state.valid_history_tokens != expected_cache_position
+            ):
+                raise RuntimeError("assistant rollback lost its generation/cache-position compare-and-swap")
+            if target_cache_position > state.cache_position:
+                raise ValueError("assistant rollback target cannot extend the cache")
+            state.cache_position = target_cache_position
+            state.valid_history_tokens = target_cache_position
+            self._condition.notify_all()
+            return snapshot_listener_state(state)
 
     def _claim_gpu_owner_locked(self) -> None:
         current = threading.get_ident()

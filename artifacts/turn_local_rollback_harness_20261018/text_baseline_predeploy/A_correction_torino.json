@@ -1,0 +1,31 @@
+{
+  "name": "A_correction_torino",
+  "request": {
+    "model": "gemma-4-omni-duplex",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Consigliami un itinerario di tre giorni a Milano."
+      },
+      {
+        "role": "assistant",
+        "content": ""
+      },
+      {
+        "role": "user",
+        "content": "Scusa, intendevo dire Torino, non Milano!"
+      }
+    ],
+    "stream": false,
+    "temperature": 0.2,
+    "max_tokens": 384
+  },
+  "status": 500,
+  "elapsed_ms": 11864.80290000327,
+  "response": {
+    "error": {
+      "code": "INFERENCE_ERROR",
+      "message": "inferenza fallita"
+    }
+  }
+}

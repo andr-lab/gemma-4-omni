@@ -105,6 +105,16 @@ async def main() -> None:
     parser.add_argument("--url", default=URL)
     parser.add_argument("--first", type=Path, default=DEFAULT_FIRST)
     parser.add_argument("--followup", type=Path, default=DEFAULT_FOLLOWUP)
+    parser.add_argument("--single-turn", action="store_true",
+                        help="send only --first, without a repeated follow-up")
+    parser.add_argument("--input-transcript", default=None,
+                        help="optional exact source transcript recorded with the probe")
+    parser.add_argument(
+        "--response-protocol-expected",
+        choices=("controller_guided_say_v1", "heard_action_say_v2"),
+        default="controller_guided_say_v1",
+        help="protocol expected from the serving process for this comparison run",
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--silence-frames", type=int, default=2)
     parser.add_argument("--max-silence-frames", type=int, default=375)
@@ -117,7 +127,7 @@ async def main() -> None:
         "url": args.url,
         "mode": args.mode,
         "model": "gemma-4-omni-duplex",
-        "response_protocol_expected": "controller_guided_say_v1",
+        "response_protocol_expected": args.response_protocol_expected,
         "system_prompt": SYSTEM,
         "session_config": {
             "turn_policy": "gemma_native_control6",
@@ -133,6 +143,8 @@ async def main() -> None:
                 "Il baggettore è 80 euro. Quali sono i miei nome, codice, città e baggetta attuale?"
             ),
         },
+        "single_turn": bool(args.single_turn),
+        "input_transcript": args.input_transcript,
         "inputs": {},
         "turns": [],
         "response_audio": {},
@@ -145,7 +157,12 @@ async def main() -> None:
 
     with events_path.open("w", encoding="utf-8") as event_file:
         def record(direction: str, event: dict[str, Any]) -> None:
-            row = {"t_monotonic": round(time.monotonic(), 6), "direction": direction, **event}
+            row = {
+                "t_monotonic": round(time.monotonic(), 6),
+                "t_monotonic_ns": time.monotonic_ns(),
+                "direction": direction,
+                **event,
+            }
             if event.get("type") == "response.audio.delta":
                 row["delta_chars"] = len(str(row.pop("delta", "")))
             event_file.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -191,7 +208,9 @@ async def main() -> None:
                         raise RuntimeError(f"session.update failed: {updated}")
                     break
 
-            wavs = [("initial", args.first), ("followup", args.followup)]
+            wavs = [("initial", args.first)]
+            if not args.single_turn:
+                wavs.append(("followup", args.followup))
             for turn_index, (name, path) in enumerate(wavs, 1):
                 response_created_event = asyncio.Event()
                 pcm = read_audio_16k(path)
@@ -291,10 +310,19 @@ async def main() -> None:
                     if kind == "response.created":
                         pending_response_ids.add(response_id)
                         responses.setdefault(response_id, {"response_created": event})
+                        policy_decision_at_ns = event.get("policy_decision_at_ns")
+                        if isinstance(policy_decision_at_ns, int):
+                            responses[response_id]["t_speak_decision_control6_at_ns"] = policy_decision_at_ns
                         response_actions[response_id] = str(
                             event.get("effective_action") or event.get("action") or ""
                         ).strip().upper()
                     elif kind == "response.action_selected":
+                        entry = responses.setdefault(response_id, {})
+                        selection_ns = event.get("policy_decision_at_ns")
+                        if isinstance(selection_ns, int):
+                            entry["t_speak_decision_control6_at_ns"] = selection_ns
+                        entry["action_selected_observed_at_ns"] = time.monotonic_ns()
+                        entry["action_selection_source"] = event.get("selection_source")
                         selected = str(
                             event.get("response_action") or event.get("wake_action") or ""
                         ).strip().upper()
@@ -305,6 +333,11 @@ async def main() -> None:
                     elif kind == "response.audio_transcript.delta":
                         transcript_by_response[response_id] = transcript_by_response.get(response_id, "") + str(event.get("delta", ""))
                     elif kind == "response.audio.delta":
+                        entry = responses.setdefault(response_id, {})
+                        if "t_first_server_relay_at_ns" not in entry:
+                            relay_ns = event.get("server_emit_started_at_ns")
+                            if isinstance(relay_ns, int):
+                                entry["t_first_server_relay_at_ns"] = relay_ns
                         try:
                             params, pcm_bytes = decode_audio_delta_wav(event)
                             previous = audio_params.setdefault(response_id, params)
@@ -322,6 +355,39 @@ async def main() -> None:
                     elif kind == "response.done":
                         entry = responses.setdefault(response_id, {})
                         entry["response_done"] = event
+                        runtime_metrics = event.get("runtime_metrics", {})
+                        if isinstance(runtime_metrics, dict):
+                            protocol_metrics = runtime_metrics.get("audio_response_protocol", {})
+                            generation_trace = runtime_metrics.get("generation_trace", {})
+                            if isinstance(protocol_metrics, dict):
+                                entry["response_protocol_actual"] = protocol_metrics.get("response_protocol")
+                                entry["first_thinker_token_id"] = protocol_metrics.get(
+                                    "first_thinker_token_id"
+                                )
+                            if (
+                                entry.get("first_thinker_token_id") is None
+                                and isinstance(generation_trace, dict)
+                            ):
+                                entry["first_thinker_token_id"] = generation_trace.get(
+                                    "first_thinker_token_id"
+                                )
+                            entry["response_protocol_matches_expected"] = (
+                                entry.get("response_protocol_actual")
+                                == args.response_protocol_expected
+                            )
+                        first_pcm_ns = event.get("t_first_audio_chunk_pcm_at_ns")
+                        if isinstance(first_pcm_ns, int):
+                            entry["t_first_audio_chunk_pcm_at_ns"] = first_pcm_ns
+                        decision_ns = entry.get("t_speak_decision_control6_at_ns")
+                        if isinstance(decision_ns, int) and isinstance(first_pcm_ns, int):
+                            entry["control6_to_first_pcm_ms"] = round(
+                                (first_pcm_ns - decision_ns) / 1_000_000.0, 3
+                            )
+                        relay_ns = entry.get("t_first_server_relay_at_ns")
+                        if isinstance(decision_ns, int) and isinstance(relay_ns, int):
+                            entry["control6_to_first_server_relay_ms"] = round(
+                                (relay_ns - decision_ns) / 1_000_000.0, 3
+                            )
                         entry["assistant_text"] = text_by_response.get(response_id, "")
                         entry["audio_transcript"] = transcript_by_response.get(response_id, "")
                         pending_response_ids.discard(response_id)

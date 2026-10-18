@@ -80,7 +80,7 @@ def test_audio_tower_q4_matches_standard_for_progressive_history_and_batch_sizes
         attention_backend_id=3,
         rmsnorm_backend_id=2,
         max_seq_len=16_384,
-        stream_q_len=4,
+        stream_q_len=2,
     )
     capability = NativeBatchCapability(
         api_version=2,
@@ -88,7 +88,7 @@ def test_audio_tower_q4_matches_standard_for_progressive_history_and_batch_sizes
         attention_backend_id=3,
         rmsnorm_backend_id=2,
         max_seq_len=16_384,
-        stream_q_len=4,
+        stream_q_len=2,
         supports_arbitrary_batch_size=True,
         stream_priority=-1,
         stream_identity="listener-audio-tower-parity",

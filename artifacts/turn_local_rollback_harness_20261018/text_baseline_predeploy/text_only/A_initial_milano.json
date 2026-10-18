@@ -1,0 +1,35 @@
+{
+  "name": "A_initial_milano",
+  "request": {
+    "model": "gemma-4-omni-duplex",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Consigliami un itinerario di tre giorni a Milano."
+      }
+    ],
+    "modalities": [
+      "text"
+    ],
+    "stream": false,
+    "temperature": 0.2,
+    "max_tokens": 384
+  },
+  "status": 200,
+  "elapsed_ms": 12325.167100003455,
+  "response": {
+    "id": "chatcmpl_0ba46f98ebf341e6a9f5ddf5ef644600",
+    "object": "chat.completion",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "Milano è una città vibrante, ricca di storia, moda, arte e ottima gastronomia. Un itinerario di tre giorni ti permetterà di assaporare le sue diverse facce.\n\nEcco due opzioni: **Opzione 1 (Classica & Culturale)** e **Opzione 2 (Moda & Modernità)**. Scegli quella che rispecchia meglio i tuoi interessi!\n\n---\n\n## Opzione 1: Milano Classica & Culturale (Arte, Storia e Gastronomia)\n\nQuesto itinerario è perfetto se ami i musei, l'architettura storica e vuoi immergerti nella cultura milanese.\n\n### Giorno 1: Cuore Storico e Arte\n\n* **Mattina (Storia):** Inizia dalla **Piazza del Duomo**. Ammira la maestosità della Cattedrale e sali sulle terrazze per una vista panoramica mozzafiato.\n* **Pranzo:** Esplora i dintorni del centro storico, magari provando una trattoria tradizionale in zona Brera.\n* **Pomeriggio (Arte):** Visita la **Pinacoteca di Brera**, uno dei musei d'arte più importanti d'Italia, o il **Castello Sforzesco** per esplorare la storia della città e ammirare le opere d'arte.\n* **Sera (Atmosfera):** Passeggiata nel quartiere di **Brera**, noto per le sue gallerie d'arte, boutique eleganti e locali raffinati per un aperitivo.\n\n### Giorno 2: Moda, Design e Shopping\n\n* **Mattina (Shopping di Lusso/Design):** Dedica la mattinata al **Quadrilatero della Moda** (Via Montenapoleone, Via della Spiga). Anche"
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "session_id": "4143743d7f5048d2b311186a464fa96c"
+  }
+}

@@ -7,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from duplex_kernel.audio_response_protocol import AUDIO_RESPONSE_PROTOCOL_V2
+from duplex_kernel.audio_response_protocol import AUDIO_RESPONSE_PROTOCOL_ENV, CONTROLLER_GUIDED_SAY_V1
 from duplex_kernel.launch import configure_bundle_runtime_environment
 from duplex_kernel.server import create_app
 
@@ -40,6 +41,7 @@ def test_v2_bundle_selects_direct_audio_and_safe_startup_defaults(tmp_path) -> N
 
     assert protocol == AUDIO_RESPONSE_PROTOCOL_V2
     assert env == {
+        AUDIO_RESPONSE_PROTOCOL_ENV: CONTROLLER_GUIDED_SAY_V1,
         DIRECT_AUDIO_ENV: "1",
         PREFIX_REUSE_ENV: "0",
         PARTIAL_ASR_ENV: "0",
@@ -137,11 +139,28 @@ def test_legacy_bundle_preserves_existing_runtime_mode(tmp_path) -> None:
     )
 
     assert protocol is None
-    assert env == {DIRECT_AUDIO_ENV: "0", PREFIX_REUSE_ENV: "1"}
+    assert env == {
+        AUDIO_RESPONSE_PROTOCOL_ENV: CONTROLLER_GUIDED_SAY_V1,
+        DIRECT_AUDIO_ENV: "0",
+        PREFIX_REUSE_ENV: "1",
+    }
+
+
+def test_launch_normalizes_explicit_protocol_and_legacy_precedence(tmp_path) -> None:
+    env = {
+        AUDIO_RESPONSE_PROTOCOL_ENV: AUDIO_RESPONSE_PROTOCOL_V2,
+        "DUPLEX_CONTROLLER_GUIDED_SAY_V1": "1",
+    }
+    configure_bundle_runtime_environment(
+        _bundle(tmp_path, AUDIO_RESPONSE_PROTOCOL_V2), workspace=str(tmp_path), environ=env,
+    )
+    assert env[AUDIO_RESPONSE_PROTOCOL_ENV] == AUDIO_RESPONSE_PROTOCOL_V2
 
 
 def test_health_reports_loaded_response_protocol_and_direct_audio_mode(monkeypatch) -> None:
     monkeypatch.setenv(DIRECT_AUDIO_ENV, "1")
+    monkeypatch.setenv(AUDIO_RESPONSE_PROTOCOL_ENV, AUDIO_RESPONSE_PROTOCOL_V2)
+    monkeypatch.setenv("DUPLEX_CONTROLLER_GUIDED_SAY_V1", "1")
     monkeypatch.setenv("DUPLEX_LISTENER_MICROBATCH", "0")
     monkeypatch.setenv("DUPLEX_LISTENER_MICROBATCH_GEMM_GRAPHS", "1")
     monkeypatch.setenv("DUPLEX_LISTENER_MICROBATCH_SEMANTIC_SHADOW", "1")

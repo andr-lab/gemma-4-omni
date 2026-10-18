@@ -12,12 +12,14 @@
 #include <cuda_bf16.h>
 #include <cuda_runtime_api.h>
 
+#include "generated_topology.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 #define GEMMA4_ORDERED_KEY_TILE_SIZE 128
-#define GEMMA4_ORDERED_QUERY_ROWS 4
+#define GEMMA4_ORDERED_QUERY_ROWS GEMMA4_STREAM_Q_LEN
 #define GEMMA4_ORDERED_QUERY_TILE_ROWS 32
 #define GEMMA4_ORDERED_HEADS 8
 #define GEMMA4_ORDERED_HEAD_DIM 512

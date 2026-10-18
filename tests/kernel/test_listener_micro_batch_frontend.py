@@ -16,6 +16,7 @@ from duplex_kernel.listener import (
 )
 from duplex_kernel.listener_microbatch import ListenerMicrobatchCoordinator
 from duplex_kernel.listener_microbatch_frontend import (
+    MEL_WINDOW_ROWS,
     ListenerMicrobatchAudioFrontend,
     PreparedListenerAudioBatch,
 )
@@ -40,7 +41,7 @@ def runtime_signature() -> RuntimeSignature:
         attention_backend_id=3,
         rmsnorm_backend_id=2,
         max_seq_len=16_384,
-        stream_q_len=4,
+        stream_q_len=2,
     )
 
 
@@ -52,7 +53,7 @@ def capability() -> NativeBatchCapability:
         attention_backend_id=3,
         rmsnorm_backend_id=2,
         max_seq_len=16_384,
-        stream_q_len=4,
+        stream_q_len=2,
         supports_arbitrary_batch_size=True,
         stream_priority=-1,
         stream_identity="listener-cuda-stream-17",
@@ -79,8 +80,8 @@ class _AudioTower:
     def __init__(self, *, valid_lengths: tuple[int, ...] | None = None) -> None:
         self.valid_lengths = valid_lengths
         self.calls: list[dict[str, Any]] = []
-        self.output = torch.empty((4, 256, 1536), dtype=torch.float32)
-        self.mask = torch.zeros((4, 256), dtype=torch.bool)
+        self.output = torch.empty((4, 15, 1536), dtype=torch.float32)
+        self.mask = torch.zeros((4, 15), dtype=torch.bool)
         self.raise_on_call: BaseException | None = None
 
     def get_audio_features(self, *, input_features, input_features_mask, return_dict):
@@ -94,9 +95,10 @@ class _AudioTower:
         if self.raise_on_call is not None:
             raise self.raise_on_call
         count = int(input_features.shape[0])
-        if self.output.shape[0] < count:
-            self.output = torch.empty((count, 256, 1536), dtype=torch.float32)
-            self.mask = torch.zeros((count, 256), dtype=torch.bool)
+        output_rows = int(input_features.shape[1]) // 4
+        if self.output.shape[0] < count or self.output.shape[1] != output_rows:
+            self.output = torch.empty((max(4, count), output_rows, 1536), dtype=torch.float32)
+            self.mask = torch.zeros((max(4, count), output_rows), dtype=torch.bool)
         input_mask = input_features_mask.to(device=input_features.device, dtype=torch.bool)
         if input_mask.shape != input_features.shape[:2]:
             raise AssertionError("feature mask must align with the batched feature rows")
@@ -115,12 +117,12 @@ class _AudioTower:
         # A small CPU fixture: each output token depends on its four input
         # rows and the validity mask. With right padding + an all-true mask,
         # the last tokens would see only zero pads and ignore real PCM.
-        row_features = input_features.float().reshape(count, 256, 4, 128)
-        row_mask = input_mask.reshape(count, 256, 4)
+        row_features = input_features.float().reshape(count, output_rows, 4, 128)
+        row_mask = input_mask.reshape(count, output_rows, 4)
         weighted = row_features * row_mask[:, :, :, None]
         denominator = row_mask.sum(dim=2).clamp_min(1).float() * 128.0
         token_values = weighted.sum(dim=(2, 3)) / denominator
-        positions = torch.arange(256, dtype=torch.float32, device=input_features.device)
+        positions = torch.arange(output_rows, dtype=torch.float32, device=input_features.device)
         channels = torch.arange(1536, dtype=torch.float32, device=input_features.device)
         values = (
             token_values[:, :, None]
@@ -223,7 +225,7 @@ def test_audio_tower_batch_cuda_span_is_distinct_from_replay_sum() -> None:
     )
     prepared = PreparedListenerAudioBatch(
         manifest_id="timing-contract",
-        input_shape=(1, 1024, 128),
+        input_shape=(1, 60, 128),
         audio_soft_tokens=(),
         snapshots=(),
         mel_prepare_ms_by_row=(),
@@ -244,27 +246,19 @@ def test_audio_tower_batch_cuda_span_is_distinct_from_replay_sum() -> None:
     assert prepared.audio_tower_batch_cuda_span_ms_after_completion() == 6.5
 
 
-def _expected_interleaved_rows(batch, states, extractor) -> tuple[np.ndarray, ...]:
-    from duplex_kernel.gemma_representation import interleave_duplex_mel
-
+def _expected_user_rows(batch, states, extractor) -> tuple[np.ndarray, ...]:
     expected: list[np.ndarray] = []
     for frame, state in zip(batch.frames, states, strict=True):
-        assistant_pcm = (
-            np.zeros(1280, dtype=np.float32)
-            if frame.reference_pcm is None
-            else np.asarray(frame.reference_pcm, dtype=np.float32)
-        )
         user_mel, _ = extractor(np.asarray(frame.pcm), state.user_pcm_tail.copy())
-        assistant_mel, _ = extractor(assistant_pcm, state.assistant_pcm_tail.copy())
-        user_history = list(state.user_mel_history) + [user_mel]
-        assistant_history = list(state.assistant_mel_history) + [assistant_mel]
+        user_history = list(state.user_mel_history)
         user_history = user_history[-DEFAULT_CONTEXT_FRAMES:]
-        assistant_history = assistant_history[-DEFAULT_CONTEXT_FRAMES:]
-        user = np.concatenate(user_history, axis=0)
-        assistant = np.concatenate(assistant_history, axis=0)
-        user = GemmaAudioTowerBackend._pad_rows(user, 512)
-        assistant = GemmaAudioTowerBackend._pad_rows(assistant, 512)
-        expected.append(interleave_duplex_mel(user, assistant))
+        user = (
+            np.concatenate(user_history, axis=0)
+            if user_history else np.empty((0, 128), dtype=np.float32)
+        )
+        context_rows = MEL_WINDOW_ROWS - 8
+        user = user[-context_rows:] if context_rows else np.empty((0, 128), dtype=np.float32)
+        expected.append(np.concatenate((user, user_mel), axis=0))
     return tuple(expected)
 
 
@@ -288,39 +282,40 @@ def test_batches_match_production_incremental_mel_history_and_encode_once(
         dtype=torch.float32,
     )
 
-    expected_features = _expected_interleaved_rows(batch, states, extractor)
+    expected_features = _expected_user_rows(batch, states, extractor)
+    valid_rows = expected_features[0].shape[0]
     prior_user_tails = [state.user_pcm_tail.copy() for state in states]
     prior_assistant_tails = [state.assistant_pcm_tail.copy() for state in states]
     prepared = frontend.encode_batch(batch, states)
 
     assert len(tower.calls) == 1
     call = tower.calls[0]
-    assert call["features_shape"] == (n, 1024, 128)
-    assert call["mask_shape"] == (n, 1024)
+    assert call["features_shape"] == (n, valid_rows, 128)
+    assert call["mask_shape"] == (n, valid_rows)
     assert call["return_dict"] is True
-    expected_mask = np.ones((n, 1024), dtype=np.bool_)
+    expected_mask = np.ones((n, valid_rows), dtype=np.bool_)
     np.testing.assert_array_equal(call["mask"], expected_mask)
     for index, expected in enumerate(expected_features):
         np.testing.assert_array_equal(call["features"][index], expected)
-    assert all(token_rows.shape == (4, 1536) for token_rows in prepared.audio_soft_tokens)
+    assert all(token_rows.shape == (2, 1536) for token_rows in prepared.audio_soft_tokens)
     assert len(prepared.mel_prepare_ms_by_row) == n
     assert all(value >= 0.0 for value in prepared.mel_prepare_ms_by_row)
     assert prepared.frontend_copy_ms >= 0.0
     assert prepared.audio_tower_lock_wait_ms >= 0.0
     assert prepared.audio_tower_lock_hold_ms >= 0.0
     assert prepared.cuda_phase_timings_after_completion() == (None, None, None)
-    staged_frame_count = min(mel_frames + 1, DEFAULT_CONTEXT_FRAMES)
-    current_frame_start = (staged_frame_count - 1) * 4
+    current_frame_start = valid_rows // 4 - 2
     for index, token_rows in enumerate(prepared.audio_soft_tokens):
         assert torch.isfinite(token_rows).all()
         valid = tower.mask[index]
         torch.testing.assert_close(
             token_rows,
-            tower.output[index][valid][current_frame_start:current_frame_start + 4].clone(),
+            tower.output[index][valid][current_frame_start:current_frame_start + 2].clone(),
             rtol=0,
             atol=0,
         )
-    assert prepared.input_shape == (n, 1024, 128)
+    assert prepared.input_shape == (n, MEL_WINDOW_ROWS, 128)
+    assert prepared.valid_mel_counts == (valid_rows,) * n
     assert not prepared.committed
 
     prepared.commit()
@@ -349,7 +344,7 @@ def test_batches_match_production_incremental_mel_history_and_encode_once(
         np.testing.assert_array_equal(state.assistant_pcm_tail, expected_assistant_tail)
 
 
-def test_early_rows_match_standard_right_padding_mask_and_current_frame_q4(
+def test_early_rows_match_user_only_unpadded_prefix_and_current_q2(
     runtime_signature: RuntimeSignature,
     capability: NativeBatchCapability,
 ) -> None:
@@ -367,21 +362,21 @@ def test_early_rows_match_standard_right_padding_mask_and_current_frame_q4(
 
     prepared = frontend.encode_batch(batch, states)
     call = tower.calls[0]
-    expected_features = _expected_interleaved_rows(
+    expected_features = _expected_user_rows(
         batch, states, _production_extractor()
     )
     assert not torch.equal(prepared.audio_soft_tokens[0], prepared.audio_soft_tokens[1])
-    np.testing.assert_array_equal(call["mask"], np.ones((2, 1024), dtype=np.bool_))
+    np.testing.assert_array_equal(call["mask"], np.ones((2, 8), dtype=np.bool_))
+    assert prepared.valid_mel_counts == (8, 8)
     for row, expected in enumerate(expected_features):
         np.testing.assert_array_equal(call["features"][row], expected)
-        # With one real history frame, production replays frame zero from the
-        # start of the full right-padded tower output, not from its last Q4.
+        # The newest two output rows correspond to the current tick.
         torch.testing.assert_close(
-            prepared.audio_soft_tokens[row], tower.output[row, :4].clone(), rtol=0, atol=0
+            prepared.audio_soft_tokens[row], tower.output[row, -2:].clone(), rtol=0, atol=0
         )
 
 
-def test_cuda_row_runner_uses_n1_inputs_and_selects_history_q4_without_vectorized_tower(
+def test_cuda_row_runner_uses_n1_inputs_and_selects_current_q2_without_vectorized_tower(
     runtime_signature: RuntimeSignature,
     capability: NativeBatchCapability,
 ) -> None:
@@ -391,10 +386,10 @@ def test_cuda_row_runner_uses_n1_inputs_and_selects_history_q4_without_vectorize
     tower = _AudioTower()
     calls: list[tuple[torch.Tensor, int]] = []
 
-    def row_runner(features: torch.Tensor, q4_start: int):
-        calls.append((features.detach().clone(), q4_start))
+    def row_runner(features: torch.Tensor, q_start: int):
+        calls.append((features.detach().clone(), q_start))
         values = torch.full(
-            (1, 4, 1536), float(len(calls)), dtype=torch.float32
+            (1, 2, 1536), float(len(calls)), dtype=torch.float32
         )
         return values, AudioTowerRowTiming(
             graph_submit_ms=0.125,
@@ -417,13 +412,97 @@ def test_cuda_row_runner_uses_n1_inputs_and_selects_history_q4_without_vectorize
 
     assert tower.calls == []
     assert len(calls) == 3
-    assert all(tuple(features.shape) == (1, 1024, 128) for features, _ in calls)
-    assert [q4_start for _, q4_start in calls] == [8, 8, 8]
+    assert all(tuple(features.shape) == (1, 24, 128) for features, _ in calls)
+    assert [q_start for _, q_start in calls] == [4, 4, 4]
+    assert prepared.valid_mel_counts == (24, 24, 24)
     assert [float(tokens[0, 0]) for tokens in prepared.audio_soft_tokens] == [1, 2, 3]
     assert prepared.audio_tower_graph_submit_ms == pytest.approx(0.375)
     assert prepared.audio_tower_execution_mode == "cuda_graph_n1"
     assert prepared.audio_tower_workspace_lock_wait_ms == pytest.approx(0.075)
     assert prepared.audio_tower_workspace_lock_hold_ms == pytest.approx(0.15)
+    prepared.commit()
+
+
+@pytest.mark.parametrize(
+    ("prior_frames", "valid_rows", "q_start"),
+    ((0, 8, 0), (1, 16, 2), (28, 232, 56), (29, 240, 58), (40, 240, 58)),
+)
+def test_startup_prefix_grows_without_padding_then_uses_full_window_graph(
+    prior_frames: int,
+    valid_rows: int,
+    q_start: int,
+    runtime_signature: RuntimeSignature,
+    capability: NativeBatchCapability,
+) -> None:
+    _, batch, states = _runtime_states_and_batch(
+        1, runtime_signature, capability, mel_frames=prior_frames
+    )
+    tower = _AudioTower()
+    calls: list[tuple[tuple[int, ...], int]] = []
+
+    def row_runner(features: torch.Tensor, start: int):
+        calls.append((tuple(features.shape), start))
+        return torch.full((1, 2, 1536), float(start)), AudioTowerRowTiming(
+            graph_submit_ms=0.1,
+            copy_cuda_events=None,
+            tower_cuda_events=None,
+            execution_mode=("cuda_graph_n1" if features.shape[1] == 240 else "eager_n1_degraded"),
+        )
+
+    frontend = ListenerMicrobatchAudioFrontend(
+        tower,
+        _production_extractor(),
+        device="cpu",
+        dtype=torch.float32,
+        audio_tower_row_runner=row_runner,
+    )
+
+    prepared = frontend.encode_batch(batch, states)
+
+    assert calls == [((1, valid_rows, 128), q_start)]
+    assert prepared.valid_mel_counts == (valid_rows,)
+    assert prepared.audio_tower_execution_mode == (
+        "cuda_graph_n1" if valid_rows == 240 else "eager_n1_degraded"
+    )
+    assert torch.all(prepared.audio_soft_tokens[0] == float(q_start))
+    prepared.commit()
+
+
+def test_mixed_startup_ages_keep_each_prefix_and_q2_output_in_row_order(
+    runtime_signature: RuntimeSignature,
+    capability: NativeBatchCapability,
+) -> None:
+    _, batch, states = _runtime_states_and_batch(
+        2, runtime_signature, capability, mel_frames=29
+    )
+    states[0].user_mel_history = deque(maxlen=DEFAULT_CONTEXT_FRAMES)
+    states[0].assistant_mel_history = deque(maxlen=DEFAULT_CONTEXT_FRAMES)
+    tower = _AudioTower()
+    calls: list[tuple[int, int]] = []
+
+    def row_runner(features: torch.Tensor, q_start: int):
+        calls.append((int(features.shape[1]), q_start))
+        return torch.full((1, 2, 1536), float(q_start)), AudioTowerRowTiming(
+            graph_submit_ms=0.1,
+            copy_cuda_events=None,
+            tower_cuda_events=None,
+            execution_mode=("cuda_graph_n1" if features.shape[1] == 240 else "eager_n1_degraded"),
+        )
+
+    frontend = ListenerMicrobatchAudioFrontend(
+        tower,
+        _production_extractor(),
+        device="cpu",
+        dtype=torch.float32,
+        audio_tower_row_runner=row_runner,
+    )
+
+    prepared = frontend.encode_batch(batch, states)
+
+    assert calls == [(8, 0), (240, 58)]
+    assert prepared.valid_mel_counts == (8, 240)
+    assert prepared.audio_tower_execution_mode == "mixed_n1"
+    assert [float(row[0, 0]) for row in prepared.audio_soft_tokens] == [0.0, 58.0]
     prepared.commit()
 
 
@@ -446,7 +525,7 @@ def test_absent_assistant_reference_matches_production_zero_pcm(
         tower, extractor, device="cpu", dtype=torch.float32
     )
 
-    expected = _expected_interleaved_rows(batch, states, extractor)[0]
+    expected = _expected_user_rows(batch, states, extractor)[0]
     frontend.encode_batch(batch, states)
 
     np.testing.assert_array_equal(tower.calls[0]["features"][0], expected)
@@ -488,12 +567,12 @@ def test_invalid_second_row_output_fails_without_partial_state_commit(
     capability: NativeBatchCapability,
 ) -> None:
     _, batch, states = _runtime_states_and_batch(2, runtime_signature, capability)
-    tower = _AudioTower(valid_lengths=(4, 3, 6, 6))
+    tower = _AudioTower(valid_lengths=(15, 1, 15, 15))
     frontend = ListenerMicrobatchAudioFrontend(
         tower, _production_extractor(), device="cpu", dtype=torch.float32
     )
 
-    with pytest.raises(RuntimeError, match="fewer than 4 valid soft tokens"):
+    with pytest.raises(RuntimeError, match="fewer than 2 valid soft tokens"):
         frontend.encode_batch(batch, states)
     assert len(tower.calls) == 1
     assert all(len(state.user_mel_history) == 5 for state in states)
@@ -607,8 +686,8 @@ def test_frontend_reuses_one_grow_only_workspace_with_standard_all_true_mask(
     )
     refreshed = frontend.encode_batch(batch, states)
     refreshed.commit()
-    assert tower.calls[-1]["features_shape"] == (1, 1024, 128)
-    expected_mask = np.ones((1, 1024), dtype=np.bool_)
+    assert tower.calls[-1]["features_shape"] == (1, 8, 128)
+    expected_mask = np.ones((1, 8), dtype=np.bool_)
     np.testing.assert_array_equal(tower.calls[-1]["mask"], expected_mask)
     assert saved_soft is not None and first_prepared is not None
     assert not torch.equal(saved_soft, tower.output[0, :4])

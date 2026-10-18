@@ -23,9 +23,9 @@ def test_exact_backend_capacity_supports_300_seconds(monkeypatch):
     monkeypatch.setenv("GEMMA4_ATEN_RMSNORM_BRIDGE", "1")
 
     assert _native_lm_max_seq_len() == NATIVE_LM_EXACT_MAX_SEQ_LEN == 16384
-    assert native_frame_capacity(16384) == 4087
+    assert native_frame_capacity(16384) == 8175
     assert AUDIO_START_AFTER_TEXT + 3750 * AUDIO_FEATURES_PER_FRAME <= 16384
-    assert native_frame_capacity(16384, prefix_len=141) == (16384 - 141) // 4
+    assert native_frame_capacity(16384, prefix_len=141) == (16384 - 141) // 2
 
 
 def test_custom_backend_keeps_4096_limit(monkeypatch):
@@ -33,7 +33,7 @@ def test_custom_backend_keeps_4096_limit(monkeypatch):
     monkeypatch.delenv("GEMMA4_ATEN_RMSNORM_BRIDGE", raising=False)
 
     assert _native_lm_max_seq_len() == NATIVE_LM_CUSTOM_MAX_SEQ_LEN == 4096
-    assert native_frame_capacity(4096) == 1015
+    assert native_frame_capacity(4096) == 2031
 
 
 def test_exact_capacity_requires_both_bridges(monkeypatch):
@@ -161,8 +161,8 @@ def test_15000_synthetic_frames_keep_order_timing_and_bounded_context():
     assert state.dropped_listener_frames == 0
     assert state.future_reference_leaks == 0
     assert state.wrong_reference_frames == 0
-    assert state.gemma_lm_context_rollover_count == 3
-    assert state.gemma_lm_context_truncated_frames == 3 * (4087 - DEFAULT_CONTEXT_FRAMES)
+    assert state.gemma_lm_context_rollover_count == 1
+    assert state.gemma_lm_context_truncated_frames == 8175 - DEFAULT_CONTEXT_FRAMES
     assert state.next_frame_id == state.gemma_lm_context_start_frame + state.gemma_lm_audio_frames
     assert len(state.user_pcm_history) == DEFAULT_CONTEXT_FRAMES
     assert len(state.assistant_pcm_history) == DEFAULT_CONTEXT_FRAMES

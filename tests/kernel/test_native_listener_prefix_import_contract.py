@@ -9,7 +9,7 @@ from duplex_kernel.native_listener import NativeGemmaListenerLM
 
 def _uninitialized_provider() -> NativeGemmaListenerLM:
     provider = object.__new__(NativeGemmaListenerLM)
-    provider.stream_q_len = 4
+    provider.stream_q_len = 2
     provider._import_cache_with_prefix = object()
     return provider
 
@@ -20,9 +20,9 @@ def test_prefix_import_requires_length_and_mask_as_a_pair() -> None:
         provider.import_cache_async(object(), current_position=141, prefix_len=141)
 
 
-def test_prefix_import_rejects_non_q4_aligned_cursor_before_cuda_access() -> None:
+def test_prefix_import_rejects_non_q2_aligned_cursor_before_cuda_access() -> None:
     provider = _uninitialized_provider()
-    with pytest.raises(ValueError, match="multiplo della lunghezza Q4"):
+    with pytest.raises(ValueError, match="multiplo della lunghezza Q2"):
         provider.import_cache_async(
             object(),
             current_position=142,

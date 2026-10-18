@@ -6,10 +6,10 @@
 #include <stddef.h>
 
 #define GEMMA4_BATCH_PROBE_HIDDEN_DIM 1536u
-#define GEMMA4_BATCH_PROBE_Q_ROWS 8u
-#define GEMMA4_BATCH_PROBE_RMS_REFERENCE_ROWS 4u
+#define GEMMA4_BATCH_PROBE_Q_ROWS 4u
+#define GEMMA4_BATCH_PROBE_RMS_REFERENCE_ROWS 2u
 #define GEMMA4_BATCH_TRACE_MAX_BYTES (100u * 1024u * 1024u)
-#define GEMMA4_BATCH_TRACE_Q_LEN 4u
+#define GEMMA4_BATCH_TRACE_Q_LEN 2u
 #define GEMMA4_BATCH_TRACE_HEADS 8u
 #define GEMMA4_BATCH_TRACE_LAYERS 35u
 #define GEMMA4_BATCH_TRACE_PLE_DIM 256u
@@ -110,9 +110,9 @@ static inline bool gemma4_batch_trace_storage_allowed(size_t bytes) {
     return bytes > 0 && bytes <= (size_t)GEMMA4_BATCH_TRACE_MAX_BYTES;
 }
 
-/* The immutable PAD PLE has exactly four distinct Q rows. The N=2 trace
+/* The immutable PAD PLE has exactly two distinct Q rows. The N=2 trace
  * reference reuses those same rows for each SID and the kernel indexes them
- * with token % Q_LEN, so the capture must retain all four source rows. */
+ * with token % Q_LEN, so the capture must retain both source rows. */
 static inline uint32_t gemma4_batch_trace_frame_pad_source_row(uint32_t token) {
     return token % GEMMA4_BATCH_TRACE_Q_LEN;
 }

@@ -59,7 +59,7 @@ class _ShapeStable:
         return SimpleNamespace(past_key_values=_Cache(prior + int(inputs_embeds.shape[1])))
 
 
-def test_semantic_prefix_cache_uses_actual_prefix_then_separate_prior_q4_queries(monkeypatch):
+def test_semantic_prefix_cache_uses_actual_prefix_then_separate_prior_q2_queries(monkeypatch):
     transformers_modeling = pytest.importorskip("transformers.models.gemma4.modeling_gemma4")
     mask_calls = []
 
@@ -76,30 +76,30 @@ def test_semantic_prefix_cache_uses_actual_prefix_then_separate_prior_q4_queries
     backend._frame_pad_ple = None
     backend.pad_token_id = 0
 
-    first = torch.full((4, 1536), 1.0)
-    second = torch.full((4, 1536), 2.0)
+    first = torch.full((2, 1536), 1.0)
+    second = torch.full((2, 1536), 2.0)
     result = GemmaAudioTowerBackend.build_semantic_prefix_cache(
         backend,
         (11, 12, 777),
-        replay_q4=(first, second),
+        replay_q2=(first, second),
         replay_frame_ids=(4, 5),
     )
 
     assert result["prefix_len"] == 3
-    assert result["cache_position"] == 11
+    assert result["cache_position"] == 7
     assert result["replay_frame_ids"] == (4, 5)
-    assert result["past_key_values"].get_seq_length() == 11
+    assert result["past_key_values"].get_seq_length() == 7
     assert [call[0] for call in backend._shape_stable_lm.calls] == [
-        (1, 3, 1536), (1, 4, 1536), (1, 4, 1536)
+        (1, 3, 1536), (1, 2, 1536), (1, 2, 1536)
     ]
     assert backend._shape_stable_lm.calls[0][1] == [[0, 1, 2]]
-    assert backend._shape_stable_lm.calls[1][1] == [[3, 4, 5, 6]]
-    assert backend._shape_stable_lm.calls[2][1] == [[7, 8, 9, 10]]
-    assert [call[2] for call in backend._shape_stable_lm.calls] == [0, 3, 7]
-    assert [call[0] for call in mask_calls] == [(1, 3, 1536), (1, 4, 1536), (1, 4, 1536)]
+    assert backend._shape_stable_lm.calls[1][1] == [[3, 4]]
+    assert backend._shape_stable_lm.calls[2][1] == [[5, 6]]
+    assert [call[2] for call in backend._shape_stable_lm.calls] == [0, 3, 5]
+    assert [call[0] for call in mask_calls] == [(1, 3, 1536), (1, 2, 1536), (1, 2, 1536)]
     assert mask_calls[0][1].shape == (1, 3)
-    assert mask_calls[1][1].shape == (1, 7)
-    assert mask_calls[2][1].shape == (1, 11)
+    assert mask_calls[1][1].shape == (1, 5)
+    assert mask_calls[2][1].shape == (1, 7)
 
 
 @pytest.mark.parametrize("replay_count", [0, 2])
@@ -113,7 +113,7 @@ def test_native_semantic_prefix_import_uses_actual_length_and_replay_cursor(monk
     monkeypatch.setattr(transformers_modeling, "create_masks_for_generate", create_masks)
 
     class _Native:
-        output_tensor = torch.zeros((1, 4, 1536))
+        output_tensor = torch.zeros((1, 2, 1536))
 
         def __init__(self):
             self.reset_count = 0
@@ -151,8 +151,8 @@ def test_native_semantic_prefix_import_uses_actual_length_and_replay_cursor(monk
     state.gemma_lm_native = native
     replay_ids = tuple(range(9 - replay_count, 9))
     replay = (
-        torch.arange(replay_count * 4 * 1536, dtype=torch.float32).reshape(
-            1, replay_count * 4, 1536
+            torch.arange(replay_count * 2 * 1536, dtype=torch.float32).reshape(
+                1, replay_count * 2, 1536
         )
         if replay_count else None
     )
@@ -170,7 +170,7 @@ def test_native_semantic_prefix_import_uses_actual_length_and_replay_cursor(monk
     imported_cache, current_position, prefix_len, prefix_mask = native.imports[0]
     assert imported_cache is result["past_key_values"]
     assert prefix_len == 3
-    assert current_position == 3 + 4 * replay_count
+    assert current_position == 3 + 2 * replay_count
     assert tuple(prefix_mask.shape) == (1, 3)
     assert torch.equal(prefix_mask, torch.ones((1, 3), dtype=torch.long))
     assert state.gemma_lm_prefix_len == 3
@@ -229,7 +229,7 @@ def test_canonical_native_prefix_import_remains_at_34_without_semantic_kwargs(mo
     monkeypatch.setattr(transformers_modeling, "create_masks_for_generate", create_masks)
 
     class _Native:
-        output_tensor = torch.zeros((1, 4, 1536))
+        output_tensor = torch.zeros((1, 2, 1536))
 
         def __init__(self):
             self.imports = []

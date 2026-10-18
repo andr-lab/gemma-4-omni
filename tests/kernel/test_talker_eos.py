@@ -162,6 +162,23 @@ class _CountingLegacyTalker:
         return torch.zeros((codes.shape[1] * 1920,), dtype=torch.float32)
 
 
+class _LiveTextCountingTalker(_CountingLegacyTalker):
+    def build_prefill_parts(
+        self,
+        text: str,
+        *,
+        raw_text_token_ids: list[int],
+        include_text_eos: bool,
+        voice_conditioning=None,
+    ):
+        del voice_conditioning
+        assert text == "ciao"
+        assert raw_text_token_ids == [77]
+        assert include_text_eos is False
+        zero = torch.zeros((1, 1, HIDDEN_SIZE))
+        return zero, zero, zero, zero
+
+
 class _RolloverStatefulSpeaker:
     instances: list["_RolloverStatefulSpeaker"] = []
 
@@ -311,6 +328,120 @@ def test_eos_flushes_previously_generated_streaming_audio() -> None:
     assert metrics["eos_frame_id"] == 1
     assert metrics["generated_cb0_frames"] == 1
     assert metrics["terminated_by_budget"] is False
+
+
+def test_pipeline_talker_releases_thinker_priority_lock_before_waiting_for_live_text() -> None:
+    engine = _engine_for_termination(_LiveTextCountingTalker())
+    engine.runtime_backend = "native"
+    engine._thinker_lock = threading.Lock()
+    engine._cb0_sample = lambda _logits, temperature=0.6, **_kwargs: 42
+
+    class _LiveStream:
+        visible_text = "ciao"
+        observed_qwen_token_count = 1
+        codec_eos_allowed = True
+
+        def __init__(self):
+            self.waits = 0
+
+        def take_trailing_token(self, *, stop_check=None):
+            del stop_check
+            assert not engine._thinker_lock.locked(), (
+                "PipelineEngine.talk must release the actual Thinker/GPU priority lock "
+                "before waiting for live text"
+            )
+            self.waits += 1
+            return None
+
+    stream = _LiveStream()
+    context = SimpleNamespace(
+        is_current=lambda: True,
+        is_cancelled=lambda: False,
+        slot_id=0,
+        response_id="lock-sentinel-test",
+        subtalker_graph=engine.subtalker_graph,
+        code2wav_graph=None,
+        pcm_chunks=[],
+        rvq_history=None,
+        callback_started=lambda: None,
+        callback_finished=lambda: None,
+    )
+    metrics: dict[str, object] = {}
+    output = engine.talk(
+        "ciao",
+        torch.empty((1, 0, HIDDEN_SIZE)),
+        n_words=1,
+        min_frames=1,
+        max_frames=2,
+        on_audio_chunk=lambda _pcm: None,
+        metrics=metrics,
+        raw_text_token_ids=[77],
+        include_text_eos=False,
+        live_qwen_text_stream=stream,
+        talk_context=context,
+    )
+
+    assert stream.waits >= 1
+    assert not engine._thinker_lock.locked()
+    assert output.size == 2 * 1920
+    assert metrics["generated_cb0_frames"] == 2
+
+
+def test_pipeline_talker_releases_thinker_priority_lock_before_waiting_for_live_text() -> None:
+    engine = _engine_for_termination(_LiveTextCountingTalker())
+    engine.runtime_backend = "native"
+    engine._thinker_lock = threading.Lock()
+    engine._cb0_sample = lambda _logits, temperature=0.6, **_kwargs: 42
+
+    class _LiveStream:
+        visible_text = "ciao"
+        observed_qwen_token_count = 1
+        codec_eos_allowed = True
+
+        def __init__(self):
+            self.waits = 0
+
+        def take_trailing_token(self, *, stop_check=None):
+            del stop_check
+            assert not engine._thinker_lock.locked(), (
+                "PipelineEngine.talk must release the actual Thinker/GPU priority lock "
+                "before waiting for live text"
+            )
+            self.waits += 1
+            return None
+
+    stream = _LiveStream()
+    context = SimpleNamespace(
+        is_current=lambda: True,
+        is_cancelled=lambda: False,
+        slot_id=0,
+        response_id="lock-sentinel-test",
+        subtalker_graph=engine.subtalker_graph,
+        code2wav_graph=None,
+        pcm_chunks=[],
+        rvq_history=None,
+        callback_started=lambda: None,
+        callback_finished=lambda: None,
+    )
+    metrics: dict[str, object] = {}
+    output = engine.talk(
+        "ciao",
+        torch.empty((1, 0, HIDDEN_SIZE)),
+        n_words=1,
+        min_frames=1,
+        max_frames=2,
+        on_audio_chunk=lambda _pcm: None,
+        metrics=metrics,
+        raw_text_token_ids=[77],
+        include_text_eos=False,
+        live_qwen_text_stream=stream,
+        talk_context=context,
+    )
+
+    assert stream.waits >= 1
+    assert not engine._thinker_lock.locked()
+    assert output.size == 2 * 1920
+    assert metrics["generated_cb0_frames"] == 2
 
 
 def test_stateful_rollover_keeps_64_frame_acoustic_budget_and_terminal_query(monkeypatch: pytest.MonkeyPatch) -> None:

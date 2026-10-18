@@ -11,12 +11,15 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import dataclass, replace
-from typing import Sequence
+from dataclasses import dataclass, fields, replace
+from types import MappingProxyType
+from typing import Any, Mapping, Sequence
 
+import numpy as np
 import torch
 
 from duplex_kernel.turn_policy import ControlAction, PolicyDecision, PolicyInput
+from duplex_kernel.native_control6_phase import NATIVE_CONTROL6_PHASE_T_WIDTH
 from duplex_kernel.microbatch_contract import BatchRowDescriptor, ListenerBatchManifest
 from duplex_kernel.native_listener_microbatch import (
     LISTENER_STREAM_Q_LEN,
@@ -114,6 +117,115 @@ class BatchPolicyInput:
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{name} must be a non-negative integer")
+
+
+@dataclass(frozen=True, slots=True)
+class DecisionRowSource:
+    """One actual native output row selected for one listener decision.
+
+    ``decision_row`` is the canonical listener row that owns the policy
+    decision. ``manifest.rows[row_index]`` remains the actual native source,
+    which may be a temporary Q2 branch at the same frame boundary.
+    """
+
+    native_output: NativeBatchOutput
+    manifest: ListenerBatchManifest
+    row_index: int
+    decision_row: BatchRowDescriptor
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.native_output, NativeBatchOutput):
+            raise TypeError("decision source requires a real NativeBatchOutput")
+        if not isinstance(self.manifest, ListenerBatchManifest):
+            raise TypeError("decision source requires its native output manifest")
+        if isinstance(self.row_index, bool) or not isinstance(self.row_index, int) or self.row_index < 0:
+            raise ValueError("decision source row_index must be a non-negative integer")
+        if not isinstance(self.decision_row, BatchRowDescriptor):
+            raise TypeError("decision source requires its canonical listener row")
+
+
+def _snapshot_policy_value(value: Any) -> Any:
+    """Copy mutable pre-head context while keeping snapshots CPU/GPU local."""
+    if isinstance(value, np.ndarray):
+        if value.dtype.hasobject:
+            raise TypeError("policy context cannot snapshot object-dtype arrays")
+        copied = np.array(value, copy=True, order="C")
+        # Back with immutable bytes so callers cannot re-enable writes on the
+        # captured array via setflags(write=True).
+        return np.frombuffer(copied.tobytes(), dtype=copied.dtype).reshape(copied.shape)
+    if isinstance(value, torch.Tensor):
+        return value.detach().clone()
+    if isinstance(value, Mapping):
+        return MappingProxyType({
+            _snapshot_policy_value(key): _snapshot_policy_value(item)
+            for key, item in value.items()
+        })
+    if isinstance(value, tuple):
+        return tuple(_snapshot_policy_value(item) for item in value)
+    if isinstance(value, list):
+        return tuple(_snapshot_policy_value(item) for item in value)
+    if isinstance(value, set):
+        return frozenset(_snapshot_policy_value(item) for item in value)
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class PolicyPreHeadContext:
+    """Immutable scheduler snapshot paired with its session-owned policy state."""
+
+    policy: Any
+    policy_input: PolicyInput
+    tick_id: tuple[str, int, int]
+    captured_at_ns: int
+    listener_generation_id: int
+
+    def __post_init__(self) -> None:
+        if not callable(getattr(self.policy, "step_with_logits", None)):
+            raise TypeError("policy context requires a step_with_logits session policy")
+        if not isinstance(self.policy_input, PolicyInput):
+            raise TypeError("policy context requires a pre-head PolicyInput snapshot")
+        state = self.policy_input
+        if not isinstance(self.tick_id, tuple) or len(self.tick_id) != 3:
+            raise ValueError("policy tick ID must be (session_id, generation_id, frame_id)")
+        sid, generation, frame_id = self.tick_id
+        if (
+            not isinstance(sid, str)
+            or not sid
+            or isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or isinstance(frame_id, bool)
+            or not isinstance(frame_id, int)
+            or generation < 0
+            or frame_id < 0
+            or (sid, generation, frame_id)
+            != (state.session_id, state.generation_id, state.frame_id)
+        ):
+            raise ValueError("policy tick ID must identify session, turn generation, and frame")
+        if (
+            isinstance(self.listener_generation_id, bool)
+            or not isinstance(self.listener_generation_id, int)
+            or self.listener_generation_id < 0
+        ):
+            raise ValueError("listener_generation_id must be a non-negative integer")
+        if state.native_listener_generation not in (None, self.listener_generation_id):
+            raise ValueError("policy pre-head state has a different listener generation")
+        if (
+            state.native_control_hidden is not None
+            or state.native_control_hidden_frame_id is not None
+            or state.native_control_hidden_at_ns is not None
+        ):
+            raise ValueError("pre-head policy context cannot contain a listener hidden")
+        if isinstance(self.captured_at_ns, bool) or not isinstance(self.captured_at_ns, int) or self.captured_at_ns <= 0:
+            raise ValueError("policy context capture clock must be a positive monotonic timestamp")
+        captured = {
+            item.name: _snapshot_policy_value(getattr(state, item.name))
+            for item in fields(state)
+        }
+        captured["legal_actions"] = tuple(state.legal_actions or ())
+        captured["native_listener_generation"] = self.listener_generation_id
+        frozen_input = replace(state, **captured)
+        object.__setattr__(self, "policy_input", frozen_input)
+        object.__setattr__(self, "tick_id", (sid, generation, frame_id))
 
 
 class GemmaNativeControl6BatchPolicy:
@@ -301,6 +413,333 @@ class GemmaNativeControl6BatchPolicy:
             native_output.completion_event.wait(consumer_stream)
         return self.step_batch(tuple(batch_inputs))
 
+    def step_native_output_views(
+        self,
+        output_views: Sequence[DecisionRowSource],
+        policy_states: Sequence[PolicyInput | PolicyPreHeadContext],
+    ) -> tuple[PolicyDecision, ...]:
+        """Evaluate one policy batch from individually proven native outputs.
+
+        A speaking row may use a short-lived Q2 decision view while other rows
+        use the canonical batch output. Every hidden still comes from its own
+        actual ``NativeBatchOutput`` and manifest. The method performs one
+        adapter forward and returns decisions keyed to canonical sessions;
+        branch session IDs and output generations remain in per-row
+        ``native_output_provenance`` diagnostics.
+        """
+        sources = tuple(output_views)
+        states = tuple(policy_states)
+        if not sources or len(sources) != len(states):
+            raise ValueError("native output views and policy states need the same non-empty row count")
+        if any(isinstance(state, PolicyPreHeadContext) for state in states):
+            if not all(isinstance(state, PolicyPreHeadContext) for state in states):
+                raise TypeError("mixed-source Control6 cannot mix context and fixture policy rows")
+            return self._step_policy_context_views(
+                sources,
+                tuple(state for state in states if isinstance(state, PolicyPreHeadContext)),
+            )
+        if len({state.session_id for state in states}) != len(states):
+            raise ValueError("mixed-source Control6 requires distinct canonical sessions")
+
+        consumer_stream = None
+        batch_inputs: list[BatchPolicyInput] = []
+        canonical_rows: list[BatchRowDescriptor] = []
+        native_rows: list[BatchRowDescriptor] = []
+        for index, (source, state) in enumerate(zip(sources, states, strict=True)):
+            if not isinstance(source, DecisionRowSource):
+                raise TypeError("mixed-source Control6 requires DecisionRowSource values")
+            if not isinstance(state, PolicyInput):
+                raise TypeError("mixed-source Control6 requires PolicyInput rows")
+            output = source.native_output
+            manifest = source.manifest
+            if (
+                output.manifest_id != manifest.manifest_id
+                or not isinstance(output.rows, tuple)
+                or output.rows != manifest.rows
+            ):
+                raise RuntimeError(f"native output view {index} lost its exact manifest provenance")
+            if (
+                isinstance(output.generation, bool)
+                or not isinstance(output.generation, int)
+                or output.generation <= 0
+            ):
+                raise RuntimeError(f"native output view {index} has an invalid generation")
+            tensor = output.tensor
+            expected_shape = (manifest.batch_size, LISTENER_STREAM_Q_LEN, HIDDEN_WIDTH)
+            if not isinstance(tensor, torch.Tensor) or tuple(tensor.shape) != expected_shape:
+                raise RuntimeError(f"native output view {index} must have shape {expected_shape}")
+            if tensor.dtype != torch.bfloat16 or tensor.device != self.adapter.lora_A.device:
+                raise RuntimeError(f"native output view {index} dtype/device differs from Control6")
+            if source.row_index >= manifest.batch_size:
+                raise IndexError(f"native output view {index} row index is outside its manifest")
+            native_row = manifest.rows[source.row_index]
+            decision_row = source.decision_row
+            if (
+                state.session_id != decision_row.session_id
+                or state.generation_id != decision_row.session_generation
+                or state.frame_id != decision_row.frame_id
+            ):
+                raise RuntimeError(f"policy state {index} differs from its canonical listener row")
+            if (
+                native_row.session_generation != decision_row.session_generation
+                or native_row.state_epoch_id != decision_row.state_epoch_id
+                or native_row.frame_id != decision_row.frame_id
+                or native_row.listener_state_version != decision_row.listener_state_version
+                or native_row.sequence_position != decision_row.sequence_position
+            ):
+                raise RuntimeError(f"native output view {index} differs from its decision frame boundary")
+            if native_row.session_id == decision_row.session_id:
+                if native_row != decision_row:
+                    raise RuntimeError(f"canonical output view {index} changed its source row")
+            elif (
+                not native_row.session_id.startswith("__q2view__")
+                or native_row.logical_q_len != LISTENER_STREAM_Q_LEN
+                or decision_row.logical_q_len != 0
+                or not decision_row.queue_audio_for_next_turn
+            ):
+                raise RuntimeError(f"native output view {index} is not a valid speaking Q2 branch")
+            if (
+                state.native_control_hidden is not None
+                or state.native_control_hidden_frame_id is not None
+                or state.native_control_hidden_at_ns is not None
+            ):
+                raise ValueError("mixed-source production policy inputs must not provide native hidden")
+            if tensor.is_cuda:
+                if not isinstance(output.completion_event, torch.cuda.Event):
+                    raise RuntimeError(f"CUDA output view {index} lacks its completion event")
+                if consumer_stream is None:
+                    consumer_stream = torch.cuda.current_stream(device=tensor.device)
+                output.completion_event.wait(consumer_stream)
+
+            hidden = tensor[source.row_index, 0, :]
+            branch_policy_state = replace(
+                state,
+                session_id=native_row.session_id,
+                native_control_hidden=hidden,
+                native_control_hidden_frame_id=native_row.frame_id,
+            )
+            provenance = ListenerHiddenProvenance(
+                session_id=native_row.session_id,
+                generation_id=native_row.session_generation,
+                state_epoch_id=native_row.state_epoch_id,
+                state_version=native_row.listener_state_version,
+                frame_id=native_row.frame_id,
+            )
+            batch_inputs.append(BatchPolicyInput(
+                state=branch_policy_state,
+                state_epoch_id=native_row.state_epoch_id,
+                listener_state_version=native_row.listener_state_version,
+                hidden_provenance=provenance,
+            ))
+            canonical_rows.append(decision_row)
+            native_rows.append(native_row)
+
+        # Exactly one call owns the adapter/head forward and all per-row legal
+        # selection metadata, so no speaking row advances a second policy path.
+        raw_decisions = self.step_batch(tuple(batch_inputs))
+        if len(raw_decisions) != len(sources):
+            raise RuntimeError("mixed-source Control6 returned an incomplete row set")
+        decisions: list[PolicyDecision] = []
+        for source, state, canonical_row, native_row, decision in zip(
+            sources, states, canonical_rows, native_rows, raw_decisions, strict=True
+        ):
+            if (
+                decision.session != native_row.session_id
+                or decision.generation_id != native_row.session_generation
+                or decision.frame_id != native_row.frame_id
+                or decision.listener_frame_id != native_row.frame_id
+            ):
+                raise RuntimeError("mixed-source Control6 decision lost its native row provenance")
+            diagnostics = dict(decision.diagnostics or {})
+            diagnostics["native_output_provenance"] = {
+                "manifest_id": source.manifest.manifest_id,
+                "output_generation": source.native_output.generation,
+                "native_session_id": native_row.session_id,
+                "canonical_session_id": canonical_row.session_id,
+                "session_generation": native_row.session_generation,
+                "state_epoch_id": native_row.state_epoch_id,
+                "listener_state_version": native_row.listener_state_version,
+                "frame_id": native_row.frame_id,
+                "sequence_position": native_row.sequence_position,
+                "cache_position": native_row.cache_position,
+            }
+            decisions.append(replace(
+                decision,
+                session=state.session_id,
+                diagnostics=diagnostics,
+            ))
+        return tuple(decisions)
+
+    def _step_policy_context_views(
+        self,
+        sources: tuple[DecisionRowSource, ...],
+        contexts: tuple[PolicyPreHeadContext, ...],
+    ) -> tuple[PolicyDecision, ...]:
+        """Score actual selected hidden rows once, then apply per-session policy state."""
+        if len({context.tick_id[0] for context in contexts}) != len(contexts):
+            raise ValueError("mixed-source policy contexts need distinct session IDs")
+        if len({id(context.policy) for context in contexts}) != len(contexts):
+            raise ValueError("each row needs its own session policy and hysteresis state")
+
+        consumer_stream = None
+        native_rows: list[BatchRowDescriptor] = []
+        hidden_rows: list[torch.Tensor | None] = []
+        phase_rows: list[torch.Tensor] = []
+        score_indices: list[int] = []
+        for index, (source, context) in enumerate(zip(sources, contexts, strict=True)):
+            if not isinstance(source, DecisionRowSource):
+                raise TypeError("mixed-source Control6 requires DecisionRowSource values")
+            if not isinstance(context, PolicyPreHeadContext):
+                raise TypeError("mixed-source Control6 requires PolicyPreHeadContext rows")
+            state = context.policy_input
+            if getattr(context.policy, "adapter", None) is not self.adapter:
+                raise RuntimeError("per-session policy does not share the worker's loaded Control6 adapter")
+            if (
+                context.tick_id != (state.session_id, state.generation_id, state.frame_id)
+                or context.tick_id[0] != source.decision_row.session_id
+                or state.frame_id != source.decision_row.frame_id
+                or state.session_id != source.decision_row.session_id
+                or context.listener_generation_id != source.decision_row.session_generation
+                or state.native_listener_generation != context.listener_generation_id
+            ):
+                raise RuntimeError(f"policy pre-head context {index} differs from its canonical listener row")
+            if (
+                output := source.native_output
+            ).manifest_id != source.manifest.manifest_id or output.rows != source.manifest.rows:
+                raise RuntimeError(f"native output view {index} lost its exact manifest provenance")
+            if not 0 <= source.row_index < source.manifest.batch_size:
+                raise IndexError(f"native output view {index} row index is outside its manifest")
+            native_row = source.manifest.rows[source.row_index]
+            decision_row = source.decision_row
+            if (
+                native_row.session_generation != decision_row.session_generation
+                or native_row.state_epoch_id != decision_row.state_epoch_id
+                or native_row.frame_id != decision_row.frame_id
+                or native_row.listener_state_version != decision_row.listener_state_version
+                or native_row.sequence_position != decision_row.sequence_position
+            ):
+                raise RuntimeError(f"native output view {index} differs from its decision frame boundary")
+            if native_row.session_id == decision_row.session_id:
+                if native_row != decision_row:
+                    raise RuntimeError(f"canonical output view {index} changed its source row")
+            elif (
+                not native_row.session_id.startswith("__q2view__")
+                or native_row.logical_q_len != LISTENER_STREAM_Q_LEN
+                or decision_row.logical_q_len != 0
+                or not decision_row.queue_audio_for_next_turn
+            ):
+                raise RuntimeError(f"native output view {index} is not a valid speaking Q2 branch")
+            tensor = output.tensor
+            expected_shape = (source.manifest.batch_size, LISTENER_STREAM_Q_LEN, HIDDEN_WIDTH)
+            if (
+                not isinstance(tensor, torch.Tensor)
+                or tuple(tensor.shape) != expected_shape
+                or tensor.dtype != torch.bfloat16
+                or tensor.device != self.adapter.lora_A.device
+            ):
+                raise RuntimeError(f"native output view {index} must match {expected_shape} BF16 on adapter device")
+            if tensor.is_cuda:
+                if not isinstance(output.completion_event, torch.cuda.Event):
+                    raise RuntimeError(f"CUDA output view {index} lacks its completion event")
+                if consumer_stream is None:
+                    consumer_stream = torch.cuda.current_stream(device=tensor.device)
+                output.completion_event.wait(consumer_stream)
+            native_rows.append(native_row)
+            if state.native_control_no_input_tick:
+                if state.native_control_hidden is not None or not state.legal_actions:
+                    raise RuntimeError("exact-zero no-input context must omit hidden and keep legal actions")
+                hidden_rows.append(None)
+                continue
+            if state.native_control_hidden is not None:
+                raise RuntimeError("pre-head policy context contains a hidden from outside this worker")
+            hidden = tensor[source.row_index, 0, :]
+            hidden_rows.append(hidden)
+            phase = state.native_control_phase_t
+            phase_tensor = (
+                torch.zeros((NATIVE_CONTROL6_PHASE_T_WIDTH,), dtype=torch.float32)
+                if phase is None
+                else torch.as_tensor(phase, dtype=torch.float32).reshape(-1)
+            )
+            if tuple(phase_tensor.shape) != (NATIVE_CONTROL6_PHASE_T_WIDTH,) or not bool(
+                torch.isfinite(phase_tensor).all()
+            ):
+                raise RuntimeError("policy pre-head context requires four finite phase_t values")
+            if not state.legal_actions:
+                raise RuntimeError("policy pre-head context requires a non-empty legal action mask")
+            unknown = set(state.legal_actions) - set(ACTIONS)
+            if unknown:
+                raise ValueError(f"policy pre-head context has unknown legal actions: {sorted(unknown)}")
+            phase_rows.append(phase_tensor)
+            score_indices.append(index)
+
+        logits_by_index: dict[int, torch.Tensor] = {}
+        if score_indices:
+            parameter = self.adapter.lora_A
+            model_hidden = torch.stack([
+                hidden_rows[index].to(
+                    device=parameter.device,
+                    dtype=self.adapter.base_rows.dtype,
+                )
+                for index in score_indices
+                if hidden_rows[index] is not None
+            ])
+            model_phase = torch.stack(phase_rows).to(
+                device=parameter.device,
+                dtype=torch.float32,
+            )
+            with torch.inference_mode():
+                logits = self.adapter(model_hidden, phase_t=model_phase).float()
+            self.forward_call_count += 1
+            if tuple(logits.shape) != (len(score_indices), len(ACTIONS)):
+                raise RuntimeError("mixed-source Control6 produced invalid batched logits")
+            for batch_index, row_index in enumerate(score_indices):
+                logits_by_index[row_index] = logits[batch_index]
+
+        available_at_ns = time.monotonic_ns()
+        decisions: list[PolicyDecision] = []
+        for index, (source, context, native_row) in enumerate(
+            zip(sources, contexts, native_rows, strict=True)
+        ):
+            state = context.policy_input
+            hidden = hidden_rows[index]
+            completed_state = replace(
+                state,
+                native_control_hidden=(
+                    None if hidden is None else hidden.reshape(1, 1, -1)
+                ),
+                native_control_hidden_frame_id=(
+                    None if hidden is None else native_row.frame_id
+                ),
+                native_control_hidden_at_ns=(
+                    None if hidden is None else available_at_ns
+                ),
+                native_listener_generation=native_row.session_generation,
+            )
+            decision = context.policy.step_with_logits(
+                completed_state,
+                logits_by_index.get(index),
+                tick_id=context.tick_id,
+            )
+            diagnostics = dict(decision.diagnostics or {})
+            diagnostics["native_output_provenance"] = {
+                "manifest_id": source.manifest.manifest_id,
+                "output_generation": source.native_output.generation,
+                "native_session_id": native_row.session_id,
+                "canonical_session_id": source.decision_row.session_id,
+                "listener_generation_id": native_row.session_generation,
+                "turn_generation_id": context.tick_id[1],
+                "state_epoch_id": native_row.state_epoch_id,
+                "listener_state_version": native_row.listener_state_version,
+                "frame_id": native_row.frame_id,
+                "sequence_position": native_row.sequence_position,
+                "cache_position": native_row.cache_position,
+                "policy_tick_id": list(context.tick_id),
+                "policy_context_captured_at_ns": context.captured_at_ns,
+                "used_for_policy": hidden is not None,
+            }
+            decisions.append(replace(decision, diagnostics=diagnostics))
+        return tuple(decisions)
+
     def step_batch(self, states: Sequence[BatchPolicyInput]) -> tuple[PolicyDecision, ...]:
         """Run the low-level policy on explicitly bound fixtures.
 
@@ -319,6 +758,7 @@ class GemmaNativeControl6BatchPolicy:
 
         now_ns = time.monotonic_ns()
         hidden_rows: list[torch.Tensor] = []
+        phase_rows: list[torch.Tensor] = []
         legal_sets: list[tuple[str, ...]] = []
         for batch_row, state in zip(batch_rows, rows, strict=True):
             provenance = batch_row.hidden_provenance
@@ -369,6 +809,18 @@ class GemmaNativeControl6BatchPolicy:
             if not legal:
                 raise RuntimeError("batched native Control6 requires a non-empty legal-action mask")
             hidden_rows.append(hidden.reshape(1, HIDDEN_WIDTH))
+            phase = state.native_control_phase_t
+            if phase is None:
+                phase_tensor = torch.zeros(
+                    (NATIVE_CONTROL6_PHASE_T_WIDTH,), dtype=torch.float32
+                )
+            else:
+                phase_tensor = torch.as_tensor(phase, dtype=torch.float32).reshape(-1)
+                if tuple(phase_tensor.shape) != (NATIVE_CONTROL6_PHASE_T_WIDTH,) or not bool(
+                    torch.isfinite(phase_tensor).all()
+                ):
+                    raise RuntimeError("batched native Control6 requires four finite phase_t values")
+            phase_rows.append(phase_tensor)
             legal_sets.append(legal)
 
         parameter = self.adapter.lora_A
@@ -376,6 +828,9 @@ class GemmaNativeControl6BatchPolicy:
             hidden.to(device=parameter.device, dtype=self.adapter.base_rows.dtype)
             for hidden in hidden_rows
         ], dim=0)
+        model_phase_t = torch.stack(phase_rows).to(
+            device=parameter.device, dtype=torch.float32
+        )
         legal_mask = torch.tensor(
             [[action in legal for action in ACTIONS] for legal in legal_sets],
             dtype=torch.bool,
@@ -386,7 +841,7 @@ class GemmaNativeControl6BatchPolicy:
             # Keep the adapter's existing finite-input guard intact. On CUDA
             # that guard may synchronize independently of the packed policy
             # metadata transfer below; this wrapper does not bypass it.
-            logits = self.adapter(model_hidden).float()
+            logits = self.adapter(model_hidden, phase_t=model_phase_t).float()
             self.forward_call_count += 1
             if tuple(logits.shape) != (len(rows), len(ACTIONS)):
                 raise RuntimeError("batched native Control6 produced invalid six-way logits")
@@ -490,7 +945,9 @@ class GemmaNativeControl6BatchPolicy:
 
 __all__ = [
     "BatchPolicyInput",
+    "DecisionRowSource",
     "GemmaNativeControl6BatchPolicy",
     "ListenerHiddenProvenance",
     "NativeControl6RawScoreSnapshot",
+    "PolicyPreHeadContext",
 ]

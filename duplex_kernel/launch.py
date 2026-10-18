@@ -86,6 +86,14 @@ def configure_bundle_runtime_environment(
     precedence when both are selected. Partial ASR remains opt-in per session.
     """
     env = os.environ if environ is None else environ
+    from duplex_kernel.audio_response_protocol import (
+        AUDIO_RESPONSE_PROTOCOL_ENV,
+        resolve_audio_response_protocol,
+    )
+
+    # Normalize the old compatibility toggle once; the server then sees the
+    # same explicit enum selected by this launcher.
+    env[AUDIO_RESPONSE_PROTOCOL_ENV] = resolve_audio_response_protocol(env)
     compiled_decode = env.get(_TALKER_COMPILED_DECODE_ENV)
     native_decode = env.get(_TALKER_NATIVE_AUDIO_Q1_ENV)
     if compiled_decode is not None and compiled_decode.strip() not in {"0", "1"}:
@@ -368,9 +376,16 @@ def main() -> int:
         "GEMMA4_OMNI_CUSTOM_VOICE_DIR",
         os.path.join(args.workspace, "custom_voices"),
     )
+    from duplex_kernel.audio_response_protocol import (
+        AUDIO_RESPONSE_PROTOCOL_ENV,
+        resolve_audio_response_protocol,
+    )
+    try:
+        os.environ[AUDIO_RESPONSE_PROTOCOL_ENV] = resolve_audio_response_protocol()
+    except ValueError as exc:
+        ap.error(str(exc))
     if args.frame_residual_adapter_checkpoint:
         os.environ.setdefault(_TALKER_NATIVE_AUDIO_Q1_ENV, "1")
-        os.environ.setdefault("DUPLEX_CONTROLLER_GUIDED_SAY_V1", "1")
     if args.frame_residual_adapter_checkpoint:
         if args.response_intent_local_cursor_checkpoint:
             ap.error("frame residual Q1 adapter cannot load a prefix projector checkpoint")
@@ -466,12 +481,15 @@ def main() -> int:
         except (OSError, RuntimeError, ValueError, TypeError) as exc:
             ap.error(f"frame residual checkpoint invalid: {exc}")
     try:
-        response_protocol = configure_bundle_runtime_environment(
+        configure_bundle_runtime_environment(
             args.duplex_response_bundle_dir,
             workspace=args.workspace,
         )
     except ValueError as exc:
         ap.error(str(exc))
+    from duplex_kernel.audio_response_protocol import resolve_audio_response_protocol
+
+    response_protocol = resolve_audio_response_protocol()
     if response_protocol:
         print(
             "[launch] response protocol="

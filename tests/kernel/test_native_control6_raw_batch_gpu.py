@@ -130,7 +130,7 @@ def test_native_control6_raw_batch_scores_match_single_rows_on_gpu() -> None:
         attention_backend_id=3,
         rmsnorm_backend_id=2,
         max_seq_len=16_384,
-        stream_q_len=4,
+        stream_q_len=2,
     )
     settings = {
         "allow_tf32": bool(torch.backends.cuda.matmul.allow_tf32),
@@ -214,7 +214,7 @@ def test_native_control6_raw_batch_scores_match_single_rows_on_gpu() -> None:
         provider = NativeGemmaListenerLM(
             lm,
             max_seq_len=16_384,
-            stream_q_len=4,
+            stream_q_len=2,
             enable_cuda_graph=False,
             attention_backend=3,
             rmsnorm_backend=2,

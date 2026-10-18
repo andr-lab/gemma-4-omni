@@ -13,7 +13,7 @@ CUDA stream bound at priority `-1`. The context owns one set of shared
 per admitted session. Frozen model weights and the PAD-frame PLE tensor are
 borrowed from the existing Python model and held strongly for the context
 lifetime. Batch sizes are exactly 1, 2, or 4; every forward consumes contiguous
-BF16 `[N,4,1536]` input rows and returns an internal `[N,4,1536]` output slot.
+BF16 `[N,2,1536]` input rows and returns an internal `[N,2,1536]` output slot.
 
 The Python owner is confined to its creating host thread for context mutation,
 cache import, forward/lease handling, rollover, retirement, counters, and close.
@@ -26,11 +26,11 @@ also requires the native priority query to attest the bound stream's configured
 priority `-1`.
 
 The forward loop visits the 35 layers once. Dense projections use one
-`cublasGemmEx` call over the combined `N*4` rows per projection; session-specific
+`cublasGemmEx` call over the combined `N*2` rows per projection; session-specific
 KV writes and attention use each row's private cache, prefix mask, and absolute
 cache position. No ABI3 single-session step is called from the batch API.
 Attention remains on the existing backend-3 policy and RMSNorm on backend 2.
-The code preserves Q=4, the 16384-token cache capacity, prefixes of 34 or 291,
+The code uses Q=2, the 16384-token cache capacity, prefixes of 34 or 291,
 and the existing fixed 35-layer topology. It does not opt into CUDA graphs or
 alter model weights, training, templates, or audio roles.
 
@@ -38,7 +38,7 @@ The row descriptor carries native context ID, session generation, a stable
 numeric epoch identity, frame ID, listener state version, sequence position,
 cache position, and total valid-history tokens. Every row is checked before
 input-copy or layer work. Cache position and valid-history tokens must match;
-both advance by exactly four only after all layers and final normalization are
+both advance by exactly two only after all layers and final normalization are
 queued successfully. Any partial enqueue error poisons the whole batch context,
 so callers cannot retry or fall back with possibly mutated caches.
 

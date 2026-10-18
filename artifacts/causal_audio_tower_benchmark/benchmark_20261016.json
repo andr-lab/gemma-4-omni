@@ -1,0 +1,486 @@
+{
+  "status": "completed",
+  "started_at_utc": "2026-10-16T20:41:17.467964+00:00",
+  "runtime": {
+    "container": "gemma4-listener-control6-microbatch-20261014",
+    "active_runtime_source": "/workspace/artifacts/runtime/listener_microbatch_source",
+    "python": "3.11.9 (main, Apr 19 2024, 16:48:06) [GCC 11.2.0]",
+    "torch": "2.12.1+cu130",
+    "torch_cuda": "13.0",
+    "transformers": "5.5.0",
+    "gpu": {
+      "name": "NVIDIA GeForce RTX 3090",
+      "total_bytes": 25298141184,
+      "free_bytes_at_start": 4167696384,
+      "device_index": 0,
+      "free_bytes_after_benchmark": 3429498880,
+      "process_peak_allocated_bytes": 655666688,
+      "process_peak_reserved_bytes": 706740224
+    },
+    "backend": "Gemma4AudioModel eager CUDA forward",
+    "cuda_graph": "measured below with static feature and mask buffers",
+    "gpu_memory_guard_min_free_bytes_before_load": 2684354560
+  },
+  "input": {
+    "path": "/workspace/artifacts/conversation_quality_20261014/inputs/clean_initial.wav",
+    "target_sample_rate_hz": 16000,
+    "source_rate_hz": 22050,
+    "source_samples": 227556,
+    "source_duration_seconds": 10.32,
+    "resampled_samples_before_trim": 165120,
+    "measured_samples": 160000,
+    "measured_duration_seconds": 10.0,
+    "resampler": "scipy.signal.resample_poly, same gcd-ratio path as server WAV upload",
+    "peak_abs": 0.5237207412719727,
+    "rms": 0.0977227587739731
+  },
+  "contract": {
+    "ticks": 125,
+    "tick_ms": 80,
+    "mel_rows_per_tick": 8,
+    "streaming_window_rows": 60,
+    "streaming_history_rows": 52,
+    "startup_padding": "left zeros to 52 historical Mel rows",
+    "all_input_mask_rows_valid": true,
+    "tower_tokens_per_tick": 2,
+    "selected_q_start": 13,
+    "selected_rows_per_tick": "[13:15]",
+    "concatenated_stream_tokens_expected": 250,
+    "cosine_reference_target": 0.995,
+    "target_streaming_tower_cuda_ms": 0.6,
+    "target_interpretation": "reported without changing windows, inputs, or references"
+  },
+  "notes": [
+    "The tower-only process runs inside the existing container; the serving PID and checkpoints are not modified.",
+    "The offline feature extractor and incremental 80 ms extractor are both sourced from the active runtime overlay.",
+    "A 60-row window is 15 output tokens by stride geometry; conformer context across layers can exceed this geometric overlap."
+  ],
+  "model": {
+    "path": "/workspace/.hf_cache/models--google--gemma-4-E2B-it/full",
+    "processor": "Gemma4Processor",
+    "feature_extractor": "Gemma4AudioFeatureExtractor",
+    "audio_tower_class": "Gemma4AudioModel",
+    "audio_tower_parameters": 304824608,
+    "audio_tower_parameter_bytes": 609649216,
+    "audio_tower_dtype": "torch.bfloat16",
+    "audio_config": {
+      "transformers_version": "5.5.0",
+      "architectures": null,
+      "output_hidden_states": false,
+      "return_dict": true,
+      "dtype": "bfloat16",
+      "chunk_size_feed_forward": 0,
+      "is_encoder_decoder": false,
+      "id2label": {
+        "0": "LABEL_0",
+        "1": "LABEL_1"
+      },
+      "label2id": {
+        "LABEL_0": 0,
+        "LABEL_1": 1
+      },
+      "problem_type": null,
+      "hidden_size": 1024,
+      "num_hidden_layers": 12,
+      "num_attention_heads": 8,
+      "hidden_act": "silu",
+      "subsampling_conv_channels": [
+        128,
+        32
+      ],
+      "conv_kernel_size": 5,
+      "residual_weight": 0.5,
+      "attention_chunk_size": 12,
+      "attention_context_left": 13,
+      "attention_context_right": 0,
+      "attention_logit_cap": 50.0,
+      "attention_invalid_logits_value": -1000000000.0,
+      "use_clipped_linears": true,
+      "rms_norm_eps": 1e-06,
+      "gradient_clipping": 10000000000.0,
+      "output_proj_dims": 1536,
+      "initializer_range": 0.02,
+      "_name_or_path": "",
+      "model_type": "gemma4_audio",
+      "output_attentions": false
+    },
+    "weight_load": {
+      "expected_state_dict_entries": 751,
+      "missing_key_count": 0,
+      "missing_key_sample": [],
+      "mismatched_key_count": 0,
+      "mismatched_key_sample": [],
+      "unexpected_key_count": 1260,
+      "unexpected_tower_key_count": 0,
+      "unexpected_non_tower_key_count": 1260,
+      "unexpected_key_sample": [
+        "model.vision_tower.encoder.layers.8.input_layernorm.weight",
+        "model.vision_tower.encoder.layers.9.mlp.gate_proj.output_max",
+        "model.vision_tower.encoder.layers.12.mlp.down_proj.input_min",
+        "model.vision_tower.encoder.layers.1.self_attn.q_proj.output_max",
+        "model.vision_tower.encoder.layers.6.self_attn.v_proj.linear.weight",
+        "model.vision_tower.encoder.layers.14.mlp.gate_proj.output_min",
+        "model.vision_tower.encoder.layers.3.mlp.gate_proj.input_max",
+        "model.vision_tower.encoder.layers.12.mlp.up_proj.linear.weight",
+        "model.vision_tower.encoder.layers.13.mlp.gate_proj.linear.weight",
+        "model.language_model.layers.2.mlp.up_proj.weight",
+        "model.vision_tower.encoder.layers.13.mlp.gate_proj.output_min",
+        "model.vision_tower.encoder.layers.0.self_attn.o_proj.input_max",
+        "model.vision_tower.encoder.layers.3.self_attn.v_proj.linear.weight",
+        "model.language_model.layers.32.post_feedforward_layernorm.weight",
+        "model.language_model.layers.24.per_layer_projection.weight",
+        "model.language_model.layers.7.layer_scalar",
+        "model.language_model.layers.15.self_attn.v_proj.weight",
+        "model.vision_tower.encoder.layers.9.self_attn.q_proj.output_max",
+        "model.vision_tower.encoder.layers.6.self_attn.q_proj.input_min",
+        "model.vision_tower.encoder.layers.5.mlp.up_proj.output_min"
+      ],
+      "tower_weights_complete": true
+    },
+    "audio_tower_temporal_geometry": {
+      "transformers_modeling_source": "/opt/conda/lib/python3.11/site-packages/transformers/models/gemma4/modeling_gemma4.py",
+      "subsampling_conv_layers": 2,
+      "subsampling_kernel_time": 3,
+      "subsampling_stride_time": 2,
+      "subsampling_padding_time": 1,
+      "subsampling_receptive_field_mel_rows": 7,
+      "subsampling_output_stride_mel_rows": 4,
+      "conformer_layers": 12,
+      "attention_context_left_tokens": 13,
+      "attention_context_right_tokens": 0,
+      "attention_chunk_tokens": 12,
+      "lightconv_depthwise_groups": 1024,
+      "lightconv_kernel_tokens": 5,
+      "lightconv_causal_left_context_tokens": 4,
+      "interpretation": "A 60-Mel-row input geometrically yields 15 tokens, but each conformer layer also applies left-context attention and a causal depthwise convolution; stacked layer context means this slice does not guarantee equivalence to the same positions from the full-clip offline pass."
+    }
+  },
+  "preprocessing": {
+    "extractor_source_file": "/workspace/artifacts/runtime/listener_microbatch_source/duplex_kernel/listener.py",
+    "extractor_source_method": "GemmaAudioTowerBackend._extract and _extract_single_frame",
+    "offline_vs_streaming_mel": {
+      "offline_shape": [
+        1000,
+        128
+      ],
+      "streaming_shape": [
+        1000,
+        128
+      ],
+      "same_shape": true,
+      "max_abs": 0.0,
+      "mean_abs": 0.0,
+      "rmse": 0.0,
+      "exact_equal_elements": 128000,
+      "element_count": 128000,
+      "whole_matrix_cosine": 0.9999999999999999,
+      "per_row_cosine": {
+        "mean": 1.0,
+        "p05": 0.9999999999999998,
+        "p50": 1.0,
+        "min": 0.9999999999999998
+      },
+      "rows_with_abs_delta_over_1e_5": 0,
+      "first_differing_rows_over_1e_5": []
+    },
+    "offline_extractor_config": {
+      "sampling_rate": 16000,
+      "feature_size": 128,
+      "frame_length": 320,
+      "hop_length": 160,
+      "fft_length": 512,
+      "preemphasis": 0.0,
+      "mel_floor": 0.001
+    }
+  },
+  "smoke": {
+    "requested_ticks": 4,
+    "passed": true,
+    "output_shape_per_tick": [
+      1,
+      15,
+      1536
+    ],
+    "cuda_ms": {
+      "count": 4,
+      "mean": 35.60886287689209,
+      "p50": 35.559486389160156,
+      "p95": 35.82040920257568,
+      "max": 35.85433578491211
+    },
+    "wall_ms": {
+      "count": 4,
+      "mean": 35.641118500000005,
+      "p50": 35.581945000000005,
+      "p95": 35.87725625,
+      "max": 35.917001
+    }
+  },
+  "streaming": {
+    "completed_ticks": 125,
+    "output_shape_per_tick": [
+      1,
+      15,
+      1536
+    ],
+    "selected_rows": [
+      13,
+      15
+    ],
+    "concatenated_output_shape": [
+      250,
+      1536
+    ],
+    "cuda_ms": {
+      "count": 125,
+      "mean": 35.383977264404294,
+      "p50": 35.34233474731445,
+      "p95": 35.553690338134764,
+      "max": 37.78764724731445
+    },
+    "wall_ms": {
+      "count": 125,
+      "mean": 35.404977,
+      "p50": 35.362641,
+      "p95": 35.57394,
+      "max": 37.809081
+    },
+    "cuda_target_ms_below_0_6": false,
+    "latency_target_uses_p95": true
+  },
+  "offline": {
+    "input_shape": [
+      1,
+      1000,
+      128
+    ],
+    "output_shape": [
+      1,
+      250,
+      1536
+    ],
+    "cuda_ms_single_call": 43.582462310791016,
+    "wall_ms_single_call": 43.609417
+  },
+  "offline_vs_streaming": {
+    "same_shape": true,
+    "shape": [
+      250,
+      1536
+    ],
+    "token_count": 250,
+    "mean": 0.823871374130249,
+    "p05": 0.4839406669139862,
+    "p50": 0.8704746961593628,
+    "p95": 0.9841654539108277,
+    "min": 0.22267110645771027,
+    "max": 0.9997525811195374,
+    "count_below_0_995": 246,
+    "fraction_at_or_above_0_995": 0.016,
+    "target_mean_at_or_above_0_995": false,
+    "same_token_count_expected_250": true
+  },
+  "baseline_1024": {
+    "input_shape": [
+      1,
+      1024,
+      128
+    ],
+    "valid_mask_rows": 1024,
+    "separate_from_causal_60_row_measurement": true,
+    "backend": "eager",
+    "free_bytes_before": 3442081792,
+    "status": "measured",
+    "output_shape": [
+      1,
+      256,
+      1536
+    ],
+    "iterations": 20,
+    "cuda_ms": {
+      "count": 20,
+      "mean": 35.55607357025146,
+      "p50": 35.41423988342285,
+      "p95": 36.08294124603272,
+      "max": 36.29875183105469
+    },
+    "wall_ms": {
+      "count": 20,
+      "mean": 35.5766158,
+      "p50": 35.434233000000006,
+      "p95": 36.1033667,
+      "max": 36.332007
+    }
+  },
+  "cuda_graph": {
+    "semantics": "same model, weights, masks, input arrays, and output selection as eager",
+    "timing": "CUDA event device time plus host wall time; capture excluded",
+    "input_update": "GPU-to-GPU copy into static input buffer, included in copy_plus_replay metrics",
+    "free_bytes_before_capture": 3439984640,
+    "input_60": {
+      "status": "measured",
+      "backend": "torch.cuda.CUDAGraph replay of the same Gemma4AudioModel forward",
+      "input_shape": [
+        1,
+        60,
+        128
+      ],
+      "output_shape": [
+        1,
+        15,
+        1536
+      ],
+      "static_input_buffers": true,
+      "capture_warmup_forwards": 3,
+      "capture_wall_ms_excluded_from_latency": 45.579969,
+      "first_replay_cuda_ms": 5.243904113769531,
+      "first_replay_wall_ms": 5.343028,
+      "replay_only_iterations": 20,
+      "replay_only_cuda_ms": {
+        "count": 20,
+        "mean": 5.157539248466492,
+        "p50": 5.157887935638428,
+        "p95": 5.160047960281372,
+        "max": 5.162176132202148
+      },
+      "replay_only_wall_ms": {
+        "count": 20,
+        "mean": 5.1743786499999995,
+        "p50": 5.1737,
+        "p95": 5.17832755,
+        "max": 5.189396
+      },
+      "same_input_eager_vs_graph": {
+        "offline_shape": [
+          15,
+          1536
+        ],
+        "streaming_shape": [
+          15,
+          1536
+        ],
+        "same_shape": true,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "rmse": 0.0,
+        "exact_equal_elements": 23040,
+        "element_count": 23040,
+        "whole_matrix_cosine": 1.0,
+        "per_row_cosine": {
+          "mean": 1.0,
+          "p05": 1.0,
+          "p50": 1.0,
+          "min": 1.0
+        },
+        "rows_with_abs_delta_over_1e_5": 0,
+        "first_differing_rows_over_1e_5": []
+      },
+      "input_series_count": 125,
+      "copy_plus_replay_cuda_ms": {
+        "count": 125,
+        "mean": 4.841649631500244,
+        "p50": 4.828159809112549,
+        "p95": 5.167872142791748,
+        "max": 5.19539213180542
+      },
+      "copy_plus_replay_wall_ms": {
+        "count": 125,
+        "mean": 4.859584616,
+        "p50": 4.845359,
+        "p95": 5.185281,
+        "max": 5.224216
+      },
+      "input_series_first_output": {
+        "offline_shape": [
+          15,
+          1536
+        ],
+        "streaming_shape": [
+          15,
+          1536
+        ],
+        "same_shape": true,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "rmse": 0.0,
+        "exact_equal_elements": 23040,
+        "element_count": 23040,
+        "whole_matrix_cosine": 1.0,
+        "per_row_cosine": {
+          "mean": 1.0,
+          "p05": 1.0,
+          "p50": 1.0,
+          "min": 1.0
+        },
+        "rows_with_abs_delta_over_1e_5": 0,
+        "first_differing_rows_over_1e_5": []
+      },
+      "replay_only_cuda_target_ms_below_0_6": false,
+      "copy_plus_replay_cuda_target_ms_below_0_6": false
+    },
+    "free_bytes_after_input_60": 3429498880,
+    "input_1024": {
+      "status": "measured",
+      "backend": "torch.cuda.CUDAGraph replay of the same Gemma4AudioModel forward",
+      "input_shape": [
+        1,
+        1024,
+        128
+      ],
+      "output_shape": [
+        1,
+        256,
+        1536
+      ],
+      "static_input_buffers": true,
+      "capture_warmup_forwards": 3,
+      "capture_wall_ms_excluded_from_latency": 38.649556,
+      "first_replay_cuda_ms": 7.869440078735352,
+      "first_replay_wall_ms": 7.949591,
+      "replay_only_iterations": 20,
+      "replay_only_cuda_ms": {
+        "count": 20,
+        "mean": 7.7653968334198,
+        "p50": 7.763967990875244,
+        "p95": 7.768278193473816,
+        "max": 7.791808128356934
+      },
+      "replay_only_wall_ms": {
+        "count": 20,
+        "mean": 7.7845654500000006,
+        "p50": 7.780948,
+        "p95": 7.7879615499999995,
+        "max": 7.863839
+      },
+      "same_input_eager_vs_graph": {
+        "offline_shape": [
+          256,
+          1536
+        ],
+        "streaming_shape": [
+          256,
+          1536
+        ],
+        "same_shape": true,
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "rmse": 0.0,
+        "exact_equal_elements": 393216,
+        "element_count": 393216,
+        "whole_matrix_cosine": 1.0,
+        "per_row_cosine": {
+          "mean": 1.0,
+          "p05": 0.9999999999999998,
+          "p50": 1.0,
+          "min": 0.9999999999999998
+        },
+        "rows_with_abs_delta_over_1e_5": 0,
+        "first_differing_rows_over_1e_5": []
+      },
+      "replay_only_cuda_target_ms_below_0_6": false
+    },
+    "free_bytes_after_input_1024": 3429498880,
+    "status": "completed"
+  },
+  "completed_at_utc": "2026-10-16T20:41:32.769644+00:00"
+}

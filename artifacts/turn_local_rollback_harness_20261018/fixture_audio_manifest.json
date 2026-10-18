@@ -1,0 +1,61 @@
+{
+  "tts": "Windows System.Speech / Microsoft Elsa Desktop / it-IT / Rate=1",
+  "resampling": "scipy.signal.resample_poly, 320/441, mono PCM16",
+  "scenario_a": {
+    "initial": "Consigliami un itinerario di tre giorni a Milano.",
+    "correction": "Scusa, intendevo dire Torino, non Milano!",
+    "correction_delay_after_first_assistant_pcm_s": 1.5
+  },
+  "scenario_b": {
+    "input": "B_docker_15s_pause300.wav",
+    "pause_samples": 4800,
+    "pause_ms": 300,
+    "pause_start_sample": 96800,
+    "pause_start_s": 6.05,
+    "pause_end_s": 6.35,
+    "combined_samples": 240000,
+    "duration_s": 15.0,
+    "frame_ms": 80,
+    "frame_samples": 1280,
+    "trailing_silence_samples": 9879
+  },
+  "clips": {
+    "A_initial_milano.wav": {
+      "expected_text": "Consigliami un itinerario di tre giorni a Milano.",
+      "source_rate_hz": 22050,
+      "source_samples": 69296,
+      "output_rate_hz": 16000,
+      "output_samples": 50283,
+      "duration_s": 3.1426875
+    },
+    "A_correction_torino.wav": {
+      "expected_text": "Scusa, intendevo dire Torino, non Milano!",
+      "source_rate_hz": 22050,
+      "source_samples": 79984,
+      "output_rate_hz": 16000,
+      "output_samples": 58039,
+      "duration_s": 3.6274375
+    },
+    "B_docker_before_pause.wav": {
+      "expected_text": "Sto avviando il servizio. Docker è il software per i container. Uso Python e CUDA.",
+      "source_rate_hz": 22050,
+      "source_samples": 133402,
+      "output_rate_hz": 16000,
+      "output_samples": 96800,
+      "duration_s": 6.05
+    },
+    "B_docker_after_pause.wav": {
+      "expected_text": "Il websocket riceve i frame ma la coda audio resta aperta. Dammi una conferma breve e continuo, misuro la latenza.",
+      "source_rate_hz": 22050,
+      "source_samples": 177118,
+      "output_rate_hz": 16000,
+      "output_samples": 128521,
+      "duration_s": 8.0325625
+    },
+    "B_docker_15s_pause300.wav": {
+      "output_rate_hz": 16000,
+      "output_samples": 240000,
+      "duration_s": 15.0
+    }
+  }
+}

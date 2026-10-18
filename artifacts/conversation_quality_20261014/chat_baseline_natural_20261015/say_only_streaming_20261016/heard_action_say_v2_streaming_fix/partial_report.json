@@ -1,0 +1,362 @@
+{
+  "url": "ws://127.0.0.1:8000/v1/realtime?duplex=1",
+  "mode": "auto",
+  "model": "gemma-4-omni-duplex",
+  "response_protocol_expected": "heard_action_say_v2",
+  "system_prompt": "Rispondi in italiano naturale e conciso, con al massimo due frasi. Usa solo le informazioni dette nella conversazione e rispetta i vincoli espliciti.",
+  "session_config": {
+    "turn_policy": "gemma_native_control6",
+    "auto_response": true,
+    "input_audio_buffer_acknowledgements": true
+  },
+  "source_transcripts": {
+    "clean_initial.wav": "Mi chiamo Elena. Il mio codice è 7-3-1. Vorrei visitare Torino con 120 euro. Rispondi in italiano, in non più di due frasi.",
+    "clean_followup.wav": "Il baggettore è 80 euro. Quali sono i miei nome, codice, città e baggetta attuale?"
+  },
+  "single_turn": true,
+  "input_transcript": "Ciao, mi dici che ore sono?",
+  "inputs": {
+    "initial": {
+      "wav": "/workspace/artifacts/conversation_quality_20261014/chat_baseline_natural_20261015/say_only_streaming_20261016/fixture.wav",
+      "samples_16khz": 48768,
+      "wav_duration_ms": 3048.0,
+      "source_audio_frames_80ms": 39,
+      "silence_frames_appended": 2,
+      "total_frames_sent": 55,
+      "silence_tail_frames_until_response_created": 14,
+      "silence_tail_frames_until_speak_done": 14
+    }
+  },
+  "turns": [
+    {
+      "turn": 1,
+      "name": "initial",
+      "waveform": "/workspace/artifacts/conversation_quality_20261014/chat_baseline_natural_20261015/say_only_streaming_20261016/fixture.wav",
+      "frames_sent": 55,
+      "silence_tail_frames_until_response_created": 14,
+      "first_frame_sent_at_ns": 4960436655255726,
+      "last_frame_sent_at_ns": 4960439856711101,
+      "manual_commit": false,
+      "responses": {
+        "resp_f732493af8b6": {
+          "response_created": {
+            "type": "response.created",
+            "response_id": "resp_f732493af8b6",
+            "response_created_at_ns": 4960439783205169,
+            "conditioning_source": "training_default",
+            "voice_conditioning_mode": "x_vector_only",
+            "reference_wav_path": "/workspace/artifacts/voices/reference.wav",
+            "reference_wav_sha256": "480f55f41c71c3d79c2a9acc48f0bfb3c5a46222e6e9ebf3e2888e93501a6b5c",
+            "response_created_at_monotonic_ns": 4960439783205169,
+            "listener_hidden_frame_id": 38,
+            "listener_hidden_at_ns": 4960439778874118,
+            "listener_hidden_age_ms": 4.331,
+            "action": "SPEAK",
+            "effective_action": "SPEAK",
+            "intent_source_frame_id": 38,
+            "intent_endpoint_frame_id": 37,
+            "intent_source": "direct_audio_policy",
+            "policy_decision_frame_id": 38,
+            "policy_decision_at_ns": 4960439781311858,
+            "policy_input_listener_hidden_frame_id": 38,
+            "policy_input_listener_hidden_at_ns": 4960439778874118,
+            "input_utterance_id": "utt_2_0e97d094",
+            "input_first_frame_id": 2,
+            "input_last_frame_id": 27
+          },
+          "t_speak_decision_control6_at_ns": 4960439781311858,
+          "action_selected_observed_at_ns": 4960440860580797,
+          "action_selection_source": null,
+          "assistant_text": "Sono le quattro e trenta.",
+          "audio_transcript": ""
+        }
+      },
+      "response_done": false,
+      "speak_response_done": false,
+      "pending_response_ids": [
+        "resp_f732493af8b6"
+      ]
+    }
+  ],
+  "response_audio": {},
+  "audio_capture_errors": [],
+  "session_created": {
+    "type": "session.created",
+    "session_id": "e67919f30c3e4d53bb51ecc55ef2c091",
+    "input_audio_buffer_capacity_frames": 6,
+    "runtime_metrics": {
+      "listener": {
+        "canonical_prime_calls": 0
+      },
+      "scheduler": {
+        "first_input_anchor_enabled": false,
+        "first_input_anchor_applied": false,
+        "ready_frame_dispatch_enabled": false,
+        "shared_listener_microbatch_enabled": true,
+        "listener_tick_period_ms": 80,
+        "listener_batch_size_policy": "all_ready_real_rows"
+      },
+      "scheduler_cuda_stream": {
+        "enabled": true,
+        "device": "cuda:0",
+        "handle": 1141018976,
+        "ownership": "per_session_listener_policy"
+      }
+    },
+    "turn_policy": "gemma_native_control6",
+    "policy_id": "gemma_native_control6",
+    "policy_actions": [
+      "LISTEN",
+      "SPEAK",
+      "CONTINUE",
+      "YIELD",
+      "BACKCHANNEL",
+      "REPLAN"
+    ],
+    "policy_input_contract": "ListenerOutput.gemma_hidden_t:1536:current_frame",
+    "policy_base_rows_validated": true,
+    "response_lora_applied": false,
+    "native_action_selection": "wake_scoped",
+    "semantic_prefix_enabled": true,
+    "semantic_prefix_schema_version": 2,
+    "semantic_prefix_contract": "gemma_native_control6_semantic_prefix_boa_v2",
+    "semantic_prefix_capacity_tokens": 291,
+    "semantic_prefix_actual_len": 34,
+    "semantic_prefix_committed_history_revision": 0,
+    "semantic_prefix_applied_history_revision": null,
+    "semantic_prefix_context_current": false
+  },
+  "session_updated": {
+    "type": "session.updated",
+    "session_id": "e67919f30c3e4d53bb51ecc55ef2c091",
+    "native_control6_semantic_prefix_initial_admission": "ineligible",
+    "native_control6_semantic_prefix_initial_admission_reason": "context_changed_after_owner_import",
+    "native_control6_semantic_prefix_initial_admission_ms": 97.952,
+    "native_control6_semantic_prefix_initial_prefix_len": 135,
+    "native_control6_semantic_prefix_initial_revision": 1,
+    "native_control6_semantic_prefix_initial_build_ms": 83.214751,
+    "native_control6_semantic_prefix_initial_replay_ms": 0.00403,
+    "native_control6_semantic_prefix_initial_import_ms": 1.617,
+    "native_control6_semantic_prefix_initial_audio_samples_received": 0,
+    "native_control6_semantic_prefix_initial_audio_queue_depth_frames": 0,
+    "native_control6_semantic_prefix_initial_audio_pending_samples": 0,
+    "input_audio_transcription_enabled": false,
+    "audio_history_archive_cpu_enabled": false,
+    "audio_history_archive_defer_offline": false,
+    "input_audio_buffer_conditioning_acknowledgements": false,
+    "listener_silence_skip_enabled": true,
+    "input_audio_buffer_capacity_frames": 6,
+    "voice": "gemma",
+    "response_projector_mode": "response_hidden_q1_query_film_v2",
+    "voice_conditioning_mode": "x_vector_only",
+    "conditioning_source": "training_default",
+    "reference_wav_path": "/workspace/artifacts/voices/reference.wav",
+    "reference_wav_sha256": "480f55f41c71c3d79c2a9acc48f0bfb3c5a46222e6e9ebf3e2888e93501a6b5c",
+    "voice_conditioning_ablation": false,
+    "turn_policy": "gemma_native_control6",
+    "policy_id": "gemma_native_control6",
+    "policy_actions": [
+      "LISTEN",
+      "SPEAK",
+      "CONTINUE",
+      "YIELD",
+      "BACKCHANNEL",
+      "REPLAN"
+    ],
+    "policy_input_contract": "ListenerOutput.gemma_hidden_t:1536:current_frame",
+    "policy_base_rows_validated": true,
+    "response_lora_applied": false,
+    "native_action_selection": "wake_scoped",
+    "semantic_prefix_enabled": true,
+    "semantic_prefix_schema_version": 2,
+    "semantic_prefix_contract": "gemma_native_control6_semantic_prefix_boa_v2",
+    "semantic_prefix_capacity_tokens": 291,
+    "semantic_prefix_actual_len": 34,
+    "semantic_prefix_committed_history_revision": 1,
+    "semantic_prefix_applied_history_revision": null,
+    "semantic_prefix_context_current": false
+  },
+  "errors": [
+    {
+      "type": "error",
+      "error": {
+        "code": "INFERENCE_ERROR",
+        "message": "native Q1 graph serving requires an exclusive response talk-context slot"
+      },
+      "response_id": "resp_f732493af8b6",
+      "runtime_metrics": {
+        "generation_trace": {
+          "conditioned_action": "SPEAK",
+          "action_instruction": null,
+          "prompt_action_instruction": false,
+          "completed_history_roles": [],
+          "thinker_token_ids": [],
+          "first_thinker_token_id": null,
+          "terminal_reason": null
+        },
+        "direct_audio": {
+          "processor_prepare_ms": 12.328221462666988,
+          "pcm_samples": 46080
+        },
+        "thinker": {
+          "thinker_prefill_lock_wait_ms": 0.034,
+          "thinker_prefill_lock_hold_ms": 66.703,
+          "thinker_prefill_lock_hold_max_ms": 66.703,
+          "thinker_decode_lock_wait_ms": 0.663,
+          "thinker_decode_lock_hold_ms": 508.409,
+          "thinker_decode_lock_hold_max_ms": 26.651,
+          "thinker_prefill_chunks": 1,
+          "thinker_decode_steps": 26,
+          "listener_admission_thinker_prefill_wait_ms": 0.063,
+          "listener_admission_thinker_prefill_wait_max_ms": 0.034,
+          "listener_admission_thinker_decode_wait_ms": 0.0,
+          "listener_admission_thinker_decode_wait_max_ms": 0.0,
+          "thinker_audio_prefill": true,
+          "thinker_audio_input_prepare_ms": 0.674,
+          "thinker_cache_reused_tokens": 0,
+          "thinker_cache_hit": false,
+          "thinker_cache_reason": "fresh:audio_cross_response_prefix_reuse_disabled_for_v2",
+          "thinker_cache_copy_tokens": 0,
+          "thinker_cache_copy_bytes": 0,
+          "thinker_cache_copy_ms": 0.0,
+          "thinker_cache_copy_lock_hold_ms": 0.0,
+          "thinker_cache_init_method": "eager_first_real_chunk",
+          "thinker_audio_feature_enqueue_ms": 76.03,
+          "thinker_prefill_lock_hold_80ms_frames": 0.8337867446243763,
+          "thinker_cache_init_ms": 146.231,
+          "thinker_audio_encoder_gpu_ms": 75.991,
+          "thinker_prefill_ms": 145.88,
+          "thinker_decode_ms": 912.046,
+          "forced_action_token_count": 0,
+          "forced_action_override_count": 0,
+          "forced_structure_token_count": 17,
+          "forced_structure_override_count": 14,
+          "terminal_reason": "eos"
+        },
+        "audio_history_archive": {
+          "status": "ready",
+          "response_action": "SPEAK",
+          "transcript_committed": true,
+          "source": "heard_action_say_v2"
+        },
+        "audio_response_protocol": {
+          "response_protocol": "heard_action_say_v2",
+          "first_thinker_token_id": 236782,
+          "status": "valid",
+          "response_action": "SPEAK",
+          "wake_action": "SPEAK",
+          "selected_action": "SPEAK",
+          "allowed_response_actions": [
+            "SPEAK",
+            "BACKCHANNEL"
+          ],
+          "action_constraint": "native_choice_with_wake_allowlist",
+          "action_forced": false,
+          "forced_action_token_count": 0,
+          "forced_action_override_count": 0,
+          "forced_structure_token_count": 11,
+          "forced_structure_override_count": 14,
+          "structure_forced": true,
+          "bounded_output": false,
+          "predecode_candidate_checks": 33,
+          "predecode_candidate_replacements": 6,
+          "predecode_bounded_closures": 0,
+          "backchannel_say_lexicon_pool_overrides": 0,
+          "backchannel_say_lexicon_constrained": false,
+          "backchannel_say_lexicon_phrase_count": 0,
+          "backchannel_say_lexicon_rejections": 0,
+          "say_chars": 25,
+          "output_token_count": 26,
+          "say_hidden_tokens": 7,
+          "say_token_spans": [
+            {
+              "token_index": 18,
+              "token_id": 146345,
+              "char_start": 0,
+              "char_end": 4
+            },
+            {
+              "token_index": 19,
+              "token_id": 674,
+              "char_start": 4,
+              "char_end": 7
+            },
+            {
+              "token_index": 20,
+              "token_id": 76078,
+              "char_start": 7,
+              "char_end": 15
+            },
+            {
+              "token_index": 21,
+              "token_id": 545,
+              "char_start": 15,
+              "char_end": 17
+            },
+            {
+              "token_index": 22,
+              "token_id": 147331,
+              "char_start": 17,
+              "char_end": 23
+            },
+            {
+              "token_index": 23,
+              "token_id": 236746,
+              "char_start": 23,
+              "char_end": 24
+            },
+            {
+              "token_index": 24,
+              "token_id": 1781,
+              "char_start": 24,
+              "char_end": 25
+            }
+          ]
+        },
+        "output_backpressure": {
+          "status": "enqueued",
+          "queue_kind": "text",
+          "burst_items": 1,
+          "wait_ms": 0.015,
+          "attempts": 1
+        },
+        "frame_residual_adapter": {
+          "response_action": "SPEAK",
+          "source": "validated_v2_say_posttoken_hidden",
+          "adapter_mode": "response_hidden_q1_query_film_v2",
+          "qwen_semantic_text_unchanged": true,
+          "qwen_prefix_slots_added": 0,
+          "qwen_route": "plain_native_audio_q1"
+        },
+        "scheduler": {
+          "ticks": 53,
+          "missing_ticks": 0,
+          "input_frames_received": 55,
+          "samples_received": 70400,
+          "duplicate_ticks": 0,
+          "out_of_order_ticks": 0,
+          "deadline_misses": 0,
+          "skipped_overdue_deadlines": 0,
+          "deadline_miss_rate": 0.0,
+          "tick_jitter_p99_ms": 0.0,
+          "input_frames_during_speaking": 0,
+          "callbacks_active": false,
+          "first_input_anchor_enabled": false,
+          "first_input_anchor_applied": false,
+          "first_input_anchor_ns": null,
+          "ready_frame_dispatch_enabled": false,
+          "input_samples_received": 70400,
+          "input_frames_enqueued": 55,
+          "input_frames_consumed": 54,
+          "dropped_input_frames": 0,
+          "duplicate_input_frames": 0,
+          "out_of_order_input_frames": 0,
+          "queue_depth_frames": 1,
+          "queue_capacity_frames": 6
+        }
+      }
+    }
+  ],
+  "partial_report_path": "/workspace/artifacts/conversation_quality_20261014/chat_baseline_natural_20261015/say_only_streaming_20261016/heard_action_say_v2_streaming_fix/partial_report.json",
+  "stopped_after_incomplete_or_failed_response": "initial"
+}

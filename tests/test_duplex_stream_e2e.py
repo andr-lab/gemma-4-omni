@@ -30,6 +30,89 @@ def test_followup_audio_delay_starts_from_first_response_done():
     )
 
 
+def test_isolated_bargein_observation_waits_from_last_injected_sample():
+    due = duplex_stream_e2e._bargein_observation_due
+
+    assert not due("enqueued", 10_000_000_000, 18_000_000_000, 8.0)
+    assert not due("sent", None, 18_000_000_000, 8.0)
+    assert not due("sent", 10_000_000_000, 17_999_999_999, 8.0)
+    assert due("sent", 10_000_000_000, 18_000_000_000, 8.0)
+
+
+def test_isolated_observation_sender_stops_with_nonterminal_active_response(tmp_path):
+    async def run():
+        probe = RealtimePairProbe(
+            "ws://unused", tmp_path / "isolated-cleanup", max_turns=1,
+            max_duration_s=30, bargein_wav=tmp_path / "correction.wav",
+            bargein_isolated_observation_s=8,
+        )
+        probe.isolated_observation_complete = True
+        peer_a = {
+            "speaker": "A", "ws": object(), "queue": asyncio.Queue(),
+            "ack_pending": deque([(1, time.monotonic_ns())]), "ack_wakeup": asyncio.Event(),
+            "stop_sender": True, "active": {"A-long-response"}, "route_pending": 0,
+        }
+        peer_b = {
+            "speaker": "B", "ws": object(), "queue": asyncio.Queue(),
+            "ack_pending": deque(), "ack_wakeup": asyncio.Event(),
+            "stop_sender": True, "active": set(), "route_pending": 0,
+        }
+        probe.peers = {"A": peer_a, "B": peer_b}
+
+        async def acknowledge_after_drain_starts():
+            await asyncio.sleep(0.01)
+            peer_a["ack_pending"].clear()
+            peer_a["ack_wakeup"].set()
+
+        ack_task = asyncio.create_task(acknowledge_after_drain_starts())
+        await asyncio.wait_for(probe._send_loop(peer_a), timeout=0.1)
+        await ack_task
+        assert not peer_a["ack_pending"]
+
+    asyncio.run(run())
+
+
+def test_isolated_observation_completion_disables_auto_response_after_window(tmp_path):
+    probe = RealtimePairProbe(
+        "ws://unused", tmp_path / "isolated-observation-deadline", max_turns=1,
+        max_duration_s=30, bargein_wav=tmp_path / "correction.wav",
+        bargein_isolated_observation_s=8,
+    )
+    peer_a = {
+        "speaker": "A", "ws": object(), "queue": asyncio.Queue(),
+        "ack_pending": deque(), "ack_wakeup": asyncio.Event(),
+        "stop_sender": False, "active": {"A-long-response"}, "route_pending": 0,
+    }
+    peer_b = {
+        "speaker": "B", "ws": object(), "queue": asyncio.Queue(),
+        "ack_pending": deque(), "ack_wakeup": asyncio.Event(),
+        "stop_sender": False, "active": set(), "route_pending": 0,
+    }
+    probe.peers = {"A": peer_a, "B": peer_b}
+    disable_requests = []
+    probe._request_auto_response_disable = lambda reason: disable_requests.append(
+        (reason, time.monotonic_ns())
+    )
+    last_sent_ns = time.monotonic_ns() - 8_000_000_001
+    injection = {"status": "sent", "last_sent_at_ns": last_sent_ns}
+
+    assert not duplex_stream_e2e._bargein_observation_due(
+        "sent", last_sent_ns, last_sent_ns + 7_999_999_999, 8.0,
+    )
+    assert duplex_stream_e2e._bargein_observation_due(
+        "sent", last_sent_ns, last_sent_ns + 8_000_000_000, 8.0,
+    )
+    probe._complete_isolated_bargein_observation(injection)
+
+    assert probe.isolated_observation_complete
+    assert probe.isolated_observation_completed_at_ns >= last_sent_ns + 8_000_000_000
+    assert probe.bridge_stopped
+    assert probe.stop_senders_requested
+    assert all(peer["stop_sender"] for peer in (peer_a, peer_b))
+    assert disable_requests[0][0] == "isolated_bargein_observation_complete"
+    assert disable_requests[0][1] >= last_sent_ns + 8_000_000_000
+
+
 def test_raw_audio_quality_reports_original_pcm_rails_without_clipping():
     pcm = np.asarray([-1.25, -1.0, -0.5, 0.0, 0.5, 1.0, 1.25], dtype=np.float32)
 
@@ -141,6 +224,15 @@ def test_batch_summary_uses_last_row_decision_and_counts_shared_phases_once(tmp_
         "listener_batch_native_output_health_row_sequence_position": 4,
         "listener_batch_native_output_health_row_cache_position": 141,
         "listener_batch_native_output_health_native_context_id": 9001,
+        "logical_q_len": 0,
+        "kv_rollback_tokens": 2,
+        "kv_rollback_enqueue_ms": 0.05,
+        "listener_cache_position_before": 141,
+        "listener_cache_position_after": 141,
+        "listener_valid_history_tokens_before": 141,
+        "listener_valid_history_tokens_after": 141,
+        "native_cache_current_position_after": 141,
+        "native_cache_valid_kv_len_after": 141,
         "frame_id": 37,
     }
     decision_common = {
@@ -1828,6 +1920,9 @@ def test_pair_counts_audible_responses_not_deferred_created_events_and_routes_ac
                 "speaker": speaker,
                 "ws": ws,
                 "queue": asyncio.Queue(maxsize=8),
+                "route_queue": asyncio.Queue(maxsize=8),
+                "route_pending": 0,
+                "route_queue_high_water": 0,
                 "queue_frames_enqueued": 0,
                 "queue_high_water": 0,
                 "ack_wakeup": asyncio.Event(),
@@ -1984,6 +2079,15 @@ def test_pair_client_ack_projection_retains_truthful_unmeasured_listener_end():
         "listener_batch_native_output_health_row_sequence_position": 4,
         "listener_batch_native_output_health_row_cache_position": 141,
         "listener_batch_native_output_health_native_context_id": 9001,
+        "logical_q_len": 0,
+        "kv_rollback_tokens": 2,
+        "kv_rollback_enqueue_ms": 0.05,
+        "listener_cache_position_before": 141,
+        "listener_cache_position_after": 141,
+        "listener_valid_history_tokens_before": 141,
+        "listener_valid_history_tokens_after": 141,
+        "native_cache_current_position_after": 141,
+        "native_cache_valid_kv_len_after": 141,
         "frame_id": 37,
     }
     projected = duplex_stream_e2e._project_input_ack_fields(event)
@@ -1992,6 +2096,13 @@ def test_pair_client_ack_projection_retains_truthful_unmeasured_listener_end():
     assert projected["scheduler_enqueue_ns"] == 100
     assert projected["scheduler_listener_end_ns"] is None
     assert projected["scheduler_listener_callback_ms"] is None
+    assert projected["logical_q_len"] == 0
+    assert projected["kv_rollback_tokens"] == 2
+    assert projected["kv_rollback_enqueue_ms"] == 0.05
+    assert projected["listener_cache_position_before"] == projected["listener_cache_position_after"] == 141
+    assert projected["listener_valid_history_tokens_before"] == projected["listener_valid_history_tokens_after"] == 141
+    assert projected["native_cache_current_position_after"] == 141
+    assert projected["native_cache_valid_kv_len_after"] == 141
     assert projected["listener_batch_native_control6_raw_score_ms"] == 6.5
     assert projected["listener_batch_native_output_health_ms"] == 0.4
     assert projected["listener_batch_semantic_prefix_build_ms"] == 3.0
@@ -2072,6 +2183,8 @@ def test_pair_bargein_wav_is_opt_in_one_shot_local_to_target_and_delayed(tmp_pat
             return {
                 "speaker": speaker,
                 "queue": asyncio.Queue(maxsize=8),
+                "route_queue": asyncio.Queue(maxsize=8),
+                "route_queue_high_water": 0,
                 "queue_frames_enqueued": 0,
                 "queue_high_water": 0,
                 "ack_capacity": 6,
@@ -2134,15 +2247,15 @@ def test_pair_bargein_wav_is_opt_in_one_shot_local_to_target_and_delayed(tmp_pat
         monkeypatch.setattr(duplex_stream_e2e.asyncio, "to_thread", immediate_to_thread)
 
         probe = RealtimePairProbe(
-            "ws://unused", tmp_path / "injected", max_turns=5, max_duration_s=5,
+            "ws://unused", tmp_path / "injected", max_turns=1, max_duration_s=5,
             bargein_wav=injection_wav,
+            bargein_isolated_observation_s=8,
         )
         peer_a, peer_b = make_peer("A"), make_peer("B")
         probe.peers = {"A": peer_a, "B": peer_b}
         probe.started_ns = 0
         logs = []
         probe.log = lambda speaker, event: logs.append({"speaker": speaker, **event})
-        probe._enqueue_route_item = lambda *_args: None
 
         peer_a["ws"] = FakeWebSocket(probe, peer_a, [
             ({"type": "response.created", "response_id": "A-response"}, 400_000_000),
@@ -2164,6 +2277,11 @@ def test_pair_bargein_wav_is_opt_in_one_shot_local_to_target_and_delayed(tmp_pat
         ], wait_after_first_audio=True)
         await probe._receive_loop(peer_b)
         assert probe.bargein_task is not None and probe.bargein_task.done()
+        assert probe.isolated_observation_active is True
+        assert probe.auto_response_disable_task is None
+        assert probe.auto_response_disable_reason is None
+        assert peer_a["route_queue"].empty()
+        assert peer_b["route_queue"].empty()
         assert len(sleep_calls) == 1
         assert sleep_calls[0] == pytest.approx(0.5)
         assert fake_now_ns[0] == 1_800_000_000
@@ -2179,6 +2297,8 @@ def test_pair_bargein_wav_is_opt_in_one_shot_local_to_target_and_delayed(tmp_pat
         assert all(item[4]["trigger_received_at_ns"] == trigger_ns for item in queued)
         assert all(item[4]["delay_ms"] == 500 for item in queued)
         assert [item[4]["frame_index"] for item in queued] == [0, 1]
+        assert [(item[4]["source_sample_start"], item[4]["source_sample_end"])
+                for item in queued] == [(0, 1280), (1280, 2560)]
 
         peer_b["queue"].put_nowait(queued[0])
         peer_b["queue"].put_nowait(queued[1])
@@ -2226,5 +2346,98 @@ def test_pair_bargein_wav_is_opt_in_one_shot_local_to_target_and_delayed(tmp_pat
         assert sent_summary["frame_count"] == 2
         assert sent_summary["first_sent_at_ns"] is not None
         assert sent_summary["last_sent_at_ns"] is not None
+
+        # A send already inside the target WebSocket is allowed to finish, but
+        # the single sender must place the correction after it and suppress any
+        # stale relay that reaches the queue after isolation starts.
+        isolated_probe = RealtimePairProbe(
+            "ws://unused", tmp_path / "inflight-isolation", max_turns=1,
+            max_duration_s=5, bargein_wav=injection_wav,
+            bargein_isolated_observation_s=8,
+        )
+        isolated_peer = make_peer("B")
+        isolated_probe.peers = {"A": make_peer("A"), "B": isolated_peer}
+        isolated_probe.stop = asyncio.Event()
+        isolation_logs = []
+        isolated_probe.log = lambda speaker, event: isolation_logs.append(
+            {"speaker": speaker, **event}
+        )
+
+        class BlockingFirstSendWebSocket:
+            def __init__(self, peer):
+                self.peer = peer
+                self.payloads = []
+                self.first_send_started = asyncio.Event()
+                self.release_first_send = asyncio.Event()
+
+            async def send(self, payload):
+                self.payloads.append(json.loads(payload))
+                if len(self.payloads) == 1:
+                    self.first_send_started.set()
+                    await self.release_first_send.wait()
+                self.peer["ack_pending"].clear()
+                self.peer["ack_wakeup"].set()
+
+        barrier_ws = BlockingFirstSendWebSocket(isolated_peer)
+        isolated_peer["ws"] = barrier_ws
+        isolated_peer["stop_sender"] = True
+        isolated_peer["queue"].put_nowait((
+            np.ones(duplex_stream_e2e.FRAME_SAMPLES, dtype=np.float32),
+            "prior-response", (), time.monotonic_ns(), {"source_kind": "relay"},
+        ))
+        isolated_peer["queue"].put_nowait((
+            np.ones(duplex_stream_e2e.FRAME_SAMPLES, dtype=np.float32),
+            "queued-response", (), time.monotonic_ns(), {"source_kind": "relay"},
+        ))
+        sender_task = asyncio.create_task(isolated_probe._send_loop(isolated_peer))
+        await asyncio.wait_for(barrier_ws.first_send_started.wait(), timeout=1)
+        isolated_probe._begin_isolated_bargein_observation("trigger-response")
+        isolation_event = next(
+            event for event in isolation_logs
+            if event["type"] == "probe.isolated_bargein_observation_started"
+        )
+        assert isolation_event["preexisting_websocket_sends"] == [{
+            "speaker": "B",
+            "response_id": "prior-response",
+            "source_kind": "relay",
+            "send_started_at_ns": isolation_event["preexisting_websocket_sends"][0]["send_started_at_ns"],
+        }]
+        assert isolation_event["preexisting_websocket_sends"][0]["send_started_at_ns"] is not None
+        assert isolated_peer["queue"].empty()
+        queue_clear_event = next(
+            event for event in isolation_logs
+            if event["type"] == "probe.isolated_bargein_relay_queues_cleared"
+        )
+        assert queue_clear_event["dropped_queued_relay_items"] == 1
+        injection_meta = {
+            "source_kind": "injection", "injection_id": "isolated-injection",
+            "trigger_response_id": "trigger-response", "generation_id": 1,
+            "frame_index": 0, "frame_count": 1,
+            "source_sample_start": 0, "source_sample_end": duplex_stream_e2e.FRAME_SAMPLES,
+            "source_sample_rate_hz": duplex_stream_e2e.INPUT_RATE,
+        }
+        isolated_peer["queue"].put_nowait((
+            np.ones(duplex_stream_e2e.FRAME_SAMPLES, dtype=np.float32),
+            "isolated-injection", (), time.monotonic_ns(), injection_meta,
+        ))
+        isolated_peer["queue"].put_nowait((
+            np.ones(duplex_stream_e2e.FRAME_SAMPLES, dtype=np.float32),
+            "late-response", (), time.monotonic_ns(), {"source_kind": "relay"},
+        ))
+        barrier_ws.release_first_send.set()
+        await asyncio.wait_for(sender_task, timeout=2)
+        send_records = isolated_peer["input_frame_send_records"]
+        assert [record["source_response_id"] for record in send_records] == [
+            "prior-response", "isolated-injection",
+        ]
+        assert send_records[0]["sent_at_ns"] <= send_records[1]["send_started_at_ns"]
+        injection_sent = next(
+            event for event in isolation_logs
+            if event["type"] == "probe.input_frame_sent"
+            and event.get("source_kind") == "injection"
+        )
+        assert injection_sent["sent_at_ns"] >= isolation_event["started_at_ns"]
+        assert isolated_peer["isolated_relay_frames_dropped"] == 2
+        assert len(barrier_ws.payloads) == 2
 
     asyncio.run(run())

@@ -1,0 +1,14 @@
+{
+  "created_at_utc": "2026-10-18T07:39:36.446850+00:00",
+  "endpoint": "POST /v1/chat/completions via SSH local forward",
+  "model": "gemma-4-omni-duplex",
+  "modalities": [
+    "text"
+  ],
+  "note": "Sequential text-only baseline. A correction follows a completed assistant response; B is transcript text plus a pause marker, not a streaming-audio comparison.",
+  "artifacts": [
+    "A_initial_milano.json",
+    "A_correction_torino.json",
+    "B_docker_full_transcript.json"
+  ]
+}

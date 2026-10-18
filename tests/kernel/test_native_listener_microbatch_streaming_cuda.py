@@ -73,7 +73,7 @@ def test_streaming_state_parity_growth_permutation_and_epoch_reset() -> None:
         attention_backend_id=3,
         rmsnorm_backend_id=2,
         max_seq_len=16_384,
-        stream_q_len=4,
+        stream_q_len=2,
     )
     backend = GemmaAudioTowerBackend(thinker, device=str(device), use_native_lm=False)
     frontend = ListenerMicrobatchAudioFrontend(
@@ -187,7 +187,7 @@ def test_streaming_state_parity_growth_permutation_and_epoch_reset() -> None:
                 reference = NativeGemmaListenerLM(
                     lm,
                     max_seq_len=16_384,
-                    stream_q_len=4,
+                    stream_q_len=2,
                     enable_cuda_graph=False,
                     attention_backend=3,
                     rmsnorm_backend=2,
@@ -204,7 +204,7 @@ def test_streaming_state_parity_growth_permutation_and_epoch_reset() -> None:
             owner_provider = NativeGemmaListenerLM(
                 lm,
                 max_seq_len=16_384,
-                stream_q_len=4,
+                stream_q_len=2,
                 enable_cuda_graph=False,
                 attention_backend=3,
                 rmsnorm_backend=2,

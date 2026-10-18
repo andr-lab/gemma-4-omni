@@ -94,7 +94,7 @@ class NativeListenerMicrobatchParityProbeTests(unittest.TestCase):
                 attention_backend_id=3,
                 rmsnorm_backend_id=2,
                 max_seq_len=16384,
-                stream_q_len=4,
+                stream_q_len=2,
             )
             report: dict[str, object] = {"status": "RUNNING"}
             artifacts: dict[str, np.ndarray] = {}

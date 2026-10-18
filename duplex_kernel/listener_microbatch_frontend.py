@@ -1,10 +1,9 @@
-"""CPU-testable shared listener audio frontend.
+"""CPU-testable shared listener frontend for causal Q=2 80 ms ticks.
 
-This module stages per-session PCM/mel transitions and forms one ``[N, 1024,
-128]`` tensor. CUDA keeps the tower geometry at M=1 for each row. CPU tests
-may continue to use one vectorized call. It does not own the native listener or
-serving lifecycle. A caller commits staged PCM tails and mel histories only after
-the complete listener transaction has succeeded.
+This module stages per-session PCM/mel transitions and forms one user-only
+``[N, W, 128]`` tensor: ``W - 8`` prior rows plus the current eight. CUDA keeps
+the tower geometry at M=1 for each row. A caller commits staged PCM tails and
+mel histories only after the complete listener transaction has succeeded.
 """
 from __future__ import annotations
 
@@ -18,7 +17,6 @@ from typing import Any
 import numpy as np
 import torch
 
-from duplex_kernel.gemma_representation import interleave_duplex_mel
 from duplex_kernel.listener import AudioTowerRowTiming
 from duplex_kernel.listener_microbatch import ListenerBatch
 from duplex_kernel.microbatch_contract import (
@@ -31,14 +29,52 @@ from duplex_kernel.microbatch_contract import (
 )
 
 
-# Source parity: GemmaListenerState defaults to 64 context frames; production
-# keeps 8 mel rows per frame and interleaves user/reference blocks into 1024 rows.
+# Source parity: GemmaListenerState defaults to 64 context frames and keeps
+# eight mel rows per frame; the current default window is 240 user Mel rows.
 CONTEXT_FRAMES = 64
 MEL_ROWS_PER_FRAME = 8
 MEL_HISTORY_ROWS = CONTEXT_FRAMES * MEL_ROWS_PER_FRAME
-INTERLEAVED_HISTORY_ROWS = 2 * MEL_HISTORY_ROWS
-SOFT_TOKENS_PER_FRAME = 4
+MEL_WINDOW_ROWS = 240
+MEL_CONTEXT_ROWS = MEL_WINDOW_ROWS - MEL_ROWS_PER_FRAME
+SOFT_TOKENS_PER_FRAME = 2
+TOWER_OUTPUT_ROWS_PER_WINDOW = MEL_WINDOW_ROWS // 4
+CURRENT_Q_START = TOWER_OUTPUT_ROWS_PER_WINDOW - SOFT_TOKENS_PER_FRAME
 REFERENCE_DELAY_FRAMES = 1
+
+
+@dataclass(frozen=True, slots=True)
+class MelWindowGeometry:
+    mel_window_rows: int
+    context_rows: int
+    tower_output_rows: int
+    q_start: int
+    required_history_frames: int
+
+
+def validate_mel_window_rows(mel_window_rows: int) -> int:
+    """Validate a fixed Gemma audio-tower Mel window geometry."""
+    if (
+        isinstance(mel_window_rows, bool)
+        or not isinstance(mel_window_rows, int)
+        or mel_window_rows < MEL_ROWS_PER_FRAME
+        or mel_window_rows % 4 != 0
+    ):
+        raise ValueError("mel_window_rows must be a multiple of 4 and at least 8")
+    return mel_window_rows
+
+
+def mel_window_geometry(mel_window_rows: int) -> MelWindowGeometry:
+    rows = validate_mel_window_rows(mel_window_rows)
+    context_rows = rows - MEL_ROWS_PER_FRAME
+    required_history_frames = (context_rows + MEL_ROWS_PER_FRAME - 1) // MEL_ROWS_PER_FRAME
+    tower_output_rows = rows // 4
+    return MelWindowGeometry(
+        mel_window_rows=rows,
+        context_rows=context_rows,
+        tower_output_rows=tower_output_rows,
+        q_start=tower_output_rows - SOFT_TOKENS_PER_FRAME,
+        required_history_frames=required_history_frames,
+    )
 
 IncrementalMelExtractor = Callable[
     [np.ndarray, np.ndarray | None], tuple[np.ndarray, np.ndarray]
@@ -49,7 +85,6 @@ class _Workspace:
     capacity: int
     cpu_features: np.ndarray
     features: torch.Tensor
-    feature_mask: torch.Tensor
     manifest_id: str | None = None
 
 
@@ -101,9 +136,11 @@ class PreparedListenerAudioBatch:
         owner_thread_id: int,
         release_workspace: Callable[[str], None],
         abort_workspace: Callable[[str], None],
+        valid_mel_counts: tuple[int, ...] | None = None,
     ) -> None:
         self.manifest_id = manifest_id
         self.input_shape = input_shape
+        self.valid_mel_counts = valid_mel_counts or tuple(input_shape[1] for _ in audio_soft_tokens)
         self.audio_soft_tokens = audio_soft_tokens
         self._snapshots = snapshots
         self.mel_prepare_ms_by_row = mel_prepare_ms_by_row
@@ -243,6 +280,7 @@ class ListenerMicrobatchAudioFrontend:
         device: torch.device | str,
         dtype: torch.dtype,
         context_frames: int = CONTEXT_FRAMES,
+        mel_window_rows: int = MEL_WINDOW_ROWS,
         audio_tower_lock: Any | None = None,
         audio_tower_row_runner: AudioTowerRowRunner | None = None,
     ) -> None:
@@ -258,13 +296,20 @@ class ListenerMicrobatchAudioFrontend:
             raise ValueError(
                 f"batched listener frontend is pinned to {CONTEXT_FRAMES} context frames"
             )
+        geometry = mel_window_geometry(mel_window_rows)
         if not isinstance(dtype, torch.dtype):
             raise TypeError("dtype must be a torch.dtype")
         self._gemma_model = gemma_model
         self._extract_single_frame = extract_single_frame
         self.device = torch.device(device)
         self.dtype = dtype
-        self.context_frames = context_frames
+        # 64 remains the existing minimum retained context. Larger configured
+        # windows grow Mel history only; LM/KV replay limits remain separate.
+        self.context_frames = max(context_frames, geometry.required_history_frames)
+        self.mel_window_rows = geometry.mel_window_rows
+        self.mel_context_rows = geometry.context_rows
+        self.tower_output_rows = geometry.tower_output_rows
+        self.current_q_start = geometry.q_start
         self.audio_tower_lock = audio_tower_lock
         if audio_tower_row_runner is not None and not callable(audio_tower_row_runner):
             raise TypeError("audio_tower_row_runner must be callable")
@@ -327,9 +372,13 @@ class ListenerMicrobatchAudioFrontend:
             try:
                 cpu_features = workspace.cpu_features[:n]
                 features = workspace.features[:n]
-                feature_mask = workspace.feature_mask[:n]
                 copy_started_ns = time.perf_counter_ns()
-                np.copyto(cpu_features, np.stack(feature_rows), casting="no")
+                cpu_features.fill(0.0)
+                valid_mel_counts = tuple(int(row.shape[0]) for row in feature_rows)
+                for index, (row, valid_rows) in enumerate(
+                    zip(feature_rows, valid_mel_counts, strict=True)
+                ):
+                    cpu_features[index, :valid_rows] = row
                 source_cpu = torch.from_numpy(cpu_features)
                 frontend_copy_cuda_events = self._cuda_event_pair()
                 if frontend_copy_cuda_events is not None:
@@ -340,14 +389,6 @@ class ListenerMicrobatchAudioFrontend:
                     non_blocking=True,
                 )
                 features.copy_(source, non_blocking=True)
-                # Match the active standard listener path: `_pad_rows` makes
-                # a fixed-width 64-frame tensor by right-padding mel history,
-                # and `GemmaAudioTowerBackend.listen` marks every row valid.
-                # Do not reinterpret zero-padded rows as masked context.
-                feature_mask.fill_(True)
-                for index, snapshot in enumerate(snapshots):
-                    if len(snapshot.user_mels) != len(snapshot.assistant_mels):
-                        raise RuntimeError("staged user/reference histories must stay frame-aligned")
                 if frontend_copy_cuda_events is not None:
                     frontend_copy_cuda_events[1].record(timing_stream)
                 frontend_copy_ms = max(
@@ -384,16 +425,17 @@ class ListenerMicrobatchAudioFrontend:
                         row_outputs: list[torch.Tensor] = []
                         row_timings: list[AudioTowerRowTiming] = []
                         for index, snapshot in enumerate(snapshots):
-                            q4_start = (len(snapshot.user_mels) - 1) * SOFT_TOKENS_PER_FRAME
+                            valid_rows = valid_mel_counts[index]
+                            q_start = valid_rows // 4 - SOFT_TOKENS_PER_FRAME
                             with torch.inference_mode():
                                 row_output, row_timing = self.audio_tower_row_runner(
-                                    features[index:index + 1], q4_start
+                                    features[index:index + 1, :valid_rows, :], q_start
                                 )
                             if not isinstance(row_output, torch.Tensor) or tuple(row_output.shape) != (
                                 1, SOFT_TOKENS_PER_FRAME, CONTROL_HIDDEN_WIDTH
                             ):
                                 raise RuntimeError(
-                                    "N=1 audio tower row runner must return [1,4,1536]"
+                                    "N=1 audio tower row runner must return [1,2,1536]"
                                 )
                             if row_output.device != self.device or row_output.dtype != self.dtype:
                                 raise RuntimeError(
@@ -415,21 +457,36 @@ class ListenerMicrobatchAudioFrontend:
                             sum(item.graph_submit_ms for item in row_timings), 3
                         )
                         modes = {item.execution_mode for item in row_timings}
-                        if len(modes) != 1:
-                            raise RuntimeError("one batch cannot mix audio tower execution modes")
-                        audio_tower_execution_mode = next(iter(modes))
-                    else:
-                        with torch.inference_mode():
-                            output = self._gemma_model.get_audio_features(
-                                input_features=features,
-                                input_features_mask=feature_mask,
-                                return_dict=True,
-                            )
-                        soft_tokens = self._select_current_frame_tokens(
-                            output,
-                            n,
-                            tuple(len(snapshot.user_mels) - 1 for snapshot in snapshots),
+                        audio_tower_execution_mode = (
+                            next(iter(modes)) if len(modes) == 1 else "mixed_n1"
                         )
+                    else:
+                        by_valid_rows: dict[int, list[int]] = {}
+                        for index, valid_rows in enumerate(valid_mel_counts):
+                            by_valid_rows.setdefault(valid_rows, []).append(index)
+                        row_outputs_by_index: list[torch.Tensor | None] = [None] * n
+                        for valid_rows, indices in by_valid_rows.items():
+                            index_tensor = torch.tensor(indices, dtype=torch.long)
+                            group_features = features.index_select(0, index_tensor)[:, :valid_rows, :]
+                            group_mask = torch.ones(
+                                (len(indices), valid_rows), dtype=torch.bool, device=self.device
+                            )
+                            with torch.inference_mode():
+                                output = self._gemma_model.get_audio_features(
+                                    input_features=group_features,
+                                    input_features_mask=group_mask,
+                                    return_dict=True,
+                                )
+                            group_outputs = self._select_current_frame_tokens(
+                                output,
+                                len(indices),
+                                tuple(len(snapshots[index].user_mels) - 1 for index in indices),
+                            )
+                            for index, row_output in zip(indices, group_outputs, strict=True):
+                                row_outputs_by_index[index] = row_output
+                        if any(output is None for output in row_outputs_by_index):
+                            raise RuntimeError("frontend did not encode every startup/window row")
+                        soft_tokens = tuple(output for output in row_outputs_by_index if output is not None)
                     if audio_tower_cuda_events is not None:
                         audio_tower_cuda_events[1].record(timing_stream)
                 finally:
@@ -444,7 +501,8 @@ class ListenerMicrobatchAudioFrontend:
                 raise
             return PreparedListenerAudioBatch(
                 manifest_id=batch.manifest.manifest_id,
-                input_shape=(n, INTERLEAVED_HISTORY_ROWS, MEL_BINS),
+                input_shape=(n, self.mel_window_rows, MEL_BINS),
+                valid_mel_counts=valid_mel_counts,
                 audio_soft_tokens=soft_tokens,
                 snapshots=snapshots,
                 mel_prepare_ms_by_row=mel_prepare_ms_by_row,
@@ -485,16 +543,11 @@ class ListenerMicrobatchAudioFrontend:
             workspace = _Workspace(
                 capacity=capacity,
                 cpu_features=np.empty(
-                    (capacity, INTERLEAVED_HISTORY_ROWS, MEL_BINS), dtype=np.float32
+                    (capacity, self.mel_window_rows, MEL_BINS), dtype=np.float32
                 ),
                 features=torch.empty(
-                    (capacity, INTERLEAVED_HISTORY_ROWS, MEL_BINS),
+                    (capacity, self.mel_window_rows, MEL_BINS),
                     dtype=self.dtype,
-                    device=self.device,
-                ),
-                feature_mask=torch.zeros(
-                    (capacity, INTERLEAVED_HISTORY_ROWS),
-                    dtype=torch.bool,
                     device=self.device,
                 ),
             )
@@ -537,8 +590,12 @@ class ListenerMicrobatchAudioFrontend:
                 self.validate_reference_frame(frame)
             user_tail = _copy_optional_tail(state.user_pcm_tail)
             assistant_tail = _copy_optional_tail(state.assistant_pcm_tail)
-            user_history = _snapshot_mel_history(state.user_mel_history)
-            assistant_history = _snapshot_mel_history(state.assistant_mel_history)
+            user_history = _snapshot_mel_history(
+                state.user_mel_history, max_frames=self.context_frames
+            )
+            assistant_history = _snapshot_mel_history(
+                state.assistant_mel_history, max_frames=self.context_frames
+            )
             if len(user_history) != len(assistant_history):
                 raise RuntimeError("user and assistant mel histories are not frame-aligned")
 
@@ -560,9 +617,9 @@ class ListenerMicrobatchAudioFrontend:
 
             next_user_history = (user_history + (user_mel,))[-self.context_frames:]
             next_assistant_history = (assistant_history + (assistant_mel,))[-self.context_frames:]
-            padded_user = _pad_mel_history(next_user_history)
-            padded_assistant = _pad_mel_history(next_assistant_history)
-            feature_rows.append(interleave_duplex_mel(padded_user, padded_assistant))
+            feature_rows.append(
+                _user_mel_window(user_history, user_mel, mel_window_rows=self.mel_window_rows)
+            )
             snapshots.append(_StateSnapshot(
                 state=state,
                 frame_id=row.frame_id,
@@ -626,13 +683,11 @@ class ListenerMicrobatchAudioFrontend:
                 or frame_index < 0
             ):
                 raise RuntimeError("audio tower current-frame index must be non-negative")
-            start = frame_index * SOFT_TOKENS_PER_FRAME
-            end = start + SOFT_TOKENS_PER_FRAME
-            if valid.shape[0] < end:
+            if valid.shape[0] < SOFT_TOKENS_PER_FRAME:
                 raise RuntimeError(
-                    "Gemma audio tower returned fewer than 4 valid soft tokens for the current frame"
+                    "Gemma audio tower returned fewer than 2 valid soft tokens for the current tick"
                 )
-            result.append(valid[start:end].detach().clone())
+            result.append(valid[-SOFT_TOKENS_PER_FRAME:].detach().clone())
         return tuple(result)
 
 
@@ -673,17 +728,24 @@ def _history_container_like(
 ) -> list[np.ndarray] | deque[np.ndarray]:
     copied = [_copy_mel(value) for value in values]
     if isinstance(template, deque):
-        return deque(copied, maxlen=template.maxlen)
+        maxlen = template.maxlen
+        if maxlen is not None and len(copied) > maxlen:
+            maxlen = len(copied)
+        return deque(copied, maxlen=maxlen)
     return copied
 
 
-def _snapshot_mel_history(value: Any) -> tuple[np.ndarray, ...]:
+def _snapshot_mel_history(
+    value: Any,
+    *,
+    max_frames: int = CONTEXT_FRAMES,
+) -> tuple[np.ndarray, ...]:
     try:
         entries = tuple(value)
     except TypeError as exc:
         raise TypeError("mel history must be a finite iterable of frame arrays") from exc
-    if len(entries) > CONTEXT_FRAMES:
-        raise ValueError("mel history exceeds the pinned 64-frame context")
+    if len(entries) > max_frames:
+        raise ValueError(f"mel history exceeds its configured {max_frames}-frame context")
     return tuple(_validate_mel_rows(entry, "mel history frame") for entry in entries)
 
 
@@ -700,13 +762,40 @@ def _pad_mel_history(history: tuple[np.ndarray, ...]) -> np.ndarray:
     # This mirrors the active standard listener `_pad_rows`: chronological
     # history starts at row zero and zeros fill the fixed-width tail. The
     # standard path also sends an all-true input mask, so the audio tower sees
-    # those padded rows as valid context. Its current-frame Q4 is selected by
-    # frame index, not by taking the last four outputs.
+    # those padded rows as valid context. Its current-frame Q2 is selected by
+    # frame index, not by taking the last two outputs.
     return np.pad(
         joined,
         ((0, MEL_HISTORY_ROWS - joined.shape[0]), (0, 0)),
         mode="constant",
     )
+
+
+def _user_mel_window(
+    history: tuple[np.ndarray, ...],
+    current: np.ndarray,
+    *,
+    mel_window_rows: int = MEL_WINDOW_ROWS,
+) -> np.ndarray:
+    """Build a causal ``W - 8`` prior + 8-current user-only Mel window."""
+    geometry = mel_window_geometry(mel_window_rows)
+    if tuple(current.shape) != (MEL_ROWS_PER_FRAME, MEL_BINS):
+        raise ValueError("current user Mel must have shape [8,128]")
+    prior_rows = tuple(_validate_mel_rows(entry, "user Mel history") for entry in history)
+    current_rows = _validate_mel_rows(current, "current user Mel")
+    joined_prior = (
+        np.concatenate(prior_rows, axis=0)
+        if prior_rows else np.empty((0, MEL_BINS), dtype=np.float32)
+    )
+    context = (
+        joined_prior[-geometry.context_rows:]
+        if geometry.context_rows
+        else np.empty((0, MEL_BINS), dtype=np.float32)
+    )
+    result = np.concatenate((context, current_rows), axis=0)
+    if result.shape[0] > geometry.mel_window_rows or result.shape[0] % 4:
+        raise RuntimeError("user Mel window did not preserve its configured geometry")
+    return np.asarray(result, dtype=np.float32)
 
 
 def _validate_snapshot_unchanged(snapshot: _StateSnapshot) -> None:

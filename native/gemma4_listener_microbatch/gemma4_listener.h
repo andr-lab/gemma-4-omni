@@ -52,7 +52,7 @@ typedef struct {
 /* Configuration for context creation */
 typedef struct {
     uint32_t max_seq_len;         /* custom <=4096; ATen exact <=16384 */
-    uint32_t stream_q_len;        /* exactly 4 soft tokens per frame */
+    uint32_t stream_q_len;        /* exactly 2 soft tokens per 80 ms frame */
     bool enable_cuda_graph;       /* opt-in per-session CUSTOM Q4 step graph; default false */
     void *output_tensor_ptr;      /* optional preallocated [1, stream_q_len, hidden_size] BF16 */
     const void *frame_pad_ple_ptr;/* precomputed [1, stream_q_len, num_layers, ple_dim] BF16 token identities */
@@ -216,7 +216,7 @@ int gemma4_listener_prime_debug(
     cudaStream_t stream
 );
 
-/* Asynchronously execute one 80 ms audio frame (Q=4 soft tokens).
+/* Asynchronously execute one 80 ms audio frame (Q=2 soft tokens).
  * Calls in one primed context must use the same CUDA stream; reset() is the
  * explicit boundary for switching streams.  This avoids implicit sync while
  * keeping ordering fail-closed. */

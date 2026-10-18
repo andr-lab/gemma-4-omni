@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define GEMMA4_LISTENER_BATCH_API_VERSION 2u
+#define GEMMA4_LISTENER_BATCH_API_VERSION 5u
 #define GEMMA4_LISTENER_BATCH_PROBE_API_VERSION 1u
 #define GEMMA4_LISTENER_BATCH_TRACE_API_VERSION 1u
 #define GEMMA4_BATCH_SUPPORTED_MASK_ANY_POSITIVE_N 0x1u
@@ -236,13 +236,56 @@ int gemma4_listener_batch_step_async(
     gemma4_listener_batch_ctx *batch,
     const gemma4_listener_batch_row *rows,
     uint32_t row_count,
-    const void *audio_soft, /* contiguous BF16 [N,4,1536] */
+    const void *audio_soft, /* contiguous BF16 [N,2,1536] */
     const gemma4_tensor_meta *audio_soft_meta,
+    cudaStream_t listener_stream);
+/* Replay previously queued [2,1536] audio soft tokens through native audio
+ * PLE/KV after a model turn. Cache advances by Q2 while listener frame,
+ * state-version, and sequence cursors remain unchanged because the original
+ * ephemeral Q0 tick already accounted for this audio frame. */
+int gemma4_listener_batch_step_queued_audio_async(
+    gemma4_listener_batch_ctx *batch,
+    const gemma4_listener_batch_row *rows,
+    uint32_t row_count,
+    const void *audio_soft,
+    const gemma4_tensor_meta *audio_soft_meta,
+    cudaStream_t listener_stream);
+/* Run a token-text Q2 step using model-produced embeddings and complete
+ * projected PLE. Tensors are contiguous BF16 [N,2,1536] and
+ * [N,2,35,256] respectively; final norm remains part of the native step. */
+int gemma4_listener_batch_step_embedded_async(
+    gemma4_listener_batch_ctx *batch,
+    const gemma4_listener_batch_row *rows,
+    uint32_t row_count,
+    const void *inputs_embeds,
+    const gemma4_tensor_meta *inputs_embeds_meta,
+    const void *per_layer_inputs,
+    const gemma4_tensor_meta *per_layer_inputs_meta,
+    cudaStream_t listener_stream);
+/* Commit only the logical prefix of the immediately preceding physical-Q2
+ * append. The caller supplies that append's pre-step row identity. Frame,
+ * state-version, and sequence cursors stay advanced; only KV visibility and
+ * cache position are truncated. Must be called by the same owner before it
+ * publishes a replacement cursor. */
+int gemma4_listener_batch_truncate_after_step_async(
+    gemma4_listener_batch_ctx *batch,
+    uint32_t slot,
+    const gemma4_listener_batch_row *pre_step_row,
+    uint32_t logical_q_len,
+    cudaStream_t listener_stream);
+/* Rewind an idle native session's visible KV tail after a cancelled assistant
+ * branch. The row must describe the exact current session cursor and target
+ * must remain at or beyond the imported true-chat prefix. */
+int gemma4_listener_batch_rewind_session_async(
+    gemma4_listener_batch_ctx *batch,
+    uint32_t slot,
+    const gemma4_listener_batch_row *current_row,
+    uint32_t target_position,
     cudaStream_t listener_stream);
 int gemma4_listener_batch_output_acquire(
     gemma4_listener_batch_ctx *batch,
     uint64_t *out_generation,
-    const void **out_tensor, /* borrowed [N,4,1536], valid until release */
+    const void **out_tensor, /* borrowed [N,2,1536], valid until release */
     const gemma4_listener_batch_row **out_rows, /* ordered row provenance */
     uint32_t *out_row_count,
     cudaEvent_t *out_completion_event);
@@ -250,7 +293,7 @@ int gemma4_listener_batch_output_clone_async(
     gemma4_listener_batch_ctx *batch,
     uint64_t generation,
     uint32_t row_count,
-    void *clone_tensor, /* caller-owned contiguous BF16 [N,4,1536] */
+    void *clone_tensor, /* caller-owned contiguous BF16 [N,2,1536] */
     const gemma4_tensor_meta *clone_meta,
     cudaStream_t listener_stream,
     cudaEvent_t *out_clone_event);
@@ -267,6 +310,7 @@ int gemma4_listener_batch_output_health(
     gemma4_listener_batch_ctx *batch,
     uint64_t generation,
     const gemma4_listener_batch_row *rows,
+    const uint32_t *logical_q_lens,
     uint32_t row_count,
     int *out_nonfinite);
 /* Private-owner cleanup before any borrowed pointer escaped. Queues a wait on
@@ -323,13 +367,26 @@ int gemma4_listener_batch_copy_session_cache_async(
     const gemma4_listener_batch_row *source_row,
     cudaStream_t listener_stream);
 
+/* Clone one completed private session into an unprimed slot of the same
+ * owner/context. Source and destination rows must carry the same logical
+ * generation/epoch/frame/state/sequence and exact valid-KV cursor; only the
+ * destination native-context identity differs. K/V and semantic-prefix state
+ * are copied on listener_stream before the new slot is published. */
+int gemma4_listener_batch_clone_session_slot_async(
+    gemma4_listener_batch_ctx *batch,
+    uint32_t destination_slot,
+    const gemma4_listener_batch_row *destination_row,
+    uint32_t source_slot,
+    const gemma4_listener_batch_row *source_row,
+    cudaStream_t listener_stream);
+
 /* Optional capability bit 7 advertises this proof-only API. Every RMS buffer
- * carries all eight rows (N=2 times Q=4), contiguous BF16 [8,1536]: X is the
+ * carries all four rows (N=2 times Q=2), contiguous BF16 [4,1536]: X is the
  * captured pre-RMS input, batched is the production N=2 RMS output, and split
- * concatenates two reference RMS calls of [4,1536] each. Every q_proj buffer
- * likewise carries all eight rows: input is the captured RMS output [8,1536],
- * actual is the production q_proj capture [8,q_dim], batched is an explicit
- * replay through the same GEMM helper at M=8, and split concatenates two M=4
+ * concatenates two reference RMS calls of [2,1536] each. Every q_proj buffer
+ * likewise carries all four rows: input is the captured RMS output [4,1536],
+ * actual is the production q_proj capture [4,q_dim], batched is an explicit
+ * replay through the same GEMM helper at M=4, and split concatenates two M=2
  * helper calls. These are proof buffers only; reads wait only when explicitly
  * invoked and do not change the ABI3 or ordinary batch forward path. */
 int gemma4_listener_batch_probe_arm(gemma4_listener_batch_ctx *batch);

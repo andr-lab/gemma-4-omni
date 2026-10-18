@@ -1,0 +1,646 @@
+{
+  "model": "Systran/faster-whisper-small",
+  "device": "cpu",
+  "compute_type": "int8",
+  "results": [
+    {
+      "file": "A_initial_milano.wav",
+      "duration_s": null,
+      "language": "it",
+      "language_probability": 1,
+      "segments": [
+        {
+          "start_s": 0.0,
+          "end_s": 2.4,
+          "text": " Consigliami un itinerario di tre giorni a Milano.",
+          "words": [
+            {
+              "start_s": 0.0,
+              "end_s": 0.64,
+              "text": " Consigliami",
+              "probability": 0.7602992951869965
+            },
+            {
+              "start_s": 0.64,
+              "end_s": 0.82,
+              "text": " un",
+              "probability": 0.6833238005638123
+            },
+            {
+              "start_s": 0.82,
+              "end_s": 1.34,
+              "text": " itinerario",
+              "probability": 0.9719220002492269
+            },
+            {
+              "start_s": 1.34,
+              "end_s": 1.48,
+              "text": " di",
+              "probability": 0.98968106508255
+            },
+            {
+              "start_s": 1.48,
+              "end_s": 1.64,
+              "text": " tre",
+              "probability": 0.6096060276031494
+            },
+            {
+              "start_s": 1.64,
+              "end_s": 1.98,
+              "text": " giorni",
+              "probability": 0.9986730515956879
+            },
+            {
+              "start_s": 1.98,
+              "end_s": 2.04,
+              "text": " a",
+              "probability": 0.9956477284431458
+            },
+            {
+              "start_s": 2.04,
+              "end_s": 2.4,
+              "text": " Milano.",
+              "probability": 0.9937607049942017
+            }
+          ]
+        }
+      ],
+      "text": "Consigliami un itinerario di tre giorni a Milano."
+    },
+    {
+      "file": "A_correction_torino.wav",
+      "duration_s": null,
+      "language": "it",
+      "language_probability": 1,
+      "segments": [
+        {
+          "start_s": 0.0,
+          "end_s": 2.86,
+          "text": " Scusa, intendevo dire Turino, non Milano.",
+          "words": [
+            {
+              "start_s": 0.0,
+              "end_s": 0.56,
+              "text": " Scusa,",
+              "probability": 0.8242966334025065
+            },
+            {
+              "start_s": 0.86,
+              "end_s": 1.36,
+              "text": " intendevo",
+              "probability": 0.9637998143831888
+            },
+            {
+              "start_s": 1.36,
+              "end_s": 1.54,
+              "text": " dire",
+              "probability": 0.9873155355453491
+            },
+            {
+              "start_s": 1.54,
+              "end_s": 2.02,
+              "text": " Turino,",
+              "probability": 0.698816567659378
+            },
+            {
+              "start_s": 2.34,
+              "end_s": 2.48,
+              "text": " non",
+              "probability": 0.8949283957481384
+            },
+            {
+              "start_s": 2.48,
+              "end_s": 2.86,
+              "text": " Milano.",
+              "probability": 0.9979535937309265
+            }
+          ]
+        }
+      ],
+      "text": "Scusa, intendevo dire Turino, non Milano."
+    },
+    {
+      "file": "B_docker_before_pause.wav",
+      "duration_s": null,
+      "language": "it",
+      "language_probability": 1,
+      "segments": [
+        {
+          "start_s": 0.0,
+          "end_s": 1.46,
+          "text": " Sto avviando il servizio.",
+          "words": [
+            {
+              "start_s": 0.0,
+              "end_s": 0.3,
+              "text": " Sto",
+              "probability": 0.7650734782218933
+            },
+            {
+              "start_s": 0.3,
+              "end_s": 0.66,
+              "text": " avviando",
+              "probability": 0.9187172849973043
+            },
+            {
+              "start_s": 0.66,
+              "end_s": 0.8,
+              "text": " il",
+              "probability": 0.9961007833480835
+            },
+            {
+              "start_s": 0.8,
+              "end_s": 1.46,
+              "text": " servizio.",
+              "probability": 0.9943360090255737
+            }
+          ]
+        },
+        {
+          "start_s": 2.04,
+          "end_s": 3.96,
+          "text": " Da Carre il software per i container.",
+          "words": [
+            {
+              "start_s": 2.04,
+              "end_s": 2.36,
+              "text": " Da",
+              "probability": 0.7606894373893738
+            },
+            {
+              "start_s": 2.36,
+              "end_s": 2.66,
+              "text": " Carre",
+              "probability": 0.3179595619440079
+            },
+            {
+              "start_s": 2.66,
+              "end_s": 2.8,
+              "text": " il",
+              "probability": 0.6606926321983337
+            },
+            {
+              "start_s": 2.8,
+              "end_s": 3.08,
+              "text": " software",
+              "probability": 0.892619788646698
+            },
+            {
+              "start_s": 3.08,
+              "end_s": 3.42,
+              "text": " per",
+              "probability": 0.954353928565979
+            },
+            {
+              "start_s": 3.42,
+              "end_s": 3.5,
+              "text": " i",
+              "probability": 0.8713809251785278
+            },
+            {
+              "start_s": 3.5,
+              "end_s": 3.96,
+              "text": " container.",
+              "probability": 0.9465348124504089
+            }
+          ]
+        },
+        {
+          "start_s": 4.8,
+          "end_s": 5.9,
+          "text": " Uso paiz anekuda.",
+          "words": [
+            {
+              "start_s": 4.8,
+              "end_s": 5.08,
+              "text": " Uso",
+              "probability": 0.6361022889614105
+            },
+            {
+              "start_s": 5.08,
+              "end_s": 5.38,
+              "text": " paiz",
+              "probability": 0.394219733774662
+            },
+            {
+              "start_s": 5.38,
+              "end_s": 5.9,
+              "text": " anekuda.",
+              "probability": 0.5450793107350668
+            }
+          ]
+        }
+      ],
+      "text": "Sto avviando il servizio. Da Carre il software per i container. Uso paiz anekuda."
+    },
+    {
+      "file": "B_docker_after_pause.wav",
+      "duration_s": null,
+      "language": "it",
+      "language_probability": 1,
+      "segments": [
+        {
+          "start_s": 0.0,
+          "end_s": 3.28,
+          "text": " Il web socket riceve i frame ma la coda audio resta aperta.",
+          "words": [
+            {
+              "start_s": 0.0,
+              "end_s": 0.24,
+              "text": " Il",
+              "probability": 0.724873423576355
+            },
+            {
+              "start_s": 0.24,
+              "end_s": 0.4,
+              "text": " web",
+              "probability": 0.46708014607429504
+            },
+            {
+              "start_s": 0.4,
+              "end_s": 0.66,
+              "text": " socket",
+              "probability": 0.8288145065307617
+            },
+            {
+              "start_s": 0.66,
+              "end_s": 1.18,
+              "text": " riceve",
+              "probability": 0.9761621057987213
+            },
+            {
+              "start_s": 1.18,
+              "end_s": 1.28,
+              "text": " i",
+              "probability": 0.8081730008125305
+            },
+            {
+              "start_s": 1.28,
+              "end_s": 1.54,
+              "text": " frame",
+              "probability": 0.9202991724014282
+            },
+            {
+              "start_s": 1.54,
+              "end_s": 1.84,
+              "text": " ma",
+              "probability": 0.9496158361434937
+            },
+            {
+              "start_s": 1.84,
+              "end_s": 1.92,
+              "text": " la",
+              "probability": 0.9932436347007751
+            },
+            {
+              "start_s": 1.92,
+              "end_s": 2.16,
+              "text": " coda",
+              "probability": 0.9574130475521088
+            },
+            {
+              "start_s": 2.16,
+              "end_s": 2.42,
+              "text": " audio",
+              "probability": 0.9759071469306946
+            },
+            {
+              "start_s": 2.42,
+              "end_s": 2.84,
+              "text": " resta",
+              "probability": 0.9385340809822083
+            },
+            {
+              "start_s": 2.84,
+              "end_s": 3.28,
+              "text": " aperta.",
+              "probability": 0.9941131472587585
+            }
+          ]
+        },
+        {
+          "start_s": 3.86,
+          "end_s": 7.22,
+          "text": " Dammi una conferma breve e continuo, misuro la latenza.",
+          "words": [
+            {
+              "start_s": 3.86,
+              "end_s": 4.38,
+              "text": " Dammi",
+              "probability": 0.8699138462543488
+            },
+            {
+              "start_s": 4.38,
+              "end_s": 4.52,
+              "text": " una",
+              "probability": 0.9971407651901245
+            },
+            {
+              "start_s": 4.52,
+              "end_s": 5.06,
+              "text": " conferma",
+              "probability": 0.9182312488555908
+            },
+            {
+              "start_s": 5.06,
+              "end_s": 5.28,
+              "text": " breve",
+              "probability": 0.9822196960449219
+            },
+            {
+              "start_s": 5.28,
+              "end_s": 5.5,
+              "text": " e",
+              "probability": 0.9958528280258179
+            },
+            {
+              "start_s": 5.5,
+              "end_s": 6.08,
+              "text": " continuo,",
+              "probability": 0.8993589580059052
+            },
+            {
+              "start_s": 6.28,
+              "end_s": 6.66,
+              "text": " misuro",
+              "probability": 0.9646668136119843
+            },
+            {
+              "start_s": 6.66,
+              "end_s": 6.78,
+              "text": " la",
+              "probability": 0.9324748516082764
+            },
+            {
+              "start_s": 6.78,
+              "end_s": 7.22,
+              "text": " latenza.",
+              "probability": 0.8607653975486755
+            }
+          ]
+        }
+      ],
+      "text": "Il web socket riceve i frame ma la coda audio resta aperta. Dammi una conferma breve e continuo, misuro la latenza."
+    },
+    {
+      "file": "B_docker_15s_pause300.wav",
+      "duration_s": null,
+      "language": "it",
+      "language_probability": 1,
+      "segments": [
+        {
+          "start_s": 0.0,
+          "end_s": 1.48,
+          "text": " Sto avviando il servizio.",
+          "words": [
+            {
+              "start_s": 0.0,
+              "end_s": 0.28,
+              "text": " Sto",
+              "probability": 0.7449174225330353
+            },
+            {
+              "start_s": 0.28,
+              "end_s": 0.66,
+              "text": " avviando",
+              "probability": 0.9130847851435343
+            },
+            {
+              "start_s": 0.66,
+              "end_s": 0.82,
+              "text": " il",
+              "probability": 0.9966408014297485
+            },
+            {
+              "start_s": 0.82,
+              "end_s": 1.48,
+              "text": " servizio.",
+              "probability": 0.9948532183965048
+            }
+          ]
+        },
+        {
+          "start_s": 2.04,
+          "end_s": 3.96,
+          "text": " Da Caray il software per i container.",
+          "words": [
+            {
+              "start_s": 2.04,
+              "end_s": 2.36,
+              "text": " Da",
+              "probability": 0.8577747344970703
+            },
+            {
+              "start_s": 2.36,
+              "end_s": 2.68,
+              "text": " Caray",
+              "probability": 0.2009957879781723
+            },
+            {
+              "start_s": 2.68,
+              "end_s": 2.82,
+              "text": " il",
+              "probability": 0.8518707156181335
+            },
+            {
+              "start_s": 2.82,
+              "end_s": 3.08,
+              "text": " software",
+              "probability": 0.9243482351303101
+            },
+            {
+              "start_s": 3.08,
+              "end_s": 3.42,
+              "text": " per",
+              "probability": 0.9338449835777283
+            },
+            {
+              "start_s": 3.42,
+              "end_s": 3.5,
+              "text": " i",
+              "probability": 0.898661732673645
+            },
+            {
+              "start_s": 3.5,
+              "end_s": 3.96,
+              "text": " container.",
+              "probability": 0.9512653350830078
+            }
+          ]
+        },
+        {
+          "start_s": 4.8,
+          "end_s": 5.94,
+          "text": " Uso paiz anekuda.",
+          "words": [
+            {
+              "start_s": 4.8,
+              "end_s": 5.08,
+              "text": " Uso",
+              "probability": 0.628916934132576
+            },
+            {
+              "start_s": 5.08,
+              "end_s": 5.38,
+              "text": " paiz",
+              "probability": 0.40790577605366707
+            },
+            {
+              "start_s": 5.38,
+              "end_s": 5.94,
+              "text": " anekuda.",
+              "probability": 0.480997900168101
+            }
+          ]
+        },
+        {
+          "start_s": 6.42,
+          "end_s": 9.6,
+          "text": " Il web so che triceve i frame ma la coda audio resta aperta.",
+          "words": [
+            {
+              "start_s": 6.42,
+              "end_s": 6.58,
+              "text": " Il",
+              "probability": 0.9774012565612793
+            },
+            {
+              "start_s": 6.58,
+              "end_s": 6.74,
+              "text": " web",
+              "probability": 0.33777859807014465
+            },
+            {
+              "start_s": 6.74,
+              "end_s": 6.94,
+              "text": " so",
+              "probability": 0.626176655292511
+            },
+            {
+              "start_s": 6.94,
+              "end_s": 7.1,
+              "text": " che",
+              "probability": 0.21732021868228912
+            },
+            {
+              "start_s": 7.1,
+              "end_s": 7.52,
+              "text": " triceve",
+              "probability": 0.8378248810768127
+            },
+            {
+              "start_s": 7.52,
+              "end_s": 7.64,
+              "text": " i",
+              "probability": 0.90761399269104
+            },
+            {
+              "start_s": 7.64,
+              "end_s": 7.86,
+              "text": " frame",
+              "probability": 0.8702296018600464
+            },
+            {
+              "start_s": 7.86,
+              "end_s": 8.2,
+              "text": " ma",
+              "probability": 0.89601069688797
+            },
+            {
+              "start_s": 8.2,
+              "end_s": 8.28,
+              "text": " la",
+              "probability": 0.992321789264679
+            },
+            {
+              "start_s": 8.28,
+              "end_s": 8.5,
+              "text": " coda",
+              "probability": 0.9447658658027649
+            },
+            {
+              "start_s": 8.5,
+              "end_s": 8.78,
+              "text": " audio",
+              "probability": 0.9824441075325012
+            },
+            {
+              "start_s": 8.78,
+              "end_s": 9.16,
+              "text": " resta",
+              "probability": 0.9083213210105896
+            },
+            {
+              "start_s": 9.16,
+              "end_s": 9.6,
+              "text": " aperta.",
+              "probability": 0.9939716160297394
+            }
+          ]
+        },
+        {
+          "start_s": 10.36,
+          "end_s": 13.56,
+          "text": " Dammi una conferma breve e continuo, misuro la latenza.",
+          "words": [
+            {
+              "start_s": 10.36,
+              "end_s": 10.72,
+              "text": " Dammi",
+              "probability": 0.7942850589752197
+            },
+            {
+              "start_s": 10.72,
+              "end_s": 10.88,
+              "text": " una",
+              "probability": 0.9970802664756775
+            },
+            {
+              "start_s": 10.88,
+              "end_s": 11.4,
+              "text": " conferma",
+              "probability": 0.9277260005474091
+            },
+            {
+              "start_s": 11.4,
+              "end_s": 11.64,
+              "text": " breve",
+              "probability": 0.9695389270782471
+            },
+            {
+              "start_s": 11.64,
+              "end_s": 11.84,
+              "text": " e",
+              "probability": 0.992998480796814
+            },
+            {
+              "start_s": 11.84,
+              "end_s": 12.4,
+              "text": " continuo,",
+              "probability": 0.9462916254997253
+            },
+            {
+              "start_s": 12.68,
+              "end_s": 13.0,
+              "text": " misuro",
+              "probability": 0.9246965944766998
+            },
+            {
+              "start_s": 13.0,
+              "end_s": 13.14,
+              "text": " la",
+              "probability": 0.9800075888633728
+            },
+            {
+              "start_s": 13.14,
+              "end_s": 13.56,
+              "text": " latenza.",
+              "probability": 0.8794892132282257
+            }
+          ]
+        }
+      ],
+      "text": "Sto avviando il servizio. Da Caray il software per i container. Uso paiz anekuda. Il web so che triceve i frame ma la coda audio resta aperta. Dammi una conferma breve e continuo, misuro la latenza."
+    }
+  ]
+}

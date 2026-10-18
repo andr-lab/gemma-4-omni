@@ -1,0 +1,23 @@
+{
+  "generator": "Windows System.Speech / Microsoft Elsa Desktop / it-IT",
+  "rate": 1,
+  "clips": [
+    {
+      "name": "A_initial_milano.wav",
+      "text": "Consigliami un itinerario di tre giorni a Milano."
+    },
+    {
+      "name": "A_correction_torino.wav",
+      "text": "Scusa, intendevo dire Torino, non Milano!"
+    },
+    {
+      "name": "B_docker_before_pause.wav",
+      "text": "Sto avviando il servizio. Docker è il software per i container. Uso Python e CUDA."
+    },
+    {
+      "name": "B_docker_after_pause.wav",
+      "text": "Il websocket riceve i frame ma la coda audio resta aperta. Dammi una conferma breve e continuo, misuro la latenza."
+    }
+  ],
+  "generated_at_utc": "2026-10-18T07:30:00Z"
+}

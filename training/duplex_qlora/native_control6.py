@@ -21,6 +21,8 @@ HIDDEN_CONTRACT = "gemma4_listener_final_norm_frame_v1"
 HIDDEN_SOURCE = "ListenerOutput.gemma_hidden_t"
 HIDDEN_NORM = "gemma_model.language_model.norm"
 HIDDEN_WIDTH = 1536
+PHASE_T_WIDTH = 4
+DELTA_INPUT_WIDTH = HIDDEN_WIDTH + PHASE_T_WIDTH
 TICK_MS = 80
 VOCAB_SIZE = 262144
 BASE_WEIGHT_SOURCE = "lm_head.weight (tied to model.language_model.embed_tokens.weight)"
@@ -138,11 +140,18 @@ class NativeControl6LoRA(nn.Module):
         self.rank = int(rank)
         self.alpha = float(alpha)
         self.scaling = self.alpha / self.rank
-        self.lora_A = nn.Parameter(torch.empty(self.rank, HIDDEN_WIDTH, dtype=torch.float32))
+        # Gemma's frozen tied-output projection remains 1536-wide. Only the
+        # trainable delta receives the four causal phase values.
+        self.lora_A = nn.Parameter(torch.empty(self.rank, DELTA_INPUT_WIDTH, dtype=torch.float32))
         self.lora_B = nn.Parameter(torch.zeros(len(ACTIONS), self.rank, dtype=torch.float32))
         nn.init.kaiming_uniform_(self.lora_A, a=5**0.5)
 
-    def forward(self, normalized_hidden: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        normalized_hidden: torch.Tensor,
+        *,
+        phase_t: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         if not isinstance(normalized_hidden, torch.Tensor) or normalized_hidden.ndim < 1:
             raise TypeError("normalized_hidden must be a tensor with a feature dimension")
         if normalized_hidden.shape[-1] != HIDDEN_WIDTH:
@@ -153,28 +162,52 @@ class NativeControl6LoRA(nn.Module):
         if not torch.isfinite(normalized_hidden).all():
             raise ValueError("normalized_hidden contains non-finite values")
         hidden = normalized_hidden.to(dtype=torch.float32)
+        if phase_t is None:
+            phase = torch.zeros(
+                (*hidden.shape[:-1], PHASE_T_WIDTH),
+                dtype=torch.float32,
+                device=hidden.device,
+            )
+        else:
+            if not isinstance(phase_t, torch.Tensor) or tuple(phase_t.shape) != (
+                *hidden.shape[:-1], PHASE_T_WIDTH
+            ):
+                raise ValueError(
+                    f"phase_t shape must be {(*hidden.shape[:-1], PHASE_T_WIDTH)}"
+                )
+            if not torch.isfinite(phase_t).all():
+                raise ValueError("phase_t contains non-finite values")
+            phase = phase_t.to(device=hidden.device, dtype=torch.float32)
         # PyTorch documents F.linear as y = x A^T + b:
         # https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.linear.html
         # Reproduce the native Gemma output-projection input/weight dtype for
         # frozen logits, then accumulate the learned delta in FP32.
         native_hidden = normalized_hidden.to(dtype=self.base_rows.dtype)
         base = F.linear(native_hidden, self.base_rows).to(dtype=torch.float32)
-        delta = F.linear(F.linear(hidden, self.lora_A), self.lora_B) * self.scaling
+        delta_input = torch.cat((hidden, phase), dim=-1)
+        delta = F.linear(F.linear(delta_input, self.lora_A), self.lora_B) * self.scaling
         return base + delta
 
     def adapter_state_dict(self) -> dict[str, torch.Tensor]:
         return {"lora_A": self.lora_A.detach().cpu(), "lora_B": self.lora_B.detach().cpu()}
 
-    def load_adapter_state_dict(self, state: Mapping[str, torch.Tensor]) -> None:
+    def load_adapter_state_dict(self, state: Mapping[str, torch.Tensor]) -> bool:
         if set(state) != {"lora_A", "lora_B"}:
             raise ValueError("native Control6 adapter must contain only lora_A and lora_B")
-        if tuple(state["lora_A"].shape) != tuple(self.lora_A.shape):
+        lora_a = state["lora_A"]
+        migrated_legacy_phase = tuple(lora_a.shape) == (self.rank, HIDDEN_WIDTH)
+        if migrated_legacy_phase:
+            # Preserve the effect of pre-phase checkpoints exactly. The new
+            # phase columns start at zero and remain untrained until fine-tuned.
+            lora_a = torch.nn.functional.pad(lora_a, (0, PHASE_T_WIDTH))
+        if tuple(lora_a.shape) != tuple(self.lora_A.shape):
             raise ValueError("native Control6 lora_A shape mismatch")
         if tuple(state["lora_B"].shape) != tuple(self.lora_B.shape):
             raise ValueError("native Control6 lora_B shape mismatch")
         with torch.no_grad():
-            self.lora_A.copy_(state["lora_A"])
+            self.lora_A.copy_(lora_a)
             self.lora_B.copy_(state["lora_B"])
+        return migrated_legacy_phase
 
 
 def save_base_rows(path: str | Path, weight_or_module: Any, *, model_id: str = MODEL_ID) -> Path:
@@ -239,11 +272,16 @@ def load_native_control6_adapter(
     adapter_state = payload.get("adapter_state_dict")
     if not isinstance(adapter_state, dict):
         raise ValueError("native Control6 adapter has no adapter_state_dict")
-    model.load_adapter_state_dict(adapter_state)
+    migrated_legacy_phase = model.load_adapter_state_dict(adapter_state)
     model.to(device=device)
     model.eval()
     report = payload.get("report")
-    return model, report if isinstance(report, dict) else {}
+    load_report = dict(report) if isinstance(report, dict) else {}
+    if migrated_legacy_phase:
+        load_report["phase_t_checkpoint_migration"] = (
+            "legacy 1536-column LoRA A zero-extended in memory; phase columns are untrained"
+        )
+    return model, load_report
 
 
 __all__ = [

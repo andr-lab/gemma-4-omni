@@ -30,8 +30,10 @@ class _Processor:
 class _Embedding:
     def __init__(self, hidden: int = HIDDEN) -> None:
         self.hidden = hidden
+        self.seen_ids: list[torch.Tensor] = []
 
     def __call__(self, ids: torch.Tensor) -> torch.Tensor:
+        self.seen_ids.append(ids.detach().clone())
         return torch.zeros((*ids.shape, self.hidden), dtype=torch.float32)
 
 
@@ -89,6 +91,17 @@ def test_base_prefill_uses_official_assistant_framing_and_italian_id() -> None:
     assert icl.shape == (1, 8, HIDDEN)
     assert text.shape == (1, 3, HIDDEN)
     assert bos.shape == (1, 1, HIDDEN)
+
+
+def test_live_prefill_uses_only_prefilled_raw_qwen_token_and_omits_text_eos() -> None:
+    model, _processor = _model()
+
+    _icl, text, _bos, _pad = model.build_prefill_parts(
+        " ", raw_text_token_ids=[77], include_text_eos=False
+    )
+
+    assert text.shape == (1, 1, HIDDEN)
+    assert any(torch.equal(ids, torch.tensor([[77]])) for ids in model.talker.embedding.seen_ids)
 
 
 def test_base_prefill_inserts_x_vector_between_codec_prefix_and_tail() -> None:

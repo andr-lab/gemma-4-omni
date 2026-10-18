@@ -1,0 +1,23 @@
+{
+  "name": "B_docker_full_transcript",
+  "request": {
+    "model": "gemma-4-omni-duplex",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Sto avviando il servizio. Docker è il software per i container. Uso Python e CUDA. [pausa di 300 ms] Il websocket riceve i frame ma la coda audio resta aperta. Dammi una conferma breve e continuo, misuro la latenza."
+      }
+    ],
+    "stream": false,
+    "temperature": 0.2,
+    "max_tokens": 384
+  },
+  "status": 500,
+  "elapsed_ms": 1002.7498000417836,
+  "response": {
+    "error": {
+      "code": "INFERENCE_ERROR",
+      "message": "inferenza fallita"
+    }
+  }
+}

@@ -1,0 +1,84 @@
+{
+  "started_utc": "2026-10-18T09:02:04.815359+00:00",
+  "mode": "single_realtime_stream",
+  "ws_url": "ws://127.0.0.1:8000/v1/realtime?duplex=1",
+  "session_id": "3c6192b8c3854fac8681ad7060c59390",
+  "input_wav": "artifacts/conversation_quality_20261014/pair_quality_bargein_6_controlfix_20261017/control4_cleanupfix_20261017_143313Z/replay/A_input.wav",
+  "followup_wav": null,
+  "followup_timing": {
+    "mode": "none",
+    "configured_delay_ms": null,
+    "first_response_done_ns": null,
+    "first_followup_input_frame_index": null,
+    "first_followup_sent_at_ns": null,
+    "actual_delay_ms": null,
+    "last_followup_sent_at_ns": null,
+    "followup_frames_sent": 0
+  },
+  "requested_input_duration_s": 0.4,
+  "source_timing_basis": "prerecorded_wav_scheduled_at_80ms_intervals",
+  "requested_input_frames": 5,
+  "tts_quality_diagnostics": false,
+  "diagnostic_seed_sha256": null,
+  "ack_capacity_frames": 6,
+  "input_frames_sent": 5,
+  "input_frames_not_dispatched": 0,
+  "source_playback_complete": true,
+  "input_frames_acked": 5,
+  "ack_ids_unique": true,
+  "missing_ack_ids": [],
+  "duplicate_acks": 0,
+  "out_of_order_acks": 0,
+  "capacity_overflow": false,
+  "pending_high_water_frames": 4,
+  "pending_after_close": 0,
+  "final_ack_drain_complete": true,
+  "final_ack_drain_timed_out": false,
+  "ack_credit_timeout_count": 0,
+  "ack_latency_ms": {
+    "p50": 217.66,
+    "p95": 252.35,
+    "max": 252.35
+  },
+  "ack_capacity_backpressure_ms": {
+    "wait_count": 0,
+    "p50": 0.0,
+    "p95": 0.0,
+    "max": 0.0
+  },
+  "server_listener_queue_ms": {
+    "p50": 214.54,
+    "p95": 249.6,
+    "max": 249.6
+  },
+  "server_listener_step_ms": {
+    "p50": 59.86,
+    "p95": 174.62,
+    "max": 174.62
+  },
+  "server_ack_queue_ms": {
+    "p50": 0.2,
+    "p95": 0.29,
+    "max": 0.29
+  },
+  "input_send_interval_ms": {
+    "p50": 80.86,
+    "p95": 81.16,
+    "max": 81.16,
+    "deadline_misses_gt_100ms": 0
+  },
+  "input_send_lag_ms": {
+    "p50": 1.61,
+    "p95": 3.62,
+    "max": 3.62,
+    "frames_over_80ms": 0
+  },
+  "input_frames_during_response": 0,
+  "non_silent_input_frames_during_response": 0,
+  "input_frames_during_audio_generation": 0,
+  "non_silent_input_frames_during_audio_generation": 0,
+  "responses": [],
+  "response_completion_timed_out": false,
+  "errors": [],
+  "sender_error": null
+}

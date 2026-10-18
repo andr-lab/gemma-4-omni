@@ -57,6 +57,30 @@ def test_audio_archive_commits_completed_transcript_in_turn_order() -> None:
     assert not session.complete_audio_history_archive(archive_id, "stale")
 
 
+def test_audio_archive_commits_acknowledged_partial_assistant_text_after_cancel() -> None:
+    session = DuplexSession("audio-archive-partial-assistant")
+    archive_id = session.reserve_audio_history_archive(
+        pcm=np.ones(1280, dtype=np.float32),
+        first_frame_id=0,
+        last_frame_id=0,
+        base_messages=[{"role": "user", "content": "precedente"}],
+    )
+
+    assert session.complete_audio_history_archive(archive_id, "audio utente")
+    assert session.update_audio_history_archive_assistant(
+        archive_id,
+        "Aspetta!",
+        status="partial",
+    )
+
+    assert session.history == [
+        {"role": "user", "content": "precedente"},
+        {"role": "user", "content": "audio utente"},
+        {"role": "assistant", "content": "Aspetta!"},
+    ]
+    assert session.pending_audio_history_archive is None
+
+
 def test_fast_archive_waits_for_assistant_commit_before_advancing_history() -> None:
     session = DuplexSession("audio-archive-race")
     archive_id = session.reserve_audio_history_archive(

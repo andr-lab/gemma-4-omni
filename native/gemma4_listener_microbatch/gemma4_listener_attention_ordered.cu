@@ -36,6 +36,8 @@ using FragmentQK = typename MM0::Mma::FragmentC;
 using FragmentPV = typename MM1::Mma::FragmentC;
 
 static_assert(OrderedAttention::kQueriesPerBlock == 32);
+static_assert(GEMMA4_ORDERED_QUERY_ROWS == GEMMA4_STREAM_Q_LEN);
+static_assert(GEMMA4_STREAM_Q_LEN == 2);
 static_assert(OrderedAttention::kKeysPerBlock == 128);
 static_assert(OrderedAttention::kNumWarpsPerBlock == 4);
 static_assert(OrderedAttention::kNumThreads == 128);

@@ -29,6 +29,7 @@ controller_guided_response_action = _PROTOCOL.controller_guided_response_action
 slice_controller_guided_say_hidden = _PROTOCOL.slice_controller_guided_say_hidden
 controller_backchannel_candidate_allowed = _PROTOCOL.controller_backchannel_candidate_allowed
 controller_backchannel_should_stop = _PROTOCOL.controller_backchannel_should_stop
+audio_response_v2_say_token_char_spans = _PROTOCOL.audio_response_v2_say_token_char_spans
 
 
 def test_v2_target_uses_compact_ordered_json_and_unicode() -> None:
@@ -263,7 +264,7 @@ def test_v2_collector_holds_text_and_say_hidden_until_full_json_validation() -> 
             token_id=100 + index,
             text=fragment,
             hidden=hidden[index],
-        ) == ""
+        ) == ("Ciao" if index == 2 else "")
         assert not collector.publishable
         assert collector.publishable_text == ""
         assert collector.say_tokens == ()
@@ -307,6 +308,69 @@ def test_v2_say_hidden_finalizer_selects_only_tokens_overlapping_say_body() -> N
     assert parsed == {"heard": "private", "action": "SPEAK", "say": "Ciao!"}
     assert say_hidden.shape == (1, 2, 2)
     assert say_hidden[0, :, 0].tolist() == [10.0, 11.0]
+
+
+def test_v2_say_spans_keep_json_boundary_token_and_map_split_escapes_causally() -> None:
+    collector = AudioResponseV2Collector(expected_action="SPEAK")
+    fragments = [
+        '{"heard":"private","action":"SPEAK","say":"Ciao \\u',
+        "00",
+        "E9 e \\uD83D",
+        "\\uDE00\"}",
+    ]
+    for index, fragment in enumerate(fragments):
+        collector.feed_token(
+            token_index=index,
+            token_id=200 + index,
+            text=fragment,
+            hidden=torch.full((1, 1, 1), float(index + 1)),
+        )
+    parsed, hidden = finish_audio_response_v2_with_say_hidden(
+        collector, expected_text="".join(fragments)
+    )
+
+    assert parsed["say"] == "Ciao é e 😀"
+    assert hidden.shape == (1, 4, 1)
+    assert [token.char_span for token in collector.say_tokens] == [
+        (0, 5), (5, 5), (5, 9), (9, 10)
+    ]
+    assert audio_response_v2_say_token_char_spans(
+        collector.say_tokens, parsed["say"]
+    ) == [(0, 5), (5, 6), (5, 9), (9, 10)]
+
+
+def test_v2_say_spans_preserve_decomposed_unicode_source_offsets() -> None:
+    collector = AudioResponseV2Collector(expected_action="SPEAK")
+    fragments = [
+        '{"heard":"private","action":"SPEAK","say":"e',
+        "\u0301",
+        '"}',
+    ]
+    for index, fragment in enumerate(fragments):
+        collector.feed_token(
+            token_index=index,
+            token_id=300 + index,
+            text=fragment,
+            hidden=torch.full((1, 1, 1), float(index + 1)),
+        )
+    parsed = collector.finish(expected_text="".join(fragments))
+
+    assert parsed["say"] == "e\u0301"
+    assert audio_response_v2_say_token_char_spans(
+        collector.say_tokens, parsed["say"]
+    ) == [(0, 1), (1, 2)]
+
+
+def test_v2_empty_say_has_no_adapter_spans_and_collector_rejects_it() -> None:
+    assert audio_response_v2_say_token_char_spans((), "") == []
+    collector = AudioResponseV2Collector(expected_action="SPEAK")
+    with pytest.raises(AudioResponseProtocolError, match="say_empty"):
+        collector.feed_token(
+            token_index=0,
+            token_id=400,
+            text='{"heard":"private","action":"SPEAK","say":""}',
+            hidden=torch.ones((1, 1, 1)),
+        )
 
 
 def test_v2_candidate_preview_rejects_compound_bad_key_without_mutating_parser() -> None:
@@ -670,6 +734,67 @@ def test_v2_grammar_forces_private_backchannel_structure_without_forcing_say() -
     assert constraint.forced_action_token_count == 1
     assert constraint.forced_structure_token_count == 6
     assert [token.hidden is not None for token in collector.say_tokens] == [True]
+
+
+def test_v2_grammar_resumes_after_a_real_gemma_bpe_action_key_boundary() -> None:
+    class _GemmaBpeBoundaryTokenizer:
+        # Verified against the loaded Transformers 5.5 Gemma tokenizer. The
+        # first delimiter token closes HEARD and opens the ACTION key; the
+        # following token is a legal partial key, not a fresh grammar prefix.
+        pieces = {
+            4337: '","',
+            236746: "a",
+            2098: ',"',
+            2064: "action",
+            12375: '\":\"',
+            647: "ction",
+        }
+        encodings = {
+            ',"action":"': [2098, 2064, 12375],
+            'action":"': [2064, 12375],
+            'ction":"': [647, 12375],
+        }
+
+        def encode(self, text, *, add_special_tokens):
+            assert add_special_tokens is False
+            return self.encodings[text]
+
+        def decode(self, token_ids, *, skip_special_tokens):
+            assert skip_special_tokens
+            return "".join(self.pieces[int(token_id)] for token_id in token_ids)
+
+    tokenizer = _GemmaBpeBoundaryTokenizer()
+    collector = AudioResponseV2Collector(allowed_actions=("SPEAK", "BACKCHANNEL"))
+    constraint = AudioResponseV2ActionConstraint(
+        expected_action=None,
+        allowed_actions=("SPEAK", "BACKCHANNEL"),
+        tokenizer=tokenizer,
+        enforce_json_structure=True,
+    )
+
+    # The escaped quote is part of HEARD. Token 4337 then consumes the actual
+    # closing quote, comma, and opening quote of the ACTION key in one piece.
+    collector.feed_token(
+        token_index=0,
+        token_id=100,
+        text=r'{"heard":"he said \"ciao',
+        hidden=object(),
+    )
+    assert collector.parser.phase == "heard_value"
+    assert constraint.next_token_id(collector) is None
+    collector.feed_token(token_index=1, token_id=4337, text='","', hidden=object())
+    assert collector.parser.phase == "action_prefix"
+
+    # The first structural proposal may be replaced by a legal top candidate
+    # (the model's `a` token). The next proposal must resume at `ction`, not
+    # replay stale IDs for the full `,"action":"` sequence.
+    constraint.next_token_id(collector)
+    assert collector.is_valid_next_text("a", terminal=False)
+    collector.feed_token(token_index=2, token_id=236746, text="a", hidden=object())
+    assert constraint.next_token_id(collector) == 647
+    assert collector.is_valid_next_text("ction", terminal=False)
+    collector.feed_token(token_index=3, token_id=647, text="ction", hidden=object())
+    assert constraint.next_token_id(collector) == 12375
 
 
 def test_v2_system_prompt_is_generic_and_marks_only_say_as_user_facing() -> None:

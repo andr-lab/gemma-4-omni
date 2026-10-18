@@ -21,7 +21,7 @@ FRAME_DURATION_MS = 80
 PCM_SAMPLES_PER_FRAME = SAMPLE_RATE_HZ * FRAME_DURATION_MS // 1_000
 PCM_TAIL_SAMPLES = 160
 CONTROL_HIDDEN_WIDTH = 1_536
-LISTENER_Q_PER_FRAME = 4
+LISTENER_Q_PER_FRAME = 2
 LISTENER_MAX_SEQ_LEN = 16_384
 LISTENER_ATTENTION_BACKEND_ID = 3
 LISTENER_RMSNORM_BACKEND_ID = 2
@@ -192,7 +192,11 @@ class ListenerFrame:
     state_epoch_id: str
     frame_id: int
     ready_at_ns: int
+    logical_q_len: int
+    ephemeral_reason: str | None
+    queue_audio_for_next_turn: bool
     reference_frame_id: int | None
+    policy_context: Any | None
     _pcm_f32le: bytes = field(repr=False)
     _reference_pcm_f32le: bytes | None = field(repr=False)
     pcm_sha256: str
@@ -207,8 +211,12 @@ class ListenerFrame:
         frame_id: int,
         ready_at_ns: int,
         pcm: np.ndarray,
+        logical_q_len: int = LISTENER_Q_PER_FRAME,
+        ephemeral_reason: str | None = None,
+        queue_audio_for_next_turn: bool = False,
         reference_pcm: np.ndarray | None = None,
         reference_frame_id: int | None = None,
+        policy_context: Any | None = None,
     ) -> None:
         if not isinstance(session_id, str) or not session_id.strip():
             raise ValueError("session_id must be non-empty")
@@ -217,6 +225,21 @@ class ListenerFrame:
         if not isinstance(state_epoch_id, str) or not state_epoch_id.strip():
             raise ValueError("state_epoch_id must be non-empty")
         _strict_nonnegative_int("ready_at_ns", ready_at_ns)
+        _strict_nonnegative_int("logical_q_len", logical_q_len)
+        if logical_q_len > LISTENER_Q_PER_FRAME:
+            raise ValueError(
+                f"logical_q_len must be in [0,{LISTENER_Q_PER_FRAME}]"
+            )
+        if ephemeral_reason not in {None, "prespeech_silence", "assistant_turn_open"}:
+            raise ValueError("ephemeral_reason must be prespeech_silence, assistant_turn_open, or None")
+        if ephemeral_reason is not None and logical_q_len != 0:
+            raise ValueError("ephemeral listener frames must commit zero logical KV tokens")
+        if logical_q_len == 0 and ephemeral_reason is None:
+            raise ValueError("logical_q_len=0 requires an explicit ephemeral_reason")
+        if type(queue_audio_for_next_turn) is not bool:
+            raise TypeError("queue_audio_for_next_turn must be a bool")
+        if queue_audio_for_next_turn and ephemeral_reason != "assistant_turn_open":
+            raise ValueError("only assistant-turn ephemeral frames may queue audio for the next turn")
         samples = self._encode_pcm(pcm, name="pcm")
         reference: bytes | None = None
         if reference_pcm is None:
@@ -230,12 +253,44 @@ class ListenerFrame:
                 raise ValueError("assistant reference must precede the current frame")
             reference = self._encode_pcm(reference_pcm, name="reference_pcm")
 
+        if policy_context is not None:
+            tick_id = getattr(policy_context, "tick_id", None)
+            listener_generation_id = getattr(policy_context, "listener_generation_id", None)
+            policy_input = getattr(policy_context, "policy_input", None)
+            if (
+                not isinstance(tick_id, tuple)
+                or len(tick_id) != 3
+                or tick_id[0] != session_id
+                or tick_id[2] != frame_id
+                or isinstance(tick_id[1], bool)
+                or not isinstance(tick_id[1], int)
+                or tick_id[1] < 0
+                or isinstance(listener_generation_id, bool)
+                or not isinstance(listener_generation_id, int)
+                or listener_generation_id != generation_id
+                or policy_input is None
+                or getattr(policy_input, "session_id", None) != session_id
+                or getattr(policy_input, "generation_id", None) != tick_id[1]
+                or getattr(policy_input, "frame_id", None) != frame_id
+            ):
+                raise ValueError("policy_context identity differs from its listener frame")
+            policy_pcm = getattr(policy_input, "user_pcm", None)
+            if policy_pcm is None or not np.array_equal(
+                np.asarray(policy_pcm, dtype="<f4").reshape(-1),
+                np.asarray(pcm, dtype="<f4").reshape(-1),
+            ):
+                raise ValueError("policy_context PCM differs from its listener frame")
+
         object.__setattr__(self, "session_id", session_id)
         object.__setattr__(self, "generation_id", generation_id)
         object.__setattr__(self, "state_epoch_id", state_epoch_id)
         object.__setattr__(self, "frame_id", frame_id)
         object.__setattr__(self, "ready_at_ns", ready_at_ns)
+        object.__setattr__(self, "logical_q_len", logical_q_len)
+        object.__setattr__(self, "ephemeral_reason", ephemeral_reason)
+        object.__setattr__(self, "queue_audio_for_next_turn", queue_audio_for_next_turn)
         object.__setattr__(self, "reference_frame_id", reference_frame_id)
+        object.__setattr__(self, "policy_context", policy_context)
         object.__setattr__(self, "_pcm_f32le", samples)
         object.__setattr__(self, "_reference_pcm_f32le", reference)
         object.__setattr__(self, "pcm_sha256", hashlib.sha256(samples).hexdigest())
@@ -461,6 +516,9 @@ class BatchRowDescriptor:
     reference_pcm_sha256: str | None
     frame_ready_at_ns: int
     reference_frame_id: int | None
+    logical_q_len: int = LISTENER_Q_PER_FRAME
+    ephemeral_reason: str | None = None
+    queue_audio_for_next_turn: bool = False
 
     def __post_init__(self) -> None:
         if not self.session_id.strip() or not self.state_epoch_id.strip():
@@ -474,8 +532,21 @@ class BatchRowDescriptor:
             "valid_history_tokens",
             "native_context_id",
             "frame_ready_at_ns",
+            "logical_q_len",
         ):
             _strict_nonnegative_int(name, getattr(self, name))
+        if self.logical_q_len > LISTENER_Q_PER_FRAME:
+            raise ValueError(
+                f"logical_q_len must be in [0,{LISTENER_Q_PER_FRAME}]"
+            )
+        if self.ephemeral_reason not in {None, "prespeech_silence", "assistant_turn_open"}:
+            raise ValueError("unsupported logical-Q ephemeral reason")
+        if (self.logical_q_len == 0) != (self.ephemeral_reason is not None):
+            raise ValueError("logical_q_len=0 and ephemeral_reason must be specified together")
+        if type(self.queue_audio_for_next_turn) is not bool:
+            raise TypeError("queue_audio_for_next_turn must be a bool")
+        if self.queue_audio_for_next_turn and self.ephemeral_reason != "assistant_turn_open":
+            raise ValueError("queued next-turn audio requires assistant-turn ephemeral mode")
         if self.native_context_id == 0:
             raise ValueError("batch row requires a non-null native context handle")
         object.__setattr__(self, "input_frame_sha256", _sha256("input_frame_sha256", self.input_frame_sha256))

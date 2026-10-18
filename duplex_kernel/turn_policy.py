@@ -61,6 +61,9 @@ class PolicyInput:
     native_control_hidden: Any | None = None
     native_control_hidden_frame_id: int | None = None
     native_control_hidden_at_ns: int | None = None
+    # Native Control6 phase_t is constructed from causal assistant t-1/t-2
+    # references plus the current user 80 ms frame. It feeds only the LoRA delta.
+    native_control_phase_t: Any | None = None
     # Optional immutable six-logit snapshot scored once for a native listener
     # microbatch. Native Control6 still applies this row's live legal mask.
     native_control6_raw_scores: Any | None = None

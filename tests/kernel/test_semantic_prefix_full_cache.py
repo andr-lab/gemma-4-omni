@@ -92,13 +92,13 @@ def _tiny_gemma4_text_model(*, per_layer_input_size: int = 8):
     return config, language_model
 
 
-def _run_sequential_gemma4_replay(language_model, prefix_token_ids, replay_q4):
+def _run_sequential_gemma4_replay(language_model, prefix_token_ids, replay_q2):
     from transformers.cache_utils import DynamicCache
     from transformers.models.gemma4.modeling_gemma4 import create_masks_for_generate
 
     device = torch.device("cpu")
     stable = _RecordingShapeStableGemmaListenerLM(
-        language_model, target_length=291, stream_length=4
+        language_model, target_length=291, stream_length=2
     )
     prefix_ids = torch.tensor(prefix_token_ids, dtype=torch.long, device=device).view(1, -1)
     prefix_embeddings = language_model.embed_tokens(prefix_ids)
@@ -123,15 +123,15 @@ def _run_sequential_gemma4_replay(language_model, prefix_token_ids, replay_q4):
 
     cache = output.past_key_values
     position = prefix_len
-    for q4 in replay_q4:
-        frame_audio = q4.reshape(1, 4, language_model.config.hidden_size).to(
+    for q2 in replay_q2:
+        frame_audio = q2.reshape(1, 2, language_model.config.hidden_size).to(
             dtype=language_model.embed_tokens.weight.dtype
         )
-        positions = torch.arange(position, position + 4, dtype=torch.long, device=device).view(1, -1)
+        positions = torch.arange(position, position + 2, dtype=torch.long, device=device).view(1, -1)
         masks = create_masks_for_generate(
             language_model.config,
             frame_audio,
-            torch.ones((1, position + 4), dtype=torch.long, device=device),
+            torch.ones((1, position + 2), dtype=torch.long, device=device),
             past_key_values=cache,
             position_ids=positions,
         )
@@ -139,9 +139,9 @@ def _run_sequential_gemma4_replay(language_model, prefix_token_ids, replay_q4):
             output = stable.forward(
                 inputs_embeds=frame_audio,
                 per_layer_inputs=language_model.get_per_layer_inputs(
-                    torch.full((1, 4), language_model.config.pad_token_id, dtype=torch.long),
+                    torch.full((1, 2), language_model.config.pad_token_id, dtype=torch.long),
                     language_model.embed_tokens(
-                        torch.full((1, 4), language_model.config.pad_token_id, dtype=torch.long)
+                        torch.full((1, 2), language_model.config.pad_token_id, dtype=torch.long)
                     ),
                 ),
                 attention_mask=masks,
@@ -150,7 +150,7 @@ def _run_sequential_gemma4_replay(language_model, prefix_token_ids, replay_q4):
                 shared_kv_states=getattr(cache, "shared_layers", None),
             )
         cache = output.past_key_values
-        position += 4
+        position += 2
     return stable, cache
 
 
@@ -173,10 +173,10 @@ def _max_abs_and_relative(actual: torch.Tensor, expected: torch.Tensor) -> tuple
     return float(difference.max()), float(relative.max())
 
 
-def _run_prefix_and_q4_replay(language_model, cache, prefix_ids, replay_embeddings):
+def _run_prefix_and_q2_replay(language_model, cache, prefix_ids, replay_embeddings):
     from transformers.models.gemma4.modeling_gemma4 import create_masks_for_generate
 
-    stable = ShapeStableGemmaListenerLM(language_model, target_length=291, stream_length=4)
+    stable = ShapeStableGemmaListenerLM(language_model, target_length=291, stream_length=2)
     prefix_embeddings = language_model.embed_tokens(prefix_ids)
     prefix_len = int(prefix_ids.shape[1])
     position_ids = torch.arange(prefix_len, dtype=torch.long).view(1, -1)
@@ -248,23 +248,23 @@ def test_prefix_full_cache_preserves_sliding_mask_and_matches_sliding_cache() ->
     config._attn_implementation = "sdpa"
     language_model = Gemma4TextModel(config).eval()
     prefix_ids = torch.arange(291, dtype=torch.long).remainder(config.vocab_size).view(1, -1)
-    replay_embeddings = [torch.randn((1, 4, config.hidden_size)) for _ in range(58)]
+    replay_embeddings = [torch.randn((1, 2, config.hidden_size)) for _ in range(117)]
 
-    full_hidden, full_cache = _run_prefix_and_q4_replay(
+    full_hidden, full_cache = _run_prefix_and_q2_replay(
         language_model, DynamicCache(), prefix_ids, replay_embeddings
     )
     sliding_cache = DynamicCache()
     sliding_cache.layers = [DynamicSlidingWindowLayer(sliding_window=512), DynamicLayer()]
-    sliding_hidden, sliding_cache = _run_prefix_and_q4_replay(
+    sliding_hidden, sliding_cache = _run_prefix_and_q2_replay(
         language_model, sliding_cache, prefix_ids, replay_embeddings
     )
 
     assert config.sliding_window == 512
     assert config.layer_types == ["sliding_attention", "full_attention"]
-    assert int(full_cache.get_seq_length(0)) == 523
-    assert [int(layer.keys.shape[-2]) for layer in full_cache.layers] == [523, 523]
-    assert int(sliding_cache.get_seq_length(0)) == 523
-    assert [int(layer.keys.shape[-2]) for layer in sliding_cache.layers] == [511, 523]
+    assert int(full_cache.get_seq_length(0)) == 525
+    assert [int(layer.keys.shape[-2]) for layer in full_cache.layers] == [525, 525]
+    assert int(sliding_cache.get_seq_length(0)) == 525
+    assert [int(layer.keys.shape[-2]) for layer in sliding_cache.layers] == [511, 525]
     hidden_diff = (full_hidden - sliding_hidden).abs()
     hidden_max_abs = float(hidden_diff.max())
     hidden_max_rel = float((hidden_diff / sliding_hidden.abs().clamp_min(1e-8)).max())
@@ -348,15 +348,15 @@ def test_semantic_prefix_builder_explicitly_uses_full_physical_cache() -> None:
 
     prefix_ids = tuple(i % config.vocab_size for i in range(291))
     replay_ids = tuple(range(1, 59))
-    replay = tuple(torch.randn((4, config.hidden_size)) for _ in replay_ids)
+    replay = tuple(torch.randn((2, config.hidden_size)) for _ in replay_ids)
     built = backend.build_semantic_prefix_cache(
-        prefix_ids, replay_q4=replay, replay_frame_ids=replay_ids
+        prefix_ids, replay_q2=replay, replay_frame_ids=replay_ids
     )
 
     assert config.sliding_window == 512
     assert config.layer_types == ["sliding_attention", "full_attention"]
     assert all(isinstance(layer, DynamicLayer) for layer in built["past_key_values"].layers)
-    assert int(built["past_key_values"].get_seq_length(0)) == 523
-    assert built["cache_position"] == 523
-    assert [int(layer.keys.shape[-2]) for layer in built["past_key_values"].layers] == [523, 523]
-    assert stable.query_lengths == [291] + [4] * len(replay_ids)
+    assert int(built["past_key_values"].get_seq_length(0)) == 407
+    assert built["cache_position"] == 407
+    assert [int(layer.keys.shape[-2]) for layer in built["past_key_values"].layers] == [407, 407]
+    assert stable.query_lengths == [291] + [2] * len(replay_ids)

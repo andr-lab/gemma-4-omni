@@ -41,6 +41,7 @@ int gemma4_cache_rebase_async(
     gemma4_cache *c, uint32_t prefix_len, uint32_t retained_audio_tokens,
     cudaStream_t stream);
 int gemma4_cache_advance_position(gemma4_cache *c, int q_len);
+int gemma4_cache_truncate_async(gemma4_cache *c, uint32_t new_position, cudaStream_t stream);
 uint32_t gemma4_cache_valid_kv_len(const gemma4_cache *c);
 void gemma4_cache_get_ptrs(const gemma4_cache *c, int layer_idx, int q_len, uint32_t base_pos, const __nv_bfloat16 **out_k, const __nv_bfloat16 **out_v, int *out_total_len, int *out_start_offset);
 int gemma4_cache_reset(gemma4_cache *c);
@@ -131,7 +132,7 @@ struct gemma4_listener_ctx {
     int *d_output_health;              /* device flag: non-finite output observed */
     bool owns_output_tensor;
 
-    /* Diagnostic-only tensor taps. Each slot stores one contiguous Q=4
+    /* Diagnostic-only tensor taps. Each slot stores one contiguous Q=2
      * tensor; widths are overprovisioned for the selected layer's topology. */
     __nv_bfloat16 *d_debug_hidden_taps; /* 16 * [4, 1536] */
     __nv_bfloat16 *d_debug_q_taps;      /* 4 * [4, 4096] */
@@ -469,7 +470,7 @@ static int run_linear_cublas_bound(
     return run_linear_cublas_impl(handle, d_w, d_x, d_y, M, N, K, stream, false);
 }
 
-/* The microbatch ABI must always issue a genuine GEMM over N*4 rows.  Keep
+/* The microbatch ABI must always issue a genuine GEMM over N*Q rows.  Keep
  * this path separate from the legacy opt-in single-frame GEMV dispatcher. */
 static int run_linear_gemm_cublas(
     cublasHandle_t handle,
@@ -3116,7 +3117,7 @@ static int gemma4_listener_graph_step_async(
     return 0;
 }
 
-/* API: Step Asynchronously (Q=4) */
+/* API: Step Asynchronously (Q=2) */
 int gemma4_listener_step_async(
     gemma4_listener_ctx *ctx,
     const void *frame_audio_soft,

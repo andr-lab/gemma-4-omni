@@ -8,13 +8,17 @@ from __future__ import annotations
 
 import json
 import copy
+import os
 import unicodedata
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 
 AUDIO_RESPONSE_PROTOCOL_V2 = "heard_action_say_v2"
 CONTROLLER_GUIDED_SAY_V1 = "controller_guided_say_v1"
+AUDIO_RESPONSE_PROTOCOL_ENV = "DUPLEX_AUDIO_RESPONSE_PROTOCOL"
+CONTROLLER_GUIDED_SAY_COMPAT_ENV = "DUPLEX_CONTROLLER_GUIDED_SAY_V1"
+AUDIO_RESPONSE_PROTOCOLS = frozenset({CONTROLLER_GUIDED_SAY_V1, AUDIO_RESPONSE_PROTOCOL_V2})
 AUDIO_RESPONSE_ACTIONS = ("SPEAK", "BACKCHANNEL", "REPLAN")
 AUDIO_RESPONSE_V2_MAX_NEW_TOKENS = 128
 AUDIO_RESPONSE_V2_MAX_HEARD_TOKENS = 48
@@ -61,6 +65,34 @@ class AudioResponseProtocolError(ValueError):
         super().__init__(f"audio response protocol v2 rejected: {self.reason}")
 
 
+def resolve_audio_response_protocol(environ: Mapping[str, str] | None = None) -> str:
+    """Resolve the selected response enum with explicit env precedence.
+
+    ``DUPLEX_AUDIO_RESPONSE_PROTOCOL`` wins whenever it is present and must
+    name a known enum. Only when it is absent does the compatibility toggle
+    map ``1`` to controller-guided SAY v1 and ``0`` to the JSON baseline v2.
+    With neither variable present, controller-guided SAY v1 is the default.
+    """
+    env = os.environ if environ is None else environ
+    if AUDIO_RESPONSE_PROTOCOL_ENV in env:
+        protocol = str(env[AUDIO_RESPONSE_PROTOCOL_ENV]).strip()
+        if protocol not in AUDIO_RESPONSE_PROTOCOLS:
+            raise ValueError(
+                f"{AUDIO_RESPONSE_PROTOCOL_ENV} must be one of "
+                f"{CONTROLLER_GUIDED_SAY_V1} or {AUDIO_RESPONSE_PROTOCOL_V2}"
+            )
+        return protocol
+    compatibility = env.get(CONTROLLER_GUIDED_SAY_COMPAT_ENV)
+    if compatibility is None:
+        return CONTROLLER_GUIDED_SAY_V1
+    compatibility = str(compatibility).strip()
+    if compatibility == "1":
+        return CONTROLLER_GUIDED_SAY_V1
+    if compatibility == "0":
+        return AUDIO_RESPONSE_PROTOCOL_V2
+    raise ValueError(f"{CONTROLLER_GUIDED_SAY_COMPAT_ENV} must be 0 or 1")
+
+
 @dataclass(frozen=True)
 class AudioResponseV2SayToken:
     """One token overlapping the raw say body.
@@ -74,6 +106,62 @@ class AudioResponseV2SayToken:
     token_id: int
     char_span: tuple[int, int]
     hidden: Any
+
+
+def audio_response_v2_say_token_char_spans(
+    say_tokens: Iterable[AudioResponseV2SayToken],
+    say_text: str,
+) -> list[tuple[int, int]]:
+    """Return complete SAY character spans for the retained post-token states.
+
+    A token can end in the middle of a JSON escape, so its hidden state may
+    have a zero-width decoded span. Once a later token completes that escape,
+    those pending states are assigned to the first SAY character produced by
+    the completion token. This preserves their causal contribution without
+    attaching them to unrelated later text or JSON structure.
+    """
+    if not isinstance(say_text, str):
+        raise TypeError("say_text must be a string")
+    tokens = tuple(say_tokens)
+    if not say_text:
+        if tokens:
+            raise AudioResponseProtocolError("say_hidden_empty_text_has_tokens")
+        return []
+    if not tokens:
+        raise AudioResponseProtocolError("say_hidden_missing")
+
+    result: list[tuple[int, int] | None] = [None] * len(tokens)
+    pending_zero_width: list[int] = []
+    covered_chars = 0
+    for index, token in enumerate(tokens):
+        span = getattr(token, "char_span", None)
+        if not isinstance(span, (tuple, list)) or len(span) != 2:
+            raise AudioResponseProtocolError("say_hidden_char_span_invalid")
+        start, end = span
+        if (
+            isinstance(start, bool) or not isinstance(start, int)
+            or isinstance(end, bool) or not isinstance(end, int)
+            or start < 0 or end < start or end > len(say_text)
+        ):
+            raise AudioResponseProtocolError("say_hidden_char_span_invalid")
+        if start != covered_chars:
+            raise AudioResponseProtocolError("say_hidden_char_span_gap_or_overlap")
+        if start == end:
+            pending_zero_width.append(index)
+            continue
+        if pending_zero_width:
+            completion_span = (start, start + 1)
+            for pending_index in pending_zero_width:
+                result[pending_index] = completion_span
+            pending_zero_width.clear()
+        result[index] = (start, end)
+        covered_chars = end
+
+    if pending_zero_width:
+        raise AudioResponseProtocolError("say_hidden_char_span_unresolved_escape")
+    if covered_chars != len(say_text) or any(span is None for span in result):
+        raise AudioResponseProtocolError("say_hidden_char_span_incomplete")
+    return [span for span in result if span is not None]
 
 
 def _normalize_action(action: Any) -> str:
@@ -717,10 +805,11 @@ class AudioResponseV2Parser:
 class AudioResponseV2Collector:
     """Collect token-aligned Thinker output and retain only ``say`` hidden states.
 
-    Nothing becomes publishable until ``finish`` validates the closing JSON
-    delimiter and confirms that tokenwise decoded text matches the final
-    Thinker decode. Tokens crossing the say-body boundary retain only the exact
-    body character span in their trace.
+    The parser exposes only decoded SAY deltas to its private runtime callback
+    while the ordered object is open. Public protocol text and retained final
+    SAY hidden states remain unavailable until ``finish`` validates the JSON
+    delimiter and confirms tokenwise text matches the final Thinker decode.
+    Tokens crossing the say-body boundary retain only the exact body span.
     """
 
     def __init__(
@@ -919,7 +1008,7 @@ class AudioResponseV2Collector:
         if not isinstance(text, str):
             raise AudioResponseProtocolError("fragment_must_be_text")
         say_char_start = len(self.parser.pending_say)
-        self.parser.feed(text)
+        visible_say_delta = self.parser.feed(text)
         if self.parser.last_feed_heard_raw_span is not None:
             self.heard_field_token_count += 1
         if self.parser.last_feed_action_raw_span is not None:
@@ -950,9 +1039,9 @@ class AudioResponseV2Collector:
                 )
             )
         self._response_parts.append(text)
-        # The current rollout validates the complete JSON before exposing text
-        # or hidden states to synthesis, clients, V9, or history.
-        return ""
+        # This return value is private to the response-owned Qwen worker.
+        # Public text/history remain gated by finish() and final JSON validation.
+        return visible_say_delta
 
     def finish(self, *, expected_text: str | None = None) -> dict[str, str]:
         if self._cancelled:
@@ -1124,6 +1213,66 @@ class AudioResponseV2ActionConstraint:
         else:
             self.forced_structure_token_count += 1
         return token_ids[0]
+
+    @staticmethod
+    def _remaining_sequence_text(
+        collector: AudioResponseV2Collector,
+        sequence: tuple[tuple[bool, str], ...],
+    ) -> str:
+        """Return only the unconsumed grammar suffix at the parser cursor."""
+        parser = collector.parser
+        item_index = int(parser._syntax_item_index)
+        literal_index = int(parser._literal_index)
+        if not 0 <= item_index <= len(sequence):
+            raise AudioResponseProtocolError("json_structure_parser_cursor_invalid")
+        pieces: list[str] = []
+        for index in range(item_index, len(sequence)):
+            _allow_whitespace, literal = sequence[index]
+            offset = literal_index if index == item_index else 0
+            if not 0 <= offset <= len(literal):
+                raise AudioResponseProtocolError("json_structure_parser_cursor_invalid")
+            pieces.append(literal[offset:])
+        remaining = "".join(pieces)
+
+        # feed() normally drains all available characters from this sequence.
+        # Account for a buffered prefix too, so forcing starts after every
+        # character already accepted by the incremental parser.
+        buffered = parser._buffer[parser._cursor:]
+        if buffered:
+            if not remaining.startswith(buffered):
+                raise AudioResponseProtocolError("json_structure_parser_buffer_mismatch")
+            remaining = remaining[len(buffered):]
+        return remaining
+
+    def _expected_forced_continuation(
+        self,
+        collector: AudioResponseV2Collector,
+    ) -> str | None:
+        """Text that a queued forced-token suffix must still complete."""
+        parser = collector.parser
+        if self.enforce_json_structure:
+            if parser.phase == "heard_prefix" and self._initial_started:
+                remaining = self._remaining_sequence_text(collector, _START_SEQUENCE)
+                return remaining + ('"' if self.expected_action == "BACKCHANNEL" else "")
+            if parser.phase == "heard_value" and (
+                self.expected_action == "BACKCHANNEL" and not parser._string_raw
+            ):
+                return '"'
+            if parser.phase == "action_prefix":
+                return self._remaining_sequence_text(collector, _ACTION_SEQUENCE)
+            if parser.phase == "say_prefix":
+                return self._remaining_sequence_text(collector, _SAY_SEQUENCE)
+            if parser.phase == "closing_brace":
+                return "}"
+        if parser.phase == "action_value" and self.expected_action is not None:
+            action_prefix = "".join(parser._string_raw)
+            if self.expected_action.startswith(action_prefix):
+                remainder = self.expected_action[len(action_prefix):]
+                if remainder:
+                    return remainder
+                if self.enforce_json_structure:
+                    return '"'
+        return None
 
     def preflight_generation_budget(
         self,
@@ -1571,14 +1720,23 @@ class AudioResponseV2ActionConstraint:
 
     def next_token_id(self, collector: AudioResponseV2Collector) -> int | None:
         if self._pending_token_ids:
-            token_id, kind = self._pending_token_ids.pop(0)
-            self.last_forced_kind = kind
-            self.forced_token_count += 1
-            if kind == "action":
-                self.forced_action_token_count += 1
-            else:
-                self.forced_structure_token_count += 1
-            return token_id
+            expected = self._expected_forced_continuation(collector)
+            pending_text = self._decode_tokens(
+                [token_id for token_id, _kind in self._pending_token_ids]
+            )
+            if expected is not None and pending_text == expected:
+                token_id, kind = self._pending_token_ids.pop(0)
+                self.last_forced_kind = kind
+                self.forced_token_count += 1
+                if kind == "action":
+                    self.forced_action_token_count += 1
+                else:
+                    self.forced_structure_token_count += 1
+                return token_id
+            # Candidate filtering can replace a forced ID with a valid model
+            # token. Drop the queued suffix when it no longer matches the
+            # parser's canonical cursor and re-tokenize the actual remainder.
+            self._pending_token_ids.clear()
         self.last_forced_kind = None
         if self.enforce_json_structure:
             parser = collector.parser
@@ -1593,7 +1751,9 @@ class AudioResponseV2ActionConstraint:
                     self.bounded_output = True
                     return self._force_text('"', kind="structure")
             if phase == "heard_prefix" and self._initial_started:
-                suffix = '"heard":""' if self.expected_action == "BACKCHANNEL" else '"heard":"'
+                suffix = self._remaining_sequence_text(collector, _START_SEQUENCE)
+                if self.expected_action == "BACKCHANNEL":
+                    suffix += '"'
                 return self._force_text(suffix, kind="structure")
             if (
                 phase == "heard_value"
@@ -1602,22 +1762,23 @@ class AudioResponseV2ActionConstraint:
             ):
                 return self._force_text('"', kind="structure")
             if phase == "action_prefix":
-                return self._force_text(',"action":"', kind="structure")
+                suffix = self._remaining_sequence_text(collector, _ACTION_SEQUENCE)
+                return self._force_text(suffix, kind="structure")
             if phase == "say_prefix":
-                return self._force_text(',"say":"', kind="structure")
+                suffix = self._remaining_sequence_text(collector, _SAY_SEQUENCE)
+                return self._force_text(suffix, kind="structure")
             if phase == "closing_brace":
                 return self._force_text("}", kind="structure")
-            if (
-                phase == "action_value"
-                and self.expected_action is not None
-            ):
-                action_prefix = "".join(parser._string_raw)
-                if self.expected_action.startswith(action_prefix):
-                    remainder = self.expected_action[len(action_prefix):]
-                    if remainder:
-                        self._started = True
-                        return self._force_text(remainder, kind="action")
+        if collector.parser.phase == "action_value" and self.expected_action is not None:
+            action_prefix = "".join(collector.parser._string_raw)
+            if self.expected_action.startswith(action_prefix):
+                remainder = self.expected_action[len(action_prefix):]
+                if remainder:
+                    self._started = True
+                    return self._force_text(remainder, kind="action")
+                if self.enforce_json_structure:
                     return self._force_text('"', kind="structure")
+                return None
         if (
             self.expected_action is None
             or self._started

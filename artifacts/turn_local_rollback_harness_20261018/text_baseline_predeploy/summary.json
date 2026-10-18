@@ -1,0 +1,11 @@
+{
+  "created_at_utc": "2026-10-18T07:38:26.074934+00:00",
+  "endpoint": "http://127.0.0.1:8000/v1/chat/completions via SSH forward to Mondaini active service",
+  "model": "gemma-4-omni-duplex",
+  "note": "Sequential plain-text baseline; A correction is a second user turn after completed first response; B is transcript text with pause marker, not a streaming-audio comparison.",
+  "artifacts": [
+    "A_initial_milano.json",
+    "A_correction_torino.json",
+    "B_docker_full_transcript.json"
+  ]
+}

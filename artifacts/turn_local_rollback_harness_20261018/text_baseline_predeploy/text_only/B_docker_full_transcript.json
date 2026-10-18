@@ -1,0 +1,35 @@
+{
+  "name": "B_docker_full_transcript",
+  "request": {
+    "model": "gemma-4-omni-duplex",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Sto avviando il servizio. Docker è il software per i container. Uso Python e CUDA. [pausa di 300 ms] Il websocket riceve i frame ma la coda audio resta aperta. Dammi una conferma breve e continuo, misuro la latenza."
+      }
+    ],
+    "modalities": [
+      "text"
+    ],
+    "stream": false,
+    "temperature": 0.2,
+    "max_tokens": 384
+  },
+  "status": 200,
+  "elapsed_ms": 966.1260000430048,
+  "response": {
+    "id": "chatcmpl_3c80be4fa3fc46ad94600b724457dfda",
+    "object": "chat.completion",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "Confermo. Continuo a monitorare la situazione e misuro la latenza."
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "session_id": "92be3b99e0f04e54a5dde0393ce600d2"
+  }
+}

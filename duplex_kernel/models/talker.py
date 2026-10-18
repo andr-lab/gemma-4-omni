@@ -638,6 +638,8 @@ class TalkerModel:
         *,
         voice_conditioning:
             dict[str, Any] | None = None,
+        raw_text_token_ids: list[int] | tuple[int, ...] | None = None,
+        include_text_eos: bool = True,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
@@ -694,6 +696,17 @@ class TalkerModel:
             :,
             3:-5,
         ]
+
+        if raw_text_token_ids is not None:
+            if not raw_text_token_ids:
+                raise ValueError("raw_text_token_ids non può essere vuoto")
+            if any(isinstance(value, bool) or not isinstance(value, int) for value in raw_text_token_ids):
+                raise TypeError("raw_text_token_ids deve contenere interi")
+            raw_ids = torch.tensor(
+                [list(raw_text_token_ids)],
+                device=input_ids.device,
+                dtype=input_ids.dtype,
+            )
 
         if raw_ids.shape[1] <= 0:
             raise RuntimeError(
@@ -852,31 +865,19 @@ class TalkerModel:
             )
         )
 
-        codec_pad_embedding = (
-            talker.get_input_embeddings()(
-                torch.tensor(
-                    [[
-                        tcfg.codec_pad_id
-                    ] * (
-                        raw_ids.shape[1]
-                        + 1
-                    )],
-                    device=self.device,
-                    dtype=input_ids.dtype,
-                )
+        text_part_projection = text_embedding
+        if include_text_eos:
+            text_part_projection = torch.cat((text_embedding, eos_e), dim=1)
+        text_part_length = int(raw_ids.shape[1]) + int(bool(include_text_eos))
+        codec_pad_embedding = talker.get_input_embeddings()(
+            torch.full(
+                (1, text_part_length),
+                int(tcfg.codec_pad_id),
+                device=self.device,
+                dtype=input_ids.dtype,
             )
         )
-
-        text_part = (
-            torch.cat(
-                (
-                    text_embedding,
-                    eos_e,
-                ),
-                dim=1,
-            )
-            + codec_pad_embedding
-        )
+        text_part = text_part_projection + codec_pad_embedding
 
         # Kept separate so FuturePrefixQwen can place:
         #

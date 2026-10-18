@@ -1,0 +1,1231 @@
+from __future__ import annotations
+
+import asyncio
+import numpy as np
+import pytest
+import torch
+import threading
+from concurrent.futures import Future
+from types import SimpleNamespace
+
+from duplex_kernel.server import (
+    _controller_guided_say_generation_options,
+    _build_unified_audio_response_suffix,
+    _build_unified_listener_prefix_token_ids,
+    _build_unified_next_user_header,
+    _consume_unified_native_text_append_result,
+    _complete_client_pcm_segment,
+    _finalize_unified_native_cache_branch,
+    _record_emitted_pcm_packet,
+    _record_client_consumed_pcm,
+    _record_turn_local_vocalized_prefix,
+    _require_closed_tts_codec_eos,
+    _unified_end_of_turn_token_id,
+    _run_unified_native_thinker,
+    _refresh_unified_prefix_for_instruction_update,
+    _require_unified_stable_audio_protocol,
+    _strict_env_switch,
+    _unified_listener_frame_contract,
+)
+
+
+def _unified_instruction_refresh_fixture(instruction: str = ""):
+    target_instruction = "I" * 37
+
+    class Tokenizer:
+        audio_token = "<|audio|>"
+
+        def __init__(self):
+            self.messages = []
+
+        def apply_chat_template(self, messages, *, tokenize, add_generation_prompt):
+            assert tokenize is False
+            assert add_generation_prompt is False
+            self.messages = messages
+            return "serialized"
+
+        def encode(self, text, *, add_special_tokens):
+            assert add_special_tokens is False
+            if text == self.audio_token:
+                return [900]
+            included = any(
+                target_instruction in str(message.get("content", ""))
+                for message in self.messages
+            )
+            before_marker = 189 + (37 if included else 0)
+            return [1] + [22] * (before_marker - 1) + [900, 77]
+
+    class Worker:
+        def __init__(self, *, fail=False):
+            self.calls = []
+            self.fail = fail
+
+        def refresh_unified_prefix_before_audio(
+            self,
+            session_id,
+            prefix_token_ids,
+            *,
+            new_revision,
+            expected_generation_id,
+            expected_cache_position,
+            prefix_import,
+        ):
+            self.calls.append((
+                session_id,
+                tuple(prefix_token_ids),
+                new_revision,
+                expected_generation_id,
+                expected_cache_position,
+                prefix_import,
+            ))
+            future = Future()
+            if self.fail:
+                future.set_exception(RuntimeError("injected owner refresh failure"))
+            else:
+                future.set_result(None)
+            return future
+
+    class Session:
+        def __init__(self):
+            self.session_id = "session"
+            self.instructions = instruction
+            self.semantic_context_revision = 0
+            self._generation_lock = threading.RLock()
+            self.active_response = False
+            self.policy_response_pending = False
+            self.history = []
+            self.listener = SimpleNamespace(backend=SimpleNamespace(boa_token_id=901))
+            self.listener_state = SimpleNamespace(
+                _lock=threading.RLock(),
+                next_frame_id=0,
+                listener_input_frames=0,
+                listener_state_version=0,
+                gemma_lm_audio_frames=0,
+                semantic_audio_soft_history=[],
+            )
+            self.audio_ingress = SimpleNamespace(
+                stats=lambda: {"input_samples_received": 0, "input_frames_enqueued": 0},
+                qsize=0,
+                pending_samples=0,
+            )
+
+        def update_instructions(self, value):
+            value = str(value)
+            with self._generation_lock:
+                if value == self.instructions:
+                    return False
+                self.instructions = value
+                self.semantic_context_revision += 1
+                return True
+
+    class Dispatcher:
+        def has_pending_work(self, _session_id):
+            return False
+
+    return Tokenizer(), Session(), Worker(), Dispatcher()
+
+
+def test_unified_session_update_refreshes_190_token_prefix_to_227_before_audio(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tokenizer, session, worker, dispatcher = _unified_instruction_refresh_fixture()
+    monkeypatch.setenv("DUPLEX_AUDIO_RESPONSE_PROTOCOL", "heard_action_say_v2")
+    engine = SimpleNamespace(
+        tokenizer=tokenizer,
+        _thinker_wrapper=SimpleNamespace(
+            processor=SimpleNamespace(audio_token="<|audio|>")
+        ),
+    )
+    imports = []
+
+    def make_import(_backend, token_ids):
+        importer = SimpleNamespace(token_ids=tuple(token_ids))
+        imports.append(importer)
+        return importer
+
+    monkeypatch.setattr("duplex_kernel.server.make_unified_prefix_import", make_import)
+    initial_ids = _build_unified_listener_prefix_token_ids(engine, session)
+    assert len(initial_ids) == 190
+    binding = {
+        "generation": 7,
+        "batch_cache_position": len(initial_ids),
+        "semantic_prefix_importer": make_import(session.listener.backend, initial_ids),
+    }
+
+    result = asyncio.run(_refresh_unified_prefix_for_instruction_update(
+        engine,
+        session,
+        instructions="I" * 37,
+        worker=worker,
+        binding=binding,
+        dispatcher=dispatcher,
+    ))
+
+    assert result == {"status": "refreshed", "prefix_len": 227, "revision": 1}
+    assert session.instructions == "I" * 37
+    assert session.semantic_context_revision == 1
+    assert len(worker.calls) == 1
+    call = worker.calls[0]
+    assert call[:5] == ("session", imports[-1].token_ids, 1, 7, 190)
+    assert len(call[1]) == binding["batch_cache_position"] == 227
+    assert binding["semantic_prefix_importer"] is imports[-1]
+
+    # Repeating the same instruction is harmless even after audio begins; a
+    # changed instruction is rejected without changing the committed session.
+    session.listener_state.next_frame_id = 1
+    session.listener_state.listener_input_frames = 1
+    no_op = asyncio.run(_refresh_unified_prefix_for_instruction_update(
+        engine,
+        session,
+        instructions="I" * 37,
+        worker=worker,
+        binding=binding,
+        dispatcher=dispatcher,
+    ))
+    assert no_op["status"] == "unchanged"
+    with pytest.raises(ValueError, match="before the first audio frame"):
+        asyncio.run(_refresh_unified_prefix_for_instruction_update(
+            engine,
+            session,
+            instructions="different instructions",
+            worker=worker,
+            binding=binding,
+            dispatcher=dispatcher,
+        ))
+
+
+def test_backchannel_generation_budget_caps_real_tokenizer_ids_at_two() -> None:
+    assert _controller_guided_say_generation_options(
+        action="BACKCHANNEL",
+        controller_guided_say=False,
+        direct_audio_candidate=False,
+        response_protocol=None,
+    )["max_tokens"] == 2
+    assert _controller_guided_say_generation_options(
+        action="BACKCHANNEL",
+        controller_guided_say=True,
+        direct_audio_candidate=True,
+        response_protocol="heard_action_say_v2",
+    )["max_tokens"] == 2
+
+
+def test_unified_instruction_refresh_failure_rolls_back_instruction_and_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tokenizer, session, worker, dispatcher = _unified_instruction_refresh_fixture()
+    worker.fail = True
+    monkeypatch.setenv("DUPLEX_AUDIO_RESPONSE_PROTOCOL", "heard_action_say_v2")
+    engine = SimpleNamespace(
+        tokenizer=tokenizer,
+        _thinker_wrapper=SimpleNamespace(
+            processor=SimpleNamespace(audio_token="<|audio|>")
+        ),
+    )
+    monkeypatch.setattr(
+        "duplex_kernel.server.make_unified_prefix_import",
+        lambda _backend, token_ids: SimpleNamespace(token_ids=tuple(token_ids)),
+    )
+    binding = {
+        "generation": 7,
+        "batch_cache_position": 190,
+        "semantic_prefix_importer": object(),
+    }
+    old_importer = binding["semantic_prefix_importer"]
+
+    with pytest.raises(RuntimeError, match="injected owner refresh failure"):
+        asyncio.run(_refresh_unified_prefix_for_instruction_update(
+            engine,
+            session,
+            instructions="I" * 37,
+            worker=worker,
+            binding=binding,
+            dispatcher=dispatcher,
+        ))
+
+    assert session.instructions == ""
+    assert session.semantic_context_revision == 0
+    assert binding["batch_cache_position"] == 190
+    assert binding["semantic_prefix_importer"] is old_importer
+
+
+def test_unified_native_result_waits_and_records_before_forward_returns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operations = []
+
+    class FakeTensor:
+        device = torch.device("cuda:0")
+        is_cuda = True
+
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def record_stream(self, stream) -> None:
+            assert stream is consumer
+            operations.append(f"record:{self.name}")
+
+    class FakeStream:
+        def wait_event(self, event) -> None:
+            assert event is ready_event
+            operations.append("wait")
+
+    ready_event = object()
+    consumer = FakeStream()
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda *, device: consumer)
+    logits = FakeTensor("logits")
+    hidden = FakeTensor("hidden")
+    result = SimpleNamespace(
+        logits=logits,
+        final_norm_hidden=hidden,
+        ready_event=ready_event,
+    )
+
+    # The returned pair is what forward_native_tokens exposes to the decoder;
+    # all stream dependency and allocator-lifetime actions must precede it.
+    returned = _consume_unified_native_text_append_result(result)
+    assert returned == (logits, hidden)
+    assert operations == ["wait", "record:logits", "record:hidden"]
+
+
+def test_unified_cuda_result_without_ready_event_fails_closed() -> None:
+    class FakeTensor:
+        device = torch.device("cuda:0")
+        is_cuda = True
+
+        def record_stream(self, _stream) -> None:
+            raise AssertionError("a missing ready event must fail before tensor use")
+
+    output = FakeTensor()
+    with pytest.raises(RuntimeError, match="missing its ready_event"):
+        _consume_unified_native_text_append_result(SimpleNamespace(
+            logits=output,
+            final_norm_hidden=output,
+            ready_event=None,
+        ))
+
+
+def test_unified_kv_switch_is_strict_0_or_1(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DUPLEX_UNIFIED_KV", raising=False)
+    assert _strict_env_switch("DUPLEX_UNIFIED_KV") is False
+    monkeypatch.setenv("DUPLEX_UNIFIED_KV", "1")
+    assert _strict_env_switch("DUPLEX_UNIFIED_KV") is True
+    monkeypatch.setenv("DUPLEX_UNIFIED_KV", "0")
+    assert _strict_env_switch("DUPLEX_UNIFIED_KV") is False
+    monkeypatch.setenv("DUPLEX_UNIFIED_KV", "true")
+    with pytest.raises(RuntimeError, match="exactly '0' or '1'"):
+        _strict_env_switch("DUPLEX_UNIFIED_KV")
+
+
+def test_unified_frame_logical_q_preserves_pending_user_audio() -> None:
+    quiet = np.zeros(1280, dtype=np.float32)
+    quiet_pending = _unified_listener_frame_contract(
+        quiet,
+        assistant_turn_open=False,
+        user_input_pending=True,
+    )
+    assert quiet_pending == (2, None, False)
+
+    voiced = np.full(1280, 0.02, dtype=np.float32)
+    assert _unified_listener_frame_contract(
+        voiced,
+        assistant_turn_open=False,
+        user_input_pending=False,
+    ) == (2, None, False)
+
+
+def test_unified_frame_logical_q_skips_only_idle_prespeech_and_marks_assistant_queue() -> None:
+    quiet = np.zeros(1280, dtype=np.float32)
+    assert _unified_listener_frame_contract(
+        quiet,
+        assistant_turn_open=False,
+        user_input_pending=False,
+    ) == (0, "prespeech_silence", False)
+
+    voiced = np.full(1280, 0.02, dtype=np.float32)
+    assert _unified_listener_frame_contract(
+        voiced,
+        assistant_turn_open=True,
+        user_input_pending=False,
+    ) == (0, "assistant_turn_open", True)
+
+
+def test_unified_prefix_uses_text_template_and_replaces_only_final_audio_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Tokenizer:
+        audio_token = "<|audio|>"
+
+        def __init__(self) -> None:
+            self.messages = None
+
+        def apply_chat_template(self, messages, *, tokenize, add_generation_prompt):
+            assert tokenize is False
+            assert add_generation_prompt is False
+            self.messages = messages
+            return "rendered chat with <|audio|> marker and trailing turn end"
+
+        def encode(self, text, *, add_special_tokens):
+            assert add_special_tokens is False
+            if text == self.audio_token:
+                return [900]
+            return [11, 12, 900, 13]
+
+    class Processor:
+        audio_token = "<|audio|>"
+
+        def __call__(self, **_kwargs):
+            raise AssertionError("prefix construction must not call the audio processor")
+
+    class Backend:
+        boa_token_id = 901
+
+    tokenizer = Tokenizer()
+    engine = type("Engine", (), {
+        "tokenizer": tokenizer,
+        "_thinker_wrapper": type("Wrapper", (), {"processor": Processor()})(),
+    })()
+    session = type("Session", (), {
+        "listener": type("Listener", (), {"backend": Backend()})(),
+        "language": "Italian",
+        "instructions": "Parla di Torino.",
+        "history": [{"role": "user", "content": "turno precedente"}],
+    })()
+    monkeypatch.setenv("DUPLEX_AUDIO_RESPONSE_PROTOCOL", "heard_action_say_v2")
+
+    prefix = _build_unified_listener_prefix_token_ids(engine, session)
+
+    assert prefix == (11, 12, 901)
+    assert tokenizer.messages[0]["role"] == "system"
+    assert "Parla di Torino." in tokenizer.messages[0]["content"]
+    assert tokenizer.messages[-2:] == [
+        {"role": "user", "content": "turno precedente"},
+        {"role": "user", "content": "<|audio|>"},
+    ]
+
+
+def test_unified_mode_rejects_turn_varying_controller_guided_system_prompt() -> None:
+    assert _require_unified_stable_audio_protocol("heard_action_say_v2") == "heard_action_say_v2"
+    with pytest.raises(RuntimeError, match="controller_guided_say_v1 has a turn-varying system prompt"):
+        _require_unified_stable_audio_protocol("controller_guided_say_v1")
+
+
+def test_unified_suffix_closes_audio_user_turn_and_starts_assistant_without_processor() -> None:
+    class Tokenizer:
+        audio_token = "<|audio|>"
+        eot_token_id = 102
+
+        def apply_chat_template(self, messages, *, tokenize, add_generation_prompt):
+            assert tokenize is False
+            assert messages == [{"role": "user", "content": "<|audio|>"}]
+            return "template with marker and turn end" + (" assistant prefix" if add_generation_prompt else "")
+
+        def encode(self, text, *, add_special_tokens):
+            assert add_special_tokens is False
+            if text == "<|audio|>":
+                return [900]
+            if text.endswith(" assistant prefix"):
+                return [100, 101, 900, 102, 103]
+            return [100, 101, 900, 102]
+
+    class Backend:
+        boa_token_id = 901
+        eoa_token_id = 902
+        bos_token_id = 100
+
+    tokenizer = Tokenizer()
+    engine = type("Engine", (), {
+        "tokenizer": tokenizer,
+        "_thinker_wrapper": type("Wrapper", (), {"processor": type("Processor", (), {"audio_token": "<|audio|>"})()})(),
+    })()
+    session = type("Session", (), {
+        "listener": type("Listener", (), {"backend": Backend()})(),
+    })()
+
+    assert _build_unified_audio_response_suffix(engine, session) == (902, 102, 103)
+    assert _build_unified_next_user_header(engine, session) == (101, 901)
+    assert _unified_end_of_turn_token_id(engine, session) == 102
+
+
+def test_unified_template_preserves_newline_and_model_generation_prompt_after_eot() -> None:
+    class Tokenizer:
+        audio_token = "<|audio|>"
+        eot_token = "<turn|>"
+        eot_token_id = 106
+
+        def apply_chat_template(self, _messages, *, tokenize, add_generation_prompt):
+            assert tokenize is False
+            tail = "<turn|>\n"
+            if add_generation_prompt:
+                tail += "<|turn>model\n"
+            return "<bos><|turn>user\n<|audio|>" + tail
+
+        def encode(self, text, *, add_special_tokens):
+            assert add_special_tokens is False
+            if text == self.audio_token:
+                return [258881]
+            if text.endswith("<|turn>model\n"):
+                return [1, 105, 258881, 106, 107, 105, 4368, 107]
+            return [1, 105, 258881, 106, 107]
+
+    class Backend:
+        boa_token_id = 258882
+        eoa_token_id = 258883
+        bos_token_id = 1
+
+    engine = SimpleNamespace(
+        tokenizer=Tokenizer(),
+        _thinker_wrapper=SimpleNamespace(processor=SimpleNamespace(audio_token="<|audio|>")),
+    )
+    session = SimpleNamespace(listener=SimpleNamespace(backend=Backend()))
+
+    assert _unified_end_of_turn_token_id(engine, session) == 106
+    assert _build_unified_audio_response_suffix(engine, session) == (
+        258883, 106, 107, 105, 4368, 107
+    )
+
+
+def test_unified_template_rejects_duplicate_eot_and_incompatible_audio_marker() -> None:
+    class Tokenizer:
+        audio_token = "<|audio|>"
+        eot_token_id = 106
+
+        def __init__(self, *, duplicate_eot=False, incompatible_marker=False):
+            self.duplicate_eot = duplicate_eot
+            self.incompatible_marker = incompatible_marker
+
+        def apply_chat_template(self, _messages, *, tokenize, add_generation_prompt):
+            assert tokenize is False
+            tail = "<turn|><turn|>\n" if self.duplicate_eot else "<turn|>\n"
+            return "<bos><|turn>user\n<|audio|>" + tail
+
+        def encode(self, text, *, add_special_tokens):
+            assert add_special_tokens is False
+            if text == self.audio_token:
+                return [258881, 258882] if self.incompatible_marker else [258881]
+            if self.duplicate_eot:
+                return [1, 105, 258881, 106, 106, 107]
+            return [1, 105, 258881, 106, 107]
+
+    class Backend:
+        boa_token_id = 258882
+        eoa_token_id = 258883
+        bos_token_id = 1
+
+    def engine_for(tokenizer):
+        return SimpleNamespace(
+            tokenizer=tokenizer,
+            _thinker_wrapper=SimpleNamespace(processor=SimpleNamespace(audio_token="<|audio|>")),
+        )
+
+    session = SimpleNamespace(listener=SimpleNamespace(backend=Backend()))
+    with pytest.raises(RuntimeError, match="exactly one configured EOT token"):
+        _unified_end_of_turn_token_id(engine_for(Tokenizer(duplicate_eot=True)), session)
+    with pytest.raises(RuntimeError, match="audio marker must map to exactly one tokenizer token"):
+        _unified_end_of_turn_token_id(engine_for(Tokenizer(incompatible_marker=True)), session)
+
+
+def test_unified_thinker_uses_only_same_native_owner_and_never_audio_prefills() -> None:
+    owner_calls = []
+
+    class Worker:
+        def __init__(self) -> None:
+            self.cursor = 20
+            self.cache_identity = object()
+            self.watermark_failures = 1
+            self.append_attempts = []
+
+        def session_state(self, _session_id):
+            future = Future()
+            future.set_result(SimpleNamespace(generation_id=12, cache_position=self.cursor))
+            owner_calls.append(("state", self.cache_identity))
+            return future
+
+        def append_text_tokens(
+            self, session_id, token_ids, *, expected_generation_id, expected_cache_position
+        ):
+            assert session_id == "session"
+            assert expected_generation_id == 12
+            assert expected_cache_position == self.cursor
+            self.append_attempts.append(tuple(token_ids))
+            if self.watermark_failures:
+                self.watermark_failures -= 1
+                future = Future()
+                future.set_exception(RuntimeError(
+                    "text append requires completed listener frame watermark"
+                ))
+                return future
+            owner_calls.append(("append", self.cache_identity, tuple(token_ids)))
+            self.cursor += len(token_ids)
+            future = Future()
+            future.set_result(SimpleNamespace(
+                logits=torch.zeros((1, 100), dtype=torch.float32),
+                final_norm_hidden=torch.full(
+                    (1, 1, 4), float(token_ids[-1]), dtype=torch.float32
+                ),
+                ready_event=None,
+            ))
+            return future
+
+    class ForbiddenAudioPath:
+        def __call__(self, *_args, **_kwargs):
+            raise AssertionError("unified decode must not call processor/audio tower")
+
+    class Sampler:
+        eos_token_ids = {99}
+
+        def __init__(self) -> None:
+            self.next_tokens = iter((7, 99))
+
+        def sample_initial(self, logits, _generated_ids):
+            token_id = next(self.next_tokens)
+            return torch.tensor([[token_id]]), token_id, logits
+
+        def sample_token(self, logits, _generated_ids):
+            token_id = next(self.next_tokens)
+            return torch.tensor([[token_id]]), token_id, logits
+
+        def select_valid_candidate(self, candidate, *, source_logits, generated_ids):
+            del source_logits, generated_ids
+            return candidate
+
+    sampler = Sampler()
+    worker = Worker()
+    captured_metrics = []
+    recorded_tokens = []
+    engine = SimpleNamespace(
+        thinker=SimpleNamespace(config=SimpleNamespace(hidden_size=4)),
+        tokenizer=SimpleNamespace(decode=lambda ids, skip_special_tokens=True: ",".join(map(str, ids))),
+        device="cpu",
+        dtype=torch.float32,
+        _thinker_wrapper=SimpleNamespace(processor=ForbiddenAudioPath()),
+        audio_tower=ForbiddenAudioPath(),
+        think=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("unified mode must not fall back to engine.think")
+        ),
+        build_thinker_sampler=lambda **_kwargs: sampler,
+    )
+    session = SimpleNamespace(session_id="session")
+    branch = {
+        "listener_generation_id": 12,
+        "cache_position": 20,
+        "turn_start_cache_position": 20,
+        "native_token_append_count": 0,
+    }
+
+    think = _run_unified_native_thinker(
+        engine,
+        session,
+        {
+            "_on_thinker_metrics": lambda metrics: captured_metrics.append(dict(metrics)),
+            "_on_thinker_token_id": recorded_tokens.append,
+        },
+        worker=worker,
+        transition_token_ids=(3, 4, 5),
+        think_kwargs={
+            "temperature": 0.0,
+            "top_p": 1.0,
+            "min_new_tokens": 0,
+            "max_new_tokens": 4,
+        },
+        generation_id=4,
+        branch=branch,
+    )
+
+    assert [call[0] for call in owner_calls] == [
+        "state", "state", "append", "append", "append"
+    ]
+    assert all(call[1] is worker.cache_identity for call in owner_calls)
+    successful_appends = [call for call in owner_calls if call[0] == "append"]
+    assert [call[2] for call in successful_appends] == [(3, 4), (5,), (7,)]
+    assert worker.append_attempts == [(3, 4), (3, 4), (5,), (7,)]
+    assert worker.cursor == branch["cache_position"] == 24
+    assert branch["turn_start_cache_position"] == 20
+    assert recorded_tokens == [7, 99]
+    assert think["gen_ids"] == [7]
+    assert think["hidden"].shape == (1, 1, 4)
+    assert think["runtime_metrics"]["unified_native_cache"]["owner_action"] == "handle_terminal_eos"
+    assert captured_metrics[-1]["first_thinker_token_at_ns"] >= captured_metrics[-1][
+        "first_thinker_token_hidden_ready_at_ns"
+    ]
+
+
+class _FutureWorker:
+    def __init__(self, *, cursor: int, turn_start: int, capacity: int, queued_tokens: int = 0,
+                 fail_append_at: int | None = None, reserve_watermark_failures: int = 0) -> None:
+        self.cursor = cursor
+        self.turn_start = turn_start
+        self.capacity = capacity
+        self.queued_tokens = queued_tokens
+        self.fail_append_at = fail_append_at
+        self.reserve_watermark_failures = reserve_watermark_failures
+        self.append_calls: list[tuple[tuple[int, ...], int]] = []
+        self.rollback_targets: list[int] = []
+        self.drain_open_modes: list[bool] = []
+
+    @staticmethod
+    def _done(value=None, error: BaseException | None = None):
+        future = Future()
+        if error is None:
+            future.set_result(value)
+        else:
+            future.set_exception(error)
+        return future
+
+    def session_state(self, _session_id):
+        return self._done(SimpleNamespace(generation_id=12, cache_position=self.cursor))
+
+    def reserve_tail_tokens(
+        self, _session_id, *, expected_generation_id, expected_cache_position, token_count
+    ):
+        assert expected_generation_id == 12
+        assert expected_cache_position == self.cursor
+        if self.reserve_watermark_failures:
+            self.reserve_watermark_failures -= 1
+            return self._done(error=RuntimeError(
+                "tail reservation requires a completed listener frame watermark"
+            ))
+        if self.cursor + self.queued_tokens + token_count > self.capacity:
+            return self._done(error=RuntimeError("native listener tail reservation exceeds capacity"))
+        return self._done(SimpleNamespace(cache_position=self.cursor))
+
+    def append_text_tokens(
+        self, _session_id, token_ids, *, expected_generation_id, expected_cache_position,
+        consume_reserved_tokens,
+    ):
+        assert expected_generation_id == 12
+        assert expected_cache_position == self.cursor
+        token_ids = tuple(token_ids)
+        self.append_calls.append((token_ids, consume_reserved_tokens))
+        self.cursor += len(token_ids)
+        if self.fail_append_at == len(self.append_calls):
+            return self._done(error=RuntimeError("injected native close append failure"))
+        return self._done(SimpleNamespace(
+            logits=torch.zeros((1, 8)),
+            final_norm_hidden=torch.zeros((1, 1, 4)),
+            ready_event=None,
+        ))
+
+    def rollback_assistant_branch(
+        self, _session_id, *, expected_generation_id, expected_cache_position,
+        target_cache_position,
+    ):
+        assert expected_generation_id == 12
+        assert expected_cache_position == self.cursor
+        self.rollback_targets.append(target_cache_position)
+        self.cursor = target_cache_position
+        return self._done(SimpleNamespace(cache_position=self.cursor))
+
+    def drain_queued_audio(
+        self, _session_id, *, expected_generation_id, expected_cache_position,
+        user_turn_already_open,
+    ):
+        assert expected_generation_id == 12
+        assert expected_cache_position == self.cursor
+        self.drain_open_modes.append(user_turn_already_open)
+        self.cursor += self.queued_tokens
+        self.queued_tokens = 0
+        return self._done(SimpleNamespace(cache_position=self.cursor))
+
+
+def _unified_branch(cursor: int, turn_start: int) -> dict[str, object]:
+    return {
+        "listener_generation_id": 12,
+        "cache_position": cursor,
+        "turn_start_cache_position": turn_start,
+        "queue_open": True,
+        "finalized": False,
+    }
+
+
+def test_unified_close_capacity_preflight_rolls_back_before_any_close_append() -> None:
+    worker = _FutureWorker(cursor=95, turn_start=80, capacity=100, queued_tokens=4)
+    branch = _unified_branch(cursor=95, turn_start=80)
+
+    with pytest.raises(RuntimeError, match="assistant branch was rolled back"):
+        asyncio.run(_finalize_unified_native_cache_branch(
+            worker,
+            "session",
+            branch,
+            history_committed=True,
+            close_ids=(31, 32, 33),
+        ))
+
+    assert worker.append_calls == []
+    assert worker.rollback_targets == [80]
+    assert worker.drain_open_modes == [True]
+    assert worker.cursor == 84
+    assert branch["finalized"] is True
+    assert branch["queue_open"] is False
+
+
+def test_unified_close_append_failure_rolls_back_partial_suffix_and_drains_open_turn() -> None:
+    worker = _FutureWorker(
+        cursor=70,
+        turn_start=60,
+        capacity=100,
+        queued_tokens=2,
+        fail_append_at=2,
+    )
+    branch = _unified_branch(cursor=70, turn_start=60)
+
+    with pytest.raises(RuntimeError, match="assistant branch was rolled back"):
+        asyncio.run(_finalize_unified_native_cache_branch(
+            worker,
+            "session",
+            branch,
+            history_committed=True,
+            close_ids=(41, 42, 43, 44, 45),
+        ))
+
+    assert worker.append_calls == [((41, 42), 2), ((43, 44), 2)]
+    assert worker.rollback_targets == [60]
+    assert worker.drain_open_modes == [True]
+    assert worker.cursor == 62
+    assert branch["finalized"] is True
+    assert branch["queue_open"] is False
+
+
+def test_unified_success_consumes_reserved_close_suffix_then_drains_new_user_turn() -> None:
+    worker = _FutureWorker(cursor=70, turn_start=60, capacity=100, queued_tokens=2)
+    branch = _unified_branch(cursor=70, turn_start=60)
+
+    asyncio.run(_finalize_unified_native_cache_branch(
+        worker,
+        "session",
+        branch,
+        history_committed=True,
+        close_ids=(51, 52, 53),
+    ))
+
+    assert worker.append_calls == [((51, 52), 2), ((53,), 1)]
+    assert worker.rollback_targets == []
+    assert worker.drain_open_modes == [False]
+    assert worker.cursor == 75
+    assert branch["finalized"] is True
+    assert branch["history_committed"] is True
+
+
+def test_private_unified_finalizer_releases_only_ephemeral_slot() -> None:
+    class Worker:
+        def __init__(self):
+            self.released = []
+
+        @staticmethod
+        def _done(value=None):
+            future = Future()
+            future.set_result(value)
+            return future
+
+        def end_ephemeral_decode(self, handle):
+            self.released.append(handle)
+            return self._done(None)
+
+        def session_state(self, *_args, **_kwargs):
+            raise AssertionError("private cleanup must not inspect canonical session state")
+
+        def rollback_assistant_branch(self, *_args, **_kwargs):
+            raise AssertionError("private cleanup must not rewind canonical cache")
+
+        def drain_queued_audio(self, *_args, **_kwargs):
+            raise AssertionError("private cleanup must not touch the canonical audio queue")
+
+    worker = Worker()
+    handle = SimpleNamespace(cache_position=117)
+    branch = {
+        "ephemeral_private": True,
+        "ephemeral_decode_handle": handle,
+        "cache_position": 115,
+        "finalized": False,
+    }
+
+    asyncio.run(_finalize_unified_native_cache_branch(
+        worker,
+        "session",
+        branch,
+        history_committed=True,
+        close_ids=(1, 2),
+    ))
+
+    assert worker.released == [handle]
+    assert branch["cache_position"] == 117
+    assert branch["finalized"] is True
+    assert branch["private_slot_released"] is True
+    assert branch["history_committed"] is False
+
+
+def test_unified_cancel_rolls_back_to_open_user_turn_and_drains_without_close_suffix() -> None:
+    worker = _FutureWorker(cursor=70, turn_start=60, capacity=100, queued_tokens=4)
+    branch = _unified_branch(cursor=70, turn_start=60)
+
+    asyncio.run(_finalize_unified_native_cache_branch(
+        worker,
+        "session",
+        branch,
+        history_committed=False,
+        close_ids=(61, 62, 63),
+    ))
+
+    assert worker.append_calls == []
+    assert worker.rollback_targets == [60]
+    assert worker.drain_open_modes == [True]
+    assert worker.cursor == 64
+    assert branch["finalized"] is True
+    assert branch["history_committed"] is False
+
+
+def test_unified_rejected_response_without_qwen_ack_keeps_empty_prefix_and_rolls_back() -> None:
+    worker = _FutureWorker(cursor=70, turn_start=60, capacity=100, queued_tokens=2)
+    branch = _unified_branch(cursor=70, turn_start=60)
+    branch.update({
+        "session_generation_id": 19,
+        "spoken_prefix_lock": threading.Lock(),
+        "spoken_prefix_kv_position": None,
+        "spoken_prefix_text": "",
+    })
+
+    # V2 can reject before the first Qwen token is consumed. The frozen FIFO
+    # snapshot is (None, ""): no cursor exists and no assistant prefix is spoken.
+    _record_turn_local_vocalized_prefix(branch, 19, None, "")
+    asyncio.run(_finalize_unified_native_cache_branch(
+        worker,
+        "session",
+        branch,
+        history_committed=False,
+        close_ids=(61, 62),
+    ))
+
+    assert branch["spoken_prefix_kv_position"] is None
+    assert branch["spoken_prefix_text"] == ""
+    assert worker.append_calls == []
+    assert worker.rollback_targets == [60]
+    assert worker.drain_open_modes == [True]
+    assert branch["finalized"] is True
+    assert branch["history_committed"] is False
+
+
+def test_unified_spoken_text_without_ack_cursor_is_rejected_explicitly() -> None:
+    branch = {
+        "session_generation_id": 19,
+        "spoken_prefix_lock": threading.Lock(),
+        "spoken_prefix_kv_position": None,
+        "spoken_prefix_text": "",
+    }
+
+    with pytest.raises(RuntimeError, match="spoken text has no acknowledged KV cursor"):
+        _record_turn_local_vocalized_prefix(branch, 19, None, "Aspetta!")
+
+
+def test_unified_cancel_rebuilds_only_acknowledged_spoken_prefix_after_rewind() -> None:
+    worker = _FutureWorker(cursor=75, turn_start=60, capacity=120, queued_tokens=2)
+    branch = _unified_branch(cursor=75, turn_start=60)
+    branch["transition_token_ids"] = (11, 12)
+    branch["spoken_prefix_text"] = "Aspetta!"
+    branch["spoken_prefix_token_ids"] = (21, 22, 23)
+    branch["spoken_prefix_exclusive_cursor"] = 65
+
+    asyncio.run(_finalize_unified_native_cache_branch(
+        worker,
+        "session",
+        branch,
+        history_committed=False,
+        close_ids=(91, 92, 93),
+    ))
+
+    assert worker.rollback_targets == [60]
+    assert worker.append_calls == [
+        ((11, 12), 2),
+        ((21, 22), 2),
+        ((23, 91), 2),
+        ((92, 93), 2),
+    ]
+    assert worker.drain_open_modes == [False]
+    assert branch["spoken_prefix_rebuilt"] is True
+    assert branch["history_committed"] is False
+
+
+def test_client_consumed_pcm_uses_complete_segment_exact_tokens_and_exclusive_cursor() -> None:
+    branch = {
+        "response_id": "response-ack",
+        "session_generation_id": 23,
+        "speaker_segment_id": "segment-ack",
+        "playback_segments": {
+            "segment-ack": {
+                "response_id": "response-ack",
+                "generation_id": 23,
+                "speaker_segment_id": "segment-ack",
+                "start_sample": 0,
+                "end_sample": 200,
+                "sample_rate": 24000,
+                "emitted_end_sample": 200,
+                "done_emitted": True,
+                "token_packets": (
+                    {"token_id": 501, "exclusive_kv_cursor": 61, "text_piece": "Cia"},
+                    {"token_id": 502, "exclusive_kv_cursor": 62, "text_piece": "o"},
+                ),
+            },
+        },
+        "turn_start_cache_position": 60,
+        "spoken_prefix_token_ids": (),
+        "spoken_prefix_exclusive_cursor": 60,
+        "spoken_prefix_text": "",
+        "client_consumed_pcm_sequence": -1,
+        "client_consumed_segments": (),
+    }
+
+    partial = {
+        "type": "client_consumed_pcm",
+        "response_id": "response-ack",
+        "generation_id": 23,
+        "speaker_segment_id": "segment-ack",
+        "start_sample": 0,
+        "end_sample": 199,
+        "sample_rate": 24000,
+        "sequence": 1,
+        "consumption_semantics": "logical_client_device_buffer",
+    }
+    assert _record_client_consumed_pcm(branch, partial) is False
+    assert branch["spoken_prefix_token_ids"] == ()
+    assert branch["spoken_prefix_exclusive_cursor"] == 60
+
+    complete = {
+        **partial,
+        "end_sample": 200,
+    }
+    assert _record_client_consumed_pcm(branch, complete) is True
+    assert branch["spoken_prefix_token_ids"] == (501, 502)
+    assert branch["spoken_prefix_exclusive_cursor"] == 62
+    assert branch["spoken_prefix_text"] == "Ciao"
+
+
+def test_unified_cancel_rebuilds_exact_acknowledged_gemma_ids_not_retokenized_text() -> None:
+    worker = _FutureWorker(cursor=75, turn_start=60, capacity=120, queued_tokens=2)
+    branch = _unified_branch(cursor=75, turn_start=60)
+    branch.update({
+        "transition_token_ids": (11, 12),
+        "spoken_prefix_token_ids": (501, 502),
+        "spoken_prefix_exclusive_cursor": 64,
+        # Text is deliberately unrelated: exact source IDs are authoritative.
+        "spoken_prefix_text": "retokenization would be wrong",
+        "spoken_prefix_rebuilt": False,
+        "spoken_prefix_lock": threading.Lock(),
+    })
+
+    asyncio.run(_finalize_unified_native_cache_branch(
+        worker,
+        "session",
+        branch,
+        history_committed=False,
+        close_ids=(91, 92, 93),
+    ))
+
+    assert worker.rollback_targets == [60]
+    assert worker.append_calls == [
+        ((11, 12), 2),
+        ((501, 502), 2),
+        ((91, 92), 2),
+        ((93,), 1),
+    ]
+    assert branch["spoken_prefix_exclusive_cursor"] == 64
+    assert branch["spoken_prefix_rebuilt"] is True
+
+
+def test_client_consumed_pcm_rejects_stale_identity_and_replayed_sequence() -> None:
+    branch = {
+        "response_id": "response-current",
+        "session_generation_id": 7,
+        "speaker_segment_id": "segment-current",
+        "playback_segments": {
+            "segment-current": {
+                "response_id": "response-current",
+                "generation_id": 7,
+                "speaker_segment_id": "segment-current",
+                "start_sample": 0,
+                "end_sample": 64,
+                "sample_rate": 24000,
+                "emitted_end_sample": 64,
+                "done_emitted": True,
+                "token_packets": (),
+            },
+        },
+        "spoken_prefix_token_ids": (),
+        "spoken_prefix_exclusive_cursor": 0,
+        "spoken_prefix_text": "",
+        "client_consumed_pcm_sequence": -1,
+        "client_consumed_segments": (),
+    }
+    ack = {
+        "type": "client_consumed_pcm",
+        "response_id": "response-current",
+        "generation_id": 7,
+        "speaker_segment_id": "segment-current",
+        "start_sample": 0,
+        "end_sample": 64,
+        "sample_rate": 24000,
+        "sequence": 1,
+        "consumption_semantics": "logical_client_device_buffer",
+    }
+    assert _record_client_consumed_pcm(branch, ack) is True
+    assert _record_client_consumed_pcm(branch, ack) is False
+    assert _record_client_consumed_pcm(branch, {**ack, "sequence": 2, "generation_id": 6}) is False
+    assert _record_client_consumed_pcm(branch, {**ack, "sequence": 2, "response_id": "stale"}) is False
+
+
+def test_client_consumed_pcm_ack_sequence_is_not_packet_id() -> None:
+    branch = {
+        "response_id": "response-counters",
+        "session_generation_id": 1,
+        "speaker_segment_id": "segment-counters",
+        "playback_segments": {
+            "segment-counters": {
+                "response_id": "response-counters",
+                "generation_id": 1,
+                "speaker_segment_id": "segment-counters",
+                "start_sample": 0,
+                "end_sample": 16,
+                "sample_rate": 24000,
+                "emitted_end_sample": 16,
+                "emitted_packet_id": 0,
+                "done_emitted": True,
+                "token_packets": (),
+            },
+        },
+        "spoken_prefix_token_ids": (),
+        "spoken_prefix_exclusive_cursor": 0,
+        "spoken_prefix_text": "",
+        "client_consumed_pcm_sequence": -1,
+        "client_consumed_segments": (),
+    }
+    ack = {
+        "type": "client_consumed_pcm",
+        "response_id": "response-counters",
+        "generation_id": 1,
+        "speaker_segment_id": "segment-counters",
+        "start_sample": 0,
+        "end_sample": 16,
+        "sample_rate": 24000,
+        "sequence": 1,
+        "consumption_semantics": "logical_client_device_buffer",
+    }
+    assert _record_client_consumed_pcm(branch, ack) is True
+
+
+def test_segment_done_marker_uses_exact_emitted_range_and_client_schema() -> None:
+    branch = {
+        "response_id": "response-marker",
+        "session_generation_id": 9,
+        "playback_segments": {},
+    }
+    packet = SimpleNamespace(
+        response_id="response-marker",
+        generation_id=9,
+        speaker_segment_id="segment-marker",
+        start_sample=0,
+        end_sample=16,
+        packet_id=0,
+    )
+    _record_emitted_pcm_packet(branch, packet)
+    marker = _complete_client_pcm_segment(
+        branch,
+        speaker_segment_id="segment-marker",
+        token_packets=({
+            "token_id": 70,
+            "exclusive_kv_cursor": 81,
+            "text_piece": "Ciao",
+        },),
+    )
+
+    assert marker == {
+        "type": "response.audio.segment_done",
+        "response_id": "response-marker",
+        "generation_id": 9,
+        "speaker_segment_id": "segment-marker",
+        "start_sample": 0,
+        "end_sample": 16,
+        "sample_rate": 24000,
+    }
+    segment = branch["playback_segments"]["segment-marker"]
+    assert segment["done_emitted"] is True
+    assert segment["token_packets"] == ({
+        "token_id": 70,
+        "exclusive_kv_cursor": 81,
+        "text_piece": "Ciao",
+    },)
+
+
+def test_emitted_segment_requires_contiguous_packets_and_marker_once() -> None:
+    branch = {
+        "response_id": "response-marker",
+        "session_generation_id": 9,
+        "playback_segments": {},
+    }
+    first = SimpleNamespace(
+        generation_id=9, speaker_segment_id="segment-marker",
+        start_sample=0, end_sample=16, packet_id=0,
+    )
+    gap = SimpleNamespace(
+        generation_id=9, speaker_segment_id="segment-marker",
+        start_sample=17, end_sample=24, packet_id=1,
+    )
+    _record_emitted_pcm_packet(branch, first)
+    with pytest.raises(RuntimeError, match="non-contiguous"):
+        _record_emitted_pcm_packet(branch, gap)
+    marker = _complete_client_pcm_segment(branch, speaker_segment_id="segment-marker")
+    assert marker["end_sample"] == 16
+    assert _complete_client_pcm_segment(branch, speaker_segment_id="segment-marker") is None
+
+
+def test_closed_tts_segment_requires_actual_codec_eos_not_text_drain() -> None:
+    _require_closed_tts_codec_eos({"eos_detected": True, "terminated_by": "eos"})
+    with pytest.raises(RuntimeError, match="did not reach codec EOS"):
+        _require_closed_tts_codec_eos({
+            "eos_detected": False,
+            "terminated_by": "budget",
+            "text_eos_consumed": True,
+            "fifo_drained": True,
+        })
+    with pytest.raises(RuntimeError, match="did not reach codec EOS"):
+        _require_closed_tts_codec_eos({"text_eos_consumed": True, "fifo_drained": True})
+
+
+def test_unified_finalizer_retries_one_pending_q0_watermark_without_rolling_back() -> None:
+    worker = _FutureWorker(
+        cursor=70,
+        turn_start=60,
+        capacity=100,
+        queued_tokens=2,
+        reserve_watermark_failures=1,
+    )
+    branch = _unified_branch(cursor=70, turn_start=60)
+
+    asyncio.run(_finalize_unified_native_cache_branch(
+        worker,
+        "session",
+        branch,
+        history_committed=True,
+        close_ids=(71, 72),
+    ))
+
+    assert worker.rollback_targets == []
+    assert worker.append_calls == [((71, 72), 2)]
+    assert worker.drain_open_modes == [False]
+    assert worker.cursor == 74
+    assert branch["history_committed"] is True
+
+
+def test_unified_finalizer_rolls_back_untracked_cache_advance_before_close() -> None:
+    worker = _FutureWorker(cursor=71, turn_start=60, capacity=100, queued_tokens=2)
+    branch = _unified_branch(cursor=70, turn_start=60)
+
+    with pytest.raises(RuntimeError, match="assistant branch was rolled back"):
+        asyncio.run(_finalize_unified_native_cache_branch(
+            worker,
+            "session",
+            branch,
+            history_committed=True,
+            close_ids=(81, 82),
+        ))
+
+    assert worker.append_calls == []
+    assert worker.rollback_targets == [60]
+    assert worker.drain_open_modes == [True]
+    assert worker.cursor == 62

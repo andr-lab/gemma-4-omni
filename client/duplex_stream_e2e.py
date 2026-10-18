@@ -43,6 +43,20 @@ PAIR_ROUTE_QUEUE_CAPACITY_CHUNKS = 8
 ENDPOINT_SILENCE_FRAMES = 10
 _NATIVE_CONTROL6_SELECTION_FIELDS = (
     "policy_fallback_reason",
+    "native_control6_effective_candidate",
+    "native_control6_effective_order",
+    "native_control6_effective_actions",
+    "native_control6_effective_members",
+    "native_control6_legal_effective_mass",
+    "native_control6_selected_effective_probability",
+    "native_control6_hysteresis_count",
+    "native_control6_hysteresis_pending",
+    "native_control6_hysteresis_applied_action",
+    "native_action_raw_probabilities",
+    "native_action_effective_order",
+    "native_action_effective_probabilities",
+    "native_action_legal_effective_probabilities",
+    "native_action_legal_effective_mass",
     "native_control6_raw_row_index",
     "native_control6_raw_token_id",
     "native_control6_raw_token",
@@ -191,6 +205,17 @@ _SERVER_EVENT_LOG_FIELDS = (
     "server_listener_step_start_ns",
     "server_listener_step_end_ns",
     "server_ack_queue_ms",
+    "logical_q_len",
+    "ephemeral_reason",
+    "queue_audio_for_next_turn",
+    "kv_rollback_tokens",
+    "kv_rollback_enqueue_ms",
+    "listener_cache_position_before",
+    "listener_cache_position_after",
+    "listener_valid_history_tokens_before",
+    "listener_valid_history_tokens_after",
+    "native_cache_current_position_after",
+    "native_cache_valid_kv_len_after",
     *_NATIVE_CONTROL6_SELECTION_FIELDS,
     *_SCHEDULER_TRACE_FIELDS,
 )
@@ -246,6 +271,17 @@ def _project_input_ack_fields(event: dict[str, Any]) -> dict[str, Any]:
         "server_listener_step_start_ns",
         "server_listener_step_end_ns",
         "server_ack_queue_ms",
+        "logical_q_len",
+        "ephemeral_reason",
+        "queue_audio_for_next_turn",
+        "kv_rollback_tokens",
+        "kv_rollback_enqueue_ms",
+        "listener_cache_position_before",
+        "listener_cache_position_after",
+        "listener_valid_history_tokens_before",
+        "listener_valid_history_tokens_after",
+        "native_cache_current_position_after",
+        "native_cache_valid_kv_len_after",
         *_SCHEDULER_TRACE_FIELDS,
     )
     return {field: event[field] for field in fields if field in event}
@@ -311,6 +347,16 @@ def _followup_after_response_done_due(
     if response_done_ns is None:
         return False
     return now_ns >= response_done_ns + int(delay_ms) * 1_000_000
+
+
+def _bargein_observation_due(
+    injection_status: str, last_sample_sent_at_ns: int | None, now_ns: int,
+    observation_s: float,
+) -> bool:
+    """End an isolated correction replay only after its final input frame plus the observation window."""
+    if injection_status != "sent" or last_sample_sent_at_ns is None:
+        return False
+    return int(now_ns) >= int(last_sample_sent_at_ns) + int(float(observation_s) * 1_000_000_000)
 
 
 def _manual_seed_bootstrap_terminal_status(event_kind: str, event: dict[str, Any]) -> str:
@@ -1151,6 +1197,11 @@ def summarize_listener_tick_events(
                         "native_action": event.get("native_action"),
                         "native_action_probability": event.get("native_action_probability"),
                         "native_action_probabilities": event.get("native_action_probabilities"),
+                        "native_action_raw_probabilities": event.get("native_action_raw_probabilities"),
+                        "native_action_effective_order": event.get("native_action_effective_order"),
+                        "native_action_effective_probabilities": event.get("native_action_effective_probabilities"),
+                        "native_action_legal_effective_probabilities": event.get("native_action_legal_effective_probabilities"),
+                        "native_action_legal_effective_mass": event.get("native_action_legal_effective_mass"),
                         "native_action_logits": event.get("native_action_logits"),
                         "selected_action": event.get("selected_action"),
                         "selected_action_probability": event.get("selected_action_probability"),
@@ -1769,6 +1820,7 @@ class RealtimePairProbe:
                  bargein_wav: Path | None = None,
                  bargein_target: str = "B",
                  bargein_delay_ms: int = 500,
+                 bargein_isolated_observation_s: float | None = None,
                  instructions_a: str = "Sei una persona che organizza una cena con amici. Parla in modo naturale e condividi le tue preferenze.",
                  instructions_b: str = "Sei un assistente conversazionale italiano. Aiuta a scegliere insieme un ristorante e un orario con proposte concise.") -> None:
         self.ws_url = ws_url
@@ -1798,6 +1850,20 @@ class RealtimePairProbe:
         self.bargein_wav = Path(bargein_wav) if bargein_wav is not None else None
         self.bargein_target = str(bargein_target).upper()
         self.bargein_delay_ms = int(bargein_delay_ms)
+        self.bargein_isolated_observation_s = (
+            None if bargein_isolated_observation_s is None
+            else float(bargein_isolated_observation_s)
+        )
+        if self.bargein_isolated_observation_s is not None:
+            if self.bargein_wav is None:
+                raise ValueError("isolated barge-in observation requires bargein_wav")
+            if self.bargein_isolated_observation_s <= 0:
+                raise ValueError("isolated barge-in observation must be positive")
+        self.isolated_observation_active = False
+        self.isolated_observation_complete = False
+        self.isolated_observation_started_at_ns: int | None = None
+        self.isolated_observation_completed_at_ns: int | None = None
+        self.isolated_relay_queue_drops = 0
         if self.bargein_target not in {"A", "B"}:
             raise ValueError("bargein_target must be A or B")
         if self.bargein_delay_ms < 0:
@@ -1954,6 +2020,35 @@ class RealtimePairProbe:
             name="pair-disable-auto-response",
         )
 
+    def _complete_isolated_bargein_observation(self, injection: dict[str, Any]) -> None:
+        """Stop relay/input after the isolated post-injection observation window."""
+        self.isolated_observation_complete = True
+        self.isolated_observation_completed_at_ns = time.monotonic_ns()
+        self.bridge_stopped = True
+        self.log("SYSTEM", {
+            "type": "probe.isolated_bargein_observation_completed",
+            "completed_at_ns": self.isolated_observation_completed_at_ns,
+            "last_injection_sample_sent_at_ns": injection.get("last_sent_at_ns"),
+            "observation_s": self.bargein_isolated_observation_s,
+            "response_ids_at_observation_end": {
+                key: sorted(peer["active"]) for key, peer in self.peers.items()
+            },
+        })
+        # Keep both sessions alive long enough to acknowledge the setting. The
+        # subsequent session.close is the protocol-supported cancellation for
+        # any generation still active at the end of this fixed observation.
+        self._request_auto_response_disable("isolated_bargein_observation_complete")
+        self.stop_senders_requested = True
+        for peer in self.peers.values():
+            peer["stop_sender"] = True
+            peer["ack_wakeup"].set()
+        self.log("SYSTEM", {
+            "type": "probe.isolated_bargein_cleanup_started",
+            "requested_at_ns": time.monotonic_ns(),
+            "pending_ack_frames": sum(len(peer["ack_pending"]) for peer in self.peers.values()),
+            "pipeline_snapshot": self._input_pipeline_snapshot(),
+        })
+
     async def _disable_auto_response_for_peers(self) -> None:
         peers = [peer for peer in self.peers.values() if hasattr(peer.get("ws"), "send")]
         if not peers:
@@ -2081,6 +2176,8 @@ class RealtimePairProbe:
             "queue_frames_enqueued": 0,
             "queue_frames_sent": 0,
             "send_inflight_response_id": None,
+            "send_inflight_source_kind": None,
+            "send_inflight_started_at_ns": None,
             "queued_audio_frames_sent": 0,
             "endpoint_silence_frames_sent": 0,
             "live_silence_frames_sent": 0,
@@ -2191,7 +2288,7 @@ class RealtimePairProbe:
         source_response_id: str,
         source_chunk_ids: tuple[int, ...] = (),
     ) -> None:
-        if self.bridge_stopped:
+        if self.bridge_stopped or self.isolated_observation_active:
             return
         queue: asyncio.Queue = receiver["queue"]
         if queue.full():
@@ -2225,6 +2322,81 @@ class RealtimePairProbe:
         for item in retained:
             queue.put_nowait(item)
         return dropped
+
+    def _begin_isolated_bargein_observation(self, trigger_response_id: str) -> None:
+        """Stop peer relays at injection scheduling while preserving correction input."""
+        if (self.bargein_isolated_observation_s is None
+                or self.isolated_observation_active):
+            return
+        self.isolated_observation_active = True
+        self.isolated_observation_started_at_ns = time.monotonic_ns()
+        preexisting_sends = [
+            {
+                "speaker": str(sender.get("speaker", "")),
+                "response_id": sender.get("send_inflight_response_id"),
+                "source_kind": sender.get("send_inflight_source_kind"),
+                "send_started_at_ns": sender.get("send_inflight_started_at_ns"),
+            }
+            for sender in self.peers.values()
+            if sender.get("send_inflight_source_kind") is not None
+        ]
+        self.log("SYSTEM", {
+            "type": "probe.isolated_bargein_observation_started",
+            "trigger_response_id": str(trigger_response_id),
+            "started_at_ns": self.isolated_observation_started_at_ns,
+            "observation_s_after_last_sent_sample": self.bargein_isolated_observation_s,
+            "relay_policy": "suppress_new_relays_at_injection_schedule",
+            "preexisting_websocket_sends": preexisting_sends,
+            "send_order_contract": "single_target_send_loop_completes_prior_send_before_injection_frame",
+        })
+        for sender in self.peers.values():
+            route_queue = sender.get("route_queue")
+            if route_queue is not None:
+                dropped = self._filter_queue(route_queue, lambda _item: False)
+                sender["route_pending"] = max(0, sender.get("route_pending", 0) - len(dropped))
+                self.isolated_relay_queue_drops += len(dropped)
+            sender["resample_remainder"] = np.empty(0, dtype=np.float32)
+            sender["resample_remainder_chunk_ids"] = np.empty(0, dtype=np.int64)
+            sender["resample_remainder_response_id"] = None
+        reserved_sources = {"seed", "live_silence", "endpoint_silence"}
+        for receiver in self.peers.values():
+            dropped = self._filter_queue(
+                receiver["queue"],
+                lambda item: (
+                    isinstance(item, tuple) and item
+                    and item[0] is self._END_UTTERANCE
+                    and (len(item) < 3 or item[2] is None)
+                ) or (
+                    isinstance(item, tuple) and item
+                    and item[0] is not self._END_UTTERANCE
+                    and len(item) >= 2 and str(item[1]) in reserved_sources
+                ),
+            )
+            relay_drops = sum(
+                1 for item in dropped
+                if isinstance(item, tuple) and item
+                and item[0] is not self._END_UTTERANCE
+                and len(item) >= 2 and str(item[1]) not in reserved_sources
+            )
+            receiver["isolated_relay_frames_dropped"] = (
+                receiver.get("isolated_relay_frames_dropped", 0) + relay_drops
+            )
+            self.isolated_relay_queue_drops += relay_drops
+            wake = receiver.get("ack_wakeup")
+            if wake is not None:
+                wake.set()
+        self.log("SYSTEM", {
+            "type": "probe.isolated_bargein_relay_queues_cleared",
+            "cleared_at_ns": time.monotonic_ns(),
+            "dropped_queued_relay_items": self.isolated_relay_queue_drops,
+        })
+
+    def _is_isolated_relay_source(self, source_response_id: str, source_kind: str | None) -> bool:
+        return bool(
+            self.isolated_observation_active
+            and source_kind != "injection"
+            and str(source_response_id) not in {"seed", "live_silence", "endpoint_silence"}
+        )
 
     def _fence_cancelled_response(
         self, sender: dict[str, Any], receiver: dict[str, Any], response_id: str,
@@ -2317,6 +2489,14 @@ class RealtimePairProbe:
         """Keep WebSocket control/ACK reads independent from paced peer forwarding."""
         if self.bridge_stopped:
             return
+        if self.isolated_observation_active:
+            self.log(sender["speaker"], {
+                "type": "probe.peer_audio_route_suppressed_isolated_observation",
+                "route_kind": item[0] if item else None,
+                "response_id": item[1] if len(item) > 1 else None,
+                "suppressed_at_ns": time.monotonic_ns(),
+            })
+            return
         response_id = str(item[1]) if len(item) > 1 else ""
         if response_id in self.cancelled_response_ids:
             if item[0] == "audio":
@@ -2369,6 +2549,14 @@ class RealtimePairProbe:
             try:
                 kind = item[0]
                 response_id = str(item[1])
+                if self.isolated_observation_active:
+                    self.log(sender["speaker"], {
+                        "type": "probe.peer_audio_route_dropped_isolated_observation",
+                        "route_kind": kind,
+                        "response_id": response_id,
+                        "dropped_at_ns": time.monotonic_ns(),
+                    })
+                    continue
                 if kind == "audio":
                     _, _, chunk_id, pcm, received_ns = item
                     if response_id in self.cancelled_response_ids:
@@ -2441,7 +2629,7 @@ class RealtimePairProbe:
             output_chunk_id = 0
         # Reaching the audible-response target closes new live-silence ingress,
         # but audio from responses that are already active must still drain.
-        if self.bridge_stopped:
+        if self.bridge_stopped or self.isolated_observation_active:
             return
         # Output packets are routed immediately. The resample remainder is kept
         # across packets so 80 ms ingress frames are not reset at each delta.
@@ -2458,6 +2646,8 @@ class RealtimePairProbe:
         if response_id in self.cancelled_response_ids:
             self.cancellation_fences[response_id]["inflight_route_chunks_dropped"] += 1
             return
+        if self.isolated_observation_active:
+            return
         pcm_16k = np.asarray(pcm_16k, dtype=np.float32)
         remainder = sender.get("resample_remainder", np.empty(0, dtype=np.float32))
         combined = np.concatenate((remainder, pcm_16k)) if remainder.size else pcm_16k
@@ -2471,6 +2661,8 @@ class RealtimePairProbe:
         for index in range(count):
             if response_id in self.cancelled_response_ids:
                 self.cancellation_fences[response_id]["inflight_route_chunks_dropped"] += count - index
+                return
+            if self.isolated_observation_active:
                 return
             start = index * FRAME_SAMPLES
             frame = combined[start:start + FRAME_SAMPLES]
@@ -2493,7 +2685,7 @@ class RealtimePairProbe:
         *,
         quiet_frames: int | None = None,
     ) -> None:
-        if self.bridge_stopped or response_id in self.cancelled_response_ids:
+        if self.bridge_stopped or self.isolated_observation_active or response_id in self.cancelled_response_ids:
             return
         remainder = sender.get("resample_remainder", np.empty(0, dtype=np.float32))
         if remainder.size:
@@ -2601,6 +2793,8 @@ class RealtimePairProbe:
                     silence_remaining -= 1
                 elif peer["stop_sender"]:
                     if not peer["ack_pending"]:
+                        if self.isolated_observation_complete:
+                            return
                         if (
                             not any(target.get("active") for target in self.peers.values())
                             and not any(target.get("route_pending", 0) for target in self.peers.values())
@@ -2612,6 +2806,8 @@ class RealtimePairProbe:
                     # as the sender has ACK capacity. Waiting only on ACK here
                     # can strand peer audio in the queue for several seconds.
                     peer["ack_wakeup"].clear()
+                    if not peer["ack_pending"]:
+                        continue
                     get_audio = asyncio.create_task(peer["queue"].get())
                     get_ack = asyncio.create_task(peer["ack_wakeup"].wait())
                     done, pending = await asyncio.wait(
@@ -2668,6 +2864,10 @@ class RealtimePairProbe:
             frame_metadata = item[4] if len(item) > 4 and isinstance(item[4], dict) else {}
             source_kind = frame_metadata.get("source_kind")
             injection_id = frame_metadata.get("injection_id")
+            if self._is_isolated_relay_source(source_response_id, source_kind):
+                peer["isolated_relay_frames_dropped"] = peer.get("isolated_relay_frames_dropped", 0) + 1
+                peer["send_inflight_response_id"] = None
+                continue
             bootstrap_seed_frame = (
                 peer.get("manual_seed_bootstrap")
                 and peer.get("bootstrap_phase") == "seed"
@@ -2677,7 +2877,8 @@ class RealtimePairProbe:
             peer["send_inflight_response_id"] = source_response_id
 
             while (len(peer["ack_pending"]) >= peer["ack_capacity"]
-                   and source_response_id not in self.cancelled_response_ids):
+                   and source_response_id not in self.cancelled_response_ids
+                   and not self._is_isolated_relay_source(source_response_id, source_kind)):
                 stalled_at = time.monotonic_ns()
                 peer["ack_wakeup"].clear()
                 await peer["ack_wakeup"].wait()
@@ -2685,6 +2886,10 @@ class RealtimePairProbe:
             if source_response_id in self.cancelled_response_ids:
                 self.cancellation_fences[source_response_id]["inflight_peer_frames_dropped"] += 1
                 peer["queue_frames_cancelled_dropped"] = peer.get("queue_frames_cancelled_dropped", 0) + 1
+                peer["send_inflight_response_id"] = None
+                continue
+            if self._is_isolated_relay_source(source_response_id, source_kind):
+                peer["isolated_relay_frames_dropped"] = peer.get("isolated_relay_frames_dropped", 0) + 1
                 peer["send_inflight_response_id"] = None
                 continue
             if self.bridge_stopped:
@@ -2696,6 +2901,10 @@ class RealtimePairProbe:
             if source_response_id in self.cancelled_response_ids:
                 self.cancellation_fences[source_response_id]["inflight_peer_frames_dropped"] += 1
                 peer["queue_frames_cancelled_dropped"] = peer.get("queue_frames_cancelled_dropped", 0) + 1
+                peer["send_inflight_response_id"] = None
+                continue
+            if self._is_isolated_relay_source(source_response_id, source_kind):
+                peer["isolated_relay_frames_dropped"] = peer.get("isolated_relay_frames_dropped", 0) + 1
                 peer["send_inflight_response_id"] = None
                 continue
 
@@ -2715,9 +2924,13 @@ class RealtimePairProbe:
                     if key != "frame_index"
                 }
             peer["pending_high_water"] = max(peer["pending_high_water"], len(peer["ack_pending"]))
+            peer["send_inflight_source_kind"] = source_kind
+            peer["send_inflight_started_at_ns"] = send_started_ns
             try:
                 await ws.send(json.dumps(payload))
             except Exception as exc:
+                peer["send_inflight_source_kind"] = None
+                peer["send_inflight_started_at_ns"] = None
                 if peer["ack_pending"] and peer["ack_pending"][-1][0] == local_frame_id:
                     peer["ack_pending"].pop()
                 peer.setdefault("input_frame_provenance", {}).pop(local_frame_id, None)
@@ -2781,6 +2994,8 @@ class RealtimePairProbe:
             }
             peer.setdefault("input_frame_send_records", []).append(record)
             peer["send_inflight_response_id"] = None
+            peer["send_inflight_source_kind"] = None
+            peer["send_inflight_started_at_ns"] = None
             self.log(peer["speaker"], {
                 "type": "probe.input_frame_sent",
                 "frame_id": local_frame_id,
@@ -2797,6 +3012,9 @@ class RealtimePairProbe:
                     "trigger_received_at_ns": frame_metadata.get("trigger_received_at_ns"),
                     "frame_index": frame_metadata.get("frame_index"),
                     "frame_count": frame_metadata.get("frame_count"),
+                    "source_sample_start": frame_metadata.get("source_sample_start"),
+                    "source_sample_end": frame_metadata.get("source_sample_end"),
+                    "source_sample_rate_hz": frame_metadata.get("source_sample_rate_hz"),
                     "enqueued_at_ns": frame_metadata.get("enqueued_at_ns"),
                 } if source_kind == "injection" else {}),
                 "bridge_queue_age_ms": round((sent_ns - enqueued_ns) / 1_000_000.0, 2),
@@ -2829,6 +3047,8 @@ class RealtimePairProbe:
                             "first_sent_at_ns": injection["first_sent_at_ns"],
                             "last_sent_at_ns": injection["last_sent_at_ns"],
                             "frame_count": injection["frame_count"],
+                            "source_sample_count": injection["frame_count"] * FRAME_SAMPLES,
+                            "source_sample_rate_hz": INPUT_RATE,
                         })
             if local_frame_id:
                 peer["input_send_gaps_ms"].append((peer["input_send_times"][-1] - peer["input_send_times"][-2]) * 1000.0)
@@ -2962,7 +3182,9 @@ class RealtimePairProbe:
                 peer["responses"].append(response_id)
                 peer["active"].add(response_id)
                 self._last_response_ns = time.monotonic_ns()
-                if self.created >= self.max_created_responses and not self.created_budget_exhausted:
+                if (self.created >= self.max_created_responses
+                        and not self.created_budget_exhausted
+                        and self.bargein_isolated_observation_s is None):
                     self.created_budget_exhausted = True
                     self._request_auto_response_disable("max_created_responses")
                     self.log("SYSTEM", {
@@ -3028,16 +3250,19 @@ class RealtimePairProbe:
                         "sample_count": int(packet.pcm.size),
                         "sample_rate_hz": int(packet.sample_rate),
                     })
-                    self._enqueue_route_item(peer, (
-                        "audio", response_id, output_chunk_id,
-                        packet.pcm.copy(), now_ns,
-                    ))
-                    if (
+                    schedule_bargein = bool(
                         self.bargein_wav is not None
                         and speaker == self.bargein_target
                         and packet.pcm.size > 0
                         and not self.bargein_scheduled
-                    ):
+                    )
+                    if schedule_bargein and self.bargein_isolated_observation_s is not None:
+                        self._begin_isolated_bargein_observation(response_id)
+                    self._enqueue_route_item(peer, (
+                        "audio", response_id, output_chunk_id,
+                        packet.pcm.copy(), now_ns,
+                    ))
+                    if schedule_bargein:
                         self.bargein_scheduled = True
                         injection_id = (
                             f"bargein:{speaker}:{response_id}:generation-{int(packet.generation_id)}"
@@ -3092,7 +3317,9 @@ class RealtimePairProbe:
                     self.completed += int(kind == "response.done")
                     if kind == "response.done" and int(response.get("audio_samples", 0)) > 0:
                         self.audible_completed += 1
-                        if self.audible_completed >= self.max_turns and not self.created_target_event.is_set():
+                        if (self.audible_completed >= self.max_turns
+                                and not self.created_target_event.is_set()
+                                and self.bargein_isolated_observation_s is None):
                             self.target_drain_deadline = (
                                 self.hard_deadline_at
                                 if self.hard_deadline_at is not None
@@ -3111,7 +3338,10 @@ class RealtimePairProbe:
                     self._last_response_ns = time.monotonic_ns()
                     if kind == "response.done":
                         response["audio_archive_status"] = "completed_response_audio"
-                        is_target = self.audible_completed >= self.max_turns
+                        is_target = (
+                            self.audible_completed >= self.max_turns
+                            and self.bargein_isolated_observation_s is None
+                        )
                         self._enqueue_route_item(peer, (
                             "finish", response_id,
                             0 if is_target else self.endpoint_silence_frames,
@@ -3184,6 +3414,9 @@ class RealtimePairProbe:
                     "trigger_received_at_ns": injection["trigger_received_at_ns"],
                     "frame_index": frame_index,
                     "frame_count": len(frames),
+                    "source_sample_start": frame_index * FRAME_SAMPLES,
+                    "source_sample_end": (frame_index + 1) * FRAME_SAMPLES,
+                    "source_sample_rate_hz": INPUT_RATE,
                     "enqueued_at_ns": None,
                 }
                 while peer["queue"].full():
@@ -3290,6 +3523,16 @@ class RealtimePairProbe:
 
         try:
             while loop.time() < hard_deadline:
+                if self.bargein_isolated_observation_s is not None:
+                    injection = next(iter(self.bargein_injections.values()), None)
+                    if injection is not None and _bargein_observation_due(
+                        str(injection.get("status", "")),
+                        injection.get("last_sent_at_ns"),
+                        time.monotonic_ns(),
+                        self.bargein_isolated_observation_s,
+                    ):
+                        self._complete_isolated_bargein_observation(injection)
+                        break
                 drain_requested = self.created_target_event.is_set() or self.created_budget_exhausted
                 if drain_requested:
                     queues_empty = all(peer["queue"].empty() for peer in (peer_a, peer_b))
@@ -3337,7 +3580,8 @@ class RealtimePairProbe:
                 if self.errors or self.overflow:
                     break
                 await asyncio.sleep(0.05)
-            if not self.pair_drain_completed and not self.errors and not self.overflow:
+            if (not self.pair_drain_completed and not self.isolated_observation_complete
+                    and not self.errors and not self.overflow):
                 self.drain_snapshot_at_timeout = self._input_pipeline_snapshot()
                 self.errors.append({
                     "error": "pair reached configured wall deadline before natural drain; result is partial",
@@ -3359,13 +3603,17 @@ class RealtimePairProbe:
             if self.bargein_task is not None and not self.bargein_task.done():
                 self.bargein_task.cancel()
                 await asyncio.gather(self.bargein_task, return_exceptions=True)
+            if self.isolated_observation_complete:
+                self.bridge_stopped = True
+                self._request_auto_response_disable("isolated_bargein_observation_complete")
             for peer in (peer_a, peer_b):
                 peer["stop_sender"] = True
                 peer["ack_wakeup"].set()
             sender_tasks = [peer["sender_task"] for peer in (peer_a, peer_b)]
             cleanup_budget_s = (
                 2.0 if self.pair_drain_completed
-                else max(0.0, min(2.0, hard_deadline - loop.time()))
+                else (ACK_CREDIT_WAIT_TIMEOUT_S + 1.0 if self.isolated_observation_complete
+                      else max(0.0, min(2.0, hard_deadline - loop.time())))
             )
             try:
                 if cleanup_budget_s > 0:
@@ -3388,6 +3636,14 @@ class RealtimePairProbe:
                     if not task.done():
                         task.cancel()
                 await asyncio.gather(*(peer["sender_task"] for peer in (peer_a, peer_b)), return_exceptions=True)
+            if self.isolated_observation_complete and self.auto_response_disable_task is not None:
+                try:
+                    await asyncio.wait_for(asyncio.shield(self.auto_response_disable_task), timeout=6.0)
+                except asyncio.TimeoutError:
+                    self.errors.append({
+                        "error": "auto_response=false was not acknowledged before isolated session close",
+                        "reason": self.auto_response_disable_reason,
+                    })
             for injection in self.bargein_injections.values():
                 if injection["status"] != "sent":
                     self.log(injection["target_speaker"], {
@@ -3428,7 +3684,10 @@ class RealtimePairProbe:
                     "type": "probe.session_close_with_active_responses",
                     "active_response_ids": active_at_close,
                     "close_at_ns": time.monotonic_ns(),
-                    "completion_status": "partial",
+                    "completion_status": (
+                        "observation_window_ended_session_close_cancels_active_generation"
+                        if self.isolated_observation_complete else "partial"
+                    ),
                 })
             self.stop.set()
             for peer in (peer_a, peer_b):
@@ -3504,6 +3763,7 @@ class RealtimePairProbe:
                     "frames_enqueued": peer["queue_frames_enqueued"],
                     "frames_sent": peer["queue_frames_sent"],
                     "queued_audio_frames_sent": peer.get("queued_audio_frames_sent", 0),
+                    "isolated_relay_frames_dropped": peer.get("isolated_relay_frames_dropped", 0),
                     "frames_cancelled_dropped": peer.get("queue_frames_cancelled_dropped", 0),
                     "endpoint_silence_frames_sent": peer.get("endpoint_silence_frames_sent", 0),
                     "live_silence_frames_sent": peer.get("live_silence_frames_sent", 0),
@@ -3638,8 +3898,20 @@ class RealtimePairProbe:
             "max_created_responses": self.max_created_responses,
             "created_budget_exhausted": self.created_budget_exhausted,
             "budget_drain_completed": self.budget_drain_completed,
-            "pair_completion_status": "complete" if self.pair_drain_completed and not self.errors else "partial",
+            "pair_completion_status": (
+                "complete" if (self.pair_drain_completed or self.isolated_observation_complete)
+                and not self.errors else "partial"
+            ),
             "pair_drain_completed": self.pair_drain_completed,
+            "isolated_bargein_observation": {
+                "enabled": self.bargein_isolated_observation_s is not None,
+                "observation_s_after_last_sample_sent": self.bargein_isolated_observation_s,
+                "active": self.isolated_observation_active,
+                "complete": self.isolated_observation_complete,
+                "started_at_ns": self.isolated_observation_started_at_ns,
+                "completed_at_ns": self.isolated_observation_completed_at_ns,
+                "queued_relay_items_dropped": self.isolated_relay_queue_drops,
+            },
             "auto_response_disable": {
                 "reason": self.auto_response_disable_reason,
                 "requested_at_ns": self.auto_response_disable_started_ns,
@@ -3738,6 +4010,10 @@ def main() -> int:
                         help="opt-in WAV input injected into one pair participant after its first audio delta")
     parser.add_argument("--bargein-target", choices=("A", "B"), default="B")
     parser.add_argument("--bargein-delay-ms", type=int, default=500)
+    parser.add_argument(
+        "--bargein-isolated-observation-s", type=float,
+        help="suppress both peer relay directions at injection scheduling and observe this long after its last sent frame",
+    )
     parser.add_argument("--instructions-a", default="Sei una persona che organizza una cena con amici. Parla in modo naturale e condividi le tue preferenze.")
     parser.add_argument("--instructions-b", default="Sei un assistente conversazionale italiano. Aiuta a scegliere insieme un ristorante e un orario con proposte concise.")
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -3757,6 +4033,11 @@ def main() -> int:
         parser.error("--bargein-wav is only available in pair mode")
     if args.bargein_wav is not None and args.bargein_delay_ms < 0:
         parser.error("--bargein-delay-ms must be non-negative")
+    if args.bargein_isolated_observation_s is not None:
+        if args.bargein_isolated_observation_s <= 0:
+            parser.error("--bargein-isolated-observation-s must be positive")
+        if args.mode != "pair" or args.bargein_wav is None:
+            parser.error("--bargein-isolated-observation-s requires pair mode and --bargein-wav")
     if args.followup_after_response_done_ms is not None:
         if args.followup_after_response_done_ms < 0:
             parser.error("--followup-after-response-done-ms must be non-negative")
@@ -3810,6 +4091,7 @@ def main() -> int:
             bargein_wav=args.bargein_wav,
             bargein_target=args.bargein_target,
             bargein_delay_ms=args.bargein_delay_ms,
+            bargein_isolated_observation_s=args.bargein_isolated_observation_s,
             instructions_a=args.instructions_a,
             instructions_b=args.instructions_b,
         )
@@ -3817,8 +4099,11 @@ def main() -> int:
             report = asyncio.run(probe.run(args.audio))
         finally:
             probe._stop_log_writer()
-        failed = bool(report["capacity_overflow"] or report["responses_created_over_hard_budget"] or report["errors"] or
-                      report["audible_completed_responses"] < report["target_audible_responses"] or any(
+        failed = bool(report["capacity_overflow"] or report["errors"] or
+                      (args.bargein_isolated_observation_s is None and (
+                       report["responses_created_over_hard_budget"]
+                       or report["audible_completed_responses"] < report["target_audible_responses"]
+                      )) or any(
             peer["missing_ack_count"] or peer["pending_acks_at_close"] or peer["ack_duplicates"]
             for peer in report["participants"]
         ))

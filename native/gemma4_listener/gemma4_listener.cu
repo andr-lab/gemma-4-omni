@@ -124,7 +124,7 @@ struct gemma4_listener_ctx {
     int *d_output_health;              /* device flag: non-finite output observed */
     bool owns_output_tensor;
 
-    /* Diagnostic-only tensor taps. Each slot stores one contiguous Q=4
+    /* Diagnostic-only tensor taps. Each slot stores one contiguous Q=2
      * tensor; widths are overprovisioned for the selected layer's topology. */
     __nv_bfloat16 *d_debug_hidden_taps; /* 16 * [4, 1536] */
     __nv_bfloat16 *d_debug_q_taps;      /* 4 * [4, 4096] */
@@ -2869,7 +2869,7 @@ static int gemma4_listener_graph_step_async(
     return 0;
 }
 
-/* API: Step Asynchronously (Q=4) */
+/* API: Step Asynchronously (Q=2) */
 int gemma4_listener_step_async(
     gemma4_listener_ctx *ctx,
     const void *frame_audio_soft,

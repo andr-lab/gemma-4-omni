@@ -9,13 +9,86 @@ import torch
 from duplex_kernel.server import (
     POLICY_FRAME_SAMPLES,
     _native_control6_decision_has_valid_input,
+    _native_control6_endpoint_bypass_enabled,
     _native_control6_listener_output_is_fresh_for_frame,
     _native_control6_listener_source_frame_id,
     _native_control6_policy_hidden_for_tick,
+    _native_control6_speaker_active,
     _silence_skip_is_true_idle,
     _silence_skip_transition_is_still_idle,
 )
+from duplex_kernel.gemma_native_control6_policy import (
+    GemmaNativeControl6Policy,
+    legal_control_actions as native_control6_legal_actions,
+)
+from duplex_kernel.duplex_control6 import DuplexControl6Policy
 from duplex_kernel.session import DuplexSession
+from duplex_kernel.turn_policy import ControlState, PolicyInput
+
+
+@pytest.mark.parametrize(
+    ("active_response", "control_state", "expected_speaking"),
+    [
+        (False, ControlState.SPEAKING, True),
+        (False, ControlState.BACKCHANNELING, True),
+        (False, ControlState.STOPPING, True),
+        (True, ControlState.LISTENING, True),
+        (False, ControlState.LISTENING, False),
+    ],
+)
+def test_native_callback_uses_one_speaking_snapshot_for_mask_input_and_no_input(
+    active_response: bool,
+    control_state: ControlState,
+    expected_speaking: bool,
+) -> None:
+    # The callback snapshots active_response/control_state once and passes this
+    # result to legality, PolicyInput, and exact-zero handling.
+    policy_speaker_active = _native_control6_speaker_active(
+        active_response=active_response,
+        control_state=control_state,
+    )
+    legal_actions = native_control6_legal_actions(
+        speaker_active=policy_speaker_active,
+        user_turn_pending=True,
+        peer_turn_active=True,
+    )
+    policy_input = PolicyInput(
+        session_id="test",
+        frame_id=1,
+        user_pcm=np.zeros(POLICY_FRAME_SAMPLES, dtype=np.float32),
+        speaker_active=policy_speaker_active,
+        generation_id=1,
+        legal_actions=legal_actions,
+    )
+    listener_hidden = torch.ones((1, 2048), dtype=torch.float32)
+    policy_hidden, no_input_tick = _native_control6_policy_hidden_for_tick(
+        user_pcm=np.zeros(POLICY_FRAME_SAMPLES, dtype=np.float32),
+        speaker_active=policy_speaker_active,
+        listener_hidden=listener_hidden,
+    )
+    assert policy_input.speaker_active is expected_speaking
+    assert policy_input.legal_actions == (
+        ("CONTINUE", "YIELD") if expected_speaking else ("LISTEN", "BACKCHANNEL", "SPEAK")
+    )
+    assert no_input_tick is expected_speaking
+    assert policy_hidden is (None if expected_speaking else listener_hidden)
+    if expected_speaking:
+        assert _native_control6_decision_has_valid_input(
+            fresh_hidden=False,
+            no_input_tick=no_input_tick,
+            speaker_active=policy_input.speaker_active,
+            action="CONTINUE",
+            legal_actions=policy_input.legal_actions,
+        )
+
+
+def test_native_endpoint_bypass_excludes_legacy_control6() -> None:
+    assert _native_control6_endpoint_bypass_enabled(
+        object.__new__(GemmaNativeControl6Policy)
+    )
+    assert not _native_control6_endpoint_bypass_enabled(
+        object.__new__(DuplexControl6Policy)
+    )
 
 
 @pytest.mark.parametrize(

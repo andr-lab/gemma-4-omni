@@ -279,7 +279,7 @@ def test_real_pcm_to_native_control6_scores_match_standard_rows() -> None:
         attention_backend_id=3,
         rmsnorm_backend_id=2,
         max_seq_len=16_384,
-        stream_q_len=4,
+        stream_q_len=2,
     )
 
     def pcm(session_index: int, frame_id: int, channel: int) -> np.ndarray:
@@ -292,7 +292,7 @@ def test_real_pcm_to_native_control6_scores_match_standard_rows() -> None:
                 cache = backend.build_semantic_prefix_cache(prefix_ids)
             else:
                 cache = backend.build_semantic_prefix_cache(
-                    prefix_ids, replay_q4=(replay,), replay_frame_ids=(0,),
+                    prefix_ids, replay_q2=(replay,), replay_frame_ids=(0,),
                 )
         return cache
 
@@ -361,13 +361,13 @@ def test_real_pcm_to_native_control6_scores_match_standard_rows() -> None:
 
         reference_providers = [
             NativeGemmaListenerLM(
-                lm, max_seq_len=16_384, stream_q_len=4, enable_cuda_graph=False,
+                lm, max_seq_len=16_384, stream_q_len=2, enable_cuda_graph=False,
                 attention_backend=3, rmsnorm_backend=2,
             )
             for _ in range(n)
         ]
         batch_provider = NativeGemmaListenerLM(
-            lm, max_seq_len=16_384, stream_q_len=4, enable_cuda_graph=False,
+            lm, max_seq_len=16_384, stream_q_len=2, enable_cuda_graph=False,
             attention_backend=3, rmsnorm_backend=2,
         )
         owner = NativeGemmaListenerMicrobatch(
@@ -597,7 +597,7 @@ def test_real_pcm_to_native_control6_scores_match_standard_rows() -> None:
         with torch.cuda.stream(stream), torch.inference_mode():
             torch_reference = backend.build_semantic_prefix_cache(
                 prefix_ids,
-                replay_q4=replay_rows,
+                replay_q2=replay_rows,
                 replay_frame_ids=replay_ids,
             )
         torch.cuda.synchronize(device)
@@ -612,7 +612,7 @@ def test_real_pcm_to_native_control6_scores_match_standard_rows() -> None:
         native_prefix_wall_ms = (time.perf_counter() - native_prefix_started) * 1000.0
 
         native_replay = NativeGemmaListenerLM(
-            lm, max_seq_len=16_384, stream_q_len=4, enable_cuda_graph=False,
+            lm, max_seq_len=16_384, stream_q_len=2, enable_cuda_graph=False,
             attention_backend=3, rmsnorm_backend=2,
         )
         try:
@@ -781,7 +781,7 @@ def test_real_pcm_to_native_control6_scores_match_standard_rows() -> None:
 
         # Capture actual tower Q4 rows from the ordinary listener. The 65th
         # frame is reserved for the next-step comparison after the 64-row replay.
-        replay_q4: list[Any] = []
+        replay_q2: list[Any] = []
         replay_pcm: list[np.ndarray] = []
         replay_frame_ids: list[int] = []
         history_state = GemmaListenerState()
@@ -806,7 +806,7 @@ def test_real_pcm_to_native_control6_scores_match_standard_rows() -> None:
             frame_start = (len(history_state.user_pcm_history) - 1) * 4
             q4 = tower[frame_start:frame_start + 4].detach().clone()
             assert tuple(q4.shape) == (4, int(getattr(backend, "hidden_size", q4.shape[-1])))
-            replay_q4.append(q4)
+            replay_q2.append(q4)
             replay_pcm.append(frame_pcm)
             replay_frame_ids.append(frame_id)
             if frame_id < replay_count:
@@ -816,7 +816,7 @@ def test_real_pcm_to_native_control6_scores_match_standard_rows() -> None:
                 capture_cursor.cache_position += 4
                 capture_cursor.valid_history_tokens += 4
         torch.cuda.synchronize(device)
-        assert len(replay_q4) == replay_count + 1
+        assert len(replay_q2) == replay_count + 1
 
         historical_frame_ids = tuple(replay_frame_ids[:replay_count])
         current_frame_id = replay_frame_ids[replay_count]
@@ -854,11 +854,11 @@ def test_real_pcm_to_native_control6_scores_match_standard_rows() -> None:
         shadow_owner: Any | None = None
         try:
             standard_replay = NativeGemmaListenerLM(
-                lm, max_seq_len=16_384, stream_q_len=4, enable_cuda_graph=False,
+                lm, max_seq_len=16_384, stream_q_len=2, enable_cuda_graph=False,
                 attention_backend=3, rmsnorm_backend=2,
             )
             shadow_provider = NativeGemmaListenerLM(
-                lm, max_seq_len=16_384, stream_q_len=4, enable_cuda_graph=False,
+                lm, max_seq_len=16_384, stream_q_len=2, enable_cuda_graph=False,
                 attention_backend=3, rmsnorm_backend=2,
             )
             replay_state = ListenerSessionState(
@@ -925,7 +925,7 @@ def test_real_pcm_to_native_control6_scores_match_standard_rows() -> None:
             torch.cuda.synchronize(device)
             standard_replay_started = time.perf_counter()
             with torch.cuda.stream(stream), torch.inference_mode():
-                for q4 in replay_q4[:replay_count]:
+                for q4 in replay_q2[:replay_count]:
                     standard_hidden_rows.append(standard_replay.step_async(
                         q4.unsqueeze(0).contiguous(),
                         stream=stream,
@@ -956,7 +956,7 @@ def test_real_pcm_to_native_control6_scores_match_standard_rows() -> None:
                 with torch.cuda.stream(shadow_stream), torch.inference_mode():
                     shadow_output = shadow_owner.step_async(
                         manifest,
-                        replay_q4[replay_index].unsqueeze(0).contiguous(),
+                        replay_q2[replay_index].unsqueeze(0).contiguous(),
                         producer_stream=stream,
                     )
                 shadow_output.completion_event.synchronize()
@@ -1066,7 +1066,7 @@ def test_real_pcm_to_native_control6_scores_match_standard_rows() -> None:
 
             with torch.cuda.stream(stream), torch.inference_mode():
                 standard_next_hidden = standard_replay.step_async(
-                    replay_q4[replay_count].unsqueeze(0).contiguous(),
+                    replay_q2[replay_count].unsqueeze(0).contiguous(),
                     stream=stream,
                     producer_stream=stream,
                 ).detach().clone()
@@ -1077,7 +1077,7 @@ def test_real_pcm_to_native_control6_scores_match_standard_rows() -> None:
             with torch.cuda.stream(shadow_stream), torch.inference_mode():
                 shadow_next_output = shadow_owner.step_async(
                     native_next_manifest,
-                    replay_q4[replay_count].unsqueeze(0).contiguous(),
+                    replay_q2[replay_count].unsqueeze(0).contiguous(),
                     producer_stream=stream,
                 )
             shadow_next_output.completion_event.synchronize()
@@ -1123,7 +1123,7 @@ def test_real_pcm_to_native_control6_scores_match_standard_rows() -> None:
             with torch.cuda.stream(stream), torch.inference_mode():
                 teacher_cache = backend.build_semantic_prefix_cache(
                     prefix_ids,
-                    replay_q4=tuple(replay_q4[:replay_count]),
+                    replay_q2=tuple(replay_q2[:replay_count]),
                     replay_frame_ids=historical_frame_ids,
                 )
             stream.synchronize()
@@ -1151,7 +1151,7 @@ def test_real_pcm_to_native_control6_scores_match_standard_rows() -> None:
             teacher_next_started = time.perf_counter()
             with torch.cuda.stream(stream), torch.inference_mode():
                 teacher_next_hidden = standard_replay.step_async(
-                    replay_q4[replay_count].unsqueeze(0).contiguous(),
+                    replay_q2[replay_count].unsqueeze(0).contiguous(),
                     stream=stream,
                     producer_stream=stream,
                 ).detach().clone()

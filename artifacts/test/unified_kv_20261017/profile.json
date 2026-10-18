@@ -1,0 +1,70 @@
+{
+  "capture": "unified-kv-final-20261017",
+  "source_report": "report.json",
+  "source_remote": "/tmp/unified-kv-final-20261017/report.json + events.jsonl",
+  "started_utc": "2026-10-17T21:10:27.651343+00:00",
+  "elapsed_s": 69.53,
+  "fixture_duration_s": 8.1835,
+  "fixture_frames": 103,
+  "requested_silence_seconds": 60,
+  "prespeech_q0_rows": 751,
+  "cache_position_after_prespeech": 227,
+  "seed_boundary": {
+    "post_onset_rows": 102,
+    "user_q2_rows": 85,
+    "assistant_phase_q0_rows": 17,
+    "native_cache_position": 431
+  },
+  "raw_frame_boundary": {
+    "A_sent_and_acked": "854/854",
+    "B_sent_and_acked": "853/853",
+    "extra_A_live_silence_flush_frames": 1,
+    "last_raw_event_cache_position": 433
+  },
+  "final_response": {
+    "control6_action": "BACKCHANNEL",
+    "v2_response_action": "SPEAK",
+    "deferred_until_endpoint": true,
+    "first_logits_after_decision_ms": 117.533092,
+    "first_thinker_token_after_decision_ms": 175.343886,
+    "audio_packets": 0,
+    "audible_completed_responses": 0
+  },
+  "short_speak_attempt": {
+    "source": "/tmp/unified-kv-instruction-refresh-smoke-20261017/report.json + events.jsonl",
+    "control6_action": "SPEAK",
+    "input_frames_sent": 41,
+    "input_frames_acked": 39,
+    "decision_to_first_logits_ms": 392.931633,
+    "decision_to_first_thinker_token_ms": 528.323645,
+    "audio_packets": 0,
+    "terminal_status": "failed",
+    "interpretation": "incomplete input and no audio; not a completed audible SPEAK test"
+  },
+  "health_at_final_check": {
+    "status": "ok",
+    "engine_loaded": true,
+    "unified_kv_enabled": true,
+    "listener_microbatch_enabled": true,
+    "semantic_shadow_enabled": false,
+    "active_realtime_sessions": 0,
+    "active_responses": 0,
+    "listener_backlog_frames": 0
+  },
+  "configuration": {
+    "DUPLEX_UNIFIED_KV": "1",
+    "response_protocol": "heard_action_say_v2",
+    "listener_microbatch": true,
+    "semantic_shadow": false
+  },
+  "focused_tests": {
+    "worker": "55 passed",
+    "unified_kv_server_gate": "19 passed",
+    "audio_response_protocol": "48 passed"
+  },
+  "limits": [
+    "175.344 ms belongs to the BACKCHANNEL response and is not a user-triggered SPEAK TTFT.",
+    "The short SPEAK attempt reached 528.324 ms to first token but had incomplete input and emitted no audio.",
+    "The final 60 s capture emitted no audible completed SPEAK; TTFT target <15 ms was not met."
+  ]
+}

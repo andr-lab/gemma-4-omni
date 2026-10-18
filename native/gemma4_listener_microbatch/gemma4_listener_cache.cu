@@ -403,6 +403,23 @@ int gemma4_cache_advance_position(gemma4_cache *c, int q_len) {
     return 0;
 }
 
+/* Exclude a just-written Q2 suffix from future attention without moving or
+ * rewriting earlier KV. The batch owner calls this only after a completed
+ * append on the same stream and before publishing the next cursor. */
+int gemma4_cache_truncate_async(
+    gemma4_cache *c,
+    uint32_t new_position,
+    cudaStream_t stream
+) {
+    if (!c || c->current_pos != c->valid_kv_len ||
+        new_position > c->current_pos || new_position > c->max_seq_len) return -1;
+    c->current_pos = new_position;
+    c->valid_kv_len = new_position;
+    /* Batched caches may use only the authoritative host cursor; the device
+     * cursor is optional and its setter is already a no-op when absent. */
+    return gemma4_cache_set_device_position_async(c, new_position, stream);
+}
+
 uint32_t gemma4_cache_valid_kv_len(const gemma4_cache *c) {
     return c ? c->valid_kv_len : UINT32_MAX;
 }

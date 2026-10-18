@@ -122,6 +122,7 @@ from duplex_kernel.thinker_text_budget import graceful_budget_action, last_compl
 QWEN_TALKER_MIN_NEW_TOKENS = 2
 
 logger = logging.getLogger("duplex_kernel.engine")
+_NO_FORCED_TOKEN_OVERRIDE = object()
 
 
 def _code2wav_graph_supports_shape(graph: Any, codes: torch.Tensor) -> bool:
@@ -651,6 +652,38 @@ def _estimate_talker_frame_budget(
     return spoken_units, numeric_extra_units, frame_budget
 
 
+def _native_q1_import_audio_frame_budget(
+    text_frame_budget: int,
+    *,
+    live_qwen_text_stream: Any | None,
+    live_frame_cap: int,
+) -> int:
+    """Reserve bounded headroom when live SAY text grows after Q1 import."""
+    text_frame_budget = int(text_frame_budget)
+    live_frame_cap = int(live_frame_cap)
+    if text_frame_budget <= 0 or live_frame_cap <= 0:
+        raise ValueError("native Q1 frame budgets devono essere positivi")
+    if text_frame_budget > live_frame_cap:
+        raise ValueError("text frame budget supera il cap live native Q1")
+    return live_frame_cap if live_qwen_text_stream is not None else text_frame_budget
+
+
+def _apply_live_frame_residual(
+    adapter: Any,
+    selected_response_hidden: torch.Tensor,
+    qwen_audio_input: torch.Tensor,
+    *,
+    generation_step: int,
+    tail_hold: bool,
+) -> tuple[torch.Tensor, bool]:
+    """Apply the already-selected live packet hidden at its global Q1 step."""
+    if isinstance(generation_step, bool) or int(generation_step) < 0:
+        raise ValueError("generation_step deve essere non negativo")
+    if int(generation_step) == 0 and bool(getattr(adapter, "preserve_frame0", False)):
+        return qwen_audio_input, bool(tail_hold)
+    return adapter(selected_response_hidden, qwen_audio_input), bool(tail_hold)
+
+
 def _audio_text_prefix_cache_reuse_from_env() -> bool:
     """Read the opt-in cross-response audio-prefix cache switch (default off)."""
     value = os.environ.get(AUDIO_TEXT_PREFIX_CACHE_REUSE_ENV)
@@ -734,6 +767,9 @@ def _build_talker_prefill_parts(
     talker: Any,
     text: str,
     voice_conditioning: dict[str, Any] | None,
+    *,
+    raw_text_token_ids: list[int] | tuple[int, ...] | None = None,
+    include_text_eos: bool = True,
 ):
     builder = getattr(
         talker,
@@ -749,16 +785,23 @@ def _build_talker_prefill_parts(
     ):
         parameters = {}
 
+    kwargs: dict[str, Any] = {}
     if "voice_conditioning" in parameters:
-        return builder(
-            text,
-            voice_conditioning=voice_conditioning,
-        )
+        kwargs["voice_conditioning"] = voice_conditioning
+    elif voice_conditioning is not None:
+        raise TypeError("Talker backend non supporta voice_conditioning")
+    if "raw_text_token_ids" in parameters:
+        kwargs["raw_text_token_ids"] = raw_text_token_ids
+    elif raw_text_token_ids is not None:
+        raise TypeError("Talker backend non supporta raw_text_token_ids live")
+    if "include_text_eos" in parameters:
+        kwargs["include_text_eos"] = include_text_eos
+    elif not include_text_eos:
+        raise TypeError("Talker backend non supporta prefill senza text EOS")
+    if kwargs:
+        return builder(text, **kwargs)
     if voice_conditioning is not None:
-        raise TypeError(
-            "Talker backend non supporta "
-            "voice_conditioning"
-        )
+        raise TypeError("Talker backend non supporta voice_conditioning")
     return builder(text)
 
 
@@ -844,6 +887,388 @@ def _validate_response_bundle_qlora_compatibility(
         raise ValueError(
             "duplex response bundle + Gemma QLoRA is supported only with native Control6 "
             "and --ablate-response-lora"
+        )
+
+
+class ThinkerSampler:
+    """Shared token-sampling pipeline used by HF and native Thinker decoders."""
+
+    def __init__(
+        self,
+        *,
+        tokenizer: Any,
+        device: Any,
+        eos_token_ids: set[int],
+        temperature: float,
+        top_p: float,
+        repetition_penalty: float,
+        min_new_tokens: int = 0,
+        backchannel_trie: dict[tuple[int, ...], Any] | None = None,
+        runtime_metrics: dict[str, Any] | None = None,
+        on_generation_start: Callable[[], Any] | None = None,
+        on_generated_token: Callable[[int, int, str, torch.Tensor], Any] | None = None,
+        on_candidate_token: Callable[[int, str, bool], bool] | None = None,
+        on_candidate_fallback: Callable[[list[tuple[int, str, bool]]], Any] | None = None,
+        on_action_logits_probe: Callable[[dict[str, Any]], Any] | None = None,
+        generation_id: int | None = None,
+        state: Any | None = None,
+        best_native_logit_candidate_id: Callable[[list[int], torch.Tensor], int | None] | None = None,
+        generator: torch.Generator | None = None,
+    ) -> None:
+        self.tokenizer = tokenizer
+        self.device = device
+        self.eos_token_ids = set(eos_token_ids)
+        self.temperature = float(temperature)
+        self.top_p = float(top_p)
+        self.repetition_penalty = float(repetition_penalty)
+        self.min_new_tokens = int(min_new_tokens)
+        self.backchannel_trie = backchannel_trie
+        self.runtime_metrics = runtime_metrics if runtime_metrics is not None else {}
+        self.on_generation_start = on_generation_start
+        self.on_generated_token_callback = on_generated_token
+        self.on_candidate_token = on_candidate_token
+        self.on_candidate_fallback = on_candidate_fallback
+        self.on_action_logits_probe = on_action_logits_probe
+        self.generation_id = generation_id
+        self.state = state
+        self.best_native_logit_candidate_id = best_native_logit_candidate_id
+        if generator is not None and not isinstance(generator, torch.Generator):
+            raise TypeError("generator deve essere torch.Generator o None")
+        self.generator = generator
+        self.last_decoded_output = ""
+        self.forced_action_logprobs: list[torch.Tensor] = []
+        self.forced_action_overrides = 0
+        self.forced_structure_logprobs: list[torch.Tensor] = []
+        self.forced_structure_overrides = 0
+        self.action_logits_probe_emitted = False
+
+        self.min_new_tokens_processor = None
+        if self.min_new_tokens > 0 and self.eos_token_ids:
+            from transformers.generation.logits_process import MinNewTokensLengthLogitsProcessor
+
+            self.min_new_tokens_processor = MinNewTokensLengthLogitsProcessor(
+                prompt_length_to_skip=0,
+                min_new_tokens=self.min_new_tokens,
+                eos_token_id=sorted(self.eos_token_ids),
+                device=str(device),
+            )
+
+    def sample_token(
+        self,
+        curr_logits: torch.Tensor,
+        generated_ids: Sequence[int],
+    ) -> tuple[torch.Tensor, int, torch.Tensor]:
+        """Apply the Thinker loop's exact penalty, filters, temperature and nucleus sampling."""
+        history = [int(token_id) for token_id in generated_ids]
+        if self.repetition_penalty != 1.0 and history:
+            curr_logits = curr_logits.clone()
+            for prev_id in set(history):
+                if curr_logits[0, prev_id] < 0:
+                    curr_logits[0, prev_id] = curr_logits[0, prev_id] * self.repetition_penalty
+                else:
+                    curr_logits[0, prev_id] = curr_logits[0, prev_id] / self.repetition_penalty
+        if self.min_new_tokens_processor is not None:
+            generated_tensor = torch.tensor([history], device=curr_logits.device, dtype=torch.long)
+            curr_logits = self.min_new_tokens_processor(generated_tensor, curr_logits)
+        if self.backchannel_trie is not None:
+            allowed = self.backchannel_trie.get(tuple(history))
+            if not allowed:
+                raise RuntimeError(
+                    "BACKCHANNEL token prefix non appartiene a nessuna frase train; "
+                    f"generated_prefix={history!r}"
+                )
+            allowed_ids = torch.tensor(sorted(allowed), device=curr_logits.device, dtype=torch.long)
+            if int(allowed_ids.min()) < 0 or int(allowed_ids.max()) >= curr_logits.shape[-1]:
+                raise RuntimeError("BACKCHANNEL trie contiene ID fuori dal vocabolario Thinker")
+            allowed_mask = torch.zeros_like(curr_logits, dtype=torch.bool)
+            allowed_mask.index_fill_(-1, allowed_ids, True)
+            curr_logits = curr_logits.masked_fill(~allowed_mask, float("-inf"))
+            self.runtime_metrics["backchannel_trie_steps"] = (
+                self.runtime_metrics.get("backchannel_trie_steps", 0) + 1
+            )
+        if self.temperature <= 1e-5:
+            token_tensor = curr_logits.argmax(dim=-1, keepdim=True)
+            candidate_scores = curr_logits
+        else:
+            probs = torch.softmax(curr_logits / self.temperature, dim=-1)
+            if 0.0 < self.top_p < 1.0:
+                values, indices = torch.sort(probs, descending=True)
+                keep = torch.cumsum(values, dim=-1) <= self.top_p
+                keep[..., 0] = True
+                probs = torch.zeros_like(probs).scatter(-1, indices, values * keep)
+                probs = probs / probs.sum(dim=-1, keepdim=True)
+            candidate_scores = probs
+            token_tensor = torch.multinomial(probs, 1, generator=self.generator)
+        return token_tensor, int(token_tensor.item()), candidate_scores
+
+    def sample_initial(
+        self,
+        logits: torch.Tensor,
+        generated_ids: Sequence[int] = (),
+    ) -> tuple[torch.Tensor, int, torch.Tensor]:
+        """Sample the first token, then apply the exact initial-force contract."""
+        forced_id = self.on_generation_start() if self.on_generation_start is not None else None
+        candidate = self.sample_token(logits, generated_ids)
+        if forced_id is None:
+            return candidate
+        if isinstance(forced_id, bool) or not isinstance(forced_id, int):
+            raise RuntimeError("audio response initial forced token id must be an integer")
+        if forced_id < 0 or forced_id >= int(logits.shape[-1]):
+            raise RuntimeError("audio response initial forced token id outside Thinker vocabulary")
+        self.forced_structure_logprobs.append(
+            torch.log_softmax(logits.float(), dim=-1)[0, forced_id].detach()
+        )
+        if candidate[1] != forced_id:
+            self.forced_structure_overrides += 1
+        return torch.tensor([[forced_id]], device=self.device, dtype=torch.long), forced_id, candidate[2]
+
+    def select_valid_candidate(
+        self,
+        candidate: tuple[torch.Tensor, int, torch.Tensor],
+        *,
+        source_logits: torch.Tensor,
+        generated_ids: Sequence[int],
+    ) -> tuple[torch.Tensor, int, torch.Tensor]:
+        token_tensor, token_id, candidate_scores = candidate
+        callback = self.on_candidate_token
+        if callback is None:
+            return candidate
+        if self.generation_id is not None and self.state is not None and not self.state.is_generation_current(
+            generation_id=self.generation_id
+        ):
+            return candidate
+
+        self.runtime_metrics["audio_response_protocol_v2_candidate_checks"] = (
+            self.runtime_metrics.get("audio_response_protocol_v2_candidate_checks", 0) + 1
+        )
+        history = [int(value) for value in generated_ids]
+
+        def candidate_text(candidate_id: int) -> tuple[str, bool]:
+            terminal = candidate_id in self.eos_token_ids
+            if terminal:
+                return "", True
+            decoded = self.tokenizer.decode([*history, int(candidate_id)], skip_special_tokens=True)
+            if not decoded.startswith(self.last_decoded_output):
+                raise RuntimeError("Thinker token decode is not prefix-stable for audio response parsing")
+            return decoded[len(self.last_decoded_output):], False
+
+        text, terminal = candidate_text(token_id)
+        if callback(token_id, text, terminal):
+            return candidate
+        rejected: list[tuple[int, str, bool]] = [(token_id, text, terminal)]
+        flat_scores = candidate_scores.reshape(-1)
+        candidate_count = min(64, int(flat_scores.shape[0]))
+        top_scores, top_ids = torch.topk(flat_scores, k=candidate_count)
+        for score, candidate_value in zip(top_scores.tolist(), top_ids.tolist()):
+            if not math.isfinite(float(score)) or float(score) <= 0.0 and self.temperature > 1e-5:
+                continue
+            candidate_id = int(candidate_value)
+            if candidate_id == token_id:
+                continue
+            text, terminal = candidate_text(candidate_id)
+            self.runtime_metrics["audio_response_protocol_v2_candidate_checks"] += 1
+            if not callback(candidate_id, text, terminal):
+                rejected.append((candidate_id, text, terminal))
+                continue
+            self.forced_structure_logprobs.append(
+                torch.log_softmax(source_logits.float(), dim=-1)[0, candidate_id].detach()
+            )
+            self.forced_structure_overrides += 1
+            self.runtime_metrics["audio_response_protocol_v2_predecode_replacements"] = (
+                self.runtime_metrics.get("audio_response_protocol_v2_predecode_replacements", 0) + 1
+            )
+            return torch.tensor([[candidate_id]], device=self.device, dtype=torch.long), candidate_id, candidate_scores
+
+        if self.on_candidate_fallback is not None:
+            fallback = self.on_candidate_fallback(rejected)
+            fallback_id = None
+            if isinstance(fallback, (tuple, list, set, frozenset)):
+                legal_pool: list[int] = []
+                for candidate_value in fallback:
+                    if isinstance(candidate_value, bool) or not isinstance(candidate_value, Integral):
+                        raise RuntimeError("audio response candidate pool IDs must be integers")
+                    candidate_id = int(candidate_value)
+                    if candidate_id < 0 or candidate_id >= int(source_logits.shape[-1]):
+                        raise RuntimeError("audio response candidate pool ID outside Thinker vocabulary")
+                    candidate_text_value, candidate_terminal = candidate_text(candidate_id)
+                    self.runtime_metrics["audio_response_protocol_v2_candidate_checks"] += 1
+                    if callback(candidate_id, candidate_text_value, candidate_terminal):
+                        legal_pool.append(candidate_id)
+                best = (
+                    None if self.best_native_logit_candidate_id is None
+                    else self.best_native_logit_candidate_id(legal_pool, source_logits)
+                )
+                if best is not None:
+                    self.runtime_metrics["audio_response_protocol_v2_lexicon_pool_overrides"] = (
+                        self.runtime_metrics.get("audio_response_protocol_v2_lexicon_pool_overrides", 0) + 1
+                    )
+                    return torch.tensor([[best]], device=self.device, dtype=torch.long), best, candidate_scores
+            elif fallback is not None:
+                fallback_id = fallback
+            if fallback_id is not None:
+                if isinstance(fallback_id, bool) or not isinstance(fallback_id, int):
+                    raise RuntimeError("audio response candidate fallback id must be an integer")
+                if fallback_id < 0 or fallback_id >= int(source_logits.shape[-1]):
+                    raise RuntimeError("audio response candidate fallback id outside Thinker vocabulary")
+                fallback_text, fallback_terminal = candidate_text(fallback_id)
+                if not callback(fallback_id, fallback_text, fallback_terminal):
+                    raise AudioResponseProtocolError("bounded_closure_not_valid")
+                self.forced_structure_logprobs.append(
+                    torch.log_softmax(source_logits.float(), dim=-1)[0, fallback_id].detach()
+                )
+                self.forced_structure_overrides += 1
+                self.runtime_metrics["audio_response_protocol_v2_predecode_replacements"] = (
+                    self.runtime_metrics.get("audio_response_protocol_v2_predecode_replacements", 0) + 1
+                )
+                self.runtime_metrics["audio_response_protocol_v2_bounded_closures"] = (
+                    self.runtime_metrics.get("audio_response_protocol_v2_bounded_closures", 0) + 1
+                )
+                return torch.tensor([[fallback_id]], device=self.device, dtype=torch.long), fallback_id, candidate_scores
+        raise AudioResponseProtocolError("no_legal_candidate_within_top64")
+
+    def after_generated_token(
+        self,
+        *,
+        token_index: int,
+        token_id: int,
+        token_hidden: torch.Tensor,
+        generated_ids: Sequence[int],
+        source_logits: torch.Tensor,
+        sampled_next: tuple[torch.Tensor, int, torch.Tensor],
+        forced_override: Any = _NO_FORCED_TOKEN_OVERRIDE,
+    ) -> tuple[torch.Tensor, int, torch.Tensor]:
+        """Run the token callback and apply its forced-next override to a pre-sampled candidate."""
+        callback = self.on_generated_token_callback
+        if callback is None or (
+            self.generation_id is not None
+            and self.state is not None
+            and not self.state.is_generation_current(generation_id=self.generation_id)
+        ):
+            return sampled_next
+        decoded = self.tokenizer.decode(list(generated_ids), skip_special_tokens=True)
+        if not decoded.startswith(self.last_decoded_output):
+            raise RuntimeError("Thinker token decode is not prefix-stable for audio response parsing")
+        token_text = decoded[len(self.last_decoded_output):]
+        self.last_decoded_output = decoded
+        forced = (
+            callback(token_index, int(token_id), token_text, token_hidden.detach())
+            if forced_override is _NO_FORCED_TOKEN_OVERRIDE
+            else forced_override
+        )
+        if forced is None:
+            return sampled_next
+        forced_kind = "action"
+        if isinstance(forced, tuple):
+            if len(forced) != 2:
+                raise RuntimeError("audio response forced token tuple must contain id and kind")
+            forced, forced_kind = forced
+        if isinstance(forced, bool) or not isinstance(forced, int):
+            raise RuntimeError("audio response forced token id must be an integer")
+        if forced_kind not in {"action", "structure"}:
+            raise RuntimeError("audio response forced token kind is invalid")
+        if forced < 0 or forced >= int(source_logits.shape[-1]):
+            raise RuntimeError("audio response forced token id outside Thinker vocabulary")
+        forced_logprob = torch.log_softmax(source_logits.float(), dim=-1)[0, forced].detach()
+        if forced_kind == "action" and self.on_action_logits_probe is not None and not self.action_logits_probe_emitted:
+            label_token_ids: dict[str, list[int]] = {}
+            encode = getattr(self.tokenizer, "encode", None)
+            if callable(encode):
+                for label in AUDIO_RESPONSE_ACTIONS:
+                    try:
+                        encoded = encode(label, add_special_tokens=False)
+                        if callable(getattr(encoded, "detach", None)):
+                            encoded = encoded.detach().cpu().reshape(-1).tolist()
+                        elif callable(getattr(encoded, "tolist", None)):
+                            encoded = encoded.tolist()
+                        while isinstance(encoded, list) and len(encoded) == 1 and isinstance(encoded[0], list):
+                            encoded = encoded[0]
+                        label_token_ids[label] = [int(value) for value in encoded]
+                    except Exception:
+                        label_token_ids[label] = []
+            distinct_first_ids = list(dict.fromkeys(
+                values[0] for values in label_token_ids.values()
+                if values and 0 <= values[0] < int(source_logits.shape[-1])
+            ))
+            if distinct_first_ids:
+                candidate_ids = torch.tensor(distinct_first_ids, device=source_logits.device, dtype=torch.long)
+                candidate_logits = source_logits[0].index_select(0, candidate_ids)
+                raw_top_id_tensor = source_logits[0].argmax().reshape(1).to(candidate_logits.dtype)
+                probe_values = torch.cat((raw_top_id_tensor, candidate_logits), dim=0).detach().float().cpu().tolist()
+                raw_argmax_token_id = int(round(probe_values[0]))
+                first_token_logits_by_id = {
+                    token_id: float(value) for token_id, value in zip(distinct_first_ids, probe_values[1:])
+                }
+            else:
+                raw_argmax_token_id = int(source_logits[0].argmax().item())
+                first_token_logits_by_id = {}
+            action_first_logits = {
+                label: first_token_logits_by_id[values[0]]
+                for label, values in label_token_ids.items()
+                if values and values[0] in first_token_logits_by_id
+            }
+            raw_argmax_action_candidates = [
+                label for label, values in label_token_ids.items()
+                if values and values[0] == raw_argmax_token_id
+            ]
+            best_first_logit = max(action_first_logits.values(), default=None)
+            best_first_action_candidates = (
+                [label for label, value in action_first_logits.items() if value == best_first_logit]
+                if best_first_logit is not None else []
+            )
+            self.on_action_logits_probe({
+                "raw_argmax_token_id": raw_argmax_token_id,
+                "sampled_token_id": int(sampled_next[1]),
+                "forced_token_id": int(forced),
+                "action_label_token_ids": label_token_ids,
+                "action_label_first_token_logits": action_first_logits,
+                "raw_argmax_action_candidates": raw_argmax_action_candidates,
+                "best_first_logit_action_candidates": best_first_action_candidates,
+            })
+            self.action_logits_probe_emitted = True
+        if forced_kind == "action":
+            self.forced_action_logprobs.append(forced_logprob)
+            if sampled_next[1] != forced:
+                self.forced_action_overrides += 1
+        else:
+            self.forced_structure_logprobs.append(forced_logprob)
+            if sampled_next[1] != forced:
+                self.forced_structure_overrides += 1
+        return torch.tensor([[forced]], device=self.device, dtype=torch.long), forced, sampled_next[2]
+
+    async def after_generated_token_async(
+        self,
+        *,
+        token_index: int,
+        token_id: int,
+        token_hidden: torch.Tensor,
+        generated_ids: Sequence[int],
+        source_logits: torch.Tensor,
+        sampled_next: tuple[torch.Tensor, int, torch.Tensor],
+    ) -> tuple[torch.Tensor, int, torch.Tensor]:
+        """Await async response callbacks without blocking the decoder loop."""
+        callback = self.on_generated_token_callback
+        if callback is None or (
+            self.generation_id is not None
+            and self.state is not None
+            and not self.state.is_generation_current(generation_id=self.generation_id)
+        ):
+            return sampled_next
+        decoded = self.tokenizer.decode(list(generated_ids), skip_special_tokens=True)
+        if not decoded.startswith(self.last_decoded_output):
+            raise RuntimeError("Thinker token decode is not prefix-stable for audio response parsing")
+        token_text = decoded[len(self.last_decoded_output):]
+        self.last_decoded_output = decoded
+        forced = callback(token_index, int(token_id), token_text, token_hidden.detach())
+        if inspect.isawaitable(forced):
+            forced = await forced
+        return self.after_generated_token(
+            token_index=token_index,
+            token_id=token_id,
+            token_hidden=token_hidden,
+            generated_ids=generated_ids,
+            source_logits=source_logits,
+            sampled_next=sampled_next,
+            forced_override=forced,
         )
 
 
@@ -2950,6 +3375,63 @@ class PipelineEngine:
         pool_offset = int(finite_indices[best_offset].item())
         return int(pool[pool_offset])
 
+    def build_thinker_sampler(
+        self,
+        *,
+        temperature: float = 0.7,
+        top_p: float = 0.9,
+        repetition_penalty: float = 1.15,
+        min_new_tokens: int = 0,
+        action: str | None = None,
+        backchannel_trie: dict[tuple[int, ...], Any] | None = None,
+        runtime_metrics: dict[str, Any] | None = None,
+        on_generation_start: Callable[[], Any] | None = None,
+        on_generated_token: Callable[[int, int, str, torch.Tensor], Any] | None = None,
+        on_candidate_token: Callable[[int, str, bool], bool] | None = None,
+        on_candidate_fallback: Callable[[list[tuple[int, str, bool]]], Any] | None = None,
+        on_action_logits_probe: Callable[[dict[str, Any]], Any] | None = None,
+        state: Any | None = None,
+        generation_id: int | None = None,
+        generator: torch.Generator | None = None,
+    ) -> ThinkerSampler:
+        """Build the exact Thinker sampling pipeline for HF or native decode."""
+        thinker_model = getattr(self, "thinker", None)
+        generation_eos = getattr(getattr(thinker_model, "generation_config", None), "eos_token_id", None)
+        model_eos = getattr(getattr(thinker_model, "config", None), "eos_token_id", None)
+        if generation_eos is not None:
+            eos_ids = normalize_eos_token_ids(generation_eos)
+        elif model_eos is not None:
+            eos_ids = normalize_eos_token_ids(model_eos)
+        else:
+            eos_ids = normalize_eos_token_ids(getattr(self.tokenizer, "eos_token_id", None))
+            eos_ids.update(normalize_eos_token_ids(getattr(self.tokenizer, "eot_id", None)))
+
+        normalized_action = str(action or "").strip().upper()
+        if backchannel_trie is None and normalized_action == "BACKCHANNEL":
+            backchannel_trie = getattr(self, "_backchannel_token_trie", None)
+            if not backchannel_trie:
+                raise RuntimeError("BACKCHANNEL richiede il trie di frasi gold del bundle attivo")
+        return ThinkerSampler(
+            tokenizer=self.tokenizer,
+            device=self.device,
+            eos_token_ids=eos_ids,
+            temperature=temperature,
+            top_p=top_p,
+            repetition_penalty=repetition_penalty,
+            min_new_tokens=min_new_tokens,
+            backchannel_trie=backchannel_trie,
+            runtime_metrics=runtime_metrics,
+            on_generation_start=on_generation_start,
+            on_generated_token=on_generated_token,
+            on_candidate_token=on_candidate_token,
+            on_candidate_fallback=on_candidate_fallback,
+            on_action_logits_probe=on_action_logits_probe,
+            generation_id=generation_id,
+            state=state,
+            best_native_logit_candidate_id=self._best_native_logit_candidate_id,
+            generator=generator,
+        )
+
     def _run_thinker_prefill(
         self,
         input_ids: list[int],
@@ -4046,96 +4528,27 @@ class PipelineEngine:
                 )
         logits = out.logits[:, -1, :]
         generated: list[int] = []
-        last_decoded_output = ""
         pending_chunk: list[int] = []
-        forced_action_logprobs: list[torch.Tensor] = []
-        forced_action_overrides = 0
-        action_logits_probe_emitted = False
-        forced_structure_logprobs: list[torch.Tensor] = []
-        forced_structure_overrides = 0
-        thinker_model = getattr(self, "thinker", None)
-        generation_eos = getattr(getattr(thinker_model, "generation_config", None), "eos_token_id", None)
-        model_eos = getattr(getattr(thinker_model, "config", None), "eos_token_id", None)
-        if generation_eos is not None:
-            eos_value = generation_eos
-        elif model_eos is not None:
-            eos_value = model_eos
-        else:
-            eos_value = None
-
-        if eos_value is not None:
-            eos = normalize_eos_token_ids(eos_value)
-        else:
-            eos = normalize_eos_token_ids(getattr(self.tokenizer, "eos_token_id", None))
-            eos.update(normalize_eos_token_ids(getattr(self.tokenizer, "eot_id", None)))
-
-        min_new_tokens_processor = None
-        if min_new_tokens > 0 and eos:
-            # This manual decode loop must apply the same standard HF
-            # min-new-token constraint as GenerationMixin.generate().
-            # Applying it to the scores before sampling suppresses every EOS
-            # ID without ever forwarding an EOS token into the KV cache.
-            from transformers.generation.logits_process import MinNewTokensLengthLogitsProcessor
-
-            min_new_tokens_processor = MinNewTokensLengthLogitsProcessor(
-                prompt_length_to_skip=0,
-                min_new_tokens=int(min_new_tokens),
-                eos_token_id=sorted(eos),
-                device=str(self.device),
-            )
+        sampler = self.build_thinker_sampler(
+            temperature=temperature,
+            top_p=top_p,
+            repetition_penalty=repetition_penalty,
+            min_new_tokens=min_new_tokens,
+            action=normalized_action,
+            backchannel_trie=backchannel_trie,
+            runtime_metrics=runtime_metrics,
+            on_generation_start=on_generation_start,
+            on_generated_token=on_generated_token,
+            on_candidate_token=on_candidate_token,
+            on_candidate_fallback=on_candidate_fallback,
+            on_action_logits_probe=on_action_logits_probe,
+            state=state,
+            generation_id=generation_id,
+        )
+        eos = sampler.eos_token_ids
 
         def _sample_token(curr_logits):
-            if repetition_penalty != 1.0 and generated:
-                curr_logits = curr_logits.clone()
-                for prev_id in set(generated):
-                    if curr_logits[0, prev_id] < 0:
-                        curr_logits[0, prev_id] = curr_logits[0, prev_id] * repetition_penalty
-                    else:
-                        curr_logits[0, prev_id] = curr_logits[0, prev_id] / repetition_penalty
-            if min_new_tokens_processor is not None:
-                generated_ids = torch.tensor([generated], device=curr_logits.device, dtype=torch.long)
-                curr_logits = min_new_tokens_processor(generated_ids, curr_logits)
-            if backchannel_trie is not None:
-                allowed = backchannel_trie.get(tuple(generated))
-                if not allowed:
-                    raise RuntimeError(
-                        "BACKCHANNEL token prefix non appartiene a nessuna frase train; "
-                        f"generated_prefix={generated!r}"
-                    )
-                allowed_ids = torch.tensor(sorted(allowed), device=curr_logits.device, dtype=torch.long)
-                if int(allowed_ids.min()) < 0 or int(allowed_ids.max()) >= curr_logits.shape[-1]:
-                    raise RuntimeError("BACKCHANNEL trie contiene ID fuori dal vocabolario Thinker")
-                allowed_mask = torch.zeros_like(curr_logits, dtype=torch.bool)
-                allowed_mask.index_fill_(-1, allowed_ids, True)
-                curr_logits = curr_logits.masked_fill(~allowed_mask, float("-inf"))
-                runtime_metrics["backchannel_trie_steps"] += 1
-            if temperature <= 1e-5:
-                tok = curr_logits.argmax(dim=-1, keepdim=True)
-                candidate_scores = curr_logits
-            else:
-                probs = torch.softmax(curr_logits / temperature, dim=-1)
-                if 0.0 < top_p < 1.0:
-                    vals, idx = torch.sort(probs, descending=True)
-                    keep = torch.cumsum(vals, dim=-1) <= top_p
-                    keep[..., 0] = True
-                    probs = torch.zeros_like(probs).scatter(-1, idx, vals * keep)
-                    probs = probs / probs.sum(dim=-1, keepdim=True)
-                candidate_scores = probs
-                tok = torch.multinomial(probs, 1)
-            val = int(tok.item())
-            return tok, val, candidate_scores
-
-        def _candidate_text(candidate_id: int) -> tuple[str, bool]:
-            terminal = candidate_id in eos
-            if terminal:
-                return "", True
-            decoded = self.tokenizer.decode(
-                [*generated, int(candidate_id)],
-                skip_special_tokens=True,
-            )
-            if not decoded.startswith(last_decoded_output):
-                raise RuntimeError("Thinker token decode is not prefix-stable for audio response parsing")
-            return decoded[len(last_decoded_output):], False
+            return sampler.sample_token(curr_logits, generated)
 
         def _select_valid_candidate(
             token_tensor: torch.Tensor,
@@ -4143,112 +4556,12 @@ class PipelineEngine:
             candidate_scores: torch.Tensor,
             source_logits: torch.Tensor,
         ) -> tuple[torch.Tensor, int]:
-            nonlocal forced_structure_overrides
-            if on_candidate_token is None:
-                return token_tensor, token_id
-            if generation_id is not None and state is not None and not state.is_generation_current(
-                generation_id=generation_id
-            ):
-                return token_tensor, token_id
-
-            runtime_metrics["audio_response_protocol_v2_candidate_checks"] = (
-                runtime_metrics.get("audio_response_protocol_v2_candidate_checks", 0) + 1
+            selected = sampler.select_valid_candidate(
+                (token_tensor, token_id, candidate_scores),
+                source_logits=source_logits,
+                generated_ids=generated,
             )
-            text, terminal = _candidate_text(token_id)
-            if on_candidate_token(token_id, text, terminal):
-                return token_tensor, token_id
-            rejected_candidates: list[tuple[int, str, bool]] = [(token_id, text, terminal)]
-
-            flat_scores = candidate_scores.reshape(-1)
-            candidate_count = min(64, int(flat_scores.shape[0]))
-            top_scores, top_ids = torch.topk(flat_scores, k=candidate_count)
-            for score, candidate in zip(top_scores.tolist(), top_ids.tolist()):
-                if not math.isfinite(float(score)) or float(score) <= 0.0 and temperature > 1e-5:
-                    continue
-                candidate = int(candidate)
-                if candidate == token_id:
-                    continue
-                text, terminal = _candidate_text(candidate)
-                runtime_metrics["audio_response_protocol_v2_candidate_checks"] += 1
-                if not on_candidate_token(candidate, text, terminal):
-                    rejected_candidates.append((candidate, text, terminal))
-                    continue
-                forced_structure_logprobs.append(
-                    torch.log_softmax(source_logits.float(), dim=-1)[0, candidate].detach()
-                )
-                forced_structure_overrides += 1
-                runtime_metrics["audio_response_protocol_v2_predecode_replacements"] = (
-                    runtime_metrics.get("audio_response_protocol_v2_predecode_replacements", 0) + 1
-                )
-                return (
-                    torch.tensor([[candidate]], device=self.device, dtype=torch.long),
-                    candidate,
-                )
-            if on_candidate_fallback is not None:
-                fallback = on_candidate_fallback(rejected_candidates)
-                fallback_id = None
-                if isinstance(fallback, (tuple, list, set, frozenset)):
-                    legal_pool: list[int] = []
-                    for candidate in fallback:
-                        if isinstance(candidate, bool) or not isinstance(candidate, Integral):
-                            raise RuntimeError(
-                                "audio response candidate pool IDs must be integers"
-                            )
-                        candidate_id = int(candidate)
-                        if candidate_id < 0 or candidate_id >= int(source_logits.shape[-1]):
-                            raise RuntimeError(
-                                "audio response candidate pool ID outside Thinker vocabulary"
-                            )
-                        candidate_text, candidate_terminal = _candidate_text(candidate_id)
-                        runtime_metrics["audio_response_protocol_v2_candidate_checks"] += 1
-                        if on_candidate_token(
-                            candidate_id, candidate_text, candidate_terminal
-                        ):
-                            legal_pool.append(candidate_id)
-                    selected_id = self._best_native_logit_candidate_id(
-                        legal_pool, source_logits
-                    )
-                    if selected_id is not None:
-                        runtime_metrics[
-                            "audio_response_protocol_v2_lexicon_pool_overrides"
-                        ] = runtime_metrics.get(
-                            "audio_response_protocol_v2_lexicon_pool_overrides", 0
-                        ) + 1
-                        return (
-                            torch.tensor(
-                                [[selected_id]], device=self.device, dtype=torch.long
-                            ),
-                            selected_id,
-                        )
-                elif fallback is not None:
-                    fallback_id = fallback
-                if fallback_id is not None:
-                    if isinstance(fallback_id, bool) or not isinstance(fallback_id, int):
-                        raise RuntimeError("audio response candidate fallback id must be an integer")
-                    if fallback_id < 0 or fallback_id >= int(source_logits.shape[-1]):
-                        raise RuntimeError("audio response candidate fallback id outside Thinker vocabulary")
-                    fallback_text, fallback_terminal = _candidate_text(fallback_id)
-                    if not on_candidate_token(fallback_id, fallback_text, fallback_terminal):
-                        from duplex_kernel.audio_response_protocol import AudioResponseProtocolError
-
-                        raise AudioResponseProtocolError("bounded_closure_not_valid")
-                    forced_structure_logprobs.append(
-                        torch.log_softmax(source_logits.float(), dim=-1)[0, fallback_id].detach()
-                    )
-                    forced_structure_overrides += 1
-                    runtime_metrics["audio_response_protocol_v2_predecode_replacements"] = (
-                        runtime_metrics.get("audio_response_protocol_v2_predecode_replacements", 0) + 1
-                    )
-                    runtime_metrics["audio_response_protocol_v2_bounded_closures"] = (
-                        runtime_metrics.get("audio_response_protocol_v2_bounded_closures", 0) + 1
-                    )
-                    return (
-                        torch.tensor([[fallback_id]], device=self.device, dtype=torch.long),
-                        fallback_id,
-                    )
-            from duplex_kernel.audio_response_protocol import AudioResponseProtocolError
-
-            raise AudioResponseProtocolError("no_legal_candidate_within_top64")
+            return selected[0], selected[1]
 
         decode_started = time.perf_counter()
         thinker_decode_event_start = thinker_decode_event_end = None
@@ -4268,22 +4581,7 @@ class PipelineEngine:
             runtime_metrics["thinker_budget_extension_capacity_tokens"] = graceful_extension_tokens
         cancelled_before_first_token = False
         terminal_reason = "budget_exhausted"
-        initial_forced_token_id = None
-        if on_generation_start is not None:
-            initial_forced_token_id = on_generation_start()
-        next_tok, next_val, next_candidate_scores = _sample_token(logits)
-        if initial_forced_token_id is not None:
-            if isinstance(initial_forced_token_id, bool) or not isinstance(initial_forced_token_id, int):
-                raise RuntimeError("audio response initial forced token id must be an integer")
-            if initial_forced_token_id < 0 or initial_forced_token_id >= int(logits.shape[-1]):
-                raise RuntimeError("audio response initial forced token id outside Thinker vocabulary")
-            forced_structure_logprobs.append(
-                torch.log_softmax(logits.float(), dim=-1)[0, initial_forced_token_id].detach()
-            )
-            if next_val != initial_forced_token_id:
-                forced_structure_overrides += 1
-            next_val = initial_forced_token_id
-            next_tok = torch.tensor([[initial_forced_token_id]], device=self.device, dtype=torch.long)
+        next_tok, next_val, next_candidate_scores = sampler.sample_initial(logits, generated)
 
         for step in range(decode_token_limit):
             if stop_check is not None and stop_check():
@@ -4397,119 +4695,15 @@ class PipelineEngine:
             logits = out.logits[:, -1, :]
 
             # Pre-sample next token immediately while listener is executing on GPU
-            next_tok, next_val, next_candidate_scores = _sample_token(logits)
-
-            if on_generated_token is not None and (
-                generation_id is None or state is None or state.is_generation_current(generation_id=generation_id)
-            ):
-                decoded_output = self.tokenizer.decode(generated, skip_special_tokens=True)
-                if not decoded_output.startswith(last_decoded_output):
-                    raise RuntimeError("Thinker token decode is not prefix-stable for audio response parsing")
-                token_text = decoded_output[len(last_decoded_output):]
-                last_decoded_output = decoded_output
-                forced_token_id = on_generated_token(
-                    len(generated) - 1,
-                    int(generated[-1]),
-                    token_text,
-                    out.hidden_states[-1][:, -1:, :].detach(),
-                )
-                if forced_token_id is not None:
-                    forced_kind = "action"
-                    if isinstance(forced_token_id, tuple):
-                        if len(forced_token_id) != 2:
-                            raise RuntimeError("audio response forced token tuple must contain id and kind")
-                        forced_token_id, forced_kind = forced_token_id
-                    if isinstance(forced_token_id, bool) or not isinstance(forced_token_id, int):
-                        raise RuntimeError("audio response forced token id must be an integer")
-                    if forced_kind not in {"action", "structure"}:
-                        raise RuntimeError("audio response forced token kind is invalid")
-                    if forced_token_id < 0 or forced_token_id >= int(logits.shape[-1]):
-                        raise RuntimeError("audio response forced token id outside Thinker vocabulary")
-                    forced_logprob = torch.log_softmax(logits.float(), dim=-1)[0, forced_token_id].detach()
-                    if (
-                        forced_kind == "action"
-                        and on_action_logits_probe is not None
-                        and not action_logits_probe_emitted
-                    ):
-                        label_token_ids: dict[str, list[int]] = {}
-                        encode = getattr(self.tokenizer, "encode", None)
-                        if callable(encode):
-                            for label in AUDIO_RESPONSE_ACTIONS:
-                                try:
-                                    encoded = encode(label, add_special_tokens=False)
-                                    if callable(getattr(encoded, "detach", None)):
-                                        encoded = encoded.detach().cpu().reshape(-1).tolist()
-                                    elif callable(getattr(encoded, "tolist", None)):
-                                        encoded = encoded.tolist()
-                                    while (
-                                        isinstance(encoded, list)
-                                        and len(encoded) == 1
-                                        and isinstance(encoded[0], list)
-                                    ):
-                                        encoded = encoded[0]
-                                    label_token_ids[label] = [int(value) for value in encoded]
-                                except Exception:
-                                    label_token_ids[label] = []
-                        distinct_first_ids = list(dict.fromkeys(
-                            token_ids[0]
-                            for token_ids in label_token_ids.values()
-                            if token_ids and 0 <= token_ids[0] < int(logits.shape[-1])
-                        ))
-                        if distinct_first_ids:
-                            candidate_ids = torch.tensor(
-                                distinct_first_ids, device=logits.device, dtype=torch.long
-                            )
-                            candidate_logits = logits[0].index_select(0, candidate_ids)
-                            raw_top_id_tensor = logits[0].argmax().reshape(1).to(candidate_logits.dtype)
-                            probe_values = torch.cat(
-                                (raw_top_id_tensor, candidate_logits), dim=0
-                            ).detach().float().cpu().tolist()
-                            raw_argmax_token_id = int(round(probe_values[0]))
-                            first_token_logits_by_id = {
-                                token_id: float(value)
-                                for token_id, value in zip(distinct_first_ids, probe_values[1:])
-                            }
-                        else:
-                            raw_argmax_token_id = int(logits[0].argmax().item())
-                            first_token_logits_by_id = {}
-                        action_first_logits = {
-                            label: first_token_logits_by_id[token_ids[0]]
-                            for label, token_ids in label_token_ids.items()
-                            if token_ids and token_ids[0] in first_token_logits_by_id
-                        }
-                        raw_argmax_action_candidates = [
-                            label for label, token_ids in label_token_ids.items()
-                            if token_ids and token_ids[0] == raw_argmax_token_id
-                        ]
-                        best_first_logit = max(action_first_logits.values(), default=None)
-                        best_first_action_candidates = (
-                            [
-                                label for label, value in action_first_logits.items()
-                                if value == best_first_logit
-                            ]
-                            if best_first_logit is not None else []
-                        )
-                        on_action_logits_probe({
-                            "raw_argmax_token_id": raw_argmax_token_id,
-                            "sampled_token_id": int(next_val),
-                            "forced_token_id": int(forced_token_id),
-                            "action_label_token_ids": label_token_ids,
-                            "action_label_first_token_logits": action_first_logits,
-                            "raw_argmax_action_candidates": raw_argmax_action_candidates,
-                            "best_first_logit_action_candidates": best_first_action_candidates,
-                        })
-                        action_logits_probe_emitted = True
-                    if forced_kind == "action":
-                        forced_action_logprobs.append(forced_logprob)
-                    else:
-                        forced_structure_logprobs.append(forced_logprob)
-                    if int(next_val) != forced_token_id:
-                        if forced_kind == "action":
-                            forced_action_overrides += 1
-                        else:
-                            forced_structure_overrides += 1
-                    next_val = forced_token_id
-                    next_tok = torch.tensor([[forced_token_id]], device=self.device, dtype=torch.long)
+            next_candidate = _sample_token(logits)
+            next_tok, next_val, next_candidate_scores = sampler.after_generated_token(
+                token_index=len(generated) - 1,
+                token_id=int(generated[-1]),
+                token_hidden=out.hidden_states[-1][:, -1:, :],
+                generated_ids=generated,
+                source_logits=logits,
+                sampled_next=next_candidate,
+            )
 
             if graceful_sentence_completion and len(generated) >= requested_max_new_tokens:
                 budget_text = self.tokenizer.decode(generated, skip_special_tokens=True)
@@ -4592,14 +4786,14 @@ class PipelineEngine:
                     thinker_decode_event_end,
                 )
             runtime_metrics["thinker_decode_ms"] = (time.perf_counter() - decode_started) * 1000.0
-            if forced_action_logprobs:
+            if sampler.forced_action_logprobs:
                 runtime_metrics["native_action_logprob"] = float(
-                    torch.stack(forced_action_logprobs).sum().item()
+                    torch.stack(sampler.forced_action_logprobs).sum().item()
                 )
-            runtime_metrics["forced_action_token_count"] = len(forced_action_logprobs)
-            runtime_metrics["forced_action_override_count"] = forced_action_overrides
-            runtime_metrics["forced_structure_token_count"] = len(forced_structure_logprobs)
-            runtime_metrics["forced_structure_override_count"] = forced_structure_overrides
+            runtime_metrics["forced_action_token_count"] = len(sampler.forced_action_logprobs)
+            runtime_metrics["forced_action_override_count"] = sampler.forced_action_overrides
+            runtime_metrics["forced_structure_token_count"] = len(sampler.forced_structure_logprobs)
+            runtime_metrics["forced_structure_override_count"] = sampler.forced_structure_overrides
             for key, value in tuple(runtime_metrics.items()):
                 if key.endswith("_ms"):
                     runtime_metrics[key] = round(float(value), 3)
@@ -4624,14 +4818,14 @@ class PipelineEngine:
                 thinker_decode_event_end,
             )
         runtime_metrics["thinker_decode_ms"] = (time.perf_counter() - decode_started) * 1000.0
-        if forced_action_logprobs:
+        if sampler.forced_action_logprobs:
             runtime_metrics["native_action_logprob"] = float(
-                torch.stack(forced_action_logprobs).sum().item()
+                torch.stack(sampler.forced_action_logprobs).sum().item()
             )
-        runtime_metrics["forced_action_token_count"] = len(forced_action_logprobs)
-        runtime_metrics["forced_action_override_count"] = forced_action_overrides
-        runtime_metrics["forced_structure_token_count"] = len(forced_structure_logprobs)
-        runtime_metrics["forced_structure_override_count"] = forced_structure_overrides
+        runtime_metrics["forced_action_token_count"] = len(sampler.forced_action_logprobs)
+        runtime_metrics["forced_action_override_count"] = sampler.forced_action_overrides
+        runtime_metrics["forced_structure_token_count"] = len(sampler.forced_structure_logprobs)
+        runtime_metrics["forced_structure_override_count"] = sampler.forced_structure_overrides
         for key, value in tuple(runtime_metrics.items()):
             if key.endswith("_ms"):
                 runtime_metrics[key] = round(float(value), 3)
@@ -6033,6 +6227,10 @@ class PipelineEngine:
              metrics: dict[str, Any] | None = None,
              generation_id: int | None = None,
              trailing_text_hidden: torch.Tensor | None = None,
+             raw_text_token_ids: list[int] | tuple[int, ...] | None = None,
+             include_text_eos: bool = True,
+             live_qwen_text_stream: Any | None = None,
+             live_frame_residual_hidden_stream: Any | None = None,
              frame_residual_response_hidden: torch.Tensor | None = None,
              listener_admission_wait: Callable[[], Any] | None = None,
              quality_diagnostic: dict[str, Any] | None = None,
@@ -6088,6 +6286,15 @@ class PipelineEngine:
                 or int(frame_residual_response_hidden.shape[-1]) != 1536
             ):
                 raise ValueError("frame residual response hidden must have shape (1,T,1536)")
+        if live_qwen_text_stream is not None:
+            if raw_text_token_ids is None or len(raw_text_token_ids) != 1:
+                raise ValueError("live Qwen response requires only token 0 in prefill")
+            if include_text_eos:
+                raise ValueError("live Qwen prefill must omit text EOS")
+            if trailing_text_hidden is not None:
+                raise ValueError("live Qwen text tail cannot be combined with static trailing hiddens")
+        if live_frame_residual_hidden_stream is not None and frame_residual_adapter is None:
+            raise RuntimeError("live response hidden requires a loaded frame residual adapter")
 
         def talk_stopped() -> bool:
             context_cancelled = (
@@ -6136,6 +6343,9 @@ class PipelineEngine:
             T_gen = min(T_gen, configured_max_frames)
             if metrics is not None:
                 metrics["configured_max_frames"] = configured_max_frames
+        else:
+            configured_max_frames = ARIA_MAX_FRAMES
+        live_frame_cap = min(ARIA_MAX_FRAMES, configured_max_frames)
         if metrics is not None:
             metrics.update({
                 "spoken_text_units": spoken_units,
@@ -6166,7 +6376,7 @@ class PipelineEngine:
             and getattr(self, "talker_q1_native_status", None) == "ready"
             and getattr(self, "_talker_native_audio_q1_requested", False)
         )
-        if frame_residual_response_hidden is not None:
+        if frame_residual_response_hidden is not None or live_frame_residual_hidden_stream is not None:
             if not native_v2_talker and not getattr(self, "allow_eager_frame_residual", True):
                 raise RuntimeError("frame residual candidate requires the actual native Qwen audio-Q1 route")
             if h_pfx.ndim != 3 or tuple(h_pfx.shape) != (1, 0, 2048):
@@ -6304,6 +6514,8 @@ class PipelineEngine:
             self.talker,
             text,
             effective_voice,
+            raw_text_token_ids=raw_text_token_ids,
+            include_text_eos=include_text_eos,
         )
         # Il solo blocco statico [assistant role + codec ICL] è riutilizzabile
         # tra turni; testo e h_pfx restano nel prefill dinamico del turno.
@@ -6343,16 +6555,32 @@ class PipelineEngine:
         past_kv = out_pfx.past_key_values
         if talk_context is not None:
             talk_context.qwen_kv = past_kv
+        ack_initial_text = getattr(live_qwen_text_stream, "ack_initial_token", None)
+        if callable(ack_initial_text):
+            # The initial ID is now in the successful dynamic Qwen prefill;
+            # only this point commits its source Gemma packet to the cursor.
+            ack_initial_text()
         native_executor = None
         if native_v2_talker:
             # The native context is private to this response.  It imports the
             # exact eager HF prefill cache and never publishes cross-turn KV.
+            # Live SAY extends its text-derived acoustic budget as Gemma emits
+            # safe prefixes, so reserve the existing bounded live cap at import
+            # time; the loop still stops at its dynamically updated T_gen.
+            native_q1_import_frames = _native_q1_import_audio_frame_budget(
+                T_gen,
+                live_qwen_text_stream=live_qwen_text_stream,
+                live_frame_cap=live_frame_cap,
+            )
             native_executor = self._new_native_talker_q1(
                 t,
                 past_kv,
-                max_audio_frames=T_gen,
+                max_audio_frames=native_q1_import_frames,
                 talk_context=talk_context,
             )
+            if metrics is not None:
+                metrics["native_q1_import_audio_frame_capacity"] = int(native_q1_import_frames)
+                metrics["native_q1_live_frame_cap"] = int(live_frame_cap)
             if talk_context is not None:
                 talk_context.native_q1_executor = native_executor
         last_h = out_pfx.last_hidden_state[:, -1:, :]
@@ -6374,22 +6602,97 @@ class PipelineEngine:
             talk_context.pcm_chunks if talk_context is not None else []
         )
         frame_residual_calls = 0
+        frame_residual_q1_steps = 0
         frame_residual_tail_hold_calls = 0
         frame_residual_delta_sq_sum: torch.Tensor | None = None
         frame_residual_base_sq_sum: torch.Tensor | None = None
         frame_residual_element_count = 0
+        live_first_packet_exclusive_cursor: int | None = None
+        live_first_packet_hidden: torch.Tensor | None = None
+        live_previous_packet_exclusive_cursor: int | None = None
+        live_previous_packet_hidden: torch.Tensor | None = None
 
         def apply_frame_residual(query: torch.Tensor, generation_step: int) -> torch.Tensor:
-            nonlocal frame_residual_calls, frame_residual_tail_hold_calls
+            nonlocal frame_residual_calls, frame_residual_q1_steps, frame_residual_tail_hold_calls
             nonlocal frame_residual_delta_sq_sum, frame_residual_base_sq_sum
             nonlocal frame_residual_element_count
+            nonlocal live_first_packet_exclusive_cursor, live_first_packet_hidden
+            nonlocal live_previous_packet_exclusive_cursor, live_previous_packet_hidden
             adapter = frame_residual_adapter
             response_states = frame_residual_response_hidden
+            residual_step = generation_step
+            live_tail_hold = False
+            live_state = None
+            if live_frame_residual_hidden_stream is not None:
+                live_state = live_frame_residual_hidden_stream.hidden_for_frame(
+                    generation_step,
+                    stop_check=talk_stopped,
+                )
+                response_states = live_state.hidden
+                live_tail_hold = bool(live_state.tail_hold)
             if adapter is None or response_states is None:
                 return query
-            conditioned, tail_hold = apply_response_state_residual(
-                adapter, response_states, query, generation_step
-            )
+            if live_state is not None and live_state.packet_exclusive_kv_cursor is not None:
+                packet_position = int(live_state.packet_exclusive_kv_cursor)
+                source_hidden = response_states.detach().float().reshape(-1)
+                hidden_norm = float(torch.linalg.vector_norm(source_hidden).cpu())
+                hidden_cosine: float | None = None
+                if (
+                    live_previous_packet_hidden is not None
+                    and live_previous_packet_exclusive_cursor != packet_position
+                ):
+                    hidden_cosine = float(F.cosine_similarity(
+                        source_hidden.unsqueeze(0),
+                        live_previous_packet_hidden.unsqueeze(0),
+                        dim=-1,
+                    ).cpu().item())
+                if live_previous_packet_exclusive_cursor != packet_position:
+                    if live_first_packet_hidden is None:
+                        live_first_packet_exclusive_cursor = packet_position
+                        live_first_packet_hidden = source_hidden.detach().clone()
+                    live_previous_packet_exclusive_cursor = packet_position
+                    live_previous_packet_hidden = source_hidden.detach().clone()
+                trace_entry = {
+                    "qwen_frame_step": int(generation_step),
+                    "gemma_token_id": live_state.gemma_token_id,
+                    "gemma_kv_position": packet_position,
+                    "qwen_token_id": live_state.qwen_token_id,
+                    "qwen_packet_token_index": live_state.packet_token_index,
+                    "qwen_packet_token_count": live_state.packet_token_count,
+                    "tail_hold": bool(live_state.tail_hold),
+                    "gemma_hidden_norm": hidden_norm,
+                    "gemma_hidden_cosine_previous_packet": hidden_cosine,
+                }
+                if metrics is not None:
+                    trace = metrics.setdefault("frame_residual_live_hidden_trace", [])
+                    if isinstance(trace, list) and len(trace) < 256:
+                        trace.append(trace_entry)
+                logger.info(
+                    "[turn-local frame residual] qwen_frame=%d gemma_token=%s gemma_kv=%d "
+                    "qwen_token=%s qwen_span=%s/%s tail_hold=%s hidden_norm=%.6f "
+                    "cosine_previous_packet=%s",
+                    int(generation_step),
+                    live_state.gemma_token_id,
+                    packet_position,
+                    live_state.qwen_token_id,
+                    live_state.packet_token_index,
+                    live_state.packet_token_count,
+                    bool(live_state.tail_hold),
+                    hidden_norm,
+                    "n/a" if hidden_cosine is None else f"{hidden_cosine:.6f}",
+                )
+            if live_state is not None:
+                conditioned, tail_hold = _apply_live_frame_residual(
+                    adapter,
+                    response_states,
+                    query,
+                    generation_step=generation_step,
+                    tail_hold=live_tail_hold,
+                )
+            else:
+                conditioned, tail_hold = apply_response_state_residual(
+                    adapter, response_states, query, residual_step
+                )
             delta = conditioned.float() - query.float()
             base = query.float()
             delta_sq, base_sq = delta.square().sum(), base.square().sum()
@@ -6400,22 +6703,42 @@ class PipelineEngine:
                 base_sq if frame_residual_base_sq_sum is None else frame_residual_base_sq_sum + base_sq
             )
             frame_residual_element_count += int(delta.numel())
-            frame_residual_calls += 1
-            frame_residual_tail_hold_calls += int(tail_hold)
+            frame_residual_q1_steps += 1
+            if not (
+                generation_step == 0
+                and bool(getattr(adapter, "preserve_frame0", False))
+            ):
+                frame_residual_calls += 1
+            frame_residual_tail_hold_calls += int(tail_hold or live_tail_hold)
             return conditioned
 
         def finalize_frame_residual_metrics() -> None:
-            if metrics is None or frame_residual_adapter is None or frame_residual_response_hidden is None:
+            if metrics is None or frame_residual_adapter is None or (
+                frame_residual_response_hidden is None
+                and live_frame_residual_hidden_stream is None
+            ):
                 return
             denominator = max(1, frame_residual_element_count)
             delta_rms = float(torch.sqrt(frame_residual_delta_sq_sum / denominator).detach().cpu()) if frame_residual_delta_sq_sum is not None else 0.0
             base_rms = float(torch.sqrt(frame_residual_base_sq_sum / denominator).detach().cpu()) if frame_residual_base_sq_sum is not None else 0.0
+            first_last_hidden_cosine: float | None = None
+            if (
+                live_first_packet_hidden is not None
+                and live_previous_packet_hidden is not None
+                and live_first_packet_exclusive_cursor != live_previous_packet_exclusive_cursor
+            ):
+                first_last_hidden_cosine = float(F.cosine_similarity(
+                    live_first_packet_hidden.unsqueeze(0),
+                    live_previous_packet_hidden.unsqueeze(0),
+                    dim=-1,
+                ).detach().cpu().item())
             metrics.update({
                 "frame_residual_adapter": str(
                     getattr(frame_residual_adapter, "architecture_id", "unknown")
                 ),
                 "frame_residual_checkpoint": self.frame_residual_adapter_resolved_path,
                 "frame_residual_calls": frame_residual_calls,
+                "frame_residual_q1_steps": frame_residual_q1_steps,
                 "frame_residual_tail_hold_calls": frame_residual_tail_hold_calls,
                 "frame_residual_qwen_q1_only": True,
                 "frame_residual_prefix_tokens_added": 0,
@@ -6423,6 +6746,7 @@ class PipelineEngine:
                 "frame_residual_rms": delta_rms,
                 "frame_residual_base_rms": base_rms,
                 "frame_residual_rms_to_base_ratio": delta_rms / base_rms if base_rms > 0.0 else 0.0,
+                "frame_residual_live_first_last_hidden_cosine": first_last_hidden_cosine,
             })
         if talk_context is not None:
             talk_context.hook_state = {
@@ -6785,7 +7109,10 @@ class PipelineEngine:
                 raise RuntimeError("Code2Wav ha prodotto audio non finito")
             return chunk
 
-        if frame_residual_response_hidden is not None and streaming_requested:
+        if (
+            frame_residual_response_hidden is not None
+            or live_frame_residual_hidden_stream is not None
+        ) and streaming_requested:
             rvq_history = getattr(talk_context, "rvq_history", None)
             if rvq_history is None:
                 rvq_history = DeviceRVQCodeRing(device=self.device)
@@ -6816,7 +7143,48 @@ class PipelineEngine:
                 if talk_context is not None:
                     talk_context.callback_finished()
 
-        for frame_id in range(T_gen):
+        frame_id = 0
+        while True:
+            if live_qwen_text_stream is not None:
+                live_text = live_qwen_text_stream.visible_text
+                if live_text:
+                    live_words = max(1, len(live_text.split()))
+                    live_spoken_units, live_numeric_extra, live_text_budget = (
+                        _estimate_talker_frame_budget(
+                            live_text,
+                            live_words,
+                            min_frames,
+                            short_streaming=short_streaming,
+                        )
+                    )
+                    # Each native text token needs one Q1 query after a CB0
+                    # frame; reserve two additional frames to feed native text
+                    # EOS and sample codec EOS after the tail drains.
+                    live_text_budget = max(
+                        live_text_budget,
+                        live_qwen_text_stream.observed_qwen_token_count + 2,
+                    )
+                    live_text_budget = apply_diagnostic_frame_budget(
+                        live_text_budget,
+                        diagnostic_max_frames=diagnostic_max_frames,
+                        absolute_max_frames=ARIA_MAX_FRAMES,
+                    )
+                    live_text_budget = min(live_frame_cap, live_text_budget)
+                    if live_text_budget > T_gen:
+                        T_gen = live_text_budget
+                    if metrics is not None:
+                        metrics.update({
+                            "spoken_text_units": live_spoken_units,
+                            "numeric_extra_spoken_units": live_numeric_extra,
+                            "requested_acoustic_frame_budget": live_text_budget,
+                            "acoustic_frame_budget": T_gen,
+                            "effective_max_frames": int(T_gen),
+                            "live_qwen_text_token_count": int(
+                                live_qwen_text_stream.observed_qwen_token_count
+                            ),
+                        })
+            if frame_id >= T_gen:
+                break
             if talk_stopped():
                 break
             admit_listener("talker", "codec_head")
@@ -6830,10 +7198,10 @@ class PipelineEngine:
             finish_cuda_timing("codec_head", timing_pair)
             if not torch.isfinite(lg).all():
                 raise RuntimeError(f"Talker codec_head non finito al frame {len(codes)}")
-            c0 = self._cb0_sample(
-                lg,
-                allow_eos=self._codec_eos_allowed(len(codes)),
-            )
+            allow_codec_eos = self._codec_eos_allowed(len(codes))
+            if live_qwen_text_stream is not None:
+                allow_codec_eos = allow_codec_eos and live_qwen_text_stream.codec_eos_allowed
+            c0 = self._cb0_sample(lg, allow_eos=allow_codec_eos)
             if eos_token_id is not None and c0 == eos_token_id:
                 eos_detected = True
                 eos_frame_id = int(frame_id)
@@ -6864,7 +7232,10 @@ class PipelineEngine:
 
             resid_output = run_talker_gpu_step("subtalker", generate_residuals)
             finish_cuda_timing("subtalker", timing_pair)
-            if frame_residual_response_hidden is not None and isinstance(resid_output, torch.Tensor):
+            if (
+                frame_residual_response_hidden is not None
+                or live_frame_residual_hidden_stream is not None
+            ) and isinstance(resid_output, torch.Tensor):
                 residual_codes = resid_output.reshape(-1)
                 if residual_codes.numel() != 15:
                     raise RuntimeError(
@@ -6914,12 +7285,34 @@ class PipelineEngine:
                 if isinstance(last_codes, torch.Tensor)
                 else torch.tensor(last_codes, device=self.device, dtype=torch.long).view(1, 1, -1)
             )
+            qwen_trailing_text_hidden = trailing_text_hidden
+            qwen_generation_step = len(codes) - 1
+            live_text_token_pending = False
+            if live_qwen_text_stream is not None:
+                next_text_id = live_qwen_text_stream.take_trailing_token(
+                    stop_check=talk_stopped,
+                )
+                if next_text_id is None:
+                    qwen_trailing_text_hidden = None
+                    qwen_generation_step = None
+                else:
+                    live_text_token_pending = True
+                    text_id_tensor = torch.tensor(
+                        [[int(next_text_id)]],
+                        device=self.device,
+                        dtype=torch.long,
+                    )
+                    qwen_trailing_text_hidden = t.text_projection(
+                        t.get_text_embeddings()(text_id_tensor)
+                    )
+                    # Live input advances its own cursor once per Q1 query.
+                    qwen_generation_step = 0
             nxt = build_qwen_audio_conditioning(
                 t,
                 cur,
                 tts_pad_embed=tts_pad_embed,
-                trailing_text_hidden=trailing_text_hidden,
-                generation_step=len(codes) - 1,
+                trailing_text_hidden=qwen_trailing_text_hidden,
+                generation_step=qwen_generation_step,
             )
             nxt = apply_frame_residual(nxt, generation_step=len(codes) - 1)
             admit_listener("talker", "next_qwen_model")
@@ -6950,11 +7343,39 @@ class PipelineEngine:
             past_kv = q1_cache
             if talk_context is not None:
                 talk_context.qwen_kv = past_kv
+            if live_text_token_pending and live_qwen_text_stream is not None:
+                ack_trailing_text = getattr(live_qwen_text_stream, "ack_trailing_token", None)
+                if callable(ack_trailing_text):
+                    # Keep the packet head and its cursor in flight until Qwen
+                    # has actually committed this text ID through Q1.
+                    ack_trailing_text()
             last_h = q1_hidden
+            frame_id += 1
+
+        if (
+            live_qwen_text_stream is not None
+            and not talk_stopped()
+            and len(codes) >= T_gen
+            and not live_qwen_text_stream.codec_eos_allowed
+        ):
+            capacity_error = RuntimeError(
+                "live SAY exhausted ARIA_MAX_FRAMES before Qwen text EOS and tail drain"
+            )
+            live_qwen_text_stream.fail(capacity_error)
+            raise capacity_error
 
         # The legacy path also reserves one non-acoustic EOS query.  It uses
         # the final committed code as input and never appends to `codes`.
-        if len(codes) >= T_gen and not eos_detected and self.allow_talker_eos and codes:
+        if (
+            len(codes) >= T_gen
+            and not eos_detected
+            and self.allow_talker_eos
+            and codes
+            and (
+                live_qwen_text_stream is None
+                or live_qwen_text_stream.codec_eos_allowed
+            )
+        ):
             last_codes = codes[-1]
             cur = (
                 last_codes.view(1, 1, -1)

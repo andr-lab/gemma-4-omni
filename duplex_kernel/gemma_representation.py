@@ -18,7 +18,8 @@ import torch
 # derives it from a supplied sequence so legacy 48-token fixtures remain
 # diagnosable rather than silently shifting the audio positions.
 TEXT_BLOCK_LEN = 32
-AUDIO_FEATURES_PER_FRAME = 4
+AUDIO_FEATURES_PER_FRAME = 2
+AUDIO_TOWER_MEL_STRIDE = 4
 AUDIO_START_AFTER_TEXT = 2 + TEXT_BLOCK_LEN  # BOA is position 1+TEXT_BLOCK_LEN
 # The listener's canonical shape-stable prefill workspace is part of the
 # numerical contract: changing its GEMM M-shape changes BF16 rounding.
@@ -70,10 +71,10 @@ def build_audio_placeholder_inputs(
     text_token_ids: tuple[int, ...] | list[int] = (),
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build the exact ``[BOS|text|BOA|audio placeholders|EOA]`` contract."""
-    if audio_feature_rows <= 0 or audio_feature_rows % AUDIO_FEATURES_PER_FRAME:
-        raise ValueError("audio_feature_rows deve essere un multiplo positivo di 4")
+    if audio_feature_rows <= 0 or audio_feature_rows % AUDIO_TOWER_MEL_STRIDE:
+        raise ValueError("audio_feature_rows deve essere un multiplo positivo dello stride Mel 4")
     device = torch.device(device)
-    audio_tokens = audio_feature_rows // AUDIO_FEATURES_PER_FRAME
+    audio_tokens = audio_feature_rows // AUDIO_TOWER_MEL_STRIDE
     length = 3 + TEXT_BLOCK_LEN + audio_tokens
     input_ids = torch.full((batch_size, length), int(audio_token_id), dtype=torch.long, device=device)
     input_ids[:, 0] = int(bos_token_id)
@@ -441,6 +442,7 @@ def select_audio_frame_hidden(
 
 __all__ = [
     "AUDIO_FEATURES_PER_FRAME",
+    "AUDIO_TOWER_MEL_STRIDE",
     "AUDIO_START_AFTER_TEXT",
     "CANONICAL_LM_PREFILL_TARGET_LEN",
     "CANONICAL_RAW_STAGE",

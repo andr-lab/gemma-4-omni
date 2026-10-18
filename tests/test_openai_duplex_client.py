@@ -22,6 +22,7 @@ from client.openai_duplex_client import (
     RealtimeAudioDevices,
     decode_response_audio,
     handle_realtime_event,
+    send_client_consumed_pcm_acks,
     send_microphone_frames,
     test_realtime_duplex_websocket as run_live_demo,
     WEBSOCKET_MAX_QUEUE,
@@ -194,6 +195,301 @@ def test_playback_capacity_is_bounded_and_overflow_is_visible() -> None:
     with pytest.raises(BufferError, match="capacity"):
         playback.enqueue("response-A", 1, np.zeros(5, dtype=np.float32))
     assert playback.pending_samples == 0
+
+
+def test_playback_acks_only_after_segment_done_and_full_callback_consumption() -> None:
+    playback = BoundedPCMPlayback(max_samples=4096)
+    handle_realtime_event({"type": "response.created", "response_id": "response-ack"}, playback)
+    handle_realtime_event({"type": "speaker.segment.opened", "generation_id": 9}, playback)
+    pcm = np.linspace(-0.5, 0.5, 1920, dtype=np.float32)
+    assert playback.enqueue_packet(
+        response_id="response-ack",
+        generation_id=9,
+        speaker_segment_id="segment-ack",
+        packet_id=17,
+        first_frame_id=4,
+        last_frame_id=4,
+        start_sample=0,
+        end_sample=1920,
+        pcm=pcm,
+        sample_rate=24_000,
+    )
+    handle_realtime_event({
+        "type": "response.audio.segment_done",
+        "response_id": "response-ack",
+        "generation_id": 9,
+        "speaker_segment_id": "segment-ack",
+        "start_sample": 0,
+        "end_sample": 1920,
+        "sample_rate": 24_000,
+    }, playback)
+
+    callback = np.empty((320, 1), dtype=np.float32)
+    assert playback.read_into(callback) == 320
+    acknowledgements = playback.drain_client_consumed_pcm_acks(current_generation_id=9)
+    assert acknowledgements == []
+    assert playback.pending_samples == 1600
+
+    callback = np.empty((1600, 1), dtype=np.float32)
+    assert playback.read_into(callback) == 1600
+    acknowledgements = playback.drain_client_consumed_pcm_acks(current_generation_id=9)
+
+    assert len(acknowledgements) == 1
+    ack = acknowledgements[0]
+    assert ack["type"] == "client_consumed_pcm"
+    assert ack["response_id"] == "response-ack"
+    assert ack["generation_id"] == 9
+    assert ack["speaker_segment_id"] == "segment-ack"
+    assert ack["start_sample"] == 0
+    assert ack["end_sample"] == 1920
+    assert ack["sample_rate"] == 24_000
+    assert ack["sequence"] == 1
+    assert isinstance(ack["client_monotonic_ns"], int)
+    assert ack["consumption_semantics"] == "logical_client_device_buffer"
+    assert playback.drain_client_consumed_pcm_acks(current_generation_id=9) == []
+    assert playback.pending_samples == 0
+
+
+def test_segment_done_after_full_callback_queues_one_ack() -> None:
+    playback = BoundedPCMPlayback(max_samples=64)
+    handle_realtime_event({"type": "response.created", "response_id": "response-late-close"}, playback)
+    handle_realtime_event({"type": "speaker.segment.opened", "generation_id": 10}, playback)
+    assert playback.enqueue_packet(
+        response_id="response-late-close",
+        generation_id=10,
+        speaker_segment_id="segment-late-close",
+        packet_id=1,
+        first_frame_id=0,
+        last_frame_id=0,
+        start_sample=0,
+        end_sample=8,
+        pcm=np.ones(8, dtype=np.float32),
+        sample_rate=24_000,
+    )
+
+    assert playback.read_into(np.empty((8, 1), dtype=np.float32)) == 8
+    assert playback.drain_client_consumed_pcm_acks(current_generation_id=10) == []
+    handle_realtime_event({
+        "type": "response.audio.segment_done",
+        "response_id": "response-late-close",
+        "generation_id": 10,
+        "speaker_segment_id": "segment-late-close",
+        "start_sample": 0,
+        "end_sample": 8,
+        "sample_rate": 24_000,
+    }, playback)
+
+    ack = playback.drain_client_consumed_pcm_acks(current_generation_id=10)
+    assert len(ack) == 1
+    assert ack[0]["end_sample"] == 8
+    assert playback.drain_client_consumed_pcm_acks(current_generation_id=10) == []
+
+
+def test_async_ack_sender_is_the_only_network_emitter_for_callback_consumption() -> None:
+    class AckSocket:
+        def __init__(self) -> None:
+            self.sent: list[dict] = []
+            self.sent_event = asyncio.Event()
+
+        async def send(self, message: str) -> None:
+            self.sent.append(json.loads(message))
+            self.sent_event.set()
+
+    async def exercise() -> None:
+        socket = AckSocket()
+        playback = BoundedPCMPlayback(max_samples=64)
+        handle_realtime_event({"type": "response.created", "response_id": "response-send"}, playback)
+        handle_realtime_event({"type": "speaker.segment.opened", "generation_id": 11}, playback)
+        assert playback.enqueue_packet(
+            response_id="response-send",
+            generation_id=11,
+            speaker_segment_id="segment-send",
+            packet_id=1,
+            first_frame_id=0,
+            last_frame_id=0,
+            start_sample=0,
+            end_sample=8,
+            pcm=np.ones(8, dtype=np.float32),
+            sample_rate=24_000,
+        )
+        handle_realtime_event({
+            "type": "response.audio.segment_done",
+            "response_id": "response-send",
+            "generation_id": 11,
+            "speaker_segment_id": "segment-send",
+            "start_sample": 0,
+            "end_sample": 8,
+            "sample_rate": 24_000,
+        }, playback)
+        assert playback.read_into(np.empty((8, 1), dtype=np.float32)) == 8
+        assert socket.sent == []
+
+        stop = asyncio.Event()
+        sender = asyncio.create_task(send_client_consumed_pcm_acks(
+            socket,
+            playback,
+            stop,
+            event_lock=asyncio.Lock(),
+            send_lock=asyncio.Lock(),
+        ))
+        await asyncio.wait_for(socket.sent_event.wait(), timeout=0.5)
+        stop.set()
+        await sender
+        assert len(socket.sent) == 1
+        assert socket.sent[0]["type"] == "client_consumed_pcm"
+        assert socket.sent[0]["end_sample"] == 8
+
+    asyncio.run(exercise())
+
+
+def test_playback_drops_partial_segment_and_late_old_generation_ack() -> None:
+    playback = BoundedPCMPlayback(max_samples=64)
+    handle_realtime_event({"type": "response.created", "response_id": "response-old"}, playback)
+    handle_realtime_event({"type": "speaker.segment.opened", "generation_id": 12}, playback)
+    assert playback.enqueue_packet(
+        response_id="response-old",
+        generation_id=12,
+        speaker_segment_id="segment-old",
+        packet_id=1,
+        first_frame_id=0,
+        last_frame_id=0,
+        start_sample=0,
+        end_sample=8,
+        pcm=np.ones(8, dtype=np.float32),
+        sample_rate=24_000,
+    )
+    handle_realtime_event({
+        "type": "response.audio.segment_done",
+        "response_id": "response-old",
+        "generation_id": 12,
+        "speaker_segment_id": "segment-old",
+        "start_sample": 0,
+        "end_sample": 8,
+        "sample_rate": 24_000,
+    }, playback)
+    assert playback.read_into(np.empty((4, 1), dtype=np.float32)) == 4
+    assert playback.drain_client_consumed_pcm_acks(current_generation_id=12) == []
+
+    # A YIELD generation fence makes any not-yet-sent consumption ACK stale.
+    handle_realtime_event({"type": "speaker.segment.opened", "generation_id": 13}, playback)
+    assert playback.drain_client_consumed_pcm_acks(current_generation_id=13) == []
+
+    handle_realtime_event({"type": "response.created", "response_id": "response-new"}, playback)
+    assert playback.enqueue_packet(
+        response_id="response-new",
+        generation_id=13,
+        speaker_segment_id="segment-new",
+        packet_id=0,
+        first_frame_id=1,
+        last_frame_id=1,
+        start_sample=0,
+        end_sample=8,
+        pcm=np.ones(8, dtype=np.float32),
+        sample_rate=24_000,
+    )
+    handle_realtime_event({
+        "type": "response.audio.segment_done",
+        "response_id": "response-new",
+        "generation_id": 13,
+        "speaker_segment_id": "segment-new",
+        "start_sample": 0,
+        "end_sample": 8,
+        "sample_rate": 24_000,
+    }, playback)
+    assert playback.read_into(np.empty((4, 1), dtype=np.float32)) == 4
+    assert playback.drain_client_consumed_pcm_acks(current_generation_id=13) == []
+    assert playback.read_into(np.empty((4, 1), dtype=np.float32)) == 4
+    ack = playback.drain_client_consumed_pcm_acks(current_generation_id=13)[0]
+    assert ack["sequence"] == 1
+    assert playback.accept_client_consumed_pcm_ack(ack, current_generation_id=13)
+    assert not playback.accept_client_consumed_pcm_ack(ack, current_generation_id=13)
+
+
+def test_yield_cancel_truncates_even_completed_response_and_fences_pending_ack() -> None:
+    playback = BoundedPCMPlayback(max_samples=64)
+    handle_realtime_event({"type": "response.created", "response_id": "response-yield"}, playback)
+    handle_realtime_event({"type": "speaker.segment.opened", "generation_id": 21}, playback)
+    assert playback.enqueue_packet(
+        response_id="response-yield",
+        generation_id=21,
+        speaker_segment_id="segment-yield",
+        packet_id=3,
+        first_frame_id=5,
+        last_frame_id=5,
+        start_sample=0,
+        end_sample=12,
+        pcm=np.ones(12, dtype=np.float32),
+        sample_rate=24_000,
+    )
+    handle_realtime_event({
+        "type": "response.audio.segment_done",
+        "response_id": "response-yield",
+        "generation_id": 21,
+        "speaker_segment_id": "segment-yield",
+        "start_sample": 0,
+        "end_sample": 12,
+        "sample_rate": 24_000,
+    }, playback)
+    handle_realtime_event({"type": "response.done", "response_id": "response-yield"}, playback)
+
+    assert playback.read_into(np.empty((12, 1), dtype=np.float32)) == 12
+    stale_ack = playback.drain_client_consumed_pcm_acks(current_generation_id=21)[0]
+    assert stale_ack["consumption_semantics"] == "logical_client_device_buffer"
+
+    # YIELD is an explicit truncation fence even after response.done; done alone
+    # intentionally preserves queued PCM for ordinary sequential playback.
+    handle_realtime_event({
+        "type": "response.cancelled",
+        "response_id": "response-yield",
+        "generation_id": 21,
+        "reason": "yield",
+    }, playback)
+    handle_realtime_event({"type": "speaker.segment.opened", "generation_id": 22}, playback)
+
+    assert playback.pending_samples == 0
+    assert playback.drain_client_consumed_pcm_acks(current_generation_id=22) == []
+    silence = np.ones((8, 1), dtype=np.float32)
+    assert playback.read_into(silence) == 0
+    np.testing.assert_array_equal(silence, np.zeros_like(silence))
+    assert not playback.accept_client_consumed_pcm_ack(stale_ack, current_generation_id=22)
+    handle_realtime_event({"type": "response.created", "response_id": "response-after-yield"}, playback)
+    assert not playback.enqueue_packet(
+        response_id="response-yield",
+        generation_id=21,
+        speaker_segment_id="segment-yield",
+        packet_id=4,
+        first_frame_id=6,
+        last_frame_id=6,
+        start_sample=12,
+        end_sample=24,
+        pcm=np.ones(12, dtype=np.float32),
+        sample_rate=24_000,
+    )
+    assert playback.pending_samples == 0
+
+
+def test_response_done_closes_last_segment_as_ack_fallback() -> None:
+    playback = BoundedPCMPlayback(max_samples=64)
+    handle_realtime_event({"type": "response.created", "response_id": "response-done-fallback"}, playback)
+    handle_realtime_event({"type": "speaker.segment.opened", "generation_id": 23}, playback)
+    assert playback.enqueue_packet(
+        response_id="response-done-fallback",
+        generation_id=23,
+        speaker_segment_id="segment-fallback",
+        packet_id=1,
+        first_frame_id=0,
+        last_frame_id=0,
+        start_sample=0,
+        end_sample=8,
+        pcm=np.ones(8, dtype=np.float32),
+        sample_rate=24_000,
+    )
+    assert playback.read_into(np.empty((8, 1), dtype=np.float32)) == 8
+    assert playback.drain_client_consumed_pcm_acks(current_generation_id=23) == []
+    handle_realtime_event({"type": "response.done", "response_id": "response-done-fallback"}, playback)
+    ack = playback.drain_client_consumed_pcm_acks(current_generation_id=23)
+    assert len(ack) == 1
+    assert ack[0]["speaker_segment_id"] == "segment-fallback"
 
 
 def test_audio_delta_decoder_checks_wav_rate_and_sample_timeline() -> None:

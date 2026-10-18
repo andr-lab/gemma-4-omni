@@ -21,6 +21,7 @@ from duplex_kernel.microbatch_contract import (
     ListenerFrame,
     ListenerSessionState,
     NativeBatchCapability,
+    PCM_TAIL_SAMPLES,
     RuntimeSignature,
 )
 from duplex_kernel.native_listener_microbatch import NativeBatchOutput, NativeBatchOutputHealth
@@ -34,7 +35,7 @@ from duplex_kernel.listener_microbatch_worker import (
     PrefixCacheImport,
     SemanticPrefixShadowRuntime,
     SemanticPrefixShadowWorker,
-    ShadowQ4Frame,
+    ShadowQ2Frame,
     WorkerStopReport,
 )
 
@@ -51,7 +52,7 @@ def _signature() -> RuntimeSignature:
         attention_backend_id=3,
         rmsnorm_backend_id=2,
         max_seq_len=16_384,
-        stream_q_len=4,
+        stream_q_len=2,
     )
 
 
@@ -62,7 +63,7 @@ def _capability() -> NativeBatchCapability:
         attention_backend_id=3,
         rmsnorm_backend_id=2,
         max_seq_len=16_384,
-        stream_q_len=4,
+        stream_q_len=2,
         supports_arbitrary_batch_size=True,
         stream_priority=-1,
         stream_identity="cuda:0:stream:0x17",
@@ -109,6 +110,20 @@ class _FakeStream:
         self.waited_events.append(event)
 
 
+class _FakeCudaEvent:
+    def __init__(self, **_kwargs: Any) -> None:
+        self.recorded_stream: Any | None = None
+
+    def record(self, stream: Any) -> None:
+        self.recorded_stream = stream
+
+
+@pytest.fixture(autouse=True)
+def _fake_cuda_event_for_worker_unit_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep CPU-only owner tests independent from CUDA initialization."""
+    monkeypatch.setattr(torch.cuda, "Event", _FakeCudaEvent)
+
+
 class _FakeMelExtractor:
     def __call__(self, pcm: np.ndarray, previous: np.ndarray | None) -> tuple[np.ndarray, np.ndarray]:
         mel = np.full((8, 128), float(np.mean(pcm)), dtype=np.float32)
@@ -131,12 +146,13 @@ class _FakeAudioModel:
         self.call_inputs.append(input_features.detach().clone())
         assert return_dict is True
         n = input_features.shape[0]
-        pooled = torch.empty((n, 256, HIDDEN_WIDTH), dtype=torch.bfloat16, device=input_features.device)
-        tokens = input_features.float().reshape(n, 256, 4, 128).mean(dim=(2, 3))
+        output_rows = input_features.shape[1] // 4
+        pooled = torch.empty((n, output_rows, HIDDEN_WIDTH), dtype=torch.bfloat16, device=input_features.device)
+        tokens = input_features.float().reshape(n, output_rows, 4, 128).mean(dim=(2, 3))
         for row in range(n):
-            for token in range(256):
+            for token in range(output_rows):
                 pooled[row, token].fill_(float(tokens[row, token] + token))
-        mask = torch.ones((n, 256), dtype=torch.bool, device=input_features.device)
+        mask = torch.ones((n, output_rows), dtype=torch.bool, device=input_features.device)
         return SimpleNamespace(pooler_output=pooled, attention_mask=mask)
 
 
@@ -175,6 +191,11 @@ class _FakeNativeBatch:
         self.manifests: list[Any] = []
         self.audio_rows: list[torch.Tensor] = []
         self.cache_copy_source_rows: list[BatchRowDescriptor] = []
+        self.fork_calls: list[tuple[BatchRowDescriptor, BatchRowDescriptor]] = []
+        self.slot_fork_calls: list[tuple[BatchRowDescriptor, BatchRowDescriptor]] = []
+        self.fail_fork: BaseException | None = None
+        self.fork_entered: threading.Event | None = None
+        self.fork_continue: threading.Event | None = None
         self.step_entered: threading.Event | None = None
         self.step_continue: threading.Event | None = None
         self.step_block_at_count = 1
@@ -210,12 +231,12 @@ class _FakeNativeBatch:
         self.max_batch_size = max(self.max_batch_size, requested_capacity)
         return self.max_batch_size
 
-    def step_async(self, manifest, audio_soft, *, producer_stream=None):
+    def step_async(self, manifest, audio_soft, *, per_layer_inputs=None, producer_stream=None):
         self._claim()
         if self.fail_step is not None:
             raise self.fail_step
         assert producer_stream is self.listener_stream
-        assert tuple(audio_soft.shape) == (manifest.batch_size, 4, HIDDEN_WIDTH)
+        assert tuple(audio_soft.shape) == (manifest.batch_size, 2, HIDDEN_WIDTH)
         assert audio_soft.dtype == torch.bfloat16
         self.manifests.append(manifest)
         self.audio_rows.append(audio_soft.detach().clone())
@@ -231,12 +252,46 @@ class _FakeNativeBatch:
             and len(self.steps) == self.step_block_at_count
         ):
             assert self.step_continue.wait(3)
+        output_tensor = audio_soft.detach().clone()
+        if manifest.rows and all(row.session_id.startswith("__q2view__") for row in manifest.rows):
+            output_tensor = output_tensor + 7
         return NativeBatchOutput(
             manifest_id=manifest.manifest_id,
             generation=len(self.steps),
             rows=manifest.rows,
-            tensor=audio_soft.detach().clone(),
+            tensor=output_tensor,
             completion_event=_FakeCompletionEvent(),
+            logical_q_lens=tuple(row.logical_q_len for row in manifest.rows),
+            embedded_text_input=per_layer_inputs is not None,
+        )
+
+    def step_queued_audio_async(self, manifest, audio_soft, *, producer_stream=None):
+        output = self.step_async(
+            manifest, audio_soft, producer_stream=producer_stream,
+        )
+        return replace(output, preserves_listener_cursors=True)
+
+    def fork_session_slot(
+        self, source_row, *, fork_session_id, fork_native_context_id,
+    ):
+        self._claim()
+        if self.fail_fork is not None:
+            raise self.fail_fork
+        destination = replace(
+            source_row,
+            session_id=fork_session_id,
+            native_context_id=fork_native_context_id,
+        )
+        self.slot_fork_calls.append((source_row, destination))
+        self.event_order.append(("slot_fork", fork_session_id))
+        return destination
+
+    def rewind_session_async(self, row, *, target_position):
+        self._claim()
+        self.event_order.append(("rewind", row.session_id))
+        return SimpleNamespace(
+            cache_position=int(target_position),
+            valid_history_tokens=int(target_position),
         )
 
     def verify_output_health(self, output):
@@ -265,6 +320,17 @@ class _FakeNativeBatch:
         self.cache_copy_source_rows.append(row)
         return SimpleNamespace(row=row)
 
+    def fork_session_cache_within_owner(self, source_row, destination_row):
+        self._claim()
+        self.fork_calls.append((source_row, destination_row))
+        if self.fork_entered is not None:
+            self.fork_entered.set()
+        if self.fork_continue is not None:
+            assert self.fork_continue.wait(3)
+        if self.fail_fork is not None:
+            raise self.fail_fork
+        return destination_row
+
     def close(self) -> None:
         self._claim()
         self.close_thread_id = threading.get_ident()
@@ -277,10 +343,68 @@ class _RecordingAdapter(NativeControl6LoRA):
         self.thread_ids: list[int] = []
         self.hidden_rows: list[torch.Tensor] = []
 
-    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+    def forward(self, hidden: torch.Tensor, *, phase_t=None) -> torch.Tensor:
         self.thread_ids.append(threading.get_ident())
         self.hidden_rows.append(hidden.detach().clone())
-        return super().forward(hidden)
+        return super().forward(hidden, phase_t=phase_t)
+
+
+class _FakeTokenAdapter:
+    def prepare(self, token_ids, *, logical_q_lens):
+        count = len(tuple(token_ids))
+        assert logical_q_lens == count
+        return SimpleNamespace(
+            inputs_embeds=torch.full((1, 2, HIDDEN_WIDTH), float(count), dtype=torch.bfloat16),
+            per_layer_inputs=torch.zeros((1, 2, 35, 256), dtype=torch.bfloat16),
+            logical_q_lens=(count,),
+        )
+
+    def logits_from_final_norm_hidden(self, hidden):
+        return hidden.float().mean(dim=-1, keepdim=True)
+
+
+class _CudaProvenanceTensor:
+    """CPU fixture tensor carrying the device metadata required by queue admission."""
+
+    def __init__(self, value: torch.Tensor) -> None:
+        self.value = value
+        self.shape = value.shape
+        self.dtype = value.dtype
+        self.device = SimpleNamespace(type="cuda")
+
+    def record_stream(self, _stream: Any) -> None:
+        pass
+
+    def unsqueeze(self, dim: int) -> torch.Tensor:
+        return self.value.unsqueeze(dim)
+
+
+def _assistant_q0(
+    state: ListenerSessionState,
+    frame_id: int = 0,
+    *,
+    queue_audio_for_next_turn: bool = True,
+) -> ListenerFrame:
+    return ListenerFrame(
+        session_id=state.session_id,
+        generation_id=state.generation_id,
+        state_epoch_id=state.state_epoch_id,
+        frame_id=frame_id,
+        ready_at_ns=time.monotonic_ns(),
+        pcm=np.full(1280, 0.25, dtype=np.float32),
+        logical_q_len=0,
+        ephemeral_reason="assistant_turn_open",
+        queue_audio_for_next_turn=queue_audio_for_next_turn,
+    )
+
+
+def _mark_queued_soft_cuda_for_cpu_fixture(rig: _Rig, session_id: str) -> None:
+    queued = rig.worker._queued_audio_soft[session_id]
+    assert len(queued) == 1
+    queued[0] = replace(
+        queued[0],
+        audio_soft_tokens=_CudaProvenanceTensor(queued[0].audio_soft_tokens),
+    )
 
 
 class _OwnerRecordingCoordinator(ListenerMicrobatchCoordinator):
@@ -380,6 +504,7 @@ def _rig(
             ),
             completion_barrier=completion_barrier,
             listener_model_lock=model_lock,
+            token_adapter=_FakeTokenAdapter(),
         )
 
     def prefix_import(state, row) -> PrefixCacheImport:
@@ -427,6 +552,33 @@ def _register(rig: _Rig, *states: ListenerSessionState) -> None:
         rig.worker.register_session(state, prefix_import=rig.prefix_import).result(timeout=3)
 
 
+def _prime_native_prefix(rig: _Rig, state: ListenerSessionState) -> None:
+    prepared = PreparedInitialPrefix(
+        prefix=PrefixCacheImport(
+            past_key_values=object(),
+            prefix_attention=torch.ones((1, 34), dtype=torch.int64),
+            prefix_len=34,
+            cache_position=34,
+        ),
+        ready_event=None,
+        session_id=state.session_id,
+        listener_generation_id=state.generation_id,
+        state_epoch_id=state.state_epoch_id,
+        semantic_context_revision=1,
+        expected_cache_position=34,
+    )
+    assert rig.worker.prime_initial_prefix(state.session_id, prepared).result(timeout=3).status == "primed"
+
+
+def _set_fixture_capacity(rig: _Rig, max_seq_len: int) -> None:
+    assert rig.native is not None
+    assert rig.native.capability is rig.coordinator.capability
+    # The production contract fixes max_seq_len to 16K. These ownership tests
+    # lower the fixture's admission bound after construction to exercise the
+    # near-capacity reservation arithmetic without weakening that ABI contract.
+    object.__setattr__(rig.coordinator.capability, "max_seq_len", max_seq_len)
+
+
 def _shadow_request(session_id: str, revision: int, frame_id: int) -> SimpleNamespace:
     return SimpleNamespace(
         session_id=session_id,
@@ -436,7 +588,7 @@ def _shadow_request(session_id: str, revision: int, frame_id: int) -> SimpleName
         semantic_context_revision=revision,
         prefix_token_ids=(1, 2),
         prefix_len=50,
-        replay_q4=(),
+        replay_q2=(),
         replay_frame_ids=(),
         cache_position=50,
         fallback_reason=None,
@@ -463,12 +615,12 @@ def _shadow_history_request(
         semantic_context_revision=revision,
         prefix_token_ids=(1, 2),
         prefix_len=50,
-        replay_q4=tuple(
-            torch.full((4, HIDDEN_WIDTH), float(index), dtype=torch.bfloat16)
+        replay_q2=tuple(
+            torch.full((2, HIDDEN_WIDTH), float(index), dtype=torch.bfloat16)
             for index in range(count)
         ),
         replay_frame_ids=replay_frame_ids,
-        cache_position=50 + 4 * count,
+        cache_position=50 + 2 * count,
         fallback_reason=None,
     )
 
@@ -633,7 +785,7 @@ def test_shadow_native_history_replay_runs_after_prefix_builder_releases_model_l
         shadow.stop().result(timeout=3)
 
 
-def test_shadow_prefix_replays_all_64_frozen_q4_rows_before_candidate_acceptance() -> None:
+def test_shadow_prefix_replays_all_64_frozen_q2_rows_before_candidate_acceptance() -> None:
     shadow, native, _stream = _start_shadow_worker(
         builder=lambda request: _prefix_only_import(request)
     )
@@ -667,7 +819,7 @@ def test_shadow_prefix_replays_all_64_frozen_q4_rows_before_candidate_acceptance
         assert len(native.manifests) == 64
         assert [manifest.rows[0].frame_id for manifest in native.manifests] == list(range(64))
         assert [manifest.rows[0].cache_position for manifest in native.manifests] == [
-            request.prefix_len + 4 * index for index in range(64)
+            request.prefix_len + 2 * index for index in range(64)
         ]
         assert [manifest.rows[0].listener_state_version for manifest in native.manifests] == [
             5 + index for index in range(64)
@@ -818,7 +970,7 @@ def test_shadow_candidate_is_not_visible_until_full_replay_and_invalidation_reti
         assert shadow._candidate is None
         assert native.releases
         assert native.releases[0][0] == request.session_id
-        assert native.releases[0][1:] == (2, request.prefix_len + 4)
+        assert native.releases[0][1:] == (2, request.prefix_len + 2)
         assert native.cache_copy_source_rows == []
         assert shadow.status["active_session_id"] is None
     finally:
@@ -861,20 +1013,20 @@ def test_shadow_stage_replacement_during_replay_retires_old_cursor_before_new_ca
         assert candidate.row.sequence_position == 9
         assert len(native.cache_copy_source_rows) == 1
         assert native.cache_copy_source_rows[0] == candidate.row
-        assert native.releases[0][1:] == (1, request_r1.prefix_len + 4)
+        assert native.releases[0][1:] == (1, request_r1.prefix_len + 2)
         assert shadow.status["latest_error"] is None
     finally:
         native.step_continue.set()
         shadow.stop().result(timeout=3)
 
 
-def test_shadow_q4_published_during_history_replay_runs_after_exact_target_cursor() -> None:
+def test_shadow_q2_published_during_history_replay_runs_after_exact_target_cursor() -> None:
     shadow, native, _stream = _start_shadow_worker(
         builder=lambda request: _prefix_only_import(request)
     )
     native.step_entered = threading.Event()
     native.step_continue = threading.Event()
-    session_id = "shadow-q4-during-history-replay"
+    session_id = "shadow-q2-during-history-replay"
     request = _shadow_history_request(
         session_id,
         3,
@@ -894,10 +1046,10 @@ def test_shadow_q4_published_during_history_replay_runs_after_exact_target_curso
         assert shadow.stage(request, listener_generation_id=7, sequence_position=9)
         assert native.step_entered.wait(2)
         assert shadow._candidate is None
-        assert shadow.publish_q4(ShadowQ4Frame(
+        assert shadow.publish_q2(ShadowQ2Frame(
             frame=_frame(state, frame_id=2),
             row=live_row,
-            audio_soft=torch.full((4, HIDDEN_WIDTH), 9.0, dtype=torch.bfloat16),
+            audio_soft=torch.full((2, HIDDEN_WIDTH), 9.0, dtype=torch.bfloat16),
             ready_event=None,
         ))
         native.step_continue.set()
@@ -906,8 +1058,8 @@ def test_shadow_q4_published_during_history_replay_runs_after_exact_target_curso
         candidate = None
         while time.monotonic() < deadline:
             candidate = shadow._candidate
-            q4 = shadow.status["diagnostics"]["q4"]
-            if candidate is not None and q4["completed_count"] == 1:
+            q2 = shadow.status["diagnostics"]["q2"]
+            if candidate is not None and q2["completed_count"] == 1:
                 break
             time.sleep(0.005)
 
@@ -918,18 +1070,18 @@ def test_shadow_q4_published_during_history_replay_runs_after_exact_target_curso
         assert candidate.row.frame_id == 3
         assert candidate.row.listener_state_version == 8
         assert candidate.row.sequence_position == 10
-        assert candidate.row.cache_position == request.cache_position + 4
+        assert candidate.row.cache_position == request.cache_position + 2
         assert candidate.catchup_frames == 1
         assert native.cache_copy_source_rows[-1] == candidate.row
-        assert shadow.status["diagnostics"]["q4"]["submitted_count"] == 1
-        assert shadow.status["diagnostics"]["q4"]["completed_count"] == 1
+        assert shadow.status["diagnostics"]["q2"]["submitted_count"] == 1
+        assert shadow.status["diagnostics"]["q2"]["completed_count"] == 1
         assert shadow.status["latest_error"] is None
     finally:
         native.step_continue.set()
         shadow.stop().result(timeout=3)
 
 
-def test_shadow_diagnostic_snapshot_tracks_stage_q4_and_cursor_rejection() -> None:
+def test_shadow_diagnostic_snapshot_tracks_stage_q2_and_cursor_rejection() -> None:
     def builder(request):
         return PrefixCacheImport(
             past_key_values=object(),
@@ -983,38 +1135,38 @@ def test_shadow_diagnostic_snapshot_tracks_stage_q4_and_cursor_rejection() -> No
         assert diagnostics["candidate_last_rejection_reason"] == "listener_cursor_mismatch"
 
         state = _state(_signature(), session_id, generation=7)
-        assert shadow.publish_q4(ShadowQ4Frame(
+        assert shadow.publish_q2(ShadowQ2Frame(
             frame=_frame(state, frame_id=0),
             row=candidate.row,
-            audio_soft=torch.zeros((4, HIDDEN_WIDTH), dtype=torch.bfloat16),
+            audio_soft=torch.zeros((2, HIDDEN_WIDTH), dtype=torch.bfloat16),
             ready_event=None,
         ))
         deadline = time.monotonic() + 2
         while time.monotonic() < deadline:
-            q4 = shadow.status["diagnostics"]["q4"]
-            if q4["completed_count"] == 1:
+            q2 = shadow.status["diagnostics"]["q2"]
+            if q2["completed_count"] == 1:
                 break
             time.sleep(0.005)
-        q4 = shadow.status["diagnostics"]["q4"]
-        assert q4["submitted_count"] == 1
-        assert q4["completed_count"] == 1
-        assert q4["last_submitted_frame_id"] == 0
-        assert q4["last_completed_frame_id"] == 0
-        assert q4["pending_depth"] == 0
-        assert q4["max_pending_depth"] == 1
-        assert q4["timings"]["fence"]["count"] == 1
-        assert q4["timings"]["output_health_validation"]["count"] == 1
+        q2 = shadow.status["diagnostics"]["q2"]
+        assert q2["submitted_count"] == 1
+        assert q2["completed_count"] == 1
+        assert q2["last_submitted_frame_id"] == 0
+        assert q2["last_completed_frame_id"] == 0
+        assert q2["pending_depth"] == 0
+        assert q2["max_pending_depth"] == 1
+        assert q2["timings"]["fence"]["count"] == 1
+        assert q2["timings"]["output_health_validation"]["count"] == 1
     finally:
         shadow.stop().result(timeout=3)
 
 
-def test_shadow_discards_stale_queued_watermark_then_accepts_fresh_q4_suffix() -> None:
+def test_shadow_discards_stale_queued_watermark_then_accepts_fresh_q2_suffix() -> None:
     shadow, native, _stream = _start_shadow_worker()
     holder_id = "stale-shadow-holder"
     session_id = "stale-shadow-watermark"
     try:
         # The shadow worker has one native slot. Keep it occupied so the
-        # second SID's snapshot remains queued while its next real Q4 arrives.
+        # second SID's snapshot remains queued while its next real Q2 arrives.
         assert shadow.stage(
             _shadow_request(holder_id, 1, 0),
             listener_generation_id=7,
@@ -1040,10 +1192,10 @@ def test_shadow_discards_stale_queued_watermark_then_accepts_fresh_q4_suffix() -
             runtime_signature=_signature(),
             native_context_id=77,
         )
-        assert shadow.publish_q4(ShadowQ4Frame(
+        assert shadow.publish_q2(ShadowQ2Frame(
             frame=_frame(state, frame_id=4),
             row=_shadow_row(session_id, 4),
-            audio_soft=torch.zeros((4, HIDDEN_WIDTH), dtype=torch.bfloat16),
+            audio_soft=torch.zeros((2, HIDDEN_WIDTH), dtype=torch.bfloat16),
             ready_event=None,
         ))
         shadow.invalidate_session(holder_id)
@@ -1059,10 +1211,10 @@ def test_shadow_discards_stale_queued_watermark_then_accepts_fresh_q4_suffix() -
             listener_generation_id=7,
             sequence_position=4,
         )
-        assert shadow.publish_q4(ShadowQ4Frame(
+        assert shadow.publish_q2(ShadowQ2Frame(
             frame=_frame(state, frame_id=4),
             row=_shadow_row(session_id, 4),
-            audio_soft=torch.zeros((4, HIDDEN_WIDTH), dtype=torch.bfloat16),
+            audio_soft=torch.zeros((2, HIDDEN_WIDTH), dtype=torch.bfloat16),
             ready_event=None,
         ))
         deadline = time.monotonic() + 2
@@ -1073,10 +1225,10 @@ def test_shadow_discards_stale_queued_watermark_then_accepts_fresh_q4_suffix() -
                 "status": dict(shadow.status),
                 "active_row": shadow._active_row,
                 "candidate_row": None if shadow._candidate is None else shadow._candidate.row,
-                "q4_processing": shadow._q4_processing,
-                "q4_rows": {
+                "q2_processing": shadow._q2_processing,
+                "q2_rows": {
                     sid: [row.frame.frame_id for row in rows]
-                    for sid, rows in shadow._q4.items()
+                    for sid, rows in shadow._q2.items()
                 },
                 "native_imports": native.imports,
             }
@@ -1153,7 +1305,7 @@ def test_shadow_claim_pins_source_across_new_revision_until_copy_fence() -> None
         shadow.stop().result(timeout=3)
 
 
-def test_primary_applied_initial_revision_cancels_queued_stage_and_q4_backlog() -> None:
+def test_primary_applied_initial_revision_cancels_queued_stage_and_q2_backlog() -> None:
     shadow, native, _stream = _start_shadow_worker()
     holder_id = "primary-applied-shadow-holder"
     session_id = "primary-applied-initial"
@@ -1187,15 +1339,15 @@ def test_primary_applied_initial_revision_cancels_queued_stage_and_q4_backlog() 
             native_context_id=78,
         )
         for frame_id in range(65):
-            assert not shadow.publish_q4(ShadowQ4Frame(
+            assert not shadow.publish_q2(ShadowQ2Frame(
                 frame=_frame(state, frame_id=frame_id),
                 row=_shadow_row(session_id, frame_id),
-                audio_soft=torch.zeros((4, HIDDEN_WIDTH), dtype=torch.bfloat16),
+                audio_soft=torch.zeros((2, HIDDEN_WIDTH), dtype=torch.bfloat16),
                 ready_event=None,
             ))
         status = shadow.status
         assert status["latest_error"] is None
-        assert status["pending_q4"] == 0
+        assert status["pending_q2"] == 0
         assert status["queued_sessions"] == 0
         assert session_id not in shadow._desired
         assert all(imported_session != session_id for _ctx, imported_session, _frame in native.imports)
@@ -1209,8 +1361,8 @@ def test_primary_applied_initial_revision_cancels_queued_stage_and_q4_backlog() 
         assert candidate_status["listener_state_version"] == 0
         assert candidate_status["prefix_len"] == 50
         assert candidate_status["replay_count"] == 0
-        assert candidate_status["replay_first_q4_frame_id"] is None
-        assert candidate_status["replay_last_q4_frame_id"] is None
+        assert candidate_status["replay_first_q2_frame_id"] is None
+        assert candidate_status["replay_last_q2_frame_id"] is None
         applied = status["primary_applied"]
         assert applied[0]["session_id"] == session_id
         assert applied[0]["semantic_context_revision"] == 4
@@ -1219,8 +1371,8 @@ def test_primary_applied_initial_revision_cancels_queued_stage_and_q4_backlog() 
         assert applied[0]["listener_state_version"] == 0
         assert applied[0]["prefix_len"] == 50
         assert applied[0]["replay_count"] == 0
-        assert applied[0]["replay_first_q4_frame_id"] is None
-        assert applied[0]["replay_last_q4_frame_id"] is None
+        assert applied[0]["replay_first_q2_frame_id"] is None
+        assert applied[0]["replay_last_q2_frame_id"] is None
     finally:
         shadow.invalidate_session(holder_id)
         shadow.stop().result(timeout=3)
@@ -1308,8 +1460,8 @@ def test_primary_applied_row_keeps_unknown_prefix_base_separate_from_commit_fram
         assert applied["request_current_frame_source"] == "unknown"
         assert applied["current_frame_id"] == 10
         assert applied["listener_state_version"] == 11
-        assert applied["replay_first_q4_frame_id"] == 8
-        assert applied["replay_last_q4_frame_id"] == 9
+        assert applied["replay_first_q2_frame_id"] == 8
+        assert applied["replay_last_q2_frame_id"] == 9
     finally:
         shadow.stop().result(timeout=3)
 
@@ -1391,7 +1543,7 @@ def test_primary_applied_notification_preserves_claimed_copy_until_fence() -> No
         shadow.stop().result(timeout=3)
 
 
-def test_shadow_candidate_cannot_be_claimed_while_a_real_q4_step_is_inflight() -> None:
+def test_shadow_candidate_cannot_be_claimed_while_a_real_q2_step_is_inflight() -> None:
     class BlockingNative(_FakeNativeBatch):
         def __init__(self, signature, capability, stream):
             super().__init__(signature, capability, stream)
@@ -1405,7 +1557,7 @@ def test_shadow_candidate_cannot_be_claimed_while_a_real_q4_step_is_inflight() -
             return super().step_async(manifest, audio_soft, producer_stream=producer_stream)
 
     shadow, native, _stream = _start_shadow_worker(native_factory=BlockingNative)
-    session_id = "q4-inflight-shadow"
+    session_id = "q2-inflight-shadow"
     try:
         assert shadow.stage(
             _shadow_request(session_id, 1, 0),
@@ -1427,10 +1579,10 @@ def test_shadow_candidate_cannot_be_claimed_while_a_real_q4_step_is_inflight() -
             runtime_signature=_signature(),
             native_context_id=78,
         )
-        assert shadow.publish_q4(ShadowQ4Frame(
+        assert shadow.publish_q2(ShadowQ2Frame(
             frame=_frame(state, frame_id=0),
             row=candidate.row,
-            audio_soft=torch.zeros((4, HIDDEN_WIDTH), dtype=torch.bfloat16),
+            audio_soft=torch.zeros((2, HIDDEN_WIDTH), dtype=torch.bfloat16),
             ready_event=None,
         ))
         entered = native.step_entered.wait(2)
@@ -1439,10 +1591,10 @@ def test_shadow_candidate_cannot_be_claimed_while_a_real_q4_step_is_inflight() -
                 debug_state = {
                     "status": dict(shadow.status),
                     "active_row": shadow._active_row,
-                    "q4_processing": shadow._q4_processing,
-                    "q4_rows": {
+                    "q2_processing": shadow._q2_processing,
+                    "q2_rows": {
                         sid: [row.frame.frame_id for row in rows]
-                        for sid, rows in shadow._q4.items()
+                        for sid, rows in shadow._q2.items()
                     },
                     "candidate_claimed": shadow._candidate_claimed,
                     "native_steps": native.steps,
@@ -1625,7 +1777,9 @@ def test_worker_uses_one_frontend_native_step_and_control6_forward_per_batch(bat
         assert row_output.cuda_completion_wait_ms is not None
     assert batch.manifest.batch_size == batch_size
     assert len(rig.model.call_shapes) == 1
-    assert rig.model.call_shapes == [(batch_size, 1024, 128)]
+    valid_mel_rows = rig.model.call_inputs[0].shape[1]
+    assert rig.model.call_shapes == [(batch_size, valid_mel_rows, 128)]
+    assert valid_mel_rows == 8  # first tick has no prior user Mel; startup is unpadded
     assert len(rig.native.steps) == 1
     assert rig.native.health_generations == [1]
     assert rig.native.event_order.index(("health", 1)) < rig.native.event_order.index(("step", batch_size)) + 2
@@ -1646,7 +1800,12 @@ def test_worker_uses_one_frontend_native_step_and_control6_forward_per_batch(bat
     assert capacity_index < first_import_index
     expected_first_queries = torch.tensor(
         [
-            float(rig.model.call_inputs[0][row].float().reshape(256, 4, 128)[0].mean())
+            float(
+                rig.model.call_inputs[0][row]
+                .float()
+                .reshape(valid_mel_rows // 4, 4, 128)[valid_mel_rows // 4 - 2]
+                .mean()
+            ) + (valid_mel_rows // 4 - 2)
             for row in range(batch_size)
         ],
         dtype=torch.float32,
@@ -1671,8 +1830,8 @@ def test_worker_uses_one_frontend_native_step_and_control6_forward_per_batch(bat
         snapshot = rig.worker.session_state(state.session_id).result(timeout=3)
         assert snapshot.next_frame_id == 1
         assert snapshot.state_version == 1
-        assert snapshot.cache_position == 38
-        assert snapshot.valid_history_tokens == 38
+        assert snapshot.cache_position == 36
+        assert snapshot.valid_history_tokens == 36
         assert state.user_pcm_tail is not None
         assert len(state.user_mel_history) == 1
 
@@ -1681,6 +1840,642 @@ def test_worker_uses_one_frontend_native_step_and_control6_forward_per_batch(bat
     assert report.stopped_cleanly
     assert report.processed_batches == 1
     assert rig.native.close_thread_id == worker_thread
+
+
+def test_worker_serializes_text_appends_around_ephemeral_audio_without_cursor_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rig = _rig()
+    state = _state(rig.coordinator.runtime_signature, "unified-alternating")
+    _register(rig, state)
+
+    first = rig.worker.submit_tick((_frame(state, frame_id=0),)).result(timeout=4)
+    assert first[state.session_id].cache_position == 36
+
+    event_order: list[str] = []
+    runtime = rig.worker._runtime
+    assert runtime is not None
+    adapter = runtime.token_adapter
+    assert adapter is not None
+    original_lm_head = adapter.logits_from_final_norm_hidden
+
+    def record_lm_head(hidden: torch.Tensor) -> torch.Tensor:
+        event_order.append("lm_head")
+        return original_lm_head(hidden)
+
+    monkeypatch.setattr(adapter, "logits_from_final_norm_hidden", record_lm_head)
+
+    class ReadyEvent:
+        recorded_stream: Any | None = None
+
+        def record(self, stream: Any) -> None:
+            self.recorded_stream = stream
+            event_order.append("ready_event")
+
+    ready_events: list[ReadyEvent] = []
+
+    def make_event(**_kwargs: Any) -> ReadyEvent:
+        event = ReadyEvent()
+        ready_events.append(event)
+        return event
+
+    monkeypatch.setattr(torch.cuda, "Event", make_event)
+
+    append = rig.worker.append_text_tokens(
+        state.session_id, (101,), expected_generation_id=state.generation_id,
+        expected_cache_position=36,
+    ).result(timeout=4)
+    assert tuple(append.logits.shape) == (1, 1)
+    assert tuple(append.final_norm_hidden.shape) == (1, 1, HIDDEN_WIDTH)
+    assert append.ready_event is ready_events[0]
+    assert append.ready_event.recorded_stream is runtime.listener_stream
+    assert event_order == ["lm_head", "ready_event"]
+    after_text = rig.worker.session_state(state.session_id).result(timeout=3)
+    assert (after_text.next_frame_id, after_text.state_version, after_text.sequence_position) == (1, 1, 1)
+    assert after_text.cache_position == after_text.valid_history_tokens == 37
+
+    ephemeral = ListenerFrame(
+        session_id=state.session_id,
+        generation_id=state.generation_id,
+        state_epoch_id=state.state_epoch_id,
+        frame_id=1,
+        ready_at_ns=time.monotonic_ns(),
+        pcm=np.zeros(1280, dtype=np.float32),
+        logical_q_len=0,
+        ephemeral_reason="assistant_turn_open",
+    )
+    during_assistant = rig.worker.submit_tick((ephemeral,)).result(timeout=4)
+    assert during_assistant[state.session_id].logical_q_len == 0
+    assert during_assistant[state.session_id].ephemeral_reason == "assistant_turn_open"
+    assert during_assistant[state.session_id].queue_audio_for_next_turn is False
+    after_ephemeral = rig.worker.session_state(state.session_id).result(timeout=3)
+    assert (after_ephemeral.next_frame_id, after_ephemeral.state_version,
+            after_ephemeral.sequence_position) == (2, 2, 2)
+    assert after_ephemeral.cache_position == after_ephemeral.valid_history_tokens == 37
+
+    rig.worker.append_text_tokens(
+        state.session_id, (202,), expected_generation_id=state.generation_id,
+        expected_cache_position=37,
+    ).result(timeout=4)
+    final = rig.worker.session_state(state.session_id).result(timeout=3)
+    assert (final.next_frame_id, final.state_version, final.sequence_position) == (2, 2, 2)
+    assert final.cache_position == final.valid_history_tokens == 38
+    assert rig.native is not None
+    assert [manifest.rows[0].logical_q_len for manifest in rig.native.manifests] == [2, 1, 0, 1]
+    assert [manifest.rows[0].frame_id for manifest in rig.native.manifests] == [0, 1, 1, 2]
+    assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
+
+
+def test_speaking_q2_decision_view_replays_onset_queue_on_private_slot_once() -> None:
+    rig = _rig()
+    state = _state(rig.coordinator.runtime_signature, "speaking-q2-view")
+    _register(rig, state)
+    _prime_native_prefix(rig, state)
+    rig.worker.begin_assistant_audio_queue(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        expected_cache_position=34,
+        reserve_tail_tokens=0,
+    ).result(timeout=3)
+
+    first = rig.worker.submit_tick((_assistant_q0(state, 0),)).result(timeout=4)[state.session_id]
+    first_view = getattr(first, "decision_view", None)
+    assert first_view is not None
+    assert first.policy_decision is not None
+    assert first.policy_decision.session == state.session_id
+    assert first.policy_decision.diagnostics["native_output_provenance"]["native_session_id"].startswith(
+        "__q2view__"
+    )
+    assert rig.adapter is not None and len(rig.adapter.hidden_rows) == 1
+    assert first_view.source_q2_frame_ids == (0,)
+    assert first_view.source_row.session_id == state.session_id
+    assert first_view.fork_row.session_id != state.session_id
+    assert first_view.fork_row.logical_q_len == 2
+    assert first.logical_q_len == 0
+    assert first_view.output_generation == first_view.native_output_health.generation
+    assert first_view.native_output_health.row == first_view.fork_row
+    assert first.native_output_health.row.session_id == state.session_id
+    assert first.native_output_health.row.logical_q_len == 0
+    assert first_view.output_generation != first.native_output_health.generation
+    assert rig.adapter is not None
+    torch.testing.assert_close(
+        rig.adapter.hidden_rows[-1][0], first_view.gemma_hidden_t[0, 0].float()
+    )
+    assert torch.all(first.gemma_audio_queries_t == first_view.gemma_audio_queries_t - 7)
+
+    second = rig.worker.submit_tick((_assistant_q0(state, 1),)).result(timeout=4)[state.session_id]
+    second_view = getattr(second, "decision_view", None)
+    assert second_view is not None
+    assert second.policy_decision is not None
+    assert rig.adapter is not None and len(rig.adapter.hidden_rows) == 2
+    assert second_view.source_q2_frame_ids == (0, 1)
+    assert second_view.source_row.frame_id == 1
+    assert second_view.fork_row.frame_id == 1
+    torch.testing.assert_close(
+        rig.adapter.hidden_rows[-1][0], second_view.gemma_hidden_t[0, 0].float()
+    )
+
+    # The old onset Q2 and current Q2 are copied from the queue/frontend output;
+    # the audio tower is run exactly once per submitted 80 ms frame.
+    assert len(rig.model.call_shapes) == 2
+    assert len(rig.native.audio_rows) == 5
+    torch.testing.assert_close(rig.native.audio_rows[2], rig.native.audio_rows[1])
+    torch.testing.assert_close(rig.native.audio_rows[3], rig.native.audio_rows[4])
+    assert [len(rig.worker._queued_audio_soft[state.session_id])] == [2]
+    assert all(
+        session_id.startswith("__q2view__")
+        for _source, destination in rig.native.slot_fork_calls
+        for session_id in (destination.session_id,)
+    )
+    assert len(rig.native.slot_fork_calls) == 2
+    assert len([item for item in rig.native.releases if item[0].startswith("__q2view__")]) == 2
+
+    canonical = rig.worker.session_state(state.session_id).result(timeout=3)
+    assert (canonical.next_frame_id, canonical.state_version, canonical.sequence_position) == (2, 2, 2)
+    assert canonical.cache_position == canonical.valid_history_tokens == 34
+    assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
+
+
+def test_backchannel_private_decode_fork_isolated_budgeted_and_cancel_cleanup() -> None:
+    rig = _rig()
+    state = _state(rig.coordinator.runtime_signature, "private-backchannel")
+    _register(rig, state)
+    _prime_native_prefix(rig, state)
+    before = rig.worker.session_state(state.session_id).result(timeout=3)
+
+    begin = getattr(rig.worker, "begin_ephemeral_decode", None)
+    append = getattr(rig.worker, "append_private_tokens", None)
+    append_transition = getattr(rig.worker, "append_private_transition_tokens", None)
+    end = getattr(rig.worker, "end_ephemeral_decode", None)
+    assert callable(begin) and callable(append) and callable(append_transition) and callable(end)
+    handle = begin(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        expected_cache_position=before.cache_position,
+    ).result(timeout=3)
+    assert handle.parent_session_id == state.session_id
+    assert handle.parent_generation_id == state.generation_id
+    assert handle.cache_position == before.cache_position
+    assert handle.fork_session_id != state.session_id
+    assert state.session_id not in rig.worker._assistant_audio_queue_open
+
+    # A canonical listener tick remains runnable while the private decode
+    # branch is alive. Its KV cursor advances independently of the branch.
+    tick = rig.worker.submit_tick((_frame(state, frame_id=0),)).result(timeout=4)
+    main_after_tick = rig.worker.session_state(state.session_id).result(timeout=3)
+    assert tick[state.session_id].cache_position == before.cache_position + 2
+    assert main_after_tick.cache_position == before.cache_position + 2
+
+    transitioned = append_transition(
+        handle, (899, 900, 901), expected_cache_position=handle.cache_position,
+    ).result(timeout=4)
+    assert transitioned.cache_position == handle.cache_position + 3
+    assert transitioned.token_count == 0
+    with pytest.raises(RuntimeError, match="private transition is allowed once"):
+        append_transition(
+            handle, (902,), expected_cache_position=transitioned.cache_position,
+        ).result(timeout=3)
+    appended = append(
+        handle, (903,), expected_cache_position=transitioned.cache_position,
+    ).result(timeout=4)
+    assert appended.cache_position == transitioned.cache_position + 1
+    assert appended.token_count == 1
+    assert tuple(appended.logits.shape) == (1, 1)
+    assert tuple(appended.final_norm_hidden.shape) == (1, 1, HIDDEN_WIDTH)
+    with pytest.raises(RuntimeError, match="private decode budget"):
+        append(
+            handle, (904, 905), expected_cache_position=appended.cache_position,
+        ).result(timeout=3)
+
+    end(handle).result(timeout=3)
+    after = rig.worker.session_state(state.session_id).result(timeout=3)
+    assert (
+        after.generation_id,
+        after.state_epoch_id,
+        after.cache_position,
+        after.valid_history_tokens,
+        after.next_frame_id,
+    ) == (
+        main_after_tick.generation_id,
+        main_after_tick.state_epoch_id,
+        main_after_tick.cache_position,
+        main_after_tick.valid_history_tokens,
+        main_after_tick.next_frame_id,
+    )
+    assert not rig.worker._assistant_audio_queue_open
+    assert not rig.worker._queued_audio_soft[state.session_id]
+    assert any(item[0] == handle.fork_session_id for item in rig.native.releases)
+    with pytest.raises(RuntimeError, match="unknown private decode fork"):
+        append(
+            handle, (906,), expected_cache_position=appended.cache_position,
+        ).result(timeout=3)
+
+    # Once sampled-token decoding begins, transition IDs are no longer valid.
+    second_handle = begin(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        expected_cache_position=main_after_tick.cache_position,
+    ).result(timeout=3)
+    sampled = append(
+        second_handle, (907,), expected_cache_position=second_handle.cache_position,
+    ).result(timeout=4)
+    with pytest.raises(RuntimeError, match="private transition is allowed once"):
+        append_transition(
+            second_handle, (908,), expected_cache_position=sampled.cache_position,
+        ).result(timeout=3)
+    end(second_handle).result(timeout=3)
+
+    even_handle = begin(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        expected_cache_position=main_after_tick.cache_position,
+    ).result(timeout=3)
+    even_transition = append_transition(
+        even_handle, (909, 910, 911, 912),
+        expected_cache_position=even_handle.cache_position,
+    ).result(timeout=4)
+    assert even_transition.cache_position == even_handle.cache_position + 4
+    assert even_transition.token_count == 0
+    end(even_handle).result(timeout=3)
+    assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
+
+
+def test_parent_generation_reset_releases_live_private_decode_fork() -> None:
+    rig = _rig()
+    state = _state(rig.coordinator.runtime_signature, "private-backchannel-reset")
+    _register(rig, state)
+    _prime_native_prefix(rig, state)
+    handle = rig.worker.begin_ephemeral_decode(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        expected_cache_position=34,
+    ).result(timeout=3)
+
+    replacement = _state(rig.coordinator.runtime_signature, state.session_id, generation=8)
+    rig.worker.reset_session(
+        state.session_id, replacement, prefix_import=rig.prefix_import,
+    ).result(timeout=3)
+    assert any(item[0] == handle.fork_session_id for item in rig.native.releases)
+    with pytest.raises(RuntimeError, match="unknown private decode fork"):
+        rig.worker.append_private_tokens(
+            handle, (905,), expected_cache_position=34,
+        ).result(timeout=3)
+    assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
+
+
+def test_assistant_queue_reservation_survives_text_append_then_replays_before_next_user_turn() -> None:
+    rig = _rig()
+    _set_fixture_capacity(rig, 40)
+    state = _state(rig.coordinator.runtime_signature, "unified-reserve-success")
+    _register(rig, state)
+    _prime_native_prefix(rig, state)
+
+    rig.worker.begin_assistant_audio_queue(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        expected_cache_position=34,
+        reserve_tail_tokens=4,
+    ).result(timeout=3)
+    output = rig.worker.submit_tick((_assistant_q0(state),)).result(timeout=4)
+    assert output[state.session_id].logical_q_len == 0
+    assert output[state.session_id].ephemeral_reason == "assistant_turn_open"
+    assert output[state.session_id].queue_audio_for_next_turn is True
+    after_q0 = rig.worker.session_state(state.session_id).result(timeout=3)
+    assert (after_q0.next_frame_id, after_q0.state_version, after_q0.sequence_position) == (1, 1, 1)
+    assert after_q0.cache_position == after_q0.valid_history_tokens == 34
+
+    rig.worker.append_text_tokens(
+        state.session_id,
+        (201, 202),
+        expected_generation_id=state.generation_id,
+        expected_cache_position=34,
+        consume_reserved_tokens=2,
+    ).result(timeout=4)
+    after_close = rig.worker.session_state(state.session_id).result(timeout=3)
+    assert after_close.cache_position == after_close.valid_history_tokens == 36
+    assert rig.worker._reserved_tail_tokens[state.session_id] == 2
+
+    _mark_queued_soft_cuda_for_cpu_fixture(rig, state.session_id)
+    drained = rig.worker.drain_queued_audio(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        expected_cache_position=36,
+    ).result(timeout=4)
+    assert drained.cache_position == drained.valid_history_tokens == 38
+    assert (drained.next_frame_id, drained.state_version, drained.sequence_position) == (1, 1, 1)
+    assert rig.worker._reserved_tail_tokens[state.session_id] == 0
+    assert not rig.worker._queued_audio_soft[state.session_id]
+    assert rig.native is not None
+    assert rig.native.manifests[-1].rows[0].logical_q_len == 2
+    assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
+
+
+def test_assistant_q2_drain_rejects_a_missing_frame_without_replaying_or_dropping() -> None:
+    rig = _rig()
+    _set_fixture_capacity(rig, 48)
+    state = _state(rig.coordinator.runtime_signature, "unified-q2-gap")
+    _register(rig, state)
+    _prime_native_prefix(rig, state)
+    rig.worker.begin_assistant_audio_queue(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        expected_cache_position=34,
+        reserve_tail_tokens=2,
+    ).result(timeout=3)
+    for frame_id, queue_for_next_turn in ((0, True), (1, True), (2, False), (3, True)):
+        output = rig.worker.submit_tick((
+            _assistant_q0(
+                state,
+                frame_id,
+                queue_audio_for_next_turn=queue_for_next_turn,
+            ),
+        )).result(timeout=4)[state.session_id]
+        if frame_id == 3:
+            assert output.decision_view is None
+            assert output.decision_view_unavailable_reason is not None
+            assert output.policy_decision is not None
+            assert output.policy_decision.diagnostics["decision_view_fallback_reason"]
+
+    queued = rig.worker._queued_audio_soft[state.session_id]
+    assert [item.source_frame_id for item in queued] == [0, 1, 3]
+    for index, item in enumerate(tuple(queued)):
+        queued[index] = replace(
+            item,
+            audio_soft_tokens=_CudaProvenanceTensor(item.audio_soft_tokens),
+        )
+    try:
+        with pytest.raises(RuntimeError, match="non-contiguous Q2 frame IDs"):
+            rig.worker.drain_queued_audio(
+                state.session_id,
+                expected_generation_id=state.generation_id,
+                expected_cache_position=34,
+            ).result(timeout=4)
+        assert [item.source_frame_id for item in queued] == [0, 1, 3]
+        assert rig.native is not None
+        canonical_manifests = [
+            manifest for manifest in rig.native.manifests
+            if not manifest.rows[0].session_id.startswith("__q2view__")
+        ]
+        scratch_manifests = [
+            manifest for manifest in rig.native.manifests
+            if manifest.rows[0].session_id.startswith("__q2view__")
+        ]
+        assert len(canonical_manifests) == 4  # four listener frames
+        assert len(scratch_manifests) == 3  # decision views only; drain did not run
+    finally:
+        rig.worker.stop(drain=False).result(timeout=3)
+
+
+def test_backchannel_native_slot_fork_copies_generation_state_without_mutating_primary() -> None:
+    rig = _rig()
+    main = _state(rig.coordinator.runtime_signature, "backchannel-fork-main")
+    main.user_pcm_tail = np.full(PCM_TAIL_SAMPLES, 0.1, dtype=np.float32)
+    main.assistant_pcm_tail = np.full(PCM_TAIL_SAMPLES, 0.2, dtype=np.float32)
+    main.user_mel_history = [torch.full((2, 4), 0.3)]
+    main.assistant_mel_history = [torch.full((2, 4), 0.4)]
+    _register(rig, main)
+    _prime_native_prefix(rig, main)
+    before = rig.worker.session_state(main.session_id).result(timeout=3)
+    forked_session_id = rig.worker.fork_native_session(
+        main.session_id, "backchannel-fork-secondary"
+    ).result(timeout=4)
+    forked = rig.worker._session_states[forked_session_id]
+    after = rig.worker.session_state(main.session_id).result(timeout=3)
+
+    assert (
+        after.session_id,
+        after.generation_id,
+        after.state_epoch_id,
+        after.next_frame_id,
+        after.state_version,
+        after.sequence_position,
+        after.cache_position,
+        after.valid_history_tokens,
+        after.native_context_id,
+    ) == (
+        before.session_id,
+        before.generation_id,
+        before.state_epoch_id,
+        before.next_frame_id,
+        before.state_version,
+        before.sequence_position,
+        before.cache_position,
+        before.valid_history_tokens,
+        before.native_context_id,
+    )
+    np.testing.assert_array_equal(after.user_pcm_tail, before.user_pcm_tail)
+    np.testing.assert_array_equal(after.assistant_pcm_tail, before.assistant_pcm_tail)
+    assert after.user_mel_history == before.user_mel_history
+    assert after.assistant_mel_history == before.assistant_mel_history
+    assert forked_session_id == "backchannel-fork-secondary"
+    assert forked.session_id == "backchannel-fork-secondary"
+    assert forked.native_context_id != before.native_context_id
+    assert forked.cache_position == before.cache_position
+    assert forked.valid_history_tokens == before.valid_history_tokens
+    assert rig.native is not None and len(rig.native.fork_calls) == 1
+    source_row, destination_row = rig.native.fork_calls[0]
+    assert source_row.session_id == main.session_id
+    assert destination_row.session_id == "backchannel-fork-secondary"
+    assert (source_row.cache_position, source_row.frame_id, source_row.sequence_position) == (
+        destination_row.cache_position, destination_row.frame_id, destination_row.sequence_position
+    )
+    assert forked.user_pcm_tail is not main.user_pcm_tail
+    assert np.array_equal(forked.user_pcm_tail, main.user_pcm_tail)
+    assert forked.assistant_pcm_tail is not main.assistant_pcm_tail
+    assert np.array_equal(forked.assistant_pcm_tail, main.assistant_pcm_tail)
+    assert forked.user_mel_history[0] is not main.user_mel_history[0]
+    assert torch.equal(forked.user_mel_history[0], main.user_mel_history[0])
+    assert forked.assistant_mel_history[0] is not main.assistant_mel_history[0]
+    assert torch.equal(forked.assistant_mel_history[0], main.assistant_mel_history[0])
+    rig.worker.close_session("backchannel-fork-secondary").result(timeout=4)
+    after_close = rig.worker.session_state(main.session_id).result(timeout=3)
+    assert (
+        after_close.generation_id,
+        after_close.state_epoch_id,
+        after_close.cache_position,
+        after_close.valid_history_tokens,
+        after_close.native_context_id,
+    ) == (
+        before.generation_id,
+        before.state_epoch_id,
+        before.cache_position,
+        before.valid_history_tokens,
+        before.native_context_id,
+    )
+    np.testing.assert_array_equal(after_close.user_pcm_tail, before.user_pcm_tail)
+    np.testing.assert_array_equal(after_close.assistant_pcm_tail, before.assistant_pcm_tail)
+    assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
+
+
+def test_backchannel_native_slot_fork_error_and_cancel_leave_primary_unchanged() -> None:
+    rig = _rig()
+    main = _state(rig.coordinator.runtime_signature, "backchannel-fork-fault-main")
+    _register(rig, main)
+    _prime_native_prefix(rig, main)
+    before = rig.worker.session_state(main.session_id).result(timeout=3)
+    assert rig.native is not None
+
+    rig.native.fail_fork = RuntimeError("injected secondary copy failure")
+    with pytest.raises(RuntimeError, match="injected secondary copy failure"):
+        rig.worker.fork_native_session(
+            main.session_id, "backchannel-fork-error"
+        ).result(timeout=4)
+    with pytest.raises(KeyError, match="backchannel-fork-error"):
+        rig.worker.session_state("backchannel-fork-error").result(timeout=3)
+    assert rig.worker.session_state(main.session_id).result(timeout=3) == before
+
+    rig.native.fail_fork = None
+    rig.native.fork_entered = threading.Event()
+    rig.native.fork_continue = threading.Event()
+    cancelled = rig.worker.fork_native_session(
+        main.session_id, "backchannel-fork-cancelled"
+    )
+    assert rig.native.fork_entered.wait(3)
+    assert cancelled.cancel()
+    rig.native.fork_continue.set()
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        state_future = rig.worker.session_state("backchannel-fork-cancelled")
+        try:
+            state_future.result(timeout=0.2)
+        except KeyError:
+            break
+        time.sleep(0.02)
+    else:
+        pytest.fail("cancelled secondary native slot was not retired")
+    assert rig.worker.session_state(main.session_id).result(timeout=3) == before
+    assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
+
+
+def test_cancel_releases_close_reservation_and_drains_queued_q2_into_open_user_turn() -> None:
+    rig = _rig()
+    _set_fixture_capacity(rig, 40)
+    state = _state(rig.coordinator.runtime_signature, "unified-reserve-cancel")
+    _register(rig, state)
+    _prime_native_prefix(rig, state)
+
+    rig.worker.begin_assistant_audio_queue(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        expected_cache_position=34,
+        reserve_tail_tokens=4,
+    ).result(timeout=3)
+    rig.worker.submit_tick((_assistant_q0(state),)).result(timeout=4)
+    rig.worker.append_text_tokens(
+        state.session_id,
+        (201,),
+        expected_generation_id=state.generation_id,
+        expected_cache_position=34,
+        consume_reserved_tokens=1,
+    ).result(timeout=4)
+    rewound = rig.worker.rollback_assistant_branch(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        expected_cache_position=35,
+        target_cache_position=34,
+    ).result(timeout=4)
+    assert rewound.cache_position == rewound.valid_history_tokens == 34
+    assert rig.worker._reserved_tail_tokens[state.session_id] == 0
+
+    _mark_queued_soft_cuda_for_cpu_fixture(rig, state.session_id)
+    drained = rig.worker.drain_queued_audio(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        expected_cache_position=34,
+        user_turn_already_open=True,
+    ).result(timeout=4)
+    assert drained.cache_position == drained.valid_history_tokens == 36
+    assert (drained.next_frame_id, drained.state_version, drained.sequence_position) == (1, 1, 1)
+    assert rig.native is not None
+    assert rig.native.manifests[-1].rows[0].frame_id == 1
+    assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
+
+
+def test_empty_assistant_queue_drain_releases_reserved_tail() -> None:
+    rig = _rig()
+    _set_fixture_capacity(rig, 40)
+    state = _state(rig.coordinator.runtime_signature, "unified-reserve-empty")
+    _register(rig, state)
+    _prime_native_prefix(rig, state)
+    rig.worker.begin_assistant_audio_queue(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        expected_cache_position=34,
+        reserve_tail_tokens=2,
+    ).result(timeout=3)
+
+    drained = rig.worker.drain_queued_audio(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        expected_cache_position=34,
+    ).result(timeout=3)
+
+    assert drained.cache_position == drained.valid_history_tokens == 34
+    assert rig.worker._reserved_tail_tokens[state.session_id] == 0
+    assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
+
+
+def test_text_append_and_reservation_reassert_wait_for_accepted_q0_watermark() -> None:
+    rig = _rig()
+    state = _state(rig.coordinator.runtime_signature, "unified-watermark")
+    _register(rig, state)
+    _prime_native_prefix(rig, state)
+    rig.worker.begin_assistant_audio_queue(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        expected_cache_position=34,
+        reserve_tail_tokens=4,
+    ).result(timeout=3)
+
+    delayed = _assistant_q0(
+        state,
+        queue_audio_for_next_turn=False,
+    )
+    object.__setattr__(delayed, "ready_at_ns", time.monotonic_ns() + 10_000_000_000)
+    rig.worker.submit_frame(delayed).result(timeout=3)
+    with pytest.raises(RuntimeError, match="tail reservation requires a completed listener frame watermark"):
+        rig.worker.reserve_tail_tokens(
+            state.session_id,
+            expected_generation_id=state.generation_id,
+            expected_cache_position=34,
+            token_count=4,
+        ).result(timeout=3)
+    with pytest.raises(RuntimeError, match="text append requires completed listener frame watermark"):
+        rig.worker.append_text_tokens(
+            state.session_id,
+            (501, 502),
+            expected_generation_id=state.generation_id,
+            expected_cache_position=34,
+        ).result(timeout=3)
+
+    with rig.coordinator._condition:
+        pending = rig.coordinator._queues[state.session_id][0][1]
+        object.__setattr__(pending, "ready_at_ns", time.monotonic_ns())
+        rig.coordinator._condition.notify_all()
+    with rig.worker._wake:
+        rig.worker._wake.notify_all()
+    assert rig.result_event.wait(4)
+    snapshot = rig.worker.session_state(state.session_id).result(timeout=3)
+    assert snapshot.cache_position == snapshot.valid_history_tokens == 34
+    assert rig.worker.reserve_tail_tokens(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        expected_cache_position=34,
+        token_count=4,
+    ).result(timeout=3) == 4
+    rig.worker.append_text_tokens(
+        state.session_id,
+        (501, 502),
+        expected_generation_id=state.generation_id,
+        expected_cache_position=34,
+        consume_reserved_tokens=2,
+    ).result(timeout=3)
+    rig.worker.drain_queued_audio(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        expected_cache_position=36,
+    ).result(timeout=3)
+    assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
 
 
 def test_failed_pipeline_aborts_frontend_and_poison_commits_no_cursor() -> None:
@@ -1853,7 +2648,7 @@ def test_reset_retires_old_native_generation_and_rejects_stale_frame() -> None:
         time.sleep(0.005)
     assert len(rig.results) == 2
     assert len(rig.native.imports) == 2
-    assert rig.native.releases == [(old.session_id, 1, 38)]
+    assert rig.native.releases == [(old.session_id, 1, 36)]
     current = rig.worker.session_state(new.session_id).result(timeout=3)
     assert current.generation_id == 8
     assert current.next_frame_id == 1
@@ -1868,7 +2663,7 @@ def test_semantic_prefix_refresh_rebases_only_kv_cursor_and_imports_before_next_
     assert first.frame_id == 0
     before = rig.worker.session_state(state.session_id).result(timeout=3)
     assert (before.next_frame_id, before.state_version, before.sequence_position) == (1, 1, 1)
-    assert before.cache_position == 38
+    assert before.cache_position == 36
 
     imported_rows = []
 
@@ -1911,7 +2706,7 @@ def test_semantic_prefix_refresh_rebases_only_kv_cursor_and_imports_before_next_
     assert imported_rows[0].frame_id == 1
     assert imported_rows[0].cache_position == 50
     assert rig.native is not None
-    assert rig.native.releases == [(state.session_id, 1, 38)]
+    assert rig.native.releases == [(state.session_id, 1, 36)]
     assert len(rig.native.imports) == 2
     assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
 
@@ -2145,6 +2940,80 @@ def test_prefix_phase_timings_are_batch_local_for_mixed_rows_and_refresh_provena
     assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
 
 
+def test_unified_instruction_prefix_refresh_rebases_pristine_frame_zero_before_audio() -> None:
+    rig = _rig()
+    state = _state(rig.coordinator.runtime_signature, "unified-prefix-refresh")
+    _register(rig, state)
+    refreshed_ids = (101, 102, 103, 104, 105, 106, 107)
+    imported_rows: list[BatchRowDescriptor] = []
+    importer_threads: list[int] = []
+
+    def refreshed_prefix(_state, row):
+        imported_rows.append(row)
+        importer_threads.append(threading.get_ident())
+        return PrefixCacheImport(
+            past_key_values=object(),
+            prefix_attention=torch.ones((1, len(refreshed_ids)), dtype=torch.int64),
+            prefix_len=len(refreshed_ids),
+            cache_position=len(refreshed_ids),
+        )
+
+    rig.worker.refresh_unified_prefix_before_audio(
+        state.session_id,
+        refreshed_ids,
+        new_revision=1,
+        expected_generation_id=state.generation_id,
+        expected_cache_position=state.cache_position,
+        prefix_import=refreshed_prefix,
+    ).result(timeout=3)
+
+    output = rig.worker.submit_tick((_frame(state),)).result(timeout=4)[state.session_id]
+
+    assert imported_rows and imported_rows[0].frame_id == 0
+    assert imported_rows[0].cache_position == len(refreshed_ids)
+    assert imported_rows[0].valid_history_tokens == len(refreshed_ids)
+    assert importer_threads == rig.runtime_factory_threads
+    assert rig.native is not None
+    assert rig.native.import_rows[0].cache_position == len(refreshed_ids)
+    assert output.frame_id == 0
+    assert output.cache_position == len(refreshed_ids) + 2
+    assert output.valid_history_tokens == len(refreshed_ids) + 2
+    assert output.semantic_prefix_len == len(refreshed_ids)
+    assert output.semantic_context_revision == 1
+    assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
+
+
+def test_unified_instruction_prefix_refresh_rejects_nonpristine_cursor_without_mutation() -> None:
+    rig = _rig()
+    state = _state(rig.coordinator.runtime_signature, "unified-prefix-stale")
+    initial_cache_position = state.cache_position
+    _register(rig, state)
+    first = rig.worker.submit_tick((_frame(state),)).result(timeout=4)[state.session_id]
+    assert first.frame_id == 0
+    assert first.cache_position == initial_cache_position + 2
+    assert rig.native is not None
+    old_importer_count = len(rig.native.import_rows)
+    old_prefix_position = rig.native.import_rows[0].cache_position
+
+    failure = rig.worker.refresh_unified_prefix_before_audio(
+        state.session_id,
+        (201, 202, 203, 204, 205),
+        new_revision=1,
+        expected_generation_id=state.generation_id,
+        expected_cache_position=first.cache_position,
+        prefix_import=lambda _state, _row: pytest.fail("stale refresh must not replace the importer"),
+    )
+    with pytest.raises(RuntimeError, match="pristine frame-zero"):
+        failure.result(timeout=3)
+
+    second = rig.worker.submit_tick((_frame(state, frame_id=1),)).result(timeout=4)[state.session_id]
+    assert second.frame_id == 1
+    assert second.cache_position == first.cache_position + 2
+    assert len(rig.native.import_rows) == old_importer_count
+    assert rig.native.import_rows[0].cache_position == old_prefix_position == initial_cache_position
+    assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
+
+
 def test_close_command_waits_for_inflight_completion_event_before_release() -> None:
     completion_started = threading.Event()
     completion_continue = threading.Event()
@@ -2166,7 +3035,7 @@ def test_close_command_waits_for_inflight_completion_event_before_release() -> N
     assert rig.result_event.wait(4)
     retired = close_future.result(timeout=4)
     assert retired.state.session_id == state.session_id
-    assert rig.native.releases == [(state.session_id, 1, 38)]
+    assert rig.native.releases == [(state.session_id, 1, 36)]
     assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
 
 

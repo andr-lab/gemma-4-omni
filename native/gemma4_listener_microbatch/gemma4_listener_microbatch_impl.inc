@@ -1,6 +1,6 @@
 /* New ABI surface for the listener's physical N-session forward.  The legacy
  * ABI3 executor above is intentionally left byte-for-byte behaviorally intact.
- * All projection GEMMs below use one row-major concatenated [N*4,K] operand;
+ * All projection GEMMs below use one row-major concatenated [N*2,K] operand;
  * per-session work is limited to private KV access and attention state. */
 
 #include <new>
@@ -107,6 +107,10 @@ struct gemma4_listener_batch_ctx {
     uint64_t completed_output_generation;
     uint32_t completed_output_row_count;
     bool output_lease_active;
+    /* Bound to the latest output generation until its logical truncate and
+     * output-health check complete. Text appends do not advance audio identity. */
+    bool output_embedded_text_input;
+    bool output_preserves_listener_cursors;
     cudaEvent_t completion_event;
     cudaEvent_t clone_event;
     bool clone_enqueued;
@@ -281,7 +285,12 @@ static const uint64_t GEMMA4_BATCH_CAPABILITIES_V2 =
     UINT64_C(512) | /* arbitrary positive row count with safe capacity growth */
     UINT64_C(1024) | /* latest-generation row-bound aggregate output health */
     UINT64_C(2048) | /* opt-in prewarmed geometric-bucket GEMM graphs per operation */
-    UINT64_C(4096); /* owner-ordered cross-context cache promotion */
+    UINT64_C(4096) | /* owner-ordered cross-context cache promotion */
+    UINT64_C(8192) | /* logical Q0/Q1 commit after physical Q2 forward */
+    UINT64_C(16384) | /* text embeddings with model-projected token PLE */
+    UINT64_C(32768) | /* compare-and-swap rollback of an assistant KV tail */
+    UINT64_C(65536) | /* queued Q2 audio replay without listener-cursor advance */
+    UINT64_C(131072); /* same-owner private session-slot fork */
 
 static bool gemma4_batch_size_supported(uint32_t n) {
     return n >= 1;
@@ -982,7 +991,7 @@ int gemma4_listener_batch_create(
 
     gemma4_listener_config model_config = *listener_config;
     model_config.enable_cuda_graph = false;
-    /* The legacy owner's output is unused; batch output has its own [N,4,H] slot. */
+    /* The legacy owner's output is unused; batch output has its own [N,2,H] slot. */
     model_config.output_tensor_ptr = nullptr;
     model_config.output_meta = nullptr;
     const int create_status = gemma4_listener_create_impl(
@@ -2266,7 +2275,7 @@ static int gemma4_batch_attention_one(
 }
 
 /* Uses the same BF16 boundaries/order as execute_layer(), except each dense
- * layer projection is a single GEMM over all N*4 rows. */
+ * layer projection is a single GEMM over all N*2 rows. */
 static int gemma4_batch_execute_layer(
     gemma4_listener_batch_ctx *batch,
     uint32_t n,
@@ -2571,15 +2580,19 @@ static int gemma4_batch_execute_layer(
     return final_status;
 }
 
-int gemma4_listener_batch_step_async(
+static int gemma4_listener_batch_step_core(
     gemma4_listener_batch_ctx *batch,
     const gemma4_listener_batch_row *rows,
     uint32_t row_count,
-    const void *audio_soft,
-    const gemma4_tensor_meta *audio_soft_meta,
+    const void *inputs_embeds,
+    const gemma4_tensor_meta *inputs_embeds_meta,
+    const void *per_layer_inputs,
+    const gemma4_tensor_meta *per_layer_inputs_meta,
+    bool embedded_text_input,
+    bool preserve_listener_cursors,
     cudaStream_t listener_stream
 ) {
-    if (!batch || !rows || !audio_soft || !audio_soft_meta || batch->poisoned ||
+    if (!batch || !rows || !inputs_embeds || !inputs_embeds_meta || batch->poisoned ||
         !gemma4_batch_size_supported(row_count) || row_count > batch->capacity ||
         batch->output_lease_active || batch->output_generation == UINT64_MAX) return -1;
     if ((batch->probe_state == GEMMA4_BATCH_PROBE_ARMED &&
@@ -2594,8 +2607,18 @@ int gemma4_listener_batch_step_async(
     int device = -1;
     const uint64_t dims[] = {row_count, GEMMA4_STREAM_Q_LEN, GEMMA4_HIDDEN_SIZE, 0};
     if (cudaGetDevice(&device) != cudaSuccess ||
-        !validate_tensor_meta(audio_soft_meta, audio_soft, device,
+        !validate_tensor_meta(inputs_embeds_meta, inputs_embeds, device,
                               GEMMA4_META_BF16, 3, dims)) return -10;
+    const uint64_t ple_dims[] = {
+        row_count, GEMMA4_STREAM_Q_LEN, GEMMA4_NUM_LAYERS, GEMMA4_PLE_DIM
+    };
+    if (embedded_text_input) {
+        if (!per_layer_inputs || !per_layer_inputs_meta ||
+            !validate_tensor_meta(per_layer_inputs_meta, per_layer_inputs, device,
+                                  GEMMA4_META_BF16, 4, ple_dims)) return -10;
+    } else if (per_layer_inputs || per_layer_inputs_meta) {
+        return -1;
+    }
     for (uint32_t i = 0; i < row_count; ++i) {
         uint32_t native_slot = batch->capacity;
         for (uint32_t candidate = 0; candidate < batch->capacity; ++candidate) {
@@ -2616,14 +2639,14 @@ int gemma4_listener_batch_step_async(
         if (rows[i].frame_id != state.expected_frame_id ||
             rows[i].listener_state_version != state.expected_state_version ||
             rows[i].sequence_position != state.expected_sequence_position ||
-            rows[i].frame_id == UINT64_MAX ||
-            rows[i].listener_state_version == UINT64_MAX ||
-            rows[i].sequence_position == UINT64_MAX) return -1;
+            (!preserve_listener_cursors && (rows[i].frame_id == UINT64_MAX ||
+             rows[i].listener_state_version == UINT64_MAX ||
+             rows[i].sequence_position == UINT64_MAX))) return -1;
         batch->active_slots[i] = native_slot;
     }
     if (batch->trace_state == GEMMA4_BATCH_TRACE_ARMED &&
         gemma4_batch_trace_update_attention_layout(batch, row_count) != 0) return -25;
-    if (cudaMemcpyAsync(batch->hidden_a, audio_soft,
+    if (cudaMemcpyAsync(batch->hidden_a, inputs_embeds,
             (size_t)row_count * GEMMA4_STREAM_Q_LEN * GEMMA4_HIDDEN_SIZE * sizeof(__nv_bfloat16),
             cudaMemcpyDeviceToDevice, listener_stream) != cudaSuccess) {
         gemma4_batch_poison(batch);
@@ -2634,6 +2657,19 @@ int gemma4_listener_batch_step_async(
     const int ple_width = GEMMA4_NUM_LAYERS * GEMMA4_PLE_DIM;
     const int ple_elements = rows_n * ple_width;
     const bool trace_prelude = batch->trace_state == GEMMA4_BATCH_TRACE_ARMED;
+    if (embedded_text_input) {
+        /* Text PLE already includes token identity, context projection, RMSNorm,
+         * and Gemma's per-layer input scale. Do not apply audio frame padding
+         * or a second projection/scale here. */
+        if (trace_prelude) return -25;
+        const size_t token_ple_bytes = (size_t)row_count * GEMMA4_STREAM_Q_LEN *
+            GEMMA4_NUM_LAYERS * GEMMA4_PLE_DIM * sizeof(__nv_bfloat16);
+        if (cudaMemcpyAsync(batch->projected_ple, per_layer_inputs,
+                token_ple_bytes, cudaMemcpyDeviceToDevice, listener_stream) != cudaSuccess) {
+            gemma4_batch_poison(batch);
+            return -7;
+        }
+    } else {
     if (trace_prelude && gemma4_batch_trace_begin(batch,
             GEMMA4_BATCH_TRACE_AUDIO_PLE_GEMM, batch->hidden_a, nullptr, nullptr,
             listener_stream) != 0) {
@@ -2743,6 +2779,7 @@ int gemma4_listener_batch_step_async(
         gemma4_batch_poison(batch);
         return -406;
     }
+    }
     if (cudaPeekAtLastError() != cudaSuccess) {
         gemma4_batch_poison(batch);
         return -8;
@@ -2776,9 +2813,11 @@ int gemma4_listener_batch_step_async(
             return -23;
         }
         batch->slots[native_slot].current_position += GEMMA4_STREAM_Q_LEN;
-        batch->slots[native_slot].expected_frame_id = rows[i].frame_id + 1;
-        batch->slots[native_slot].expected_state_version = rows[i].listener_state_version + 1;
-        batch->slots[native_slot].expected_sequence_position = rows[i].sequence_position + 1;
+        if (!preserve_listener_cursors) {
+            batch->slots[native_slot].expected_frame_id = rows[i].frame_id + 1;
+            batch->slots[native_slot].expected_state_version = rows[i].listener_state_version + 1;
+            batch->slots[native_slot].expected_sequence_position = rows[i].sequence_position + 1;
+        }
     }
     const bool trace_armed = batch->trace_state == GEMMA4_BATCH_TRACE_ARMED;
     if (trace_armed && !gemma4_batch_trace_capture_complete(batch)) {
@@ -2802,6 +2841,8 @@ int gemma4_listener_batch_step_async(
     batch->forward_calls++;
     for (uint32_t i = 0; i < row_count; ++i) batch->output_rows[i] = rows[i];
     batch->output_row_count = row_count;
+    batch->output_embedded_text_input = embedded_text_input;
+    batch->output_preserves_listener_cursors = preserve_listener_cursors;
     batch->output_generation++;
     batch->completed_output_generation = 0;
     batch->completed_output_row_count = 0;
@@ -2811,6 +2852,128 @@ int gemma4_listener_batch_step_async(
     }
     batch->output_lease_active = true;
     batch->clone_enqueued = false;
+    return 0;
+}
+
+int gemma4_listener_batch_step_async(
+    gemma4_listener_batch_ctx *batch,
+    const gemma4_listener_batch_row *rows,
+    uint32_t row_count,
+    const void *audio_soft,
+    const gemma4_tensor_meta *audio_soft_meta,
+    cudaStream_t listener_stream
+) {
+    return gemma4_listener_batch_step_core(
+        batch, rows, row_count, audio_soft, audio_soft_meta,
+        nullptr, nullptr, false, false, listener_stream);
+}
+
+int gemma4_listener_batch_step_queued_audio_async(
+    gemma4_listener_batch_ctx *batch,
+    const gemma4_listener_batch_row *rows,
+    uint32_t row_count,
+    const void *audio_soft,
+    const gemma4_tensor_meta *audio_soft_meta,
+    cudaStream_t listener_stream
+) {
+    return gemma4_listener_batch_step_core(
+        batch, rows, row_count, audio_soft, audio_soft_meta,
+        nullptr, nullptr, false, true, listener_stream);
+}
+
+int gemma4_listener_batch_step_embedded_async(
+    gemma4_listener_batch_ctx *batch,
+    const gemma4_listener_batch_row *rows,
+    uint32_t row_count,
+    const void *inputs_embeds,
+    const gemma4_tensor_meta *inputs_embeds_meta,
+    const void *per_layer_inputs,
+    const gemma4_tensor_meta *per_layer_inputs_meta,
+    cudaStream_t listener_stream
+) {
+    return gemma4_listener_batch_step_core(
+        batch, rows, row_count, inputs_embeds, inputs_embeds_meta,
+        per_layer_inputs, per_layer_inputs_meta, true, true, listener_stream);
+}
+
+int gemma4_listener_batch_truncate_after_step_async(
+    gemma4_listener_batch_ctx *batch,
+    uint32_t slot,
+    const gemma4_listener_batch_row *pre_step_row,
+    uint32_t logical_q_len,
+    cudaStream_t listener_stream
+) {
+    if (!batch || !pre_step_row || batch->poisoned || batch->output_lease_active ||
+        slot >= batch->capacity || logical_q_len >= GEMMA4_STREAM_Q_LEN ||
+        !batch->stream_bound || listener_stream != batch->listener_stream) return -1;
+    const int stream_status = gemma4_batch_bind_stream(batch, listener_stream);
+    if (stream_status != 0) return stream_status;
+    gemma4_listener_batch_slot &state = batch->slots[slot];
+    const bool embedded_text_input = batch->output_embedded_text_input;
+    const bool preserve_listener_cursors = batch->output_preserves_listener_cursors;
+    if (!state.primed || pre_step_row->native_context_id != state.context_id ||
+        pre_step_row->session_generation != state.session_generation ||
+        pre_step_row->state_epoch_id != state.state_epoch_id ||
+        pre_step_row->cache_position > batch->model->config.max_seq_len - GEMMA4_STREAM_Q_LEN ||
+        pre_step_row->valid_history_tokens != pre_step_row->cache_position ||
+        (!preserve_listener_cursors && (pre_step_row->frame_id == UINT64_MAX ||
+         pre_step_row->listener_state_version == UINT64_MAX ||
+         pre_step_row->sequence_position == UINT64_MAX)) ||
+        state.current_position != pre_step_row->cache_position + GEMMA4_STREAM_Q_LEN ||
+        (embedded_text_input && logical_q_len == 0u) ||
+        (embedded_text_input &&
+         (state.expected_frame_id != pre_step_row->frame_id ||
+          state.expected_state_version != pre_step_row->listener_state_version ||
+          state.expected_sequence_position != pre_step_row->sequence_position)) ||
+        (!preserve_listener_cursors &&
+         (state.expected_frame_id != pre_step_row->frame_id + 1u ||
+          state.expected_state_version != pre_step_row->listener_state_version + 1u ||
+          state.expected_sequence_position != pre_step_row->sequence_position + 1u)) ||
+        (preserve_listener_cursors &&
+         (state.expected_frame_id != pre_step_row->frame_id ||
+          state.expected_state_version != pre_step_row->listener_state_version ||
+          state.expected_sequence_position != pre_step_row->sequence_position)) ||
+        state.current_position != gemma4_cache_valid_kv_len(state.cache)) return -2;
+    const uint32_t logical_position = pre_step_row->cache_position + logical_q_len;
+    if (logical_position < state.prefix_len || logical_position > state.current_position) return -3;
+    if (gemma4_cache_truncate_async(state.cache, logical_position, listener_stream) != 0) {
+        gemma4_batch_poison(batch);
+        return -4;
+    }
+    state.current_position = logical_position;
+    batch->model->last_stream = listener_stream;
+    return 0;
+}
+
+int gemma4_listener_batch_rewind_session_async(
+    gemma4_listener_batch_ctx *batch,
+    uint32_t slot,
+    const gemma4_listener_batch_row *current_row,
+    uint32_t target_position,
+    cudaStream_t listener_stream
+) {
+    if (!batch || !current_row || batch->poisoned || batch->output_lease_active ||
+        slot >= batch->capacity || !batch->stream_bound ||
+        listener_stream != batch->listener_stream) return -1;
+    const int stream_status = gemma4_batch_bind_stream(batch, listener_stream);
+    if (stream_status != 0) return stream_status;
+    gemma4_listener_batch_slot &state = batch->slots[slot];
+    if (!gemma4_batch_row_identity_matches(batch, slot, current_row, true) ||
+        current_row->session_generation != state.session_generation ||
+        current_row->state_epoch_id != state.state_epoch_id ||
+        current_row->frame_id != state.expected_frame_id ||
+        current_row->listener_state_version != state.expected_state_version ||
+        current_row->sequence_position != state.expected_sequence_position ||
+        current_row->valid_history_tokens != current_row->cache_position ||
+        target_position < state.prefix_len ||
+        target_position > state.current_position ||
+        state.current_position != gemma4_cache_valid_kv_len(state.cache)) return -2;
+    if (gemma4_cache_truncate_async(state.cache, target_position, listener_stream) != 0) {
+        gemma4_batch_poison(batch);
+        return -3;
+    }
+    state.current_position = target_position;
+    batch->model->last_stream = listener_stream;
     return 0;
 }
 
@@ -2893,10 +3056,11 @@ int gemma4_listener_batch_output_health(
     gemma4_listener_batch_ctx *batch,
     uint64_t generation,
     const gemma4_listener_batch_row *rows,
+    const uint32_t *logical_q_lens,
     uint32_t row_count,
     int *out_nonfinite
 ) {
-    if (!batch || !rows || !out_nonfinite || batch->poisoned ||
+    if (!batch || !rows || !logical_q_lens || !out_nonfinite || batch->poisoned ||
         batch->output_lease_active || !batch->stream_bound ||
         !gemma4_batch_size_supported(row_count) || row_count > batch->capacity ||
         generation == 0 || generation != batch->output_generation ||
@@ -2925,17 +3089,27 @@ int gemma4_listener_batch_output_health(
                 break;
             }
         }
-        if (slot == batch->capacity ||
+        const uint32_t logical_q_len = logical_q_lens[i];
+        if (logical_q_len > GEMMA4_STREAM_Q_LEN || slot == batch->capacity ||
             !gemma4_batch_row_identity_matches(batch, slot, &row, false)) {
             gemma4_batch_poison(batch);
             return -3;
         }
         const gemma4_listener_batch_slot &state = batch->slots[slot];
-        if (row.cache_position > UINT32_MAX - GEMMA4_STREAM_Q_LEN ||
-            state.current_position != row.cache_position + GEMMA4_STREAM_Q_LEN ||
-            state.expected_frame_id != row.frame_id + 1u ||
-            state.expected_state_version != row.listener_state_version + 1u ||
-            state.expected_sequence_position != row.sequence_position + 1u ||
+        const bool embedded_text_input = batch->output_embedded_text_input;
+        const bool preserve_listener_cursors = batch->output_preserves_listener_cursors;
+        const bool audio_identity_matches =
+            state.expected_frame_id == row.frame_id + 1u &&
+            state.expected_state_version == row.listener_state_version + 1u &&
+            state.expected_sequence_position == row.sequence_position + 1u;
+        const bool preserved_identity_matches =
+            state.expected_frame_id == row.frame_id &&
+            state.expected_state_version == row.listener_state_version &&
+            state.expected_sequence_position == row.sequence_position;
+        if (row.cache_position > UINT32_MAX - logical_q_len ||
+            state.current_position != row.cache_position + logical_q_len ||
+            (embedded_text_input && logical_q_len == 0u) ||
+            !(preserve_listener_cursors ? preserved_identity_matches : audio_identity_matches) ||
             gemma4_cache_valid_kv_len(state.cache) != state.current_position) {
             gemma4_batch_poison(batch);
             return -4;
@@ -2944,6 +3118,8 @@ int gemma4_listener_batch_output_health(
     const int status = gemma4_listener_output_health(batch->model, out_nonfinite);
     batch->completed_output_generation = 0;
     batch->completed_output_row_count = 0;
+    batch->output_embedded_text_input = false;
+    batch->output_preserves_listener_cursors = false;
     if (status != 0) {
         gemma4_batch_poison(batch);
         return status == 1 ? 1 : -5;
@@ -3182,6 +3358,80 @@ static bool gemma4_batch_model_weights_match(
                    sizeof(gemma4_layer_weights)) != 0) return false;
     }
     return true;
+}
+
+int gemma4_listener_batch_clone_session_slot_async(
+    gemma4_listener_batch_ctx *batch,
+    uint32_t destination_slot,
+    const gemma4_listener_batch_row *destination_row,
+    uint32_t source_slot,
+    const gemma4_listener_batch_row *source_row,
+    cudaStream_t listener_stream
+) {
+    if (!batch || !destination_row || !source_row || batch->poisoned ||
+        batch->output_lease_active || !batch->stream_bound ||
+        destination_slot >= batch->capacity || source_slot >= batch->capacity ||
+        destination_slot == source_slot || !batch->slots[destination_slot].cache ||
+        !batch->slots[destination_slot].prefix_attention ||
+        batch->slots[destination_slot].primed ||
+        destination_row->native_context_id == 0) return -1;
+    if (!gemma4_batch_snapshot_row_matches(batch, source_slot, source_row)) return -2;
+
+    const gemma4_listener_batch_slot &source_state = batch->slots[source_slot];
+    gemma4_listener_batch_slot &destination_state = batch->slots[destination_slot];
+    if (destination_row->native_context_id == source_row->native_context_id ||
+        destination_row->session_generation != source_row->session_generation ||
+        destination_row->state_epoch_id != source_row->state_epoch_id ||
+        destination_row->frame_id != source_row->frame_id ||
+        destination_row->listener_state_version != source_row->listener_state_version ||
+        destination_row->sequence_position != source_row->sequence_position ||
+        destination_row->cache_position != source_row->cache_position ||
+        destination_row->valid_history_tokens != source_row->valid_history_tokens ||
+        destination_row->valid_history_tokens != destination_row->cache_position ||
+        source_state.prefix_len == 0 ||
+        source_state.prefix_len > GEMMA4_CANONICAL_LM_PREFILL_TARGET_LEN ||
+        source_state.current_position < source_state.prefix_len ||
+        source_state.current_position > batch->model->config.max_seq_len ||
+        gemma4_cache_valid_kv_len(destination_state.cache) != 0 ||
+        gemma4_cache_valid_kv_len(source_state.cache) != source_state.current_position ||
+        !source_state.prefix_attention) return -2;
+    for (uint32_t i = 0; i < batch->capacity; ++i) {
+        if (i != destination_slot && batch->slots[i].primed &&
+            batch->slots[i].context_id == destination_row->native_context_id) return -2;
+    }
+    const int stream_status = gemma4_batch_bind_stream(batch, listener_stream);
+    if (stream_status != 0) return stream_status;
+    if (batch->model->last_stream != 0 && batch->model->last_stream != listener_stream)
+        return -6;
+
+    const int copy_status = gemma4_cache_copy_async(
+        destination_state.cache, source_state.cache, source_state.current_position,
+        listener_stream);
+    if (copy_status != 0) {
+        if (copy_status == -3 || copy_status == -4) {
+            gemma4_batch_poison(batch);
+            return -3;
+        }
+        return -2;
+    }
+    if (cudaMemcpyAsync(destination_state.prefix_attention, source_state.prefix_attention,
+            (size_t)source_state.prefix_len * sizeof(int64_t), cudaMemcpyDeviceToDevice,
+            listener_stream) != cudaSuccess || cudaPeekAtLastError() != cudaSuccess) {
+        gemma4_batch_poison(batch);
+        return -3;
+    }
+
+    destination_state.context_id = destination_row->native_context_id;
+    destination_state.session_generation = source_state.session_generation;
+    destination_state.state_epoch_id = source_state.state_epoch_id;
+    destination_state.expected_frame_id = source_state.expected_frame_id;
+    destination_state.expected_state_version = source_state.expected_state_version;
+    destination_state.expected_sequence_position = source_state.expected_sequence_position;
+    destination_state.prefix_len = source_state.prefix_len;
+    destination_state.current_position = source_state.current_position;
+    destination_state.primed = true;
+    batch->model->last_stream = listener_stream;
+    return 0;
 }
 
 int gemma4_listener_batch_copy_session_cache_async(

@@ -7,25 +7,27 @@ from typing import Any
 import torch
 
 from duplex_kernel.gemma_native_control6_policy import GemmaNativeControl6Policy
+from duplex_kernel.gemma_representation import AUDIO_FEATURES_PER_FRAME
 from duplex_kernel.native_control6_prompt import (
     build_native_control6_prefix_ids,
     select_native_control6_replay_suffix,
 )
 
 
-def _latest_audio_soft_q4(soft: Any, *, hidden_size: int = 1536) -> Any:
-    """Return the current tick's real Q4 tower rows from a fresh output.
+def _latest_audio_soft_q2(soft: Any, *, hidden_size: int = 1536) -> Any:
+    """Return the current tick's real Q2 tower rows from a fresh output.
 
     The first listener call after reset can expose the rolling-window audio
-    sequence, while steady-state outputs expose only the newest Q4. Replay
-    stores one observed tick at a time, so retain the final complete Q4 rows.
+    sequence, while steady-state outputs expose only the newest Q2. Replay
+    stores one observed tick at a time, so retain the final complete Q2 rows.
     """
     shape = tuple(getattr(soft, "shape", ()))
     if getattr(soft, "ndim", None) != 2 or len(shape) != 2:
-        raise RuntimeError(f"Q4 audio soft inatteso per replay semantico: {shape}")
-    if int(shape[1]) != hidden_size or int(shape[0]) < 4 or int(shape[0]) % 4:
-        raise RuntimeError(f"audio soft non allineato a tick Q4: {shape}")
-    return soft[-4:, :]
+        raise RuntimeError(f"Q2 audio soft inatteso per replay semantico: {shape}")
+    q_len = AUDIO_FEATURES_PER_FRAME
+    if int(shape[1]) != hidden_size or int(shape[0]) < q_len or int(shape[0]) % q_len:
+        raise RuntimeError(f"audio soft non allineato a tick Q2: {shape}")
+    return soft[-q_len:, :]
 
 
 def _prior_audio_replay_batch(
@@ -34,7 +36,7 @@ def _prior_audio_replay_batch(
     current_frame_id: int,
     hidden_size: int = 1536,
 ) -> tuple[Any | None, tuple[int, ...], str | None]:
-    """Build the exact observed Q4 suffix ending before the current frame."""
+    """Build the exact observed Q2 suffix ending before the current frame."""
     if current_frame_id < 0:
         raise RuntimeError("frame corrente senza ID assoluto")
     replay = select_native_control6_replay_suffix(
@@ -48,11 +50,11 @@ def _prior_audio_replay_batch(
     if not replay_frames:
         return None, (), None
     normalized = tuple(
-        _latest_audio_soft_q4(frame, hidden_size=hidden_size)
+        _latest_audio_soft_q2(frame, hidden_size=hidden_size)
         for frame in replay_frames
     )
     batch = torch.stack(normalized, dim=0).reshape(
-        1, len(normalized) * 4, hidden_size
+        1, len(normalized) * AUDIO_FEATURES_PER_FRAME, hidden_size
     )
     return batch, tuple(int(frame_id) for frame_id in replay_ids), None
 
@@ -69,13 +71,13 @@ class NativeControl6SemanticPrefixRequest:
     semantic_context_revision: int
     prefix_token_ids: tuple[int, ...]
     prefix_len: int
-    replay_q4: tuple[Any, ...]
+    replay_q2: tuple[Any, ...]
     replay_frame_ids: tuple[int, ...]
     fallback_reason: str | None
 
     @property
     def cache_position(self) -> int:
-        return self.prefix_len + 4 * len(self.replay_q4)
+        return self.prefix_len + AUDIO_FEATURES_PER_FRAME * len(self.replay_q2)
 
 
 def build_native_control6_semantic_prefix_request(
@@ -85,7 +87,7 @@ def build_native_control6_semantic_prefix_request(
     current_frame_id: int,
     pending_speak: Any,
 ) -> NativeControl6SemanticPrefixRequest | None:
-    """Capture prompt and strictly prior Q4 history without touching CUDA."""
+    """Capture prompt and strictly prior Q2 history without touching CUDA."""
     if not isinstance(getattr(session, "turn_policy", None), GemmaNativeControl6Policy):
         return None
     if not bool(getattr(engine, "native_control6_semantic_prefix_enabled", True)):
@@ -154,7 +156,7 @@ def build_native_control6_semantic_prefix_request(
         )
         if replay is None:
             replay_ids: tuple[int, ...] = ()
-            replay_q4: tuple[Any, ...] = ()
+            replay_q2: tuple[Any, ...] = ()
             fallback_reason = (
                 "no_contiguous_observed_history_before_current_frame"
                 if current_frame_id > 0 else None
@@ -162,8 +164,8 @@ def build_native_control6_semantic_prefix_request(
         else:
             selected_ids, selected_frames = replay
             replay_ids = tuple(int(value) for value in selected_ids)
-            replay_q4 = tuple(
-                _latest_audio_soft_q4(
+            replay_q2 = tuple(
+                _latest_audio_soft_q2(
                     frame,
                     hidden_size=int(getattr(backend, "hidden_size", 1536)),
                 )
@@ -179,7 +181,7 @@ def build_native_control6_semantic_prefix_request(
             semantic_context_revision=revision,
             prefix_token_ids=tuple(int(value) for value in prefix_ids),
             prefix_len=prefix_len,
-            replay_q4=replay_q4,
+            replay_q2=replay_q2,
             replay_frame_ids=replay_ids,
             fallback_reason=fallback_reason,
         )
@@ -211,10 +213,12 @@ def prepare_native_control6_semantic_prefix(
     if request is None:
         return False
     replay_audio_soft = (
-        torch.stack(request.replay_q4, dim=0).reshape(
-            1, len(request.replay_q4) * 4, int(getattr(backend, "hidden_size", 1536))
+        torch.stack(request.replay_q2, dim=0).reshape(
+            1,
+            len(request.replay_q2) * AUDIO_FEATURES_PER_FRAME,
+            int(getattr(backend, "hidden_size", 1536)),
         )
-        if request.replay_q4 else None
+        if request.replay_q2 else None
     )
     backend.prime_semantic_prefix(
         state,
@@ -236,7 +240,7 @@ def record_native_control6_semantic_audio(
     *,
     expected_session_generation: int | None = None,
 ) -> None:
-    """Record the actual current Q4 after its fresh listener query at frame t."""
+    """Record the actual current Q2 after its fresh listener query at frame t."""
     if not isinstance(getattr(session, "turn_policy", None), GemmaNativeControl6Policy):
         return
     if not bool(getattr(engine, "native_control6_semantic_prefix_enabled", True)):
@@ -248,8 +252,8 @@ def record_native_control6_semantic_audio(
     backend = getattr(listener, "backend", None)
     soft = getattr(output, "audio_tower_hidden", None)
     if state is None or soft is None or not callable(getattr(soft, "detach", None)):
-        raise RuntimeError("native Control6 richiede la soft feature Q4 fresca corrente")
-    soft = _latest_audio_soft_q4(soft, hidden_size=int(getattr(backend, "hidden_size", 1536)))
+        raise RuntimeError("native Control6 richiede la soft feature Q2 fresca corrente")
+    soft = _latest_audio_soft_q2(soft, hidden_size=int(getattr(backend, "hidden_size", 1536)))
     frame_id = int(getattr(output, "frame_id", -1))
     if frame_id < 0:
         raise RuntimeError("listener output senza frame ID assoluto per replay semantico")
@@ -266,7 +270,7 @@ def record_native_control6_semantic_audio(
                 if frame_id == int(history[-1][0]):
                     history.pop()
                 else:
-                    raise RuntimeError("frame Q4 corrente retrocede rispetto alla history semantica")
+                    raise RuntimeError("frame Q2 corrente retrocede rispetto alla history semantica")
             if history and frame_id != int(history[-1][0]) + 1:
                 history.clear()
             history.append((frame_id, owned_soft))

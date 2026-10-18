@@ -1,0 +1,100 @@
+{
+  "started_utc": "2026-10-18T00:38:54.589550+00:00",
+  "mode": "single_realtime_stream",
+  "ws_url": "ws://127.0.0.1:8000/v1/realtime?duplex=1",
+  "session_id": "f73832da25ec445a8490e7ed4f03ab08",
+  "input_wav": "/workspace/artifacts/conversation_quality_20261014/chat_baseline_natural_20261015/say_only_streaming_20261016/fixture.wav",
+  "followup_wav": null,
+  "followup_timing": {
+    "mode": "none",
+    "configured_delay_ms": null,
+    "first_response_done_ns": 5067851248353294,
+    "first_followup_input_frame_index": null,
+    "first_followup_sent_at_ns": null,
+    "actual_delay_ms": null,
+    "last_followup_sent_at_ns": null,
+    "followup_frames_sent": 0
+  },
+  "requested_input_duration_s": 3.1,
+  "source_timing_basis": "prerecorded_wav_scheduled_at_80ms_intervals",
+  "requested_input_frames": 39,
+  "tts_quality_diagnostics": false,
+  "diagnostic_seed_sha256": null,
+  "ack_capacity_frames": 6,
+  "input_frames_sent": 39,
+  "input_frames_not_dispatched": 0,
+  "source_playback_complete": true,
+  "input_frames_acked": 39,
+  "ack_ids_unique": true,
+  "missing_ack_ids": [],
+  "duplicate_acks": 0,
+  "out_of_order_acks": 0,
+  "capacity_overflow": false,
+  "pending_high_water_frames": 4,
+  "pending_after_close": 0,
+  "final_ack_drain_complete": true,
+  "final_ack_drain_timed_out": false,
+  "ack_credit_timeout_count": 0,
+  "ack_latency_ms": {
+    "p50": 134.72,
+    "p95": 246.48,
+    "max": 248.29
+  },
+  "ack_capacity_backpressure_ms": {
+    "wait_count": 0,
+    "p50": 0.0,
+    "p95": 0.0,
+    "max": 0.0
+  },
+  "server_listener_queue_ms": {
+    "p50": 131.43,
+    "p95": 243.47,
+    "max": 245.11
+  },
+  "server_listener_step_ms": {
+    "p50": 64.23,
+    "p95": 76.32,
+    "max": 171.48
+  },
+  "server_ack_queue_ms": {
+    "p50": 0.21,
+    "p95": 0.63,
+    "max": 0.85
+  },
+  "input_send_interval_ms": {
+    "p50": 80.82,
+    "p95": 82.01,
+    "max": 82.15,
+    "deadline_misses_gt_100ms": 0
+  },
+  "input_send_lag_ms": {
+    "p50": 16.61,
+    "p95": 31.55,
+    "max": 31.83,
+    "frames_over_80ms": 0
+  },
+  "input_frames_during_response": 32,
+  "non_silent_input_frames_during_response": 18,
+  "input_frames_during_audio_generation": 0,
+  "non_silent_input_frames_during_audio_generation": 0,
+  "responses": [
+    {
+      "response_id": "resp_0eb22e3c9e5b",
+      "action": "SPEAK",
+      "created_ns": 5067844551360538,
+      "first_audio_ns": 5067847200986854,
+      "last_audio_ns": 5067851240812131,
+      "done_ns": 5067851248351844,
+      "text": "Aspetta! Sei davvero sicuro di voler cancellare tutto? Se vuoi procedo subito.",
+      "packets": 41,
+      "audio_samples": 157440,
+      "audio_duration_s": 6.56,
+      "first_audio_ms": 2649.6,
+      "response_wall_ms": 6697.0,
+      "wav_path": "/workspace/artifacts/conversation_quality_20261014/chat_baseline_natural_20261015/say_only_streaming_20261016/task5_unified_v2_live_fifo_20261018_final/response_resp_0eb22e3c9e5b.wav"
+    }
+  ],
+  "response_completion_timed_out": false,
+  "errors": [],
+  "sender_error": null
+}

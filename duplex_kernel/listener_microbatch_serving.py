@@ -18,6 +18,11 @@ from duplex_kernel.listener_microbatch_worker import (
     PrefixCacheImport,
     SemanticPrefixShadowRuntime,
 )
+from duplex_kernel.gemma_native_control6_batch_policy import (
+    GemmaNativeControl6BatchPolicy,
+    PolicyPreHeadContext,
+)
+from duplex_kernel.gemma_native_control6_policy import GemmaNativeControl6Policy
 from duplex_kernel.microbatch_contract import (
     CANONICAL_PREFIX_TOKENS,
     LISTENER_MAX_SEQ_LEN,
@@ -67,28 +72,109 @@ def _semantic_prefix_request_matches_applied_row(
     )
 
 
+def _policy_contexts_for_batch(
+    batch: Any,
+    states: tuple[ListenerSessionState, ...],
+    *,
+    policy_adapter: Any,
+) -> tuple[PolicyPreHeadContext, ...]:
+    """Bind each queued frame's immutable scheduler snapshot to its exact row."""
+    frames = tuple(getattr(batch, "frames", ()))
+    rows = tuple(getattr(getattr(batch, "manifest", None), "rows", ()))
+    if not frames or len(frames) != len(states) or len(rows) != len(states):
+        raise RuntimeError("native Control6 policy context batch rows are incomplete")
+    contexts: list[PolicyPreHeadContext] = []
+    for index, (frame, row, listener_state) in enumerate(
+        zip(frames, rows, states, strict=True)
+    ):
+        context = getattr(frame, "policy_context", None)
+        if not isinstance(context, PolicyPreHeadContext):
+            raise RuntimeError(f"native Control6 frame {index} lacks PolicyPreHeadContext")
+        policy = context.policy
+        if getattr(policy, "adapter", None) is not policy_adapter:
+            raise RuntimeError(f"native Control6 frame {index} uses a different loaded adapter")
+        if context.listener_generation_id != row.session_generation:
+            raise RuntimeError(f"native Control6 frame {index} listener generation differs from row")
+        if (
+            listener_state.session_id != row.session_id
+            or listener_state.generation_id != row.session_generation
+            or listener_state.state_epoch_id != row.state_epoch_id
+        ):
+            raise RuntimeError(f"native Control6 frame {index} listener state differs from row")
+        if (
+            context.policy_input.session_id != row.session_id
+            or context.policy_input.frame_id != row.frame_id
+            or context.tick_id
+            != (
+                context.policy_input.session_id,
+                context.policy_input.generation_id,
+                context.policy_input.frame_id,
+            )
+            or (frame.session_id, frame.generation_id, frame.frame_id)
+            != (row.session_id, row.session_generation, row.frame_id)
+        ):
+            raise RuntimeError(f"native Control6 frame {index} turn snapshot differs from row")
+        contexts.append(context)
+    if len({context.policy_input.session_id for context in contexts}) != len(contexts):
+        raise RuntimeError("native Control6 policy contexts must belong to distinct sessions")
+    return tuple(contexts)
+
+
+def _build_native_control6_batch_policy(
+    native_control6_policy: Any | None,
+) -> tuple[GemmaNativeControl6BatchPolicy | None, Any | None]:
+    """Create the shared one-forward scorer and its frame-snapshot callback."""
+    if native_control6_policy is None:
+        return None, None
+    if not isinstance(native_control6_policy, GemmaNativeControl6Policy):
+        raise TypeError("shared native Control6 requires GemmaNativeControl6Policy")
+    batch_policy = GemmaNativeControl6BatchPolicy(
+        native_control6_policy.adapter,
+        checkpoint_path=native_control6_policy.checkpoint_path,
+    )
+
+    def make_policy_inputs(
+        batch: Any,
+        states: tuple[ListenerSessionState, ...],
+    ) -> tuple[PolicyPreHeadContext, ...]:
+        return _policy_contexts_for_batch(
+            batch,
+            states,
+            policy_adapter=batch_policy.adapter,
+        )
+
+    return batch_policy, make_policy_inputs
+
+
 def make_listener_microbatch_worker(
     listener: Any,
     *,
     library_path: str | os.PathLike[str] | None = None,
     native_control6_policy: Any | None = None,
     semantic_prefix_enabled: bool = True,
+    unified_kv_enabled: bool = False,
 ) -> ListenerMicrobatchWorker:
     """Create a single-owner worker from the already loaded serving listener.
 
-    The CUDA stream, native weight provider, private batch runtime, canonical
-    34-token prefix cache, and audio frontend are constructed on the worker's
-    owner thread. There is deliberately no per-session fallback.
+    The CUDA stream, native weight provider, private batch runtime, and audio
+    frontend are constructed on the worker's owner thread. Legacy mode also
+    creates the canonical 34-token prefix. Unified mode requires an exact
+    per-session text prefix importer and never builds the canonical audio
+    prefix. There is deliberately no per-session fallback.
     """
     gemm_graphs_enabled = _strict_env_flag(GEMM_GRAPHS_ENV)
-    semantic_shadow_enabled = _strict_env_flag(SEMANTIC_SHADOW_ENV)
-    if semantic_shadow_enabled and (
+    if type(unified_kv_enabled) is not bool:
+        raise TypeError("unified_kv_enabled must be a bool")
+    semantic_shadow_enabled = (
+        False if unified_kv_enabled else _strict_env_flag(SEMANTIC_SHADOW_ENV)
+    )
+    if not unified_kv_enabled and semantic_shadow_enabled and (
         native_control6_policy is None or not semantic_prefix_enabled
     ):
         raise ValueError(
             f"{SEMANTIC_SHADOW_ENV}=1 requires native Control6 and semantic prefixes"
         )
-    if (
+    if not unified_kv_enabled and (
         native_control6_policy is not None
         and semantic_prefix_enabled
         and not semantic_shadow_enabled
@@ -127,19 +213,6 @@ def make_listener_microbatch_worker(
             raise RuntimeError("shared listener needs the canonical ShapeStable Gemma LM")
         stream = torch.cuda.Stream(device=device, priority=-1)
 
-        # Build the same BOS + 32 audio slots + BOA prefix used by
-        # GemmaAudioTowerBackend.prime_steady_state. The immutable DynamicCache
-        # is copied into each native private session slot on first use.
-        input_ids, attention = backend._build_multimodal_inputs(
-            (), 1024, device=device
-        )
-        prefix_ids = input_ids[:, :CANONICAL_PREFIX_TOKENS]
-        prefix_attention = attention[:, :CANONICAL_PREFIX_TOKENS].to(
-            device=device, dtype=torch.long
-        )
-        prefix_positions = torch.arange(
-            CANONICAL_PREFIX_TOKENS, device=device, dtype=torch.long
-        ).view(1, -1)
         model_lock = getattr(backend, "_lock", None)
         if model_lock is None or not callable(getattr(model_lock, "acquire_fair", None)):
             raise RuntimeError("shared listener requires the source backend's fair model lock")
@@ -150,39 +223,54 @@ def make_listener_microbatch_worker(
         # listener registration or tick. Keep host contention telemetry scoped
         # to shared-listener serving; do not enable the global CUDA profiler.
         configure_host_timeline(enabled=True, capacity=256)
-        model_lock_acquired = False
-        try:
-            acquire_fair = getattr(model_lock, "acquire_fair", None)
-            if callable(acquire_fair):
-                model_lock_acquired = bool(acquire_fair("listener"))
-                if not model_lock_acquired:
-                    raise RuntimeError("canonical listener prefix lock admission was cancelled")
-            elif model_lock is not None:
-                model_lock.acquire()
-                model_lock_acquired = True
-            with torch.cuda.stream(stream), torch.inference_mode():
-                prefix_embeds = language_model.embed_tokens(prefix_ids)
-                prefix_per_layer = language_model.get_per_layer_inputs(prefix_ids, prefix_embeds)
-                prefix_masks = create_masks_for_generate(
-                    language_model.config,
-                    prefix_embeds,
-                    prefix_attention,
-                    past_key_values=None,
-                    position_ids=prefix_positions,
-                )
-                prefix_output = backend._shape_stable_lm.forward(
-                    inputs_embeds=prefix_embeds,
-                    per_layer_inputs=prefix_per_layer,
-                    attention_mask=prefix_masks,
-                    position_ids=prefix_positions,
-                    past_key_values=None,
-                    shared_kv_states=None,
-                )
-        finally:
-            if model_lock_acquired:
-                model_lock.release()
-        prefix_cache = prefix_output.past_key_values
-        stream.synchronize()
+        prefix_cache = None
+        prefix_attention = None
+        if not unified_kv_enabled:
+            # Legacy mode builds the historical BOS + 32 audio slots + BOA
+            # prefix. Unified mode imports its actual chat prefix per session.
+            input_ids, attention = backend._build_multimodal_inputs(
+                (), 1024, device=device
+            )
+            prefix_ids = input_ids[:, :CANONICAL_PREFIX_TOKENS]
+            prefix_attention = attention[:, :CANONICAL_PREFIX_TOKENS].to(
+                device=device, dtype=torch.long
+            )
+            prefix_positions = torch.arange(
+                CANONICAL_PREFIX_TOKENS, device=device, dtype=torch.long
+            ).view(1, -1)
+            model_lock_acquired = False
+            try:
+                acquire_fair = getattr(model_lock, "acquire_fair", None)
+                if callable(acquire_fair):
+                    model_lock_acquired = bool(acquire_fair("listener"))
+                    if not model_lock_acquired:
+                        raise RuntimeError("canonical listener prefix lock admission was cancelled")
+                elif model_lock is not None:
+                    model_lock.acquire()
+                    model_lock_acquired = True
+                with torch.cuda.stream(stream), torch.inference_mode():
+                    prefix_embeds = language_model.embed_tokens(prefix_ids)
+                    prefix_per_layer = language_model.get_per_layer_inputs(prefix_ids, prefix_embeds)
+                    prefix_masks = create_masks_for_generate(
+                        language_model.config,
+                        prefix_embeds,
+                        prefix_attention,
+                        past_key_values=None,
+                        position_ids=prefix_positions,
+                    )
+                    prefix_output = backend._shape_stable_lm.forward(
+                        inputs_embeds=prefix_embeds,
+                        per_layer_inputs=prefix_per_layer,
+                        attention_mask=prefix_masks,
+                        position_ids=prefix_positions,
+                        past_key_values=None,
+                        shared_kv_states=None,
+                    )
+            finally:
+                if model_lock_acquired:
+                    model_lock.release()
+            prefix_cache = prefix_output.past_key_values
+            stream.synchronize()
 
         provider = NativeGemmaListenerLM(
             language_model,
@@ -202,7 +290,7 @@ def make_listener_microbatch_worker(
             topology_sha256=topology_sha256,
             native_library_sha256=_EMPTY_SHA256,
             native_abi_version=3,
-            batch_api_version=2,
+            batch_api_version=5,
             attention_backend_id=3,
             rmsnorm_backend_id=2,
             max_seq_len=LISTENER_MAX_SEQ_LEN,
@@ -227,23 +315,32 @@ def make_listener_microbatch_worker(
             backend._extract_single_frame,
             device=device,
             dtype=backend.dtype,
+            mel_window_rows=backend.mel_window_rows,
             # The shared LM lock is reserved for semantic-prefix ShapeStable work.
-            audio_tower_row_runner=backend.run_audio_tower_q4,
+            audio_tower_row_runner=backend.run_audio_tower_q2,
         )
+        # The mixed-source policy wrapper runs one head forward after the
+        # server has captured each row's exact pre-head scheduler snapshot.
         control6_scorer = None
-        if native_control6_policy is not None:
-            from duplex_kernel.gemma_native_control6_batch_policy import GemmaNativeControl6BatchPolicy
-            from duplex_kernel.gemma_native_control6_policy import GemmaNativeControl6Policy
+        batch_policy, policy_inputs = _build_native_control6_batch_policy(
+            native_control6_policy
+        )
+        token_adapter = None
+        if unified_kv_enabled:
+            from duplex_kernel.unified_token_adapter import UnifiedTokenAdapter
 
-            if not isinstance(native_control6_policy, GemmaNativeControl6Policy):
-                raise TypeError("shared native Control6 scorer requires GemmaNativeControl6Policy")
-            control6_scorer = GemmaNativeControl6BatchPolicy(
-                native_control6_policy.adapter,
-                checkpoint_path=native_control6_policy.checkpoint_path,
+            tokenizer = getattr(getattr(backend, "processor", None), "tokenizer", None)
+            if tokenizer is None:
+                raise RuntimeError("unified text decode requires the official Thinker tokenizer")
+            token_adapter = UnifiedTokenAdapter(
+                backend.model,
+                tokenizer=tokenizer,
+                require_cuda=True,
             )
         backend._listener_microbatch_runtime_info = {
             "enabled": True,
             "mode": "shared_fixed_80ms_microbatch",
+            "unified_kv_enabled": unified_kv_enabled,
             "native_abi_version": signature.native_abi_version,
             "batch_api_version": signature.batch_api_version,
             "attention_backend_id": signature.attention_backend_id,
@@ -260,23 +357,27 @@ def make_listener_microbatch_worker(
             "topology_sha256": signature.topology_sha256,
             "library_path": str(native.library_path),
             "native_control6_raw_batch_scoring": control6_scorer is not None,
+            "native_control6_mixed_source_policy": batch_policy is not None,
             "native_control6_checkpoint_path": (
-                None if control6_scorer is None else control6_scorer.checkpoint_path
+                None if batch_policy is None else batch_policy.checkpoint_path
             ),
             "semantic_shadow_enabled": semantic_shadow_enabled,
             "semantic_shadow_ready": False,
         }
 
-        def import_prefix(_state: ListenerSessionState, _row: Any) -> PrefixCacheImport:
-            return PrefixCacheImport(
-                past_key_values=prefix_cache,
-                prefix_attention=prefix_attention,
-                prefix_len=CANONICAL_PREFIX_TOKENS,
-            )
+        import_prefix = None
+        if not unified_kv_enabled:
+            def import_prefix(_state: ListenerSessionState, _row: Any) -> PrefixCacheImport:
+                assert prefix_cache is not None and prefix_attention is not None
+                return PrefixCacheImport(
+                    past_key_values=prefix_cache,
+                    prefix_attention=prefix_attention,
+                    prefix_len=CANONICAL_PREFIX_TOKENS,
+                )
 
-        # This importer returns an immutable cache already built during worker
-        # initialization. Its later copies target private native row contexts.
-        setattr(import_prefix, "requires_shared_lm_lock", False)
+            # This importer returns an immutable cache already built during
+            # worker initialization; no Thinker work is needed during import.
+            setattr(import_prefix, "requires_shared_lm_lock", False)
 
         shadow_factory = None
         shadow_prefix_builder = None
@@ -380,16 +481,112 @@ def make_listener_microbatch_worker(
             listener_stream=stream,
             frontend=frontend,
             native=native,
-            policy=None,
-            policy_inputs=None,
+            policy=batch_policy,
+            policy_inputs=policy_inputs,
             listener_model_lock=model_lock,
             prefix_importer=import_prefix,
             control6_scorer=control6_scorer,
             shadow_factory=shadow_factory,
             shadow_prefix_builder=shadow_prefix_builder,
+            token_adapter=token_adapter,
         )
 
     return ListenerMicrobatchWorker(None, runtime_factory=runtime_factory)
+
+
+def make_unified_prefix_import(
+    backend: Any,
+    prefix_token_ids: tuple[int, ...] | list[int],
+) -> Any:
+    """Build and cache one real chat-prefix KV for a unified listener session.
+
+    ``prefix_token_ids`` must be the exact system + opening user-header + BOA
+    sequence produced from the active Thinker chat template.  In particular,
+    it must not contain the legacy BOS/PAD audio prefix or audio placeholders.
+    The returned owner-thread importer runs a single text-only ShapeStable
+    prefill, then returns the same immutable cache for native import.  All
+    later audio and generated-text appends use the native session cache.
+    """
+    token_ids = tuple(int(token) for token in prefix_token_ids)
+    if not token_ids:
+        raise ValueError("unified prefix token IDs must not be empty")
+    if any(isinstance(token, bool) for token in prefix_token_ids):
+        raise TypeError("unified prefix token IDs must be integers, not booleans")
+    bos_token_id = getattr(backend, "bos_token_id", None)
+    if bos_token_id is None:
+        config = getattr(getattr(backend, "gemma_model", None), "config", None)
+        bos_token_id = getattr(config, "bos_token_id", None)
+    if bos_token_id is not None and token_ids[0] != int(bos_token_id):
+        raise ValueError("unified prefix must begin with the Thinker BOS token")
+    boa_token_id = getattr(backend, "boa_token_id", None)
+    if boa_token_id is None:
+        config = getattr(getattr(backend, "gemma_model", None), "config", None)
+        boa_token_id = getattr(config, "boa_token_id", None)
+    if boa_token_id is None or token_ids[-1] != int(boa_token_id):
+        raise ValueError("unified prefix must end with the Thinker BOA token")
+    audio_token_id = getattr(backend, "audio_token_id", None)
+    eoa_token_id = getattr(backend, "eoa_token_id", None)
+    forbidden = {
+        int(value) for value in (audio_token_id, eoa_token_id)
+        if value is not None
+    }
+    if any(token in forbidden for token in token_ids[:-1]):
+        raise ValueError("unified prefix cannot contain audio placeholders or EOA")
+    if token_ids.count(int(boa_token_id)) != 1:
+        raise ValueError("unified prefix must contain exactly one final BOA token")
+    if not callable(getattr(backend, "build_semantic_prefix_cache", None)):
+        raise TypeError("unified prefix requires the serving backend's ShapeStable cache builder")
+    model_lock = getattr(backend, "_lock", None)
+    if model_lock is None:
+        raise TypeError("unified prefix requires the serving Thinker model lock")
+
+    cached_prefix: PrefixCacheImport | None = None
+
+    def import_prefix(state: ListenerSessionState, row: Any) -> PrefixCacheImport:
+        nonlocal cached_prefix
+        if (
+            state.session_id != row.session_id
+            or state.generation_id != row.session_generation
+            or state.state_epoch_id != row.state_epoch_id
+            or state.next_frame_id != 0
+            or state.sequence_position != 0
+            or row.frame_id != 0
+            or row.sequence_position != 0
+            or row.cache_position != len(token_ids)
+            or row.valid_history_tokens != len(token_ids)
+        ):
+            raise RuntimeError("unified prefix import requires the pristine frame-zero session cursor")
+        if cached_prefix is None:
+            with torch.inference_mode():
+                cache = backend.build_semantic_prefix_cache(
+                    token_ids,
+                    replay_q2=(),
+                    replay_frame_ids=(),
+                )
+            prefix_len = int(cache["prefix_len"])
+            cache_position = int(cache["cache_position"])
+            replay_frame_ids = tuple(cache.get("replay_frame_ids", ()))
+            if (
+                prefix_len != len(token_ids)
+                or cache_position != len(token_ids)
+                or replay_frame_ids
+            ):
+                raise RuntimeError("unified prefix builder returned a non-prefix cache")
+            cached_prefix = PrefixCacheImport(
+                past_key_values=cache["past_key_values"],
+                prefix_attention=cache["prefix_attention"],
+                prefix_len=prefix_len,
+                cache_position=cache_position,
+                prefix_build_ms=float(cache["prefix_build_ms"]),
+                replay_ms=0.0,
+            )
+        return cached_prefix
+
+    # ShapeStable reads the same mutable Thinker workspaces as ordinary
+    # thinker inference.  The worker takes a short model lock while it builds
+    # this initial prefix and releases it before native listener execution.
+    setattr(import_prefix, "requires_shared_lm_lock", True)
+    return import_prefix
 
 
 def initial_listener_session_state(
@@ -473,7 +670,7 @@ def semantic_prefix_importer(
             raise RuntimeError("semantic prefix request lost its current-frame compare-and-swap")
         cache = backend.build_semantic_prefix_cache(
             request.prefix_token_ids,
-            replay_q4=request.replay_q4,
+            replay_q2=request.replay_q2,
             replay_frame_ids=request.replay_frame_ids,
         )
         if (
@@ -517,7 +714,7 @@ def prepare_initial_semantic_prefix(
     """
     if not isinstance(request, NativeControl6SemanticPrefixRequest):
         raise TypeError("request must be an immutable native Control6 prefix snapshot")
-    if request.current_frame_id != 0 or request.replay_q4 or request.replay_frame_ids:
+    if request.current_frame_id != 0 or request.replay_q2 or request.replay_frame_ids:
         raise ValueError("initial semantic admission requires frame zero and no audio replay")
     if not callable(getattr(backend, "build_semantic_prefix_cache", None)):
         raise TypeError("backend must expose build_semantic_prefix_cache")
@@ -541,7 +738,7 @@ def prepare_initial_semantic_prefix(
         with torch.cuda.stream(prepare_stream), torch.inference_mode():
             cache = backend.build_semantic_prefix_cache(
                 request.prefix_token_ids,
-                replay_q4=(),
+                replay_q2=(),
                 replay_frame_ids=(),
             )
             if (
@@ -609,7 +806,7 @@ def commit_initial_semantic_prefix_state(
         or prepared.prefix.prefix_len != request.prefix_len
         or prepared.prefix.cache_position != request.cache_position
         or request.current_frame_id != 0
-        or request.replay_q4
+        or request.replay_q2
         or request.replay_frame_ids
     ):
         return False
@@ -658,6 +855,7 @@ __all__ = [
     "commit_initial_semantic_prefix_state",
     "initial_listener_session_state",
     "make_listener_microbatch_worker",
+    "make_unified_prefix_import",
     "prepare_initial_semantic_prefix",
     "prepare_initial_semantic_prefix_async",
     "semantic_prefix_importer",

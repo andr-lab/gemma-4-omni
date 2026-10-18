@@ -86,6 +86,37 @@ class DecodedAudioPacket:
     pcm: np.ndarray
 
 
+@dataclass
+class _PlaybackChunk:
+    pcm: np.ndarray
+    offset: int
+    response_id: str
+    generation_id: int
+    speaker_segment_id: str | None = None
+    packet_id: int | None = None
+    first_frame_id: int | None = None
+    last_frame_id: int | None = None
+    start_sample: int | None = None
+    end_sample: int | None = None
+    sample_rate: int | None = None
+
+
+@dataclass
+class _PlaybackSegment:
+    response_id: str
+    generation_id: int
+    speaker_segment_id: str
+    start_sample: int
+    enqueued_end_sample: int
+    consumed_end_sample: int
+    sample_rate: int
+    first_frame_id: int
+    last_frame_id: int
+    end_sample: int | None = None
+    closed: bool = False
+    ack_queued: bool = False
+
+
 def _required_int(event: dict[str, Any], name: str) -> int:
     value = event.get(name)
     if isinstance(value, bool) or not isinstance(value, int):
@@ -145,17 +176,26 @@ class BoundedMicrophoneFrames:
 
 
 class BoundedPCMPlayback:
-    """Generation-fenced FIFO consumed only at the audio device's sample clock."""
+    """Generation-fenced FIFO with logical application-buffer consumption ACKs."""
 
     def __init__(self, *, max_samples: int = PLAYBACK_MAX_SAMPLES) -> None:
         if isinstance(max_samples, bool) or int(max_samples) < 1:
             raise ValueError("max_samples deve essere positivo")
         self.max_samples = int(max_samples)
-        self._chunks: deque[tuple[np.ndarray, int, str, int]] = deque()
+        self._chunks: deque[_PlaybackChunk] = deque()
         self._pending_samples = 0
         self._response_id: str | None = None
+        self._response_generations: dict[str, set[int]] = {}
         self._generation_id: int | None = None
         self._completed_responses: set[str] = set()
+        self._cancelled_responses: set[str] = set()
+        self._cancelled_pairs: set[tuple[str, int]] = set()
+        self._segments: dict[tuple[str, int, str], _PlaybackSegment] = {}
+        self._ack_sequence = 0
+        self._last_accepted_ack_sequence = 0
+        self._pending_acks: deque[dict[str, Any]] = deque()
+        self._outstanding_acks: dict[int, dict[str, Any]] = {}
+        self._accepted_watermarks: dict[tuple[str, int, str], int] = {}
         self._lock = threading.Lock()
 
     @property
@@ -163,44 +203,146 @@ class BoundedPCMPlayback:
         with self._lock:
             return self._pending_samples
 
+    @property
+    def generation_id(self) -> int | None:
+        with self._lock:
+            return self._generation_id
+
+    def _discard_acks_locked(self, *, response_id: str | None = None, generation_id: int | None = None) -> None:
+        def matches(ack: dict[str, Any]) -> bool:
+            return (
+                (response_id is None or ack["response_id"] == response_id)
+                and (generation_id is None or ack["generation_id"] == generation_id)
+            )
+        self._pending_acks = deque(ack for ack in self._pending_acks if not matches(ack))
+        self._outstanding_acks = {
+            sequence: ack for sequence, ack in self._outstanding_acks.items()
+            if not matches(ack)
+        }
+
     def _clear_locked(self) -> int:
         dropped = self._pending_samples
         self._chunks.clear()
         self._pending_samples = 0
         self._completed_responses.clear()
+        self._segments.clear()
+        self._pending_acks.clear()
+        self._outstanding_acks.clear()
         return dropped
 
     def _discard_locked(self, predicate) -> int:
-        kept: deque[tuple[np.ndarray, int, str, int]] = deque()
+        kept: deque[_PlaybackChunk] = deque()
         dropped = 0
-        discarded_responses: set[str] = set()
-        for samples, offset, response_id, generation_id in self._chunks:
-            if predicate(response_id, generation_id):
-                dropped += samples.size - offset
-                discarded_responses.add(response_id)
+        discarded_pairs: set[tuple[str, int]] = set()
+        for chunk in self._chunks:
+            if predicate(chunk.response_id, chunk.generation_id):
+                dropped += chunk.pcm.size - chunk.offset
+                discarded_pairs.add((chunk.response_id, chunk.generation_id))
             else:
-                kept.append((samples, offset, response_id, generation_id))
+                kept.append(chunk)
         self._chunks = kept
         self._pending_samples -= dropped
-        for response_id in discarded_responses:
-            if not any(chunk[2] == response_id for chunk in self._chunks):
+        for response_id, generation_id in discarded_pairs:
+            self._discard_acks_locked(response_id=response_id, generation_id=generation_id)
+        for key in tuple(self._segments):
+            response_id, generation_id, _segment_id = key
+            if predicate(response_id, generation_id):
+                self._segments.pop(key, None)
+                self._discard_acks_locked(response_id=response_id, generation_id=generation_id)
+        for response_id in {response for response, _generation in discarded_pairs}:
+            if not any(chunk.response_id == response_id for chunk in self._chunks):
                 self._completed_responses.discard(response_id)
         return dropped
+
+    def _cleanup_completed_response_locked(self, response_id: str) -> None:
+        if response_id not in self._completed_responses:
+            return
+        if response_id == self._response_id:
+            return
+        if any(chunk.response_id == response_id for chunk in self._chunks):
+            return
+        if any(ack["response_id"] == response_id for ack in self._pending_acks):
+            return
+        if any(ack["response_id"] == response_id for ack in self._outstanding_acks.values()):
+            return
+        self._completed_responses.discard(response_id)
+        self._response_generations.pop(response_id, None)
+        for key in tuple(self._segments):
+            if key[0] == response_id:
+                self._segments.pop(key, None)
 
     def _advance_generation_locked(self, generation_id: int) -> bool:
         if self._generation_id is not None and generation_id < self._generation_id:
             return False
         if self._generation_id is None or generation_id > self._generation_id:
-            # Preserve queued PCM only for responses the server explicitly
-            # completed. An unfinished prior response is stale at this fence.
+            # Preserve output only for responses already completed by the server.
+            stale_pairs = {
+                (chunk.response_id, chunk.generation_id)
+                for chunk in self._chunks
+                if chunk.generation_id < generation_id
+                and chunk.response_id not in self._completed_responses
+            }
+            stale_pairs.update(
+                (segment.response_id, segment.generation_id)
+                for segment in self._segments.values()
+                if segment.generation_id < generation_id
+                and segment.response_id not in self._completed_responses
+            )
+            self._cancelled_pairs.update(stale_pairs)
             self._discard_locked(
-                lambda response_id, chunk_generation: (
-                    chunk_generation < generation_id
-                    and response_id not in self._completed_responses
-                )
+                lambda response_id, chunk_generation: (response_id, chunk_generation) in stale_pairs
             )
             self._generation_id = generation_id
         return True
+
+    @staticmethod
+    def _segment_key(
+        response_id: str,
+        generation_id: int,
+        speaker_segment_id: str,
+    ) -> tuple[str, int, str]:
+        return (str(response_id), int(generation_id), str(speaker_segment_id))
+
+    def _cancel_response_locked(self, response_id: str, generation_id: int | None) -> bool:
+        response = str(response_id)
+        generations = set(self._response_generations.get(response, ()))
+        generations.update(
+            chunk.generation_id for chunk in self._chunks if chunk.response_id == response
+        )
+        generations.update(
+            segment.generation_id for segment in self._segments.values()
+            if segment.response_id == response
+        )
+        if generation_id is not None:
+            generations = {int(generation_id)}
+        elif response == self._response_id and self._generation_id is not None:
+            generations.add(self._generation_id)
+        for generation in generations:
+            self._cancelled_pairs.add((response, generation))
+        dropped = self._discard_locked(
+            lambda queued_response, queued_generation: (
+                queued_response == response
+                and (generation_id is None or queued_generation == int(generation_id))
+            )
+        )
+        self._discard_acks_locked(response_id=response, generation_id=generation_id)
+        if generation_id is None:
+            self._cancelled_responses.add(response)
+            self._completed_responses.discard(response)
+            self._response_generations.pop(response, None)
+        else:
+            response_generations = self._response_generations.get(response)
+            if response_generations is not None:
+                response_generations.discard(int(generation_id))
+                if not response_generations:
+                    self._response_generations.pop(response, None)
+            self._completed_responses.discard(response)
+        active_generations = self._response_generations.get(response, set())
+        if response == self._response_id and (
+            generation_id is None or not active_generations or int(generation_id) == self._generation_id
+        ):
+            self._response_id = None
+        return bool(generations) or dropped > 0
 
     def begin_response(self, response_id: str) -> None:
         response = str(response_id)
@@ -212,17 +354,31 @@ class BoundedPCMPlayback:
                 if previous is not None and previous not in self._completed_responses:
                     # A replacement without response.done is an implicit stale
                     # fence; completed responses remain queued in FIFO order.
-                    self._discard_locked(lambda queued_id, _generation: queued_id == previous)
+                    self._cancel_response_locked(previous, generation_id=None)
                 self._response_id = response
-                if previous is not None and not any(chunk[2] == previous for chunk in self._chunks):
-                    self._completed_responses.discard(previous)
+                self._cancelled_responses.discard(response)
+                self._response_generations.setdefault(response, set())
+                if previous is not None:
+                    self._cleanup_completed_response_locked(previous)
 
     def complete_response(self, response_id: str) -> bool:
         response = str(response_id)
         with self._lock:
-            if response != self._response_id:
+            if response in self._cancelled_responses:
+                return False
+            has_state = (
+                response == self._response_id
+                or any(chunk.response_id == response for chunk in self._chunks)
+                or any(segment.response_id == response for segment in self._segments.values())
+            )
+            if not has_state:
                 return False
             self._completed_responses.add(response)
+            for segment in self._segments.values():
+                if segment.response_id == response and not segment.closed:
+                    segment.end_sample = segment.enqueued_end_sample
+                    segment.closed = True
+                    self._maybe_queue_segment_ack_locked(segment)
             return True
 
     def advance_generation(self, generation_id: int) -> bool:
@@ -232,6 +388,70 @@ class BoundedPCMPlayback:
             return self._advance_generation_locked(generation_id)
 
     def enqueue(self, response_id: str, generation_id: int, pcm: np.ndarray) -> bool:
+        return self._enqueue_chunk(
+            response_id=response_id,
+            generation_id=generation_id,
+            pcm=pcm,
+        )
+
+    def enqueue_packet(
+        self,
+        *,
+        response_id: str,
+        generation_id: int,
+        speaker_segment_id: str,
+        packet_id: int,
+        first_frame_id: int,
+        last_frame_id: int,
+        start_sample: int,
+        end_sample: int,
+        pcm: np.ndarray,
+        sample_rate: int,
+    ) -> bool:
+        """Queue one identified packet without losing its sample/frame provenance."""
+        for name, value in (
+            ("generation_id", generation_id), ("packet_id", packet_id),
+            ("first_frame_id", first_frame_id), ("last_frame_id", last_frame_id),
+            ("start_sample", start_sample), ("end_sample", end_sample),
+            ("sample_rate", sample_rate),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} non valido")
+        samples = np.asarray(pcm, dtype=np.float32).reshape(-1)
+        if (
+            last_frame_id < first_frame_id or sample_rate <= 0
+            or end_sample <= start_sample or end_sample - start_sample != samples.size
+        ):
+            raise ValueError("packet frame/sample metadata non valido")
+        if not isinstance(speaker_segment_id, str) or not speaker_segment_id:
+            raise ValueError("speaker_segment_id non può essere vuoto")
+        return self._enqueue_chunk(
+            response_id=response_id,
+            generation_id=generation_id,
+            pcm=pcm,
+            speaker_segment_id=speaker_segment_id,
+            packet_id=packet_id,
+            first_frame_id=first_frame_id,
+            last_frame_id=last_frame_id,
+            start_sample=start_sample,
+            end_sample=end_sample,
+            sample_rate=sample_rate,
+        )
+
+    def _enqueue_chunk(
+        self,
+        *,
+        response_id: str,
+        generation_id: int,
+        pcm: np.ndarray,
+        speaker_segment_id: str | None = None,
+        packet_id: int | None = None,
+        first_frame_id: int | None = None,
+        last_frame_id: int | None = None,
+        start_sample: int | None = None,
+        end_sample: int | None = None,
+        sample_rate: int | None = None,
+    ) -> bool:
         array = np.asarray(pcm, dtype=np.float32).reshape(-1)
         if array.size == 0 or not np.isfinite(array).all():
             raise ValueError("playback PCM vuoto o non finito")
@@ -240,9 +460,14 @@ class BoundedPCMPlayback:
         if isinstance(generation_id, bool) or not isinstance(generation_id, int) or generation_id < 0:
             raise ValueError("generation_id non valido")
         with self._lock:
-            if str(response_id) != self._response_id:
+            response = str(response_id)
+            if (
+                response != self._response_id
+                or response in self._cancelled_responses
+                or (response, generation_id) in self._cancelled_pairs
+            ):
                 return False
-            if response_id in self._completed_responses:
+            if response in self._completed_responses:
                 return False
             if not self._advance_generation_locked(generation_id):
                 return False
@@ -250,23 +475,200 @@ class BoundedPCMPlayback:
                 raise BufferError(
                     f"playback queue capacity exceeded ({self.max_samples} samples)"
                 )
-            self._chunks.append((np.array(array, dtype=np.float32, copy=True), 0, str(response_id), generation_id))
+            if speaker_segment_id is not None:
+                if (
+                    packet_id is None or first_frame_id is None or last_frame_id is None
+                    or start_sample is None or end_sample is None or sample_rate is None
+                    or end_sample - start_sample != array.size
+                ):
+                    raise ValueError("playback segment metadata is incomplete or inconsistent")
+                key = (response, generation_id, speaker_segment_id)
+                segment = self._segments.get(key)
+                if segment is None:
+                    segment = _PlaybackSegment(
+                        response_id=response,
+                        generation_id=generation_id,
+                        speaker_segment_id=speaker_segment_id,
+                        start_sample=start_sample,
+                        enqueued_end_sample=end_sample,
+                        consumed_end_sample=start_sample,
+                        sample_rate=sample_rate,
+                        first_frame_id=first_frame_id,
+                        last_frame_id=last_frame_id,
+                    )
+                    self._segments[key] = segment
+                else:
+                    if segment.closed:
+                        raise ValueError("audio packet arrived after its segment was closed")
+                    if (
+                        start_sample != segment.enqueued_end_sample
+                        or first_frame_id != segment.last_frame_id + 1
+                        or sample_rate != segment.sample_rate
+                    ):
+                        raise ValueError("audio packets are not contiguous within the speaker segment")
+                    segment.enqueued_end_sample = end_sample
+                    segment.last_frame_id = last_frame_id
+                self._response_generations.setdefault(response, set()).add(generation_id)
+            self._chunks.append(_PlaybackChunk(
+                np.array(array, dtype=np.float32, copy=True), 0, str(response_id), generation_id,
+                speaker_segment_id, packet_id, first_frame_id, last_frame_id,
+                start_sample, end_sample, sample_rate,
+            ))
             self._pending_samples += int(array.size)
             return True
 
-    def cancel_response(self, response_id: str | None) -> bool:
+    def _maybe_queue_segment_ack_locked(self, segment: _PlaybackSegment) -> None:
+        if (
+            not segment.closed
+            or segment.ack_queued
+            or segment.end_sample is None
+            or segment.start_sample >= segment.end_sample
+            or segment.enqueued_end_sample != segment.end_sample
+            or segment.consumed_end_sample != segment.end_sample
+        ):
+            return
+        self._ack_sequence += 1
+        self._pending_acks.append({
+            "type": "client_consumed_pcm",
+            "response_id": segment.response_id,
+            "generation_id": segment.generation_id,
+            "speaker_segment_id": segment.speaker_segment_id,
+            "start_sample": segment.start_sample,
+            "end_sample": segment.end_sample,
+            "sample_rate": segment.sample_rate,
+            "sequence": self._ack_sequence,
+            "client_monotonic_ns": time.monotonic_ns(),
+            "consumption_semantics": "logical_client_device_buffer",
+        })
+        segment.ack_queued = True
+
+    def complete_segment(
+        self,
+        *,
+        response_id: str,
+        generation_id: int,
+        speaker_segment_id: str,
+        start_sample: int,
+        end_sample: int,
+        sample_rate: int,
+    ) -> bool:
+        """Close one server-declared segment; ACK only after every sample is copied."""
+        response = str(response_id)
+        if not response or not isinstance(speaker_segment_id, str) or not speaker_segment_id:
+            raise ValueError("segment completion requires response and segment identities")
+        for name, value in (
+            ("generation_id", generation_id), ("start_sample", start_sample),
+            ("end_sample", end_sample), ("sample_rate", sample_rate),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} non valido")
+        if end_sample <= start_sample or sample_rate <= 0:
+            raise ValueError("segment completion range/sample rate non valido")
+        with self._lock:
+            if (
+                response in self._cancelled_responses
+                or (response, generation_id) in self._cancelled_pairs
+                or not self._advance_generation_locked(generation_id)
+            ):
+                return False
+            segment = self._segments.get((response, generation_id, speaker_segment_id))
+            if segment is None:
+                return False
+            if (
+                segment.start_sample != start_sample
+                or segment.enqueued_end_sample != end_sample
+                or segment.sample_rate != sample_rate
+            ):
+                raise ValueError("segment completion metadata does not match queued PCM")
+            if segment.closed:
+                return segment.end_sample == end_sample
+            segment.closed = True
+            segment.end_sample = end_sample
+            self._maybe_queue_segment_ack_locked(segment)
+            return True
+
+    def cancel_response(
+        self,
+        response_id: str | None,
+        generation_id: int | None = None,
+    ) -> bool:
         with self._lock:
             if response_id is None:
+                for response, generations in self._response_generations.items():
+                    self._cancelled_pairs.update((response, generation) for generation in generations)
+                for chunk in self._chunks:
+                    self._cancelled_pairs.add((chunk.response_id, chunk.generation_id))
+                for segment in self._segments.values():
+                    self._cancelled_pairs.add((segment.response_id, segment.generation_id))
                 self._clear_locked()
                 self._response_id = None
+                self._response_generations.clear()
                 return True
-            response = str(response_id)
-            was_current = response == self._response_id
-            dropped = self._discard_locked(lambda queued_id, _generation: queued_id == response)
-            self._completed_responses.discard(response)
-            if was_current:
-                self._response_id = None
-            return was_current or dropped > 0
+            return self._cancel_response_locked(str(response_id), generation_id)
+
+    def drain_client_consumed_pcm_acks(
+        self,
+        *,
+        current_generation_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return current-fence ACKs; these certify buffer consumption, not sound output."""
+        if current_generation_id is not None and (
+            isinstance(current_generation_id, bool) or not isinstance(current_generation_id, int)
+        ):
+            raise ValueError("current_generation_id non valido")
+        with self._lock:
+            valid: list[dict[str, Any]] = []
+            remaining: deque[dict[str, Any]] = deque()
+            while self._pending_acks:
+                ack = self._pending_acks.popleft()
+                if current_generation_id is None or ack["generation_id"] == current_generation_id:
+                    self._outstanding_acks[int(ack["sequence"])] = ack
+                    valid.append(dict(ack))
+                else:
+                    remaining.append(ack)
+            self._pending_acks = remaining
+            return valid
+
+    def accept_client_consumed_pcm_ack(
+        self,
+        ack: dict[str, Any],
+        *,
+        current_generation_id: int | None = None,
+    ) -> bool:
+        """Validate a locally emitted ACK immediately before sending it on the socket."""
+        if not isinstance(ack, dict):
+            return False
+        with self._lock:
+            sequence = ack.get("sequence")
+            generation = ack.get("generation_id")
+            if (
+                isinstance(sequence, bool) or not isinstance(sequence, int)
+                or isinstance(generation, bool) or not isinstance(generation, int)
+                or (current_generation_id is not None and generation != current_generation_id)
+                or (ack.get("response_id"), generation) in self._cancelled_pairs
+                or ack.get("response_id") in self._cancelled_responses
+                or sequence <= self._last_accepted_ack_sequence
+                or self._outstanding_acks.get(sequence) != ack
+                or ack.get("type") != "client_consumed_pcm"
+            ):
+                return False
+            response_id = ack.get("response_id")
+            segment_id = ack.get("speaker_segment_id")
+            watermark = ack.get("end_sample")
+            if (
+                not isinstance(response_id, str) or not response_id
+                or not isinstance(segment_id, str) or not segment_id
+                or isinstance(watermark, bool) or not isinstance(watermark, int) or watermark < 0
+            ):
+                return False
+            key = (response_id, generation, segment_id)
+            if watermark <= self._accepted_watermarks.get(key, -1):
+                return False
+            self._accepted_watermarks[key] = watermark
+            self._last_accepted_ack_sequence = sequence
+            self._outstanding_acks.pop(sequence, None)
+            self._cleanup_completed_response_locked(response_id)
+            return True
 
     def read_into(self, outdata: np.ndarray) -> int:
         """Fill the complete device callback buffer; return samples copied."""
@@ -281,19 +683,34 @@ class BoundedPCMPlayback:
         written = 0
         with self._lock:
             while written < destination.size and self._chunks:
-                samples, offset, response_id, chunk_generation = self._chunks[0]
-                count = min(destination.size - written, samples.size - offset)
-                destination[written:written + count] = samples[offset:offset + count]
+                chunk = self._chunks[0]
+                count = min(destination.size - written, chunk.pcm.size - chunk.offset)
+                destination[written:written + count] = chunk.pcm[chunk.offset:chunk.offset + count]
                 written += count
                 self._pending_samples -= count
-                if offset + count == samples.size:
+                next_offset = chunk.offset + count
+                if chunk.speaker_segment_id is not None:
+                    key = self._segment_key(
+                        chunk.response_id, chunk.generation_id, chunk.speaker_segment_id,
+                    )
+                    segment = self._segments.get(key)
+                    if segment is None or chunk.start_sample is None:
+                        raise RuntimeError("playback chunk lost its segment cursor owner")
+                    consumed_start = int(chunk.start_sample) + chunk.offset
+                    if consumed_start != segment.consumed_end_sample:
+                        raise RuntimeError("device callback encountered a discontinuous segment sample cursor")
+                    segment.consumed_end_sample += count
+                    if segment.consumed_end_sample > segment.enqueued_end_sample:
+                        raise RuntimeError("device callback consumed beyond enqueued segment PCM")
+                    self._maybe_queue_segment_ack_locked(segment)
+                if next_offset == chunk.pcm.size:
                     self._chunks.popleft()
-                    if response_id in self._completed_responses and not any(
-                        chunk[2] == response_id for chunk in self._chunks
+                    if chunk.response_id in self._completed_responses and not any(
+                        queued.response_id == chunk.response_id for queued in self._chunks
                     ):
-                        self._completed_responses.discard(response_id)
+                        self._cleanup_completed_response_locked(chunk.response_id)
                 else:
-                    self._chunks[0] = (samples, offset + count, response_id, chunk_generation)
+                    chunk.offset = next_offset
         return written
 
 
@@ -366,10 +783,36 @@ def handle_realtime_event(event: dict[str, Any], playback: BoundedPCMPlayback) -
         playback.advance_generation(generation)
     elif event_type == "response.audio.delta":
         packet = decode_response_audio(event)
-        playback.enqueue(packet.response_id, packet.generation_id, packet.pcm)
+        playback.enqueue_packet(
+            response_id=packet.response_id,
+            generation_id=packet.generation_id,
+            speaker_segment_id=packet.speaker_segment_id,
+            packet_id=packet.packet_id,
+            first_frame_id=packet.first_frame_id,
+            last_frame_id=packet.last_frame_id,
+            start_sample=packet.start_sample,
+            end_sample=packet.end_sample,
+            pcm=packet.pcm,
+            sample_rate=packet.sample_rate,
+        )
+    elif event_type == "response.audio.segment_done":
+        playback.complete_segment(
+            response_id=str(event.get("response_id", "")),
+            generation_id=_required_int(event, "generation_id"),
+            speaker_segment_id=str(event.get("speaker_segment_id", "")),
+            start_sample=_required_int(event, "start_sample"),
+            end_sample=_required_int(event, "end_sample"),
+            sample_rate=_required_int(event, "sample_rate"),
+        )
     elif event_type in {"response.cancelled", "audio.cancelled"}:
         response_id = event.get("response_id")
-        playback.cancel_response(None if response_id is None else str(response_id))
+        generation_id = event.get("generation_id")
+        if generation_id is not None:
+            generation_id = _required_int(event, "generation_id")
+        playback.cancel_response(
+            None if response_id is None else str(response_id),
+            generation_id,
+        )
         print(f"\n[Audio flushed] response={response_id} reason={event.get('reason', 'cancelled')}")
     elif event_type in {"response.output_text.delta", "response.audio_transcript.delta"}:
         delta = event.get("delta", "")
@@ -507,6 +950,8 @@ async def send_microphone_frames(
     websocket: Any,
     microphone: BoundedMicrophoneFrames,
     stop: asyncio.Event,
+    *,
+    send_lock: asyncio.Lock | None = None,
 ) -> None:
     """Send captured PCM16 frames independently of response receive/playback."""
     next_send_ns = 0
@@ -529,10 +974,15 @@ async def send_microphone_frames(
                 pass
         if stop.is_set():
             return
-        await websocket.send(json.dumps({
+        message = json.dumps({
             "type": "input_audio_buffer.append",
             "audio": base64.b64encode(frame.pcm16).decode("ascii"),
-        }, separators=(",", ":")))
+        }, separators=(",", ":"))
+        if send_lock is None:
+            await websocket.send(message)
+        else:
+            async with send_lock:
+                await websocket.send(message)
         # If the event loop or transport falls behind, keep the PCM timeline
         # honest instead of bursting old frames to catch up.
         next_send_ns = max(due_ns, time.monotonic_ns()) + MIC_FRAME_NS
@@ -543,6 +993,7 @@ async def _receive_realtime_events(
     playback: BoundedPCMPlayback,
     *,
     duration_s: float | None = None,
+    event_lock: asyncio.Lock | None = None,
 ) -> None:
     loop = asyncio.get_running_loop()
     deadline = None if duration_s is None else loop.time() + duration_s
@@ -562,7 +1013,43 @@ async def _receive_realtime_events(
         event = json.loads(raw)
         if not isinstance(event, dict):
             raise ValueError("evento realtime deve essere un oggetto JSON")
-        handle_realtime_event(event, playback)
+        if event_lock is None:
+            handle_realtime_event(event, playback)
+        else:
+            async with event_lock:
+                handle_realtime_event(event, playback)
+
+
+async def send_client_consumed_pcm_acks(
+    websocket: Any,
+    playback: BoundedPCMPlayback,
+    stop: asyncio.Event,
+    *,
+    event_lock: asyncio.Lock,
+    send_lock: asyncio.Lock,
+) -> None:
+    """Send callback-produced ACKs from asyncio, fenced against received cancels."""
+    while not stop.is_set():
+        acknowledgements = playback.drain_client_consumed_pcm_acks()
+        if not acknowledgements:
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=0.01)
+            except asyncio.TimeoutError:
+                pass
+            continue
+        for acknowledgement in acknowledgements:
+            if stop.is_set():
+                return
+            # Take the socket lock first so a queued microphone write cannot
+            # make this ACK stale while the event loop waits for the transport.
+            async with send_lock:
+                async with event_lock:
+                    if not playback.accept_client_consumed_pcm_ack(
+                        acknowledgement,
+                        current_generation_id=int(acknowledgement["generation_id"]),
+                    ):
+                        continue
+                    await websocket.send(json.dumps(acknowledgement, separators=(",", ":")))
 
 
 async def _watch_audio_devices(devices: RealtimeAudioDevices, stop: asyncio.Event) -> None:
@@ -812,12 +1299,23 @@ async def test_realtime_duplex_websocket(
         )
         devices.start()
         stop = asyncio.Event()
-        sender_task = asyncio.create_task(send_microphone_frames(ws, microphone, stop))
+        event_lock = asyncio.Lock()
+        send_lock = asyncio.Lock()
+        sender_task = asyncio.create_task(
+            send_microphone_frames(ws, microphone, stop, send_lock=send_lock)
+        )
         receiver_task = asyncio.create_task(
-            _receive_realtime_events(ws, playback, duration_s=duration_s)
+            _receive_realtime_events(
+                ws, playback, duration_s=duration_s, event_lock=event_lock,
+            )
+        )
+        ack_sender_task = asyncio.create_task(
+            send_client_consumed_pcm_acks(
+                ws, playback, stop, event_lock=event_lock, send_lock=send_lock,
+            )
         )
         monitor_task = asyncio.create_task(_watch_audio_devices(devices, stop))
-        tasks = (sender_task, receiver_task, monitor_task)
+        tasks = (sender_task, receiver_task, ack_sender_task, monitor_task)
         print("✅ Full-duplex attivo. Ctrl+C per terminare.")
         try:
             done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)

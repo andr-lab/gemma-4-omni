@@ -11,6 +11,7 @@ from duplex_kernel.native_qwen_talker import (
     _advance_audio_q1_position,
     _dynamic_cache_kv_layers,
 )
+from duplex_kernel.frame_residual_adapter import FrameResidualQueryFiLMAdapter
 from duplex_kernel.engine import PipelineEngine
 import duplex_kernel.engine as engine_module
 
@@ -357,6 +358,53 @@ def test_native_q1_executor_imports_exact_hf_prefill_cache_and_capacity(monkeypa
 
     assert executor.max_cache_len == 60
     assert executor.imported == (cache, 41)
+
+
+def test_live_native_q1_import_reserves_bounded_capacity_for_growing_text_budget() -> None:
+    live_stream = object()
+
+    assert engine_module._native_q1_import_audio_frame_budget(
+        57,
+        live_qwen_text_stream=live_stream,
+        live_frame_cap=512,
+    ) == 512
+    assert engine_module._native_q1_import_audio_frame_budget(
+        57,
+        live_qwen_text_stream=None,
+        live_frame_cap=512,
+    ) == 57
+
+
+def test_live_frame_residual_preserves_only_global_frame_zero_and_uses_exact_packet_hidden() -> None:
+    adapter = FrameResidualQueryFiLMAdapter()
+    with torch.no_grad():
+        adapter.output.weight.normal_(mean=0.0, std=0.02)
+        adapter.output.bias.fill_(0.01)
+    torch.manual_seed(123)
+    query = torch.randn((1, 1, 2048))
+    hidden_first = torch.randn((1, 1, 1536))
+    hidden_last = torch.randn((1, 1, 1536))
+    seen_hidden = []
+    adapter.register_forward_pre_hook(
+        lambda _module, args: seen_hidden.append(args[0].detach().clone())
+    )
+
+    frame0, tail0 = engine_module._apply_live_frame_residual(
+        adapter, hidden_first, query, generation_step=0, tail_hold=False
+    )
+    frame1, tail1 = engine_module._apply_live_frame_residual(
+        adapter, hidden_first, query, generation_step=1, tail_hold=False
+    )
+    frame2, tail2 = engine_module._apply_live_frame_residual(
+        adapter, hidden_last, query, generation_step=2, tail_hold=True
+    )
+
+    assert torch.equal(frame0, query)
+    assert torch.linalg.vector_norm(frame1 - query).item() > 0.0
+    assert not torch.allclose(frame1, frame2)
+    assert torch.equal(seen_hidden[0], hidden_first)
+    assert torch.equal(seen_hidden[1], hidden_last)
+    assert (tail0, tail1, tail2) == (False, False, True)
 
 
 def test_native_q1_startup_warmup_uses_three_audio_queries_after_nonzero_prefix(monkeypatch) -> None:

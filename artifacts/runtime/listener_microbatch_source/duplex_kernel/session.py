@@ -16,6 +16,8 @@ Sessione duplex (per utente):
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import logging
 import threading
 import time
@@ -51,6 +53,325 @@ MAX_AUDIO_HISTORY_ARCHIVE_SAMPLES = USER_SAMPLE_RATE * 30
 POLICY_AUDIO_FRAME_MS = 80
 POLICY_AUDIO_FRAME_SAMPLES = USER_SAMPLE_RATE * POLICY_AUDIO_FRAME_MS // 1000
 MAX_COMPLETED_UTTERANCE_AUDIO_SAMPLES = USER_SAMPLE_RATE * DEFAULT_MAX_AUDIO_MS // 1000
+TURN_LOCAL_SPEECH_FIFO_CAPACITY = 4
+GEMMA_SPEECH_TICK_MS = 80
+GEMMA_SPEECH_TOKENS_PER_TICK = 2
+
+
+@dataclass(frozen=True)
+class SpokenTokenPacket:
+    """One visible SAY delta with its exact post-token Gemma state and KV cursor."""
+
+    token_id: int
+    text_piece: str
+    gemma_hidden_1536: Any = field(repr=False, compare=False)
+    kv_position: int
+
+    def __post_init__(self) -> None:
+        if isinstance(self.token_id, bool) or int(self.token_id) < 0:
+            raise ValueError("Gemma token_id deve essere non negativo")
+        if not isinstance(self.text_piece, str):
+            raise TypeError("text_piece deve essere string")
+        if isinstance(self.kv_position, bool) or int(self.kv_position) < 0:
+            raise ValueError("kv_position deve essere non negativo")
+        shape = tuple(getattr(self.gemma_hidden_1536, "shape", ()))
+        if shape != (1, 1536):
+            raise ValueError(f"gemma_hidden_1536 deve avere shape (1,1536), ricevuto {shape}")
+        hidden = self.gemma_hidden_1536
+        detach = getattr(hidden, "detach", None)
+        if callable(detach):
+            hidden = detach()
+            clone = getattr(hidden, "clone", None)
+            if callable(clone):
+                hidden = clone()
+        object.__setattr__(self, "token_id", int(self.token_id))
+        object.__setattr__(self, "kv_position", int(self.kv_position))
+        object.__setattr__(self, "gemma_hidden_1536", hidden)
+
+
+@dataclass(frozen=True)
+class SpeechQwenToken:
+    """A Qwen text ID and the Gemma packet whose SAY span produced it."""
+
+    token_id: int
+    packet: SpokenTokenPacket
+    packet_token_index: int
+    packet_token_count: int
+
+
+@dataclass
+class _QueuedSpokenPacket:
+    packet: SpokenTokenPacket
+    qwen_token_ids: tuple[int, ...]
+    next_token_index: int = 0
+
+
+class TurnLocalSpeechFIFO:
+    """Bounded, response-owned FIFO; packet heads live until all Qwen IDs drain."""
+
+    def __init__(self, capacity: int = TURN_LOCAL_SPEECH_FIFO_CAPACITY) -> None:
+        if isinstance(capacity, bool) or not 1 <= int(capacity) <= TURN_LOCAL_SPEECH_FIFO_CAPACITY:
+            raise ValueError(f"capacity deve essere compresa tra 1 e {TURN_LOCAL_SPEECH_FIFO_CAPACITY}")
+        self.capacity = int(capacity)
+        self._condition = threading.Condition(threading.RLock())
+        self._entries: deque[_QueuedSpokenPacket] = deque()
+        self._inflight: SpeechQwenToken | None = None
+        self._generation_id: int | None = None
+        self._closed = False
+        self._frozen = False
+        self._initial_token_taken = False
+        self._last_vocalized_kv_position: int | None = None
+        self._vocalized_text_parts: list[str] = []
+        self._peak_depth = 0
+
+    def __len__(self) -> int:
+        with self._condition:
+            return len(self._entries)
+
+    @property
+    def last_vocalized_kv_position(self) -> int | None:
+        """Last Gemma KV position consumed by Qwen text synthesis, not playback ACK."""
+        with self._condition:
+            return self._last_vocalized_kv_position
+
+    @property
+    def vocalized_text(self) -> str:
+        """Gemma packet text whose complete Qwen ID spans were accepted by Q1."""
+        with self._condition:
+            return "".join(self._vocalized_text_parts)
+
+    @property
+    def peak_depth(self) -> int:
+        """Maximum queued plus in-flight Gemma packet count this turn."""
+        with self._condition:
+            return self._peak_depth
+
+    @property
+    def generation_id(self) -> int | None:
+        with self._condition:
+            return self._generation_id
+
+    def begin_turn(self, *, generation_id: int) -> None:
+        if isinstance(generation_id, bool) or int(generation_id) < 0:
+            raise ValueError("generation_id deve essere non negativo")
+        with self._condition:
+            self._entries.clear()
+            self._inflight = None
+            self._generation_id = int(generation_id)
+            self._closed = False
+            self._frozen = False
+            self._initial_token_taken = False
+            self._last_vocalized_kv_position = None
+            self._vocalized_text_parts.clear()
+            self._peak_depth = 0
+            self._condition.notify_all()
+
+    def put(
+        self,
+        packet: SpokenTokenPacket,
+        *,
+        qwen_token_ids: tuple[int, ...] | list[int],
+        generation_id: int,
+        stop_check: Callable[[], bool] | None = None,
+        timeout_s: float | None = None,
+    ) -> None:
+        if not isinstance(packet, SpokenTokenPacket):
+            raise TypeError("packet deve essere SpokenTokenPacket")
+        ids = tuple(qwen_token_ids)
+        if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in ids):
+            raise ValueError("qwen_token_ids deve contenere ID interi non negativi")
+        if packet.text_piece and not ids:
+            raise ValueError("SAY visibile senza ID Qwen: gestire esplicitamente il carry, non scartarlo")
+        started = time.monotonic()
+        while True:
+            with self._condition:
+                self._raise_generation(generation_id)
+                if self._frozen:
+                    raise RuntimeError("turn-local speech FIFO snapshot is frozen")
+                if self._closed:
+                    raise RuntimeError("turn-local speech FIFO closed")
+                if len(self._entries) < self.capacity:
+                    if not ids:
+                        # Empty/structural Gemma deltas have explicit zero-vocal-ID
+                        # semantics and never advance the synthesis cursor.
+                        return
+                    self._entries.append(_QueuedSpokenPacket(packet, ids))
+                    self._peak_depth = max(self._peak_depth, len(self._entries))
+                    self._condition.notify_all()
+                    return
+                if timeout_s is None:
+                    self._condition.wait(0.02)
+                else:
+                    remaining = float(timeout_s) - (time.monotonic() - started)
+                    if remaining <= 0:
+                        raise TimeoutError("turn-local speech FIFO full")
+                    self._condition.wait(min(0.02, remaining))
+            # stop_check can acquire the session generation lock. Never call it
+            # while holding the FIFO condition: invalidate_generation takes
+            # those locks in the opposite order to clear this queue.
+            if stop_check is not None and stop_check():
+                raise RuntimeError("turn-local speech FIFO producer cancelled")
+
+    def _raise_generation(self, generation_id: int) -> None:
+        if self._generation_id != int(generation_id):
+            raise RuntimeError("turn-local speech FIFO generation changed")
+
+    def take_qwen_token(
+        self,
+        *,
+        generation_id: int,
+        initial: bool = False,
+        stop_check: Callable[[], bool] | None = None,
+        timeout_s: float | None = None,
+    ) -> SpeechQwenToken | None:
+        started = time.monotonic()
+        while True:
+            with self._condition:
+                self._raise_generation(generation_id)
+                if initial and self._initial_token_taken:
+                    raise RuntimeError("Qwen initial token was already consumed")
+                if self._inflight is not None:
+                    if timeout_s is not None and time.monotonic() - started >= timeout_s:
+                        raise TimeoutError("turn-local speech FIFO token remains in flight")
+                    self._condition.wait(0.02)
+                elif self._entries:
+                    head = self._entries[0]
+                    index = head.next_token_index
+                    token = SpeechQwenToken(
+                        token_id=head.qwen_token_ids[index],
+                        packet=head.packet,
+                        packet_token_index=index,
+                        packet_token_count=len(head.qwen_token_ids),
+                    )
+                    self._inflight = token
+                    if initial:
+                        self._initial_token_taken = True
+                    return token
+                elif self._closed:
+                    return None
+                elif timeout_s is not None:
+                    remaining = float(timeout_s) - (time.monotonic() - started)
+                    if remaining <= 0:
+                        raise TimeoutError("turn-local speech FIFO empty")
+                    self._condition.wait(min(0.02, remaining))
+                else:
+                    self._condition.wait(0.02)
+            # Avoid lock inversion with session.invalidate_generation().
+            if stop_check is not None and stop_check():
+                raise RuntimeError("turn-local speech FIFO consumer cancelled")
+
+    def ack_qwen_token(self, *, generation_id: int) -> int | None:
+        """Commit one reserved ID only after the Qwen forward accepted it."""
+        with self._condition:
+            self._raise_generation(generation_id)
+            if self._frozen:
+                raise RuntimeError("turn-local speech FIFO snapshot is frozen")
+            token = self._inflight
+            if token is None:
+                raise RuntimeError("turn-local speech FIFO has no Qwen token in flight")
+            head = self._entries[0]
+            if (
+                head.packet is not token.packet
+                or head.next_token_index != token.packet_token_index
+            ):
+                raise RuntimeError("turn-local speech FIFO in-flight token lost its head owner")
+            head.next_token_index += 1
+            cursor = None
+            if head.next_token_index == len(head.qwen_token_ids):
+                self._entries.popleft()
+                self._last_vocalized_kv_position = head.packet.kv_position
+                self._vocalized_text_parts.append(head.packet.text_piece)
+                cursor = head.packet.kv_position
+            self._inflight = None
+            self._condition.notify_all()
+            return cursor
+
+    def close(self) -> None:
+        """Stop producers and let the consumer drain already accepted packets."""
+        with self._condition:
+            self._closed = True
+            self._condition.notify_all()
+
+    def freeze_snapshot(self, *, generation_id: int) -> tuple[int | None, str]:
+        """Freeze the synthesis ACK boundary and return its atomic text/cursor."""
+        with self._condition:
+            self._raise_generation(generation_id)
+            self._frozen = True
+            self._closed = True
+            snapshot = (
+                self._last_vocalized_kv_position,
+                "".join(self._vocalized_text_parts),
+            )
+            self._condition.notify_all()
+            return snapshot
+
+    def clear(self) -> int | None:
+        """Fence the turn, discard queued packets, and return its synthesis cursor."""
+        with self._condition:
+            cursor = self._last_vocalized_kv_position
+            self._entries.clear()
+            self._inflight = None
+            self._closed = True
+            self._frozen = True
+            self._condition.notify_all()
+            return cursor
+
+
+class GemmaTokenTickPacer:
+    """Hard per-80ms-window token budget with no catch-up burst after delays."""
+
+    def __init__(
+        self,
+        *,
+        tick_ms: int = GEMMA_SPEECH_TICK_MS,
+        max_tokens_per_tick: int = GEMMA_SPEECH_TOKENS_PER_TICK,
+        monotonic: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Any] = asyncio.sleep,
+    ) -> None:
+        if isinstance(tick_ms, bool) or int(tick_ms) <= 0:
+            raise ValueError("tick_ms deve essere positivo")
+        if isinstance(max_tokens_per_tick, bool) or int(max_tokens_per_tick) < 1:
+            raise ValueError("max_tokens_per_tick deve essere positivo")
+        self.tick_s = int(tick_ms) / 1000.0
+        self.max_tokens_per_tick = int(max_tokens_per_tick)
+        self._monotonic = monotonic
+        self._sleep = sleep
+        self._epoch = float(monotonic())
+        self._tick_index = 0
+        self._tokens_in_tick = 0
+        self._total_acquired = 0
+        self._peak_tokens_in_tick = 0
+
+    async def acquire(self, *, stop_check: Callable[[], bool] | None = None) -> None:
+        while True:
+            now = float(self._monotonic())
+            tick = max(0, int((now - self._epoch) // self.tick_s))
+            if tick > self._tick_index:
+                self._tick_index = tick
+                self._tokens_in_tick = 0
+            if self._tokens_in_tick < self.max_tokens_per_tick:
+                if stop_check is not None and stop_check():
+                    raise RuntimeError("Gemma speech token pacing cancelled")
+                self._tokens_in_tick += 1
+                self._total_acquired += 1
+                self._peak_tokens_in_tick = max(
+                    self._peak_tokens_in_tick, self._tokens_in_tick
+                )
+                return
+            next_boundary = self._epoch + (self._tick_index + 1) * self.tick_s
+            if stop_check is not None and stop_check():
+                raise RuntimeError("Gemma speech token pacing cancelled")
+            result = self._sleep(max(0.0, next_boundary - now))
+            if inspect.isawaitable(result):
+                await result
+
+    def snapshot(self) -> dict[str, int]:
+        return {
+            "tick_ms": int(round(self.tick_s * 1000.0)),
+            "max_tokens_per_tick": self.max_tokens_per_tick,
+            "total_tokens": self._total_acquired,
+            "peak_tokens_in_tick": self._peak_tokens_in_tick,
+        }
 
 
 @dataclass(frozen=True)
@@ -125,6 +446,11 @@ class DuplexSession:
     stale_kv_writes: int = 0
     stale_session_mutations: int = 0
     stale_write_attempts: dict[str, int] = field(default_factory=dict)
+    # Gemma-to-Qwen speech packets are owned by this response generation.
+    speech_fifo: TurnLocalSpeechFIFO = field(default_factory=TurnLocalSpeechFIFO, repr=False, compare=False)
+    _speech_fifo_snapshots: dict[int, tuple[int | None, str]] = field(
+        default_factory=dict, repr=False, compare=False
+    )
     _silence_skip_transition_lock: threading.Lock = field(
         default_factory=threading.Lock, repr=False, compare=False
     )
@@ -390,6 +716,7 @@ class DuplexSession:
                         generation_id=self.session_generation_id,
                     )
                     self.policy_audio_source_generation_id = self.session_generation_id
+                self.speech_fifo.begin_turn(generation_id=self.session_generation_id)
                 self.response_id = response_id
                 self.speaker_segment_id = f"seg_{uuid.uuid4().hex[:12]}"
                 self.frame_id = 0
@@ -884,14 +1211,18 @@ class DuplexSession:
     ) -> bool:
         """Attach the actual completed assistant turn to its archive slot."""
         normalized_status = str(status).strip().lower()
-        if normalized_status not in {"completed", "cancelled", "absent"}:
+        if normalized_status not in {"completed", "partial", "cancelled", "absent"}:
             raise ValueError("stato assistant archive non supportato")
         with self._generation_lock:
             pending = self._find_audio_history_archive_locked(archive_id)
             if self._closed or pending is None:
                 self.stale_history_writes += 1
                 return False
-            assistant_text = str(text).strip() if normalized_status == "completed" else ""
+            assistant_text = (
+                str(text).strip()
+                if normalized_status in {"completed", "partial"}
+                else ""
+            )
             pending["assistant_text"] = assistant_text
             pending["assistant_status"] = normalized_status
             pending["assistant_finalized"] = True
@@ -923,7 +1254,7 @@ class DuplexSession:
             base_messages.append({"role": "user", "content": transcript})
         assistant_text = (
             str(pending.get("assistant_text", "")).strip()
-            if pending.get("assistant_status", "completed") == "completed"
+            if pending.get("assistant_status", "completed") in {"completed", "partial"}
             else ""
         )
         if assistant_text:
@@ -1040,9 +1371,17 @@ class DuplexSession:
         with self._generation_lock:
             if self._closed:
                 return self.session_generation_id
+            old_generation_id = int(self.session_generation_id)
+            if self.speech_fifo.generation_id == old_generation_id:
+                self._speech_fifo_snapshots[old_generation_id] = self.speech_fifo.freeze_snapshot(
+                    generation_id=old_generation_id
+                )
+            while len(self._speech_fifo_snapshots) > 4:
+                self._speech_fifo_snapshots.pop(next(iter(self._speech_fifo_snapshots)))
             self._clear_completed_utterance_audio_locked()
             self._clear_policy_audio_source_watermark_locked()
             self.session_generation_id += 1
+            self.speech_fifo.clear()
             self.stop_requested = True
             self.policy_response_pending = False
             self.conditioning_buffer.invalidate()
@@ -1059,6 +1398,21 @@ class DuplexSession:
                 self.v9_text_anchor = None
             logger.debug("[session] generation invalidata %s: %s", self.session_id, reason)
             return self.session_generation_id
+
+    def freeze_speech_snapshot(self, *, generation_id: int) -> tuple[int | None, str]:
+        """Return the final ACKed speech prefix for one generation exactly once."""
+        generation_id = int(generation_id)
+        with self._generation_lock:
+            snapshot = self._speech_fifo_snapshots.get(generation_id)
+            if snapshot is None:
+                snapshot = self.speech_fifo.freeze_snapshot(generation_id=generation_id)
+                self._speech_fifo_snapshots[generation_id] = snapshot
+                while len(self._speech_fifo_snapshots) > 4:
+                    oldest = next(iter(self._speech_fifo_snapshots))
+                    if oldest == generation_id:
+                        break
+                    self._speech_fifo_snapshots.pop(oldest)
+            return snapshot
 
     def is_generation_current(self, token: GenerationToken | None = None, *, generation_id: int | None = None,
                               response_id: str | None = None, speaker_segment_id: str | None = None) -> bool:
@@ -1161,6 +1515,7 @@ class DuplexSession:
             self._clear_completed_utterance_audio_locked()
             self._clear_policy_audio_source_watermark_locked()
             self.session_generation_id += 1
+            self.speech_fifo.clear()
             self.stop_requested = True
             self.policy_response_pending = False
             self.policy_audio_frames.clear()

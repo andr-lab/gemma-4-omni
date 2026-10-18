@@ -1,0 +1,14 @@
+{
+  "created_at_utc": "2026-10-18T07:43:31.526704+00:00",
+  "endpoint": "POST /v1/chat/completions via SSH tunnel to Mondaini",
+  "model": "gemma-4-omni-duplex",
+  "modalities": [
+    "text"
+  ],
+  "max_tokens": 768,
+  "note": "A sequential plain-text baseline; first answer completes before correction, unlike streaming interruption.",
+  "items": [
+    "A_initial_milano.json",
+    "A_correction_torino.json"
+  ]
+}

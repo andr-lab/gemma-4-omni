@@ -1,0 +1,79 @@
+{
+  "status": "completed",
+  "created_at_utc": "2026-10-16T21:37:01.604200+00:00",
+  "experiment": "Q2 output-selection-only microbenchmark; no tower reload, no serving change",
+  "source": {
+    "npz": "/workspace/artifacts/causal_audio_tower_benchmark/window_sweep_20261016_terminal_hidden.npz",
+    "array_key": "window_640_tick124_last_hidden_state",
+    "cached_source_shape": [
+      160,
+      1536
+    ],
+    "selection_source_rows": "last 60 of cached W640 tick124 hidden state; values used only to preserve real BF16 tower tensor characteristics",
+    "pooled_shape": [
+      1,
+      60,
+      1536
+    ],
+    "dtype": "torch.bfloat16",
+    "mask": "all true [1,60]",
+    "q_start": 58
+  },
+  "methods": {
+    "boolean_index_then_slice_clone": "pooled.copy_(source); valid=pooled[0][mask[0].bool()]; valid[58:60].unsqueeze(0).to(dtype/device).clone()",
+    "direct_slice_clone": "pooled.copy_(source); pooled[:,58:60,:].to(dtype/device).clone()",
+    "input_copy": "fresh GPU copy into pooled each measured call; included in both methods",
+    "warmup_per_method": 20,
+    "samples_per_method": 50,
+    "synchronization": "CUDA events on current stream; synchronize before sample and on end event; wall includes host dispatch and any dynamic boolean-index synchronization",
+    "scope_limit": "isolates output selection + clone only; excludes CUDA graph replay, tower, and embed_audio projection"
+  },
+  "parity": {
+    "outputs_equal": true,
+    "shape": [
+      1,
+      2,
+      1536
+    ],
+    "max_abs": 0.0
+  },
+  "results": {
+    "boolean_index_then_slice_clone": {
+      "cuda_ms": {
+        "count": 50,
+        "mean": 0.1520300817489624,
+        "p50": 0.14950400590896606,
+        "p95": 0.16179199516773224,
+        "max": 0.16486400365829468
+      },
+      "wall_ms": {
+        "count": 50,
+        "mean": 0.17262922000000003,
+        "p50": 0.168268,
+        "p95": 0.181272,
+        "max": 0.285464
+      }
+    },
+    "direct_slice_clone": {
+      "cuda_ms": {
+        "count": 50,
+        "mean": 0.06059392124414444,
+        "p50": 0.05939200147986412,
+        "p95": 0.07121920175850391,
+        "max": 0.07680000364780426
+      },
+      "wall_ms": {
+        "count": 50,
+        "mean": 0.07939813999999999,
+        "p50": 0.0780415,
+        "p95": 0.08970204999999999,
+        "max": 0.098581
+      }
+    }
+  },
+  "gpu": {
+    "name": "NVIDIA GeForce RTX 3090",
+    "free_bytes_before": 4167696384,
+    "free_bytes_after": 4121559040
+  }
+}
