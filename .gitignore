@@ -5,6 +5,7 @@
 __pycache__/
 *.pyc
 *.pyo
+*.obj
 .tmp/
 .tmp_*
 *.log
