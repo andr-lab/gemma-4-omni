@@ -42,6 +42,7 @@ EXCLUDE_DIRS = {
     "checkpoints",
     "data",
     "samples",
+    "artifacts",
     "build",
     "dist",
 }
@@ -132,7 +133,7 @@ def sync_single_file(local_path: Path) -> bool:
     remote_dir = os.path.dirname(remote_path)
 
     # Assicura che la directory remota esista
-    mkdir_cmd = ["ssh", "-o", "BatchMode=yes", SSH_HOST, f"mkdir -p '{remote_dir}'"]
+    mkdir_cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", SSH_HOST, f"mkdir -p '{remote_dir}'"]
     subprocess.run(mkdir_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
 
     scp_cmd = [
