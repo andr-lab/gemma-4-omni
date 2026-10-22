@@ -13,6 +13,7 @@ from duplex_kernel.listener import GemmaListener, GemmaListenerState
 from duplex_kernel.listener_microbatch_serving import (
     GEMM_GRAPHS_ENV,
     SEMANTIC_SHADOW_ENV,
+    STABLE_TURN_POLICY_Q2_CONTEXT_ENV,
     _build_native_control6_batch_policy,
     _semantic_prefix_request_matches_applied_row,
     _strict_env_flag,
@@ -69,6 +70,8 @@ def test_applied_prefix_request_reuse_requires_full_identity(
         (GEMM_GRAPHS_ENV, "1", True),
         (SEMANTIC_SHADOW_ENV, "0", False),
         (SEMANTIC_SHADOW_ENV, "1", True),
+        (STABLE_TURN_POLICY_Q2_CONTEXT_ENV, "0", False),
+        (STABLE_TURN_POLICY_Q2_CONTEXT_ENV, "1", True),
     ],
 )
 def test_microbatch_serving_switches_accept_only_explicit_zero_or_one(
@@ -88,8 +91,10 @@ def test_microbatch_serving_switches_reject_ambiguous_values(monkeypatch, value:
 def test_microbatch_serving_switches_default_off(monkeypatch) -> None:
     monkeypatch.delenv(GEMM_GRAPHS_ENV, raising=False)
     monkeypatch.delenv(SEMANTIC_SHADOW_ENV, raising=False)
+    monkeypatch.delenv(STABLE_TURN_POLICY_Q2_CONTEXT_ENV, raising=False)
     assert _strict_env_flag(GEMM_GRAPHS_ENV) is False
     assert _strict_env_flag(SEMANTIC_SHADOW_ENV) is False
+    assert _strict_env_flag(STABLE_TURN_POLICY_Q2_CONTEXT_ENV) is False
 
 
 def test_native_control6_serving_factory_builds_mixed_policy_and_reads_frame_context() -> None:

@@ -36,7 +36,29 @@ from duplex_kernel.native_control6_runtime import NativeControl6SemanticPrefixRe
 MICROBATCH_LIBRARY_ENV = "DUPLEX_LISTENER_MICROBATCH_LIBRARY_PATH"
 GEMM_GRAPHS_ENV = "DUPLEX_LISTENER_MICROBATCH_GEMM_GRAPHS"
 SEMANTIC_SHADOW_ENV = "DUPLEX_LISTENER_MICROBATCH_SEMANTIC_SHADOW"
+STABLE_TURN_POLICY_Q2_CONTEXT_ENV = "DUPLEX_NATIVE_CONTROL6_STABLE_TURN_POLICY_Q2_CONTEXT"
+STREAMING_CONFORMER_Q2_EXPERIMENTAL_ENV = "DUPLEX_STREAMING_CONFORMER_Q2_EXPERIMENTAL"
 _EMPTY_SHA256 = "0" * 64
+
+
+def _capture_experimental_streaming_q2(
+    gemma_model: Any,
+    *,
+    device: Any,
+    dtype: Any,
+    max_sessions: int,
+    max_graph_batch_size: int,
+) -> Any:
+    """Build the explicit opt-in tower using its single startup precision scope."""
+    from duplex_kernel.streaming_conformer import StreamingConformerAudioTower
+
+    return StreamingConformerAudioTower.from_gemma_model_optimized_cuda(
+        gemma_model,
+        device=device,
+        dtype=dtype,
+        max_sessions=max_sessions,
+        max_graph_batch_size=max_graph_batch_size,
+    )
 
 
 def _strict_env_flag(name: str, *, default: bool = False) -> bool:
@@ -131,6 +153,9 @@ def _build_native_control6_batch_policy(
     batch_policy = GemmaNativeControl6BatchPolicy(
         native_control6_policy.adapter,
         checkpoint_path=native_control6_policy.checkpoint_path,
+        capture_debug_inputs=bool(
+            os.environ.get("DUPLEX_NATIVE_CONTROL6_DEBUG_INPUT_DIRECTORY", "").strip()
+        ),
     )
 
     def make_policy_inputs(
@@ -163,6 +188,9 @@ def make_listener_microbatch_worker(
     prefix. There is deliberately no per-session fallback.
     """
     gemm_graphs_enabled = _strict_env_flag(GEMM_GRAPHS_ENV)
+    stable_turn_policy_q2_context = _strict_env_flag(
+        STABLE_TURN_POLICY_Q2_CONTEXT_ENV,
+    )
     if type(unified_kv_enabled) is not bool:
         raise TypeError("unified_kv_enabled must be a bool")
     semantic_shadow_enabled = (
@@ -303,6 +331,7 @@ def make_listener_microbatch_worker(
             listener_stream=stream,
             max_batch_size=4,
             enable_gemm_graphs=gemm_graphs_enabled,
+            enable_variable_q_gemm_graphs=unified_kv_enabled,
         )
         with torch.cuda.stream(stream):
             primary_capacity = native.ensure_capacity(4)
@@ -310,6 +339,28 @@ def make_listener_microbatch_worker(
             raise RuntimeError(
                 f"primary listener capacity prewarm returned {primary_capacity}, expected >=4"
             )
+        streaming_q2_opt_in = os.environ.get(
+            STREAMING_CONFORMER_Q2_EXPERIMENTAL_ENV, ""
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        streaming_audio_tower = None
+        streaming_q2_status = "disabled_default_w240"
+        if streaming_q2_opt_in:
+            try:
+                streaming_audio_tower = _capture_experimental_streaming_q2(
+                    backend.gemma_model,
+                    device=device,
+                    dtype=backend.dtype,
+                    max_sessions=128,
+                    max_graph_batch_size=int(native.max_batch_size),
+                )
+                streaming_q2_status = (
+                    f"experimental_graphs_n1_to_n{int(native.max_batch_size)}_captured"
+                )
+            except Exception as exc:
+                # Q2 remains optional; any unsupported capture/runtime form
+                # uses the existing rolling W240 row runner.
+                streaming_audio_tower = None
+                streaming_q2_status = f"unsupported_fallback_w240: {type(exc).__name__}: {exc}"
         frontend = ListenerMicrobatchAudioFrontend(
             backend.gemma_model,
             backend._extract_single_frame,
@@ -318,6 +369,7 @@ def make_listener_microbatch_worker(
             mel_window_rows=backend.mel_window_rows,
             # The shared LM lock is reserved for semantic-prefix ShapeStable work.
             audio_tower_row_runner=backend.run_audio_tower_q2,
+            streaming_audio_tower=streaming_audio_tower,
         )
         # The mixed-source policy wrapper runs one head forward after the
         # server has captured each row's exact pre-head scheduler snapshot.
@@ -340,6 +392,13 @@ def make_listener_microbatch_worker(
         backend._listener_microbatch_runtime_info = {
             "enabled": True,
             "mode": "shared_fixed_80ms_microbatch",
+            "streaming_conformer_q2_opt_in": streaming_q2_opt_in,
+            "streaming_conformer_q2_status": streaming_q2_status,
+            "audio_frontend_default": (
+                "streaming_conformer_q2_experimental"
+                if streaming_audio_tower is not None
+                else "w240"
+            ),
             "unified_kv_enabled": unified_kv_enabled,
             "native_abi_version": signature.native_abi_version,
             "batch_api_version": signature.batch_api_version,
@@ -353,6 +412,10 @@ def make_listener_microbatch_worker(
             "gemm_graphs_enabled": native.gemm_graphs_enabled,
             "gemm_graph_count": native.gemm_graph_count,
             "gemm_graph_prepare_ms": native.gemm_graph_prepare_ms,
+            "variable_q_gemm_graphs_enabled": native.variable_q_gemm_graphs_enabled,
+            "variable_q_gemm_graph_count": native.variable_q_gemm_graph_count,
+            "variable_q_gemm_graph_prepare_ms": native.variable_q_gemm_graph_prepare_ms,
+            "variable_q_gemm_graph_prepare_error": native.variable_q_gemm_graph_prepare_error,
             "stream_priority": native.capability.stream_priority,
             "topology_sha256": signature.topology_sha256,
             "library_path": str(native.library_path),
@@ -400,6 +463,7 @@ def make_listener_microbatch_worker(
                     listener_stream=shadow_stream,
                     max_batch_size=1,
                     enable_gemm_graphs=gemm_graphs_enabled,
+                    enable_variable_q_gemm_graphs=False,
                     stream_priority=0,
                 )
                 if shadow_native.max_batch_size < 1:
@@ -489,9 +553,14 @@ def make_listener_microbatch_worker(
             shadow_factory=shadow_factory,
             shadow_prefix_builder=shadow_prefix_builder,
             token_adapter=token_adapter,
+            close_resources=frontend.close,
         )
 
-    return ListenerMicrobatchWorker(None, runtime_factory=runtime_factory)
+    return ListenerMicrobatchWorker(
+        None,
+        runtime_factory=runtime_factory,
+        stable_turn_policy_q2_context=stable_turn_policy_q2_context,
+    )
 
 
 def make_unified_prefix_import(
@@ -852,6 +921,7 @@ def _copy_tail(value: Any) -> np.ndarray | None:
 __all__ = [
     "InitialPrefixAdmission",
     "MICROBATCH_LIBRARY_ENV",
+    "STABLE_TURN_POLICY_Q2_CONTEXT_ENV",
     "commit_initial_semantic_prefix_state",
     "initial_listener_session_state",
     "make_listener_microbatch_worker",

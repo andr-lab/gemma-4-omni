@@ -36,7 +36,7 @@ OBJS = $(CUDA_OBJS) $(ORDERED_OBJ) $(ATEN_OBJS)
 
 all: $(LIB_TARGET) $(TEST_TARGET)
 
-%.o: %.cu generated_topology.h gemma4_listener.h gemma4_listener_kernels.cuh gemma4_listener_rms_exact.cuh listener_cuda_create_failure_log.cuh listener_create_failure_log.h sliding_repeat_capacity.h full_repeat_capacity.h
+%.o: %.cu generated_topology.h runtime_prefix_capacity.h gemma4_listener.h gemma4_listener_kernels.cuh gemma4_listener_rms_exact.cuh listener_cuda_create_failure_log.cuh listener_create_failure_log.h sliding_repeat_capacity.h full_repeat_capacity.h
 	$(NVCC) $(NVCCFLAGS) -c $< -o $@
 
 gemma4_listener_attention_ordered.o: gemma4_listener_attention_ordered.cu gemma4_listener_attention_ordered.cuh
@@ -51,7 +51,8 @@ gemma4_listener_aten_norm.o: gemma4_listener_aten_norm.cpp gemma4_listener_aten_
 $(LIB_TARGET): $(OBJS)
 	$(NVCC) $(NVCCFLAGS) -shared $(OBJS) -o $@ $(LDFLAGS) $(TORCH_LDFLAGS) -Xlinker -rpath -Xlinker $(TORCH_LIBRARY_DIR) -Xlinker -Bsymbolic-functions
 
-gemma4_listener.o: gemma4_listener_microbatch.h gemma4_listener_microbatch_impl.inc
+gemma4_listener.o: gemma4_listener.cu generated_topology.h runtime_prefix_capacity.h gemma4_listener.h gemma4_listener_rms_exact.cuh gemma4_listener_aten.h gemma4_listener_aten_norm.h gemma4_listener_kernels.cuh gemma4_listener_attention_ordered.cuh listener_cuda_create_failure_log.cuh sliding_repeat_capacity.h full_repeat_capacity.h gemma4_listener_batch_contract.h gemma4_listener_gemv4_contract.h gemma4_listener_microbatch.h gemma4_listener_microbatch_impl.inc
+	$(NVCC) $(NVCCFLAGS) -c $< -o $@
 
 $(TEST_TARGET): gemma4_listener_test.cu $(LIB_TARGET)
 	$(NVCC) $(NVCCFLAGS) $< -o $@ -L. -lgemma4_listener_microbatch $(LDFLAGS) $(TORCH_LDFLAGS) -Xlinker -rpath -Xlinker $(TORCH_LIBRARY_DIR) -Xlinker -rpath -Xlinker .

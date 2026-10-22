@@ -1,0 +1,1348 @@
+{
+  "status": "completed",
+  "started_at_utc": "2026-10-22T14:14:17.187711+00:00",
+  "completed_at_utc": "2026-10-22T14:33:13+00:00",
+  "benchmark": "exact incremental Gemma4AudioModel Q2 Conformer cache parity and complete frontend CUDA Graph latency",
+  "runtime": {
+    "container": "gemma4-listener-control6-h3000-eos-build14-20261021",
+    "workspace": "/workspace/.tmp/task_e_acceptance_20261022",
+    "active_service_overlay": "/workspace/artifacts/runtime/control6_runtime_pendingpcm_phaseonly_q2cachemeta_build14_stableturn_q2_context_h3000_eos_20261021",
+    "python": "3.11.9 (main, Apr 19 2024, 16:48:06) [GCC 11.2.0]",
+    "platform": "Linux-7.0.0-30-generic-x86_64-with-glibc2.35",
+    "torch": "2.12.1+cu130",
+    "torch_cuda": "13.0",
+    "transformers": "5.5.0",
+    "gpu": "NVIDIA GeForce RTX 3090",
+    "torch_float32_matmul_precision": "highest",
+    "cuda_matmul_tf32": false,
+    "transformers_modeling_source": "/opt/conda/lib/python3.11/site-packages/transformers/models/gemma4/modeling_gemma4.py"
+  },
+  "implementation": {
+    "path": "/workspace/.tmp/task_e_acceptance_20261022/duplex_kernel/streaming_conformer.py",
+    "sha256": "0a61bb92b41ca22795eb308135df3586f1345812e344332152e63b06472e9185",
+    "triton_kernel_path": "/workspace/.tmp/task_e_acceptance_20261022/duplex_kernel/streaming_conformer_kernels.py",
+    "triton_kernel_sha256": "37e8036b62b7aa2f595fa2d560f40a0c5f265b4187974b6c9014e4bf8087f5df"
+  },
+  "model": {
+    "resolved_path": "/workspace/.tmp/task_e_acceptance_20261022/.hf_cache/models--google--gemma-4-E2B-it/full",
+    "loading_boundary": "Gemma4AudioModel and Gemma4MultimodalEmbedder only; no LM instantiated or loaded",
+    "audio_config": {
+      "hidden_size": 1024,
+      "num_hidden_layers": 12,
+      "num_attention_heads": 8,
+      "subsampling_conv_channels": [
+        128,
+        32
+      ],
+      "conv_kernel_size": 5,
+      "attention_chunk_size": 12,
+      "attention_context_left": 13,
+      "attention_context_right": 0,
+      "output_proj_dims": 1536,
+      "rms_norm_eps": 1e-06,
+      "text_hidden_size": 1536
+    },
+    "checkpoint_tensors": {
+      "index_path": null,
+      "index_present": false,
+      "shard_paths": [
+        "/workspace/.tmp/task_e_acceptance_20261022/.hf_cache/models--google--gemma-4-E2B-it/full/model.safetensors"
+      ],
+      "shard_file_sizes_bytes": {
+        "/workspace/.tmp/task_e_acceptance_20261022/.hf_cache/models--google--gemma-4-E2B-it/full/model.safetensors": 10246621918
+      },
+      "selected_prefix_counts": {
+        "model.audio_tower.": 751,
+        "model.embed_audio.": 1
+      },
+      "selected_tensor_count": 752,
+      "selected_tensor_bytes": 614368768,
+      "all_safetensors_tensor_keys": 752,
+      "full_language_model_loaded": false
+    }
+  },
+  "input": {
+    "path": "/workspace/.tmp/task_e_acceptance_20261022/artifacts/conversation_quality_20261014/inputs/clean_initial.wav",
+    "sha256": "be2b9a2e46eaac18bd12a7aa3fbb46648dd04c0e3a68e3c1c5265c37647045d9",
+    "source_sample_rate": 22050,
+    "source_samples": 227556,
+    "resampled_sample_rate": 16000,
+    "resampled_samples_before_trim": 165120,
+    "samples_used": 160000,
+    "seconds_used": 10.0,
+    "channels": 1,
+    "ticks": 125,
+    "mel_rows": 1000,
+    "feature_extractor": "Gemma4AudioFeatureExtractor",
+    "processor": "Gemma4Processor"
+  },
+  "gpu_memory": {
+    "free_bytes_before_smoke": 5461639168,
+    "free_bytes_after_smoke": 5331615744,
+    "free_bytes_after_selected_weights": 4723441664,
+    "total_bytes": 25298141184
+  },
+  "smoke": {
+    "status": "passed",
+    "model": "tiny installed Gemma4AudioModel + Gemma4MultimodalEmbedder",
+    "ticks": 2,
+    "device": "NVIDIA GeForce RTX 3090",
+    "free_bytes_after_smoke": 5331615744,
+    "total_bytes": 25298141184,
+    "committed_positions": [
+      [
+        "smoke",
+        0,
+        "smoke-epoch",
+        2,
+        2
+      ]
+    ]
+  },
+  "parity": {
+    "mel_features": {
+      "shape": [
+        1000,
+        128
+      ],
+      "offline_equals_incremental_bitwise": true,
+      "max_absolute_delta": 0.0
+    },
+    "tower_1536": {
+      "offline_shape": [
+        250,
+        1536
+      ],
+      "cached_streaming_vs_offline": {
+        "whole_sequence": {
+          "same_shape": true,
+          "shape": [
+            250,
+            1536
+          ],
+          "token_count": 250,
+          "mean": 0.9999494552612305,
+          "p05": 0.9998950153589249,
+          "p50": 0.9999617338180542,
+          "p95": 0.9999780207872391,
+          "min": 0.999381959438324
+        },
+        "after_first_13_tokens": {
+          "same_shape": true,
+          "shape": [
+            237,
+            1536
+          ],
+          "token_count": 237,
+          "mean": 0.9999485015869141,
+          "p05": 0.9998908400535583,
+          "p50": 0.999961256980896,
+          "p95": 0.9999770522117615,
+          "min": 0.999381959438324
+        },
+        "required_after_first_13_tokens": {
+          "mean_minimum": 0.9995,
+          "minimum_minimum": 0.998
+        },
+        "passed_after_first_13_tokens": true
+      },
+      "rolling_w240_vs_offline": {
+        "whole_sequence": {
+          "same_shape": true,
+          "shape": [
+            250,
+            1536
+          ],
+          "token_count": 250,
+          "mean": 0.9997079968452454,
+          "p05": 0.9989235758781433,
+          "p50": 0.9998383522033691,
+          "p95": 0.9999695301055909,
+          "min": 0.9973877668380737
+        },
+        "after_first_13_tokens": {
+          "same_shape": true,
+          "shape": [
+            237,
+            1536
+          ],
+          "token_count": 237,
+          "mean": 0.9996940493583679,
+          "p05": 0.9989099025726318,
+          "p50": 0.9998326301574707,
+          "p95": 0.9999671459197998,
+          "min": 0.9973877668380737
+        }
+      },
+      "cached_streaming_vs_w240": {
+        "whole_sequence": {
+          "same_shape": true,
+          "shape": [
+            250,
+            1536
+          ],
+          "token_count": 250,
+          "mean": 0.9997203350067139,
+          "p05": 0.9990474373102188,
+          "p50": 0.9998349547386169,
+          "p95": 0.9999692022800446,
+          "min": 0.9972331523895264
+        },
+        "after_first_13_tokens": {
+          "same_shape": true,
+          "shape": [
+            237,
+            1536
+          ],
+          "token_count": 237,
+          "mean": 0.9997072219848633,
+          "p05": 0.9990086078643798,
+          "p50": 0.9998177289962769,
+          "p95": 0.9999629616737366,
+          "min": 0.9972331523895264
+        }
+      }
+    },
+    "post_embed_production": {
+      "offline_shape": [
+        250,
+        1536
+      ],
+      "cached_streaming_vs_offline": {
+        "whole_sequence": {
+          "same_shape": true,
+          "shape": [
+            250,
+            1536
+          ],
+          "token_count": 250,
+          "mean": 0.9999570846557617,
+          "p05": 0.9998992562294007,
+          "p50": 0.9999705255031586,
+          "p95": 0.9999854594469071,
+          "min": 0.9993541836738586
+        },
+        "after_first_13_tokens": {
+          "same_shape": true,
+          "shape": [
+            237,
+            1536
+          ],
+          "token_count": 237,
+          "mean": 0.9999560713768005,
+          "p05": 0.9998906850814819,
+          "p50": 0.9999700784683228,
+          "p95": 0.9999848127365112,
+          "min": 0.9993541836738586
+        },
+        "required_after_first_13_tokens": {
+          "mean_minimum": 0.9995,
+          "minimum_minimum": 0.998
+        },
+        "passed_after_first_13_tokens": true
+      },
+      "rolling_w240_vs_offline": {
+        "whole_sequence": {
+          "same_shape": true,
+          "shape": [
+            250,
+            1536
+          ],
+          "token_count": 250,
+          "mean": 0.9997498393058777,
+          "p05": 0.9991066098213196,
+          "p50": 0.9998654127120972,
+          "p95": 0.9999759823083878,
+          "min": 0.9973442554473877
+        },
+        "after_first_13_tokens": {
+          "same_shape": true,
+          "shape": [
+            237,
+            1536
+          ],
+          "token_count": 237,
+          "mean": 0.9997376799583435,
+          "p05": 0.9990953207015991,
+          "p50": 0.9998618960380554,
+          "p95": 0.9999745488166809,
+          "min": 0.9973442554473877
+        }
+      },
+      "cached_streaming_vs_w240": {
+        "whole_sequence": {
+          "same_shape": true,
+          "shape": [
+            250,
+            1536
+          ],
+          "token_count": 250,
+          "mean": 0.9997649192810059,
+          "p05": 0.9991918057203293,
+          "p50": 0.9998644888401031,
+          "p95": 0.9999748587608337,
+          "min": 0.9976127743721008
+        },
+        "after_first_13_tokens": {
+          "same_shape": true,
+          "shape": [
+            237,
+            1536
+          ],
+          "token_count": 237,
+          "mean": 0.9997536540031433,
+          "p05": 0.9991658806800843,
+          "p50": 0.9998563528060913,
+          "p95": 0.9999719977378845,
+          "min": 0.9976127743721008
+        }
+      }
+    },
+    "cached_streaming_output_shape": [
+      250,
+      1536
+    ],
+    "rolling_w240_output_shape": [
+      250,
+      1536
+    ],
+    "cache_state_after_125_ticks": [
+      [
+        "real-parity",
+        0,
+        "real-epoch",
+        125,
+        125
+      ]
+    ]
+  },
+  "production_streaming_api": {
+    "status": "optimized_runtime_ready",
+    "api_path": "/workspace/.tmp/task_e_acceptance_20261022/duplex_kernel/streaming_conformer.py",
+    "optimize_cuda": true,
+    "default_opt_in": false,
+    "max_sessions": 128,
+    "compiled_function": "_compute_step",
+    "compiled_call": "torch.compile(self._compute_step, fullgraph=True, dynamic=False, options={'emulate_precision_casts': True})",
+    "selected_row_staging_writes": {
+      "operation": "torch.Tensor.index_copy_(0, slots, next_state)",
+      "banks": [
+        "_stage_mel_cache",
+        "_stage_mel_mask_cache",
+        "_stage_subsample_cache",
+        "_stage_subsample_mask_cache",
+        "_stage_keys",
+        "_stage_values",
+        "_stage_conv_inputs",
+        "_stage_token_valid"
+      ],
+      "scope": "N selected rows only; outside Inductor and inside CUDA graph capture through _execute"
+    },
+    "wrapped_gemma4_linear_instance_count": 120,
+    "graph_shapes_captured_before_quality": [
+      1,
+      2,
+      3,
+      4
+    ],
+    "quality_ticks": 125,
+    "quality_completed_before_500_replays": true,
+    "cached_vs_offline_acceptance": {
+      "raw_passed": true,
+      "post_embed_passed": true,
+      "passed": true,
+      "required_after_first_13_tokens": {
+        "mean_minimum": 0.9995,
+        "minimum_minimum": 0.998
+      }
+    },
+    "cached_vs_w240": {
+      "status": "measured_threshold_failed",
+      "tower_1536": {
+        "whole_sequence": {
+          "same_shape": true,
+          "shape": [
+            250,
+            1536
+          ],
+          "token_count": 250,
+          "mean": 0.9997203350067139,
+          "p05": 0.9990474373102188,
+          "p50": 0.9998349547386169,
+          "p95": 0.9999692022800446,
+          "min": 0.9972331523895264
+        },
+        "after_first_13_tokens": {
+          "same_shape": true,
+          "shape": [
+            237,
+            1536
+          ],
+          "token_count": 237,
+          "mean": 0.9997072219848633,
+          "p05": 0.9990086078643798,
+          "p50": 0.9998177289962769,
+          "p95": 0.9999629616737366,
+          "min": 0.9972331523895264
+        },
+        "required_after_first_13_tokens": {
+          "mean_minimum": 0.9995,
+          "minimum_minimum": 0.998
+        },
+        "passed_after_first_13_tokens": false
+      },
+      "post_embed": {
+        "whole_sequence": {
+          "same_shape": true,
+          "shape": [
+            250,
+            1536
+          ],
+          "token_count": 250,
+          "mean": 0.9997649192810059,
+          "p05": 0.9991918057203293,
+          "p50": 0.9998644888401031,
+          "p95": 0.9999748587608337,
+          "min": 0.9976127743721008
+        },
+        "after_first_13_tokens": {
+          "same_shape": true,
+          "shape": [
+            237,
+            1536
+          ],
+          "token_count": 237,
+          "mean": 0.9997536540031433,
+          "p05": 0.9991658806800843,
+          "p50": 0.9998563528060913,
+          "p95": 0.9999719977378845,
+          "min": 0.9976127743721008
+        },
+        "required_after_first_13_tokens": {
+          "mean_minimum": 0.9995,
+          "minimum_minimum": 0.998
+        },
+        "passed_after_first_13_tokens": false
+      },
+      "required_after_first_13_tokens": {
+        "mean_minimum": 0.9995,
+        "minimum_minimum": 0.998
+      },
+      "passed": false
+    },
+    "replay_target_acceptance_n1_n2": {
+      "1": {
+        "passed": false,
+        "mean_ms": 1.5469967777729035,
+        "p50_ms": 1.5471359491348267,
+        "target_ms": 0.8,
+        "clock_stabilized_repeat": true
+      },
+      "2": {
+        "passed": false,
+        "mean_ms": 1.6368447737693788,
+        "p50_ms": 1.6373759508132935,
+        "target_ms": 0.8,
+        "clock_stabilized_repeat": false
+      }
+    },
+    "global_bf16_reduced_precision_reduction": {
+      "original_value": true,
+      "value_after_ctor_compile_warmup_and_capture": true,
+      "value_at_end": true,
+      "restored_after_startup": true,
+      "restored_at_end": true,
+      "scope_value_during_startup": false
+    },
+    "fallback": "W240 rolling frontend, with compile/capture diagnostic retained above",
+    "status_completed_does_not_imply_acceptance_pass": true,
+    "overall_acceptance": {
+      "cached_vs_offline_after_first_13_tokens": true,
+      "cached_vs_w240_after_first_13_tokens": false,
+      "cuda_graph_latency_mean_and_p50_below_target_n1_n2": false,
+      "passed": false,
+      "failed_criteria": [
+        "cached_vs_w240.minimum_minimum_0_998",
+        "cuda_graph_latency_mean_and_p50_below_0_80_ms_n1_n2"
+      ]
+    }
+  },
+  "cuda_graph_complete_frontend": {
+    "boundary": "[N,8,128] device tensor input through input staging, exact cached tower, one embed_audio, output clone, and transactional persistent-state commit",
+    "iterations_per_shape": 500,
+    "iterations_run_only_after_125_tick_offline_quality_pass": true,
+    "warmup_compile_and_capture_excluded": true,
+    "concurrent_nvml_telemetry": true,
+    "target_ms": 0.8,
+    "shapes": {
+      "1": {
+        "status": "measured",
+        "batch_size": 1,
+        "input_shape": [
+          1,
+          8,
+          128
+        ],
+        "input_source": "final real WAV Mel tick repeated for N rows",
+        "raw_output_shape": [
+          1,
+          2,
+          1536
+        ],
+        "post_embed_output_shape": [
+          1,
+          2,
+          1536
+        ],
+        "measured_iterations": 500,
+        "warmup_replays_excluded": 436,
+        "graph_capture_and_warmup_advanced_state": false,
+        "every_measured_replay_committed_state": true,
+        "n2_session_order_reversed_every_other_replay": false,
+        "state_after_measured_replays": [
+          [
+            "bench-0",
+            0,
+            "bench-epoch",
+            500,
+            500
+          ]
+        ],
+        "cuda_graph_replay_only_latency": {
+          "count": 500,
+          "mean_ms": 1.5469967777729035,
+          "p05_ms": 1.5452159643173218,
+          "p50_ms": 1.5471359491348267,
+          "p95_ms": 1.5493119955062866,
+          "min_ms": 1.5441279411315918,
+          "max_ms": 1.5738879442214966
+        },
+        "python_prepare_commit_clone_transaction_latency": {
+          "count": 500,
+          "mean_ms": 1.98195966,
+          "p05_ms": 1.792608,
+          "p50_ms": 1.8097344999999998,
+          "p95_ms": 1.8263965,
+          "min_ms": 1.092878,
+          "max_ms": 88.490646
+        },
+        "latency_target_mean_and_p50_below_0_80_ms": false,
+        "nvml_telemetry": {
+          "status": "measured",
+          "sample_count": 20,
+          "sampling_interval_ms": 50,
+          "samples": [
+            {
+              "sm_clock_mhz": 1995.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 96.0,
+              "memory_utilization_percent": 52.0,
+              "power_watts": 207.44
+            },
+            {
+              "sm_clock_mhz": 1995.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 96.0,
+              "memory_utilization_percent": 52.0,
+              "power_watts": 207.44
+            },
+            {
+              "sm_clock_mhz": 1995.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 96.0,
+              "memory_utilization_percent": 52.0,
+              "power_watts": 207.44
+            },
+            {
+              "sm_clock_mhz": 1995.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 96.0,
+              "memory_utilization_percent": 52.0,
+              "power_watts": 207.44
+            },
+            {
+              "sm_clock_mhz": 1995.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 96.0,
+              "memory_utilization_percent": 52.0,
+              "power_watts": 207.44
+            },
+            {
+              "sm_clock_mhz": 1995.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 96.0,
+              "memory_utilization_percent": 52.0,
+              "power_watts": 207.44
+            },
+            {
+              "sm_clock_mhz": 1995.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 96.0,
+              "memory_utilization_percent": 52.0,
+              "power_watts": 207.44
+            },
+            {
+              "sm_clock_mhz": 1995.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 92.0,
+              "memory_utilization_percent": 47.0,
+              "power_watts": 207.44
+            },
+            {
+              "sm_clock_mhz": 1995.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 92.0,
+              "memory_utilization_percent": 47.0,
+              "power_watts": 207.44
+            },
+            {
+              "sm_clock_mhz": 1995.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 92.0,
+              "memory_utilization_percent": 47.0,
+              "power_watts": 207.44
+            },
+            {
+              "sm_clock_mhz": 1995.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 92.0,
+              "memory_utilization_percent": 47.0,
+              "power_watts": 207.44
+            },
+            {
+              "sm_clock_mhz": 1995.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 92.0,
+              "memory_utilization_percent": 47.0,
+              "power_watts": 207.44
+            },
+            {
+              "sm_clock_mhz": 1995.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 92.0,
+              "memory_utilization_percent": 47.0,
+              "power_watts": 207.44
+            },
+            {
+              "sm_clock_mhz": 1995.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 92.0,
+              "memory_utilization_percent": 47.0,
+              "power_watts": 207.44
+            },
+            {
+              "sm_clock_mhz": 1995.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 92.0,
+              "memory_utilization_percent": 47.0,
+              "power_watts": 207.44
+            },
+            {
+              "sm_clock_mhz": 1995.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 92.0,
+              "memory_utilization_percent": 47.0,
+              "power_watts": 207.44
+            },
+            {
+              "sm_clock_mhz": 1995.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 92.0,
+              "memory_utilization_percent": 47.0,
+              "power_watts": 207.44
+            },
+            {
+              "sm_clock_mhz": 1995.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 92.0,
+              "memory_utilization_percent": 47.0,
+              "power_watts": 252.222
+            },
+            {
+              "sm_clock_mhz": 1995.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 92.0,
+              "memory_utilization_percent": 47.0,
+              "power_watts": 252.222
+            },
+            {
+              "sm_clock_mhz": 1995.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 92.0,
+              "memory_utilization_percent": 47.0,
+              "power_watts": 252.222
+            }
+          ],
+          "mean": {
+            "sm_clock_mhz": 1995.0,
+            "memory_clock_mhz": 9501.0,
+            "gpu_utilization_percent": 93.4,
+            "memory_utilization_percent": 48.75,
+            "power_watts": 214.15730000000002
+          },
+          "min": {
+            "sm_clock_mhz": 1995.0,
+            "memory_clock_mhz": 9501.0,
+            "gpu_utilization_percent": 92.0,
+            "memory_utilization_percent": 47.0,
+            "power_watts": 207.44
+          },
+          "max": {
+            "sm_clock_mhz": 1995.0,
+            "memory_clock_mhz": 9501.0,
+            "gpu_utilization_percent": 96.0,
+            "memory_utilization_percent": 52.0,
+            "power_watts": 252.222
+          }
+        },
+        "cuda_events_preallocated_before_measured_loop": true,
+        "graph_event_bracket": "immediately before and after ws.graph.replay() only",
+        "no_host_copy_or_synchronization_inside_measured_replay_loop": true,
+        "prior_clock_ramp_measurement": {
+          "cuda_graph_replay_only_latency": {
+            "count": 500,
+            "mean_ms": 1.5587337446212768,
+            "p05_ms": 1.5411200523376465,
+            "p50_ms": 1.5431679487228394,
+            "p95_ms": 1.6168960332870483,
+            "min_ms": 1.539072036743164,
+            "max_ms": 1.6444799900054932
+          },
+          "python_prepare_commit_clone_transaction_latency": {
+            "count": 500,
+            "mean_ms": 1.823857386,
+            "p05_ms": 1.7928870000000001,
+            "p50_ms": 1.809065,
+            "p95_ms": 1.8928684500000001,
+            "min_ms": 1.732419,
+            "max_ms": 2.041854
+          },
+          "nvml_telemetry": {
+            "status": "measured",
+            "sample_count": 19,
+            "sampling_interval_ms": 50,
+            "samples": [
+              {
+                "sm_clock_mhz": 1860.0,
+                "memory_clock_mhz": 9501.0,
+                "gpu_utilization_percent": 20.0,
+                "memory_utilization_percent": 3.0,
+                "power_watts": 141.364
+              },
+              {
+                "sm_clock_mhz": 1860.0,
+                "memory_clock_mhz": 9501.0,
+                "gpu_utilization_percent": 22.0,
+                "memory_utilization_percent": 9.0,
+                "power_watts": 141.364
+              },
+              {
+                "sm_clock_mhz": 1860.0,
+                "memory_clock_mhz": 9501.0,
+                "gpu_utilization_percent": 22.0,
+                "memory_utilization_percent": 9.0,
+                "power_watts": 141.364
+              },
+              {
+                "sm_clock_mhz": 1860.0,
+                "memory_clock_mhz": 9501.0,
+                "gpu_utilization_percent": 22.0,
+                "memory_utilization_percent": 9.0,
+                "power_watts": 141.364
+              },
+              {
+                "sm_clock_mhz": 1860.0,
+                "memory_clock_mhz": 9501.0,
+                "gpu_utilization_percent": 22.0,
+                "memory_utilization_percent": 9.0,
+                "power_watts": 141.364
+              },
+              {
+                "sm_clock_mhz": 1860.0,
+                "memory_clock_mhz": 9501.0,
+                "gpu_utilization_percent": 22.0,
+                "memory_utilization_percent": 9.0,
+                "power_watts": 141.364
+              },
+              {
+                "sm_clock_mhz": 1860.0,
+                "memory_clock_mhz": 9501.0,
+                "gpu_utilization_percent": 22.0,
+                "memory_utilization_percent": 9.0,
+                "power_watts": 141.364
+              },
+              {
+                "sm_clock_mhz": 1860.0,
+                "memory_clock_mhz": 9501.0,
+                "gpu_utilization_percent": 22.0,
+                "memory_utilization_percent": 9.0,
+                "power_watts": 141.364
+              },
+              {
+                "sm_clock_mhz": 1860.0,
+                "memory_clock_mhz": 9501.0,
+                "gpu_utilization_percent": 22.0,
+                "memory_utilization_percent": 9.0,
+                "power_watts": 141.364
+              },
+              {
+                "sm_clock_mhz": 1860.0,
+                "memory_clock_mhz": 9501.0,
+                "gpu_utilization_percent": 22.0,
+                "memory_utilization_percent": 9.0,
+                "power_watts": 141.364
+              },
+              {
+                "sm_clock_mhz": 1860.0,
+                "memory_clock_mhz": 9501.0,
+                "gpu_utilization_percent": 22.0,
+                "memory_utilization_percent": 9.0,
+                "power_watts": 141.364
+              },
+              {
+                "sm_clock_mhz": 2010.0,
+                "memory_clock_mhz": 9501.0,
+                "gpu_utilization_percent": 91.0,
+                "memory_utilization_percent": 47.0,
+                "power_watts": 187.345
+              },
+              {
+                "sm_clock_mhz": 2010.0,
+                "memory_clock_mhz": 9501.0,
+                "gpu_utilization_percent": 91.0,
+                "memory_utilization_percent": 47.0,
+                "power_watts": 187.345
+              },
+              {
+                "sm_clock_mhz": 2010.0,
+                "memory_clock_mhz": 9501.0,
+                "gpu_utilization_percent": 91.0,
+                "memory_utilization_percent": 47.0,
+                "power_watts": 187.345
+              },
+              {
+                "sm_clock_mhz": 2010.0,
+                "memory_clock_mhz": 9501.0,
+                "gpu_utilization_percent": 91.0,
+                "memory_utilization_percent": 47.0,
+                "power_watts": 187.345
+              },
+              {
+                "sm_clock_mhz": 2010.0,
+                "memory_clock_mhz": 9501.0,
+                "gpu_utilization_percent": 91.0,
+                "memory_utilization_percent": 47.0,
+                "power_watts": 187.345
+              },
+              {
+                "sm_clock_mhz": 2010.0,
+                "memory_clock_mhz": 9501.0,
+                "gpu_utilization_percent": 91.0,
+                "memory_utilization_percent": 47.0,
+                "power_watts": 187.345
+              },
+              {
+                "sm_clock_mhz": 2010.0,
+                "memory_clock_mhz": 9501.0,
+                "gpu_utilization_percent": 91.0,
+                "memory_utilization_percent": 47.0,
+                "power_watts": 187.345
+              },
+              {
+                "sm_clock_mhz": 2010.0,
+                "memory_clock_mhz": 9501.0,
+                "gpu_utilization_percent": 91.0,
+                "memory_utilization_percent": 47.0,
+                "power_watts": 187.345
+              }
+            ],
+            "mean": {
+              "sm_clock_mhz": 1923.157894736842,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 50.94736842105263,
+              "memory_utilization_percent": 24.68421052631579,
+              "power_watts": 160.72442105263156
+            },
+            "min": {
+              "sm_clock_mhz": 1860.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 20.0,
+              "memory_utilization_percent": 3.0,
+              "power_watts": 141.364
+            },
+            "max": {
+              "sm_clock_mhz": 2010.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 91.0,
+              "memory_utilization_percent": 47.0,
+              "power_watts": 187.345
+            }
+          }
+        },
+        "clock_stabilized_repeat": {
+          "run_date_utc": "2026-10-22",
+          "warmup_abort_only_replays_before_measurement": 428,
+          "additional_helper_abort_warmups_excluded": 8,
+          "canonical_committed_positions_unchanged_during_abort_warmup": true,
+          "three_consecutive_pre_measurement_sm_clock_samples_mhz": [
+            1995,
+            1995,
+            1995
+          ],
+          "measured_replay_sm_clock_mhz_min_mean_max": [
+            1995,
+            1995,
+            1995
+          ],
+          "measured_replay_memory_clock_mhz_min_mean_max": [
+            9501,
+            9501,
+            9501
+          ],
+          "global_bf16_reduced_precision_reduction_restored": true,
+          "state_after_measured_replays": [
+            [
+              "bench-0",
+              0,
+              "bench-epoch",
+              500,
+              500
+            ]
+          ],
+          "latency_target_mean_and_p50_below_0_80_ms": false,
+          "measurement_benchmark_script": "/workspace/.tmp/task_e_acceptance_20261022/tools/benchmark_streaming_conformer_q2.py",
+          "measurement_benchmark_script_sha256": "e40c6ed3307dfda609fe3901f1c6c4353c6274cdd35677d9f9e787e74c6c5ac3"
+        }
+      },
+      "2": {
+        "status": "measured",
+        "batch_size": 2,
+        "input_shape": [
+          2,
+          8,
+          128
+        ],
+        "input_source": "final real WAV Mel tick repeated for N rows",
+        "raw_output_shape": [
+          2,
+          2,
+          1536
+        ],
+        "post_embed_output_shape": [
+          2,
+          2,
+          1536
+        ],
+        "measured_iterations": 500,
+        "warmup_replays_excluded": 8,
+        "graph_capture_and_warmup_advanced_state": false,
+        "every_measured_replay_committed_state": true,
+        "n2_session_order_reversed_every_other_replay": true,
+        "state_after_measured_replays": [
+          [
+            "bench-0",
+            0,
+            "bench-epoch",
+            500,
+            500
+          ],
+          [
+            "bench-1",
+            0,
+            "bench-epoch",
+            500,
+            500
+          ]
+        ],
+        "cuda_graph_replay_only_latency": {
+          "count": 500,
+          "mean_ms": 1.6368447737693788,
+          "p05_ms": 1.6301440000534058,
+          "p50_ms": 1.6373759508132935,
+          "p95_ms": 1.6394239664077759,
+          "min_ms": 1.6261119842529297,
+          "max_ms": 1.7049599885940552
+        },
+        "python_prepare_commit_clone_transaction_latency": {
+          "count": 500,
+          "mean_ms": 1.9184597220000001,
+          "p05_ms": 1.9014509499999999,
+          "p50_ms": 1.916711,
+          "p95_ms": 1.9309215000000002,
+          "min_ms": 1.443593,
+          "max_ms": 2.908737
+        },
+        "latency_target_mean_and_p50_below_0_80_ms": false,
+        "nvml_telemetry": {
+          "status": "measured",
+          "sample_count": 20,
+          "sampling_interval_ms": 50,
+          "samples": [
+            {
+              "sm_clock_mhz": 2010.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 91.0,
+              "memory_utilization_percent": 47.0,
+              "power_watts": 233.183
+            },
+            {
+              "sm_clock_mhz": 2010.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 91.0,
+              "memory_utilization_percent": 47.0,
+              "power_watts": 233.183
+            },
+            {
+              "sm_clock_mhz": 2010.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 65.0,
+              "memory_utilization_percent": 34.0,
+              "power_watts": 233.183
+            },
+            {
+              "sm_clock_mhz": 2010.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 65.0,
+              "memory_utilization_percent": 34.0,
+              "power_watts": 233.183
+            },
+            {
+              "sm_clock_mhz": 2010.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 65.0,
+              "memory_utilization_percent": 34.0,
+              "power_watts": 233.183
+            },
+            {
+              "sm_clock_mhz": 2010.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 65.0,
+              "memory_utilization_percent": 34.0,
+              "power_watts": 233.183
+            },
+            {
+              "sm_clock_mhz": 2010.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 65.0,
+              "memory_utilization_percent": 34.0,
+              "power_watts": 233.183
+            },
+            {
+              "sm_clock_mhz": 2010.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 65.0,
+              "memory_utilization_percent": 34.0,
+              "power_watts": 233.183
+            },
+            {
+              "sm_clock_mhz": 2010.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 65.0,
+              "memory_utilization_percent": 34.0,
+              "power_watts": 233.183
+            },
+            {
+              "sm_clock_mhz": 2010.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 65.0,
+              "memory_utilization_percent": 34.0,
+              "power_watts": 233.183
+            },
+            {
+              "sm_clock_mhz": 2010.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 65.0,
+              "memory_utilization_percent": 34.0,
+              "power_watts": 233.183
+            },
+            {
+              "sm_clock_mhz": 2010.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 65.0,
+              "memory_utilization_percent": 34.0,
+              "power_watts": 233.183
+            },
+            {
+              "sm_clock_mhz": 1995.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 92.0,
+              "memory_utilization_percent": 47.0,
+              "power_watts": 265.929
+            },
+            {
+              "sm_clock_mhz": 1995.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 92.0,
+              "memory_utilization_percent": 47.0,
+              "power_watts": 265.929
+            },
+            {
+              "sm_clock_mhz": 1995.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 92.0,
+              "memory_utilization_percent": 47.0,
+              "power_watts": 265.929
+            },
+            {
+              "sm_clock_mhz": 1995.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 92.0,
+              "memory_utilization_percent": 47.0,
+              "power_watts": 265.929
+            },
+            {
+              "sm_clock_mhz": 1995.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 92.0,
+              "memory_utilization_percent": 47.0,
+              "power_watts": 265.929
+            },
+            {
+              "sm_clock_mhz": 1995.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 92.0,
+              "memory_utilization_percent": 47.0,
+              "power_watts": 265.929
+            },
+            {
+              "sm_clock_mhz": 1995.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 92.0,
+              "memory_utilization_percent": 47.0,
+              "power_watts": 265.929
+            },
+            {
+              "sm_clock_mhz": 1995.0,
+              "memory_clock_mhz": 9501.0,
+              "gpu_utilization_percent": 92.0,
+              "memory_utilization_percent": 47.0,
+              "power_watts": 265.929
+            }
+          ],
+          "mean": {
+            "sm_clock_mhz": 2004.0,
+            "memory_clock_mhz": 9501.0,
+            "gpu_utilization_percent": 78.4,
+            "memory_utilization_percent": 40.5,
+            "power_watts": 246.2814
+          },
+          "min": {
+            "sm_clock_mhz": 1995.0,
+            "memory_clock_mhz": 9501.0,
+            "gpu_utilization_percent": 65.0,
+            "memory_utilization_percent": 34.0,
+            "power_watts": 233.183
+          },
+          "max": {
+            "sm_clock_mhz": 2010.0,
+            "memory_clock_mhz": 9501.0,
+            "gpu_utilization_percent": 92.0,
+            "memory_utilization_percent": 47.0,
+            "power_watts": 265.929
+          }
+        },
+        "cuda_events_preallocated_before_measured_loop": true,
+        "graph_event_bracket": "immediately before and after ws.graph.replay() only",
+        "no_host_copy_or_synchronization_inside_measured_replay_loop": true
+      }
+    }
+  },
+  "candidate_snapshot_evidence_not_runtime_api": {
+    "provenance": "pre-integration candidate harness measurements supplied for this task",
+    "status": "snapshot_candidate_not_production_runtime",
+    "cached_vs_offline_after_first_13_tokens": {
+      "tower_1536_mean": 0.9999464154,
+      "tower_1536_min": 0.9993313551,
+      "post_embed_mean": 0.9999531507,
+      "post_embed_min": 0.9992180467,
+      "passed_stated_offline_threshold": true
+    },
+    "cached_vs_w240_after_first_13_tokens": {
+      "tower_1536_mean": 0.999706924,
+      "tower_1536_min": 0.996979177,
+      "post_embed_mean": 0.999754608,
+      "post_embed_min": 0.99737215,
+      "acceptance_status": "measured_not_passed_or_certified"
+    },
+    "compiled_candidate_replay_cuda_only_ms_n1": {
+      "mean": 1.68117,
+      "p50": 1.681408,
+      "target_0_80_ms_passed": false
+    },
+    "compiled_candidate_replay_cuda_only_ms_n2": {
+      "mean": 1.848268,
+      "p50": 1.84832,
+      "target_0_80_ms_passed": false
+    },
+    "triton_without_compile_cuda_only_ms_n1_n2": [
+      3.669,
+      3.911
+    ],
+    "linear_graph_reference_exact_kernel_p50_ms": {
+      "cuda_graph_reference": 0.023552,
+      "triton_tile32x128": 0.016384,
+      "bitwise_equal": true
+    },
+    "prior_compile_report_section": null
+  },
+  "measurement_limits": {
+    "service_state": "active build14 service was left running and unchanged",
+    "latency_scope": "audio frontend only; excludes PCM/Mel CPU extractor, native LM/policy, scheduler, TTS, and playback",
+    "post_embed_included": true,
+    "persistent_state_update_included": true,
+    "clock_policy": "read only; no GPU clock changes"
+  },
+  "cache_staging_codegen_diagnostic": {
+    "issue_before_selected_row_staging_split": {
+      "inductor_generated_module": "/tmp/torchinductor_appuser/f4/cf4y3aphcojt46mjks6hwbrfwhbisfutytldvlbabyum6tkfr6sl.py",
+      "generated_source_bytes": 1461058,
+      "full_bank_shape": [
+        128,
+        12,
+        13,
+        8,
+        128
+      ],
+      "full_bank_fp32_elements": 20447232,
+      "full_bank_output_bytes": 81788928,
+      "full_bank_copy_launches_per_step": 6,
+      "launches_operating_on_full_bank_copy_shape": true
+    },
+    "after_compute_and_selected_staging_writes_were_separated": {
+      "inductor_generated_module": "/tmp/torchinductor_appuser/6n/c6nf3ketclvkqaufbct57ns3xntxq5xrdsp6hemwfsfoq4zgjzi6.py",
+      "generated_source_bytes": 1099351,
+      "generated_launch_sites": 401,
+      "largest_reported_launch_grid": 638976,
+      "full_bank_copy_launches_over_20447232_elements": 0,
+      "staging_write_boundary": "selected rows only, outside Inductor and inside CUDA Graph capture"
+    },
+    "interpretation": "Inductor had functionalized staged-cache writes into full max_sessions bank copies; moving selected-row writes outside compiled compute removed the 20,447,232-element copy launches. The remaining graph still misses the 0.80 ms target."
+  },
+  "task_e_diagnostic_evidence": {
+    "status": "completed",
+    "status_means_run_completed_not_accepted": true,
+    "rejected_gemv_candidate": {
+      "runtime_integrated": false,
+      "decision": "rejected",
+      "algorithm": "standalone BF16-to-FP32 GEMV; one CTA loads W[BLOCK_N,BLOCK_K] for all M=2/4 rows",
+      "tile_configurations": [
+        {
+          "block_n": 8,
+          "block_k": 128
+        },
+        {
+          "block_n": 8,
+          "block_k": 256
+        },
+        {
+          "block_n": 16,
+          "block_k": 128
+        },
+        {
+          "block_n": 16,
+          "block_k": 256
+        }
+      ],
+      "samples_per_variant_per_cache_mode": 500,
+      "environment": {
+        "gpu": "NVIDIA GeForce RTX 3090",
+        "torch": "2.12.1+cu130",
+        "triton": "3.7.1",
+        "sm_clock_mhz_range": [
+          1965,
+          1995
+        ],
+        "l2_bytes": 6291456,
+        "cold_l2_flush_bytes": 67108864
+      },
+      "minimum_cosine_similarity_vs_original_gemma_at_least": 1.000000119,
+      "best_cold_l2_p50_ms_vs_s1_bn16": {
+        "N1": {
+          "ffn_down": {
+            "gemv": 0.032768,
+            "s1_bn16": 0.019456
+          },
+          "qkv": {
+            "gemv": 0.012288,
+            "s1_bn16": 0.008192
+          },
+          "light_start": {
+            "gemv": 0.016384,
+            "s1_bn16": 0.011264
+          }
+        },
+        "N2": {
+          "ffn_down": {
+            "gemv": 0.04608,
+            "s1_bn16": 0.019456
+          },
+          "qkv": {
+            "gemv": 0.016384,
+            "s1_bn16": 0.008192
+          },
+          "light_start": {
+            "gemv": 0.024576,
+            "s1_bn16": 0.011264
+          }
+        }
+      },
+      "cache_modes": [
+        "warm",
+        "cold_l2"
+      ]
+    },
+    "actual_graph_profile": {
+      "profiled_operation": "one production-class N=1 CUDA Graph replay",
+      "tick_125_gemma4_clippable_linear_module_forward_hooks": {
+        "calls_by_batch_n": {
+          "1": 120,
+          "2": 120
+        },
+        "bf16_weight_bytes_by_batch_n": {
+          "N1": 578813952,
+          "N2": 578813952
+        }
+      },
+      "profiler_clipped_linear_kernel_launches": 108,
+      "hook_calls_and_profiler_launches_are_distinct": true,
+      "kernel_count": 516,
+      "kernel_device_time_sum_us": 1672.481,
+      "categories": {
+        "clipped_linear": {
+          "count": 108,
+          "device_time_us": 954.021
+        },
+        "gemm_other": {
+          "count": 66,
+          "device_time_us": 177.92
+        },
+        "conv": {
+          "count": 27,
+          "device_time_us": 71.807
+        },
+        "pointwise_norm": {
+          "count": 50,
+          "device_time_us": 57.857
+        },
+        "attention_softmax": {
+          "count": 12,
+          "device_time_us": 15.615
+        },
+        "mixed_cache_copy_or_pointwise": {
+          "count": 209,
+          "device_time_us": 345.572
+        },
+        "other": {
+          "count": 44,
+          "device_time_us": 49.689
+        }
+      },
+      "timing_boundary": "CUDA Graph replay only"
+    },
+    "acceptance": {
+      "cuda_graph_mean_and_p50_below_0_80_ms_n1_n2": false,
+      "cached_vs_w240_after_first_13_tokens": false,
+      "overall": false
+    }
+  }
+}

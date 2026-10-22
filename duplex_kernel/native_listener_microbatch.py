@@ -36,6 +36,7 @@ from duplex_kernel.native_listener import (
     Gemma4TensorMeta,
     NativeGemmaListenerLM,
 )
+from duplex_kernel.native_control6_prompt import NATIVE_CONTROL6_PREFIX_MAX_TOKENS
 
 
 BATCH_API_VERSION = 5
@@ -53,9 +54,12 @@ BATCH_TOKEN_EMBEDDING_CAPABILITY = 0x4000
 BATCH_TAIL_REWIND_CAPABILITY = 0x8000
 BATCH_QUEUED_AUDIO_REPLAY_CAPABILITY = 0x10000
 BATCH_SESSION_FORK_CAPABILITY = 0x20000
+BATCH_VARIABLE_Q_QUEUED_AUDIO_CAPABILITY = 0x40000
+BATCH_VARIABLE_Q_TEXT_CAPABILITY = 0x80000
+BATCH_VARIABLE_Q_GEMM_GRAPH_CAPABILITY = 0x100000
 BATCH_SUPPORTED_MASK_ANY_POSITIVE_N = 0x1
 BATCH_PREFIX_MIN_LEN = 1
-BATCH_PREFIX_MAX_LEN = 291
+BATCH_PREFIX_MAX_LEN = NATIVE_CONTROL6_PREFIX_MAX_TOKENS
 BATCH_PREFIX_LENGTHS = range(BATCH_PREFIX_MIN_LEN, BATCH_PREFIX_MAX_LEN + 1)
 TRACE_KIND_GEMM = 1
 TRACE_KIND_RMS = 2
@@ -123,6 +127,7 @@ def trace_reference_layout(stage_name: str, *, n: int) -> dict[str, int]:
 NATIVE_ABI_VERSION = 3
 LISTENER_STREAM_PRIORITY = -1
 LISTENER_STREAM_Q_LEN = 2
+MAX_STREAM_Q_LEN = 8
 LISTENER_MAX_SEQ_LEN = 16_384
 LISTENER_MAX_ROLLOVER_AUDIO_TOKENS = 64 * LISTENER_STREAM_Q_LEN
 _UINT64_MAX = (1 << 64) - 1
@@ -318,7 +323,11 @@ class NativeBatchApiFeatures:
     token_embedded_input: bool = False
     tail_rewind: bool = False
     queued_audio_replay: bool = False
+    queued_audio_batch: bool = False
+    variable_q_text: bool = False
     session_fork: bool = False
+    ephemeral_metadata_rebind: bool = False
+    variable_q_gemm_graphs: bool = False
 
     def __bool__(self) -> bool:
         """Preserve existing bool use: truth means the RMS/q-proj probe exists."""
@@ -335,6 +344,7 @@ class NativeBatchOutput:
     tensor: torch.Tensor
     completion_event: torch.cuda.Event
     logical_q_lens: tuple[int, ...] = ()
+    cache_advance_tokens_by_row: tuple[int, ...] = ()
     kv_rollback_tokens_by_row: tuple[int, ...] = ()
     kv_rollback_enqueue_ms: float = 0.0
     embedded_text_input: bool = False
@@ -416,6 +426,7 @@ class _SessionBinding:
     cache_position: int
     valid_history_tokens: int
     prefix_len: int
+    ephemeral_fork: bool = False
 
 
 def _unsigned(name: str, value: Any, bits: int) -> int:
@@ -449,6 +460,14 @@ def _row_to_c(row: BatchRowDescriptor) -> CBatchRow:
 
 def _c_row_values(row: CBatchRow) -> tuple[int, ...]:
     return tuple(int(getattr(row, name)) for name, _ctype in CBatchRow._fields_)
+
+
+def _validate_queued_audio_query_count(query_count: int) -> int:
+    if isinstance(query_count, bool) or not isinstance(query_count, int):
+        raise TypeError("queued audio query_count must be an integer")
+    if query_count < LISTENER_STREAM_Q_LEN or query_count > 64 or query_count % 2:
+        raise ValueError("queued audio query_count must be even and in [2,64]")
+    return query_count
 
 
 def _configure_native_signatures(lib: Any) -> None:
@@ -682,6 +701,49 @@ def _configure_native_api(lib: Any) -> NativeBatchApiFeatures:
     queued_audio_replay = bool(capabilities & BATCH_QUEUED_AUDIO_REPLAY_CAPABILITY)
     if not queued_audio_replay:
         raise RuntimeError("native batch API5 requires cursor-preserving queued-audio replay")
+    queued_audio_batch = bool(capabilities & BATCH_VARIABLE_Q_QUEUED_AUDIO_CAPABILITY)
+    if queued_audio_batch:
+        function = getattr(lib, "gemma4_listener_batch_append_queued_audio_async", None)
+        if function is None:
+            raise RuntimeError(
+                "native DSO advertises variable-Q queued audio but omits its symbol"
+            )
+        function.restype = ctypes.c_int
+        function.argtypes = [
+            ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(CBatchRow),
+            ctypes.c_void_p, ctypes.POINTER(Gemma4TensorMeta), ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+    variable_q_text = bool(capabilities & BATCH_VARIABLE_Q_TEXT_CAPABILITY)
+    if variable_q_text:
+        function = getattr(lib, "gemma4_listener_batch_step_embedded_variable_async", None)
+        if function is None:
+            raise RuntimeError("native DSO advertises variable-Q text but omits its symbol")
+        function.restype = ctypes.c_int
+        function.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(CBatchRow), ctypes.c_uint32, ctypes.c_uint32,
+            ctypes.c_void_p, ctypes.POINTER(Gemma4TensorMeta), ctypes.c_void_p,
+            ctypes.POINTER(Gemma4TensorMeta), ctypes.c_void_p,
+        ]
+    variable_q_gemm_graphs = bool(
+        capabilities & BATCH_VARIABLE_Q_GEMM_GRAPH_CAPABILITY
+    )
+    if variable_q_gemm_graphs:
+        for name, restype, argtypes in (
+            (
+                "gemma4_listener_batch_prepare_variable_q_gemm_graphs",
+                ctypes.c_int,
+                [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint64)],
+            ),
+            (
+                "gemma4_listener_batch_variable_gemm_graph_count",
+                ctypes.c_uint64,
+                [ctypes.c_void_p],
+            ),
+        ):
+            function = getattr(lib, name)
+            function.restype = restype
+            function.argtypes = argtypes
     session_fork = bool(capabilities & BATCH_SESSION_FORK_CAPABILITY)
     if session_fork:
         function = getattr(lib, "gemma4_listener_batch_clone_session_slot_async")
@@ -707,6 +769,12 @@ def _configure_native_api(lib: Any) -> NativeBatchApiFeatures:
             function = getattr(lib, name)
             function.restype = restype
             function.argtypes = argtypes
+        variable_count = getattr(
+            lib, "gemma4_listener_batch_variable_gemm_graph_count", None,
+        )
+        if variable_count is not None:
+            variable_count.restype = ctypes.c_uint64
+            variable_count.argtypes = [ctypes.c_void_p]
     cache_copy_available = bool(capabilities & BATCH_CACHE_COPY_CAPABILITY)
     if cache_copy_available:
         function = getattr(lib, "gemma4_listener_batch_copy_session_cache_async")
@@ -736,8 +804,45 @@ def _configure_native_api(lib: Any) -> NativeBatchApiFeatures:
         cache_copy=cache_copy_available, logical_q_truncate=logical_q_truncate,
         token_embedded_input=token_embedded_input,
         tail_rewind=tail_rewind, queued_audio_replay=queued_audio_replay,
+        queued_audio_batch=queued_audio_batch,
+        variable_q_text=variable_q_text,
         session_fork=session_fork,
+        ephemeral_metadata_rebind=(
+            _configure_ephemeral_rebind_signature(lib)
+        ),
+        variable_q_gemm_graphs=variable_q_gemm_graphs,
     )
+
+
+def _configure_ephemeral_rebind_signature(lib: Any) -> bool:
+    """Bind the additive metadata-only fork CAS when the DSO exports it."""
+    function = getattr(
+        lib, "gemma4_listener_batch_rebind_ephemeral_session_metadata_async", None,
+    )
+    if function is None:
+        return False
+    function.restype = ctypes.c_int
+    function.argtypes = [
+        ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(CBatchRow),
+        ctypes.c_uint32, ctypes.POINTER(CBatchRow), ctypes.c_void_p,
+    ]
+    return True
+
+
+def _validate_native_prefix_capacity(lib: Any) -> int:
+    """Fail closed unless the loaded DSO owns enough semantic-prefix mask storage."""
+    function = getattr(lib, "gemma4_listener_runtime_prefix_capacity", None)
+    if function is None:
+        raise RuntimeError("native batch DSO does not expose its semantic-prefix capacity")
+    function.restype = ctypes.c_uint32
+    function.argtypes = []
+    capacity = int(function())
+    if capacity != BATCH_PREFIX_MAX_LEN:
+        raise RuntimeError(
+            "native batch DSO prefix capacity mismatch: "
+            f"runtime={capacity}, Python={BATCH_PREFIX_MAX_LEN}"
+        )
+    return capacity
 
 
 class NativeGemmaListenerMicrobatch:
@@ -757,6 +862,7 @@ class NativeGemmaListenerMicrobatch:
         listener_stream: torch.cuda.Stream,
         max_batch_size: int = 4,
         enable_gemm_graphs: bool = False,
+        enable_variable_q_gemm_graphs: bool = True,
         stream_priority: int = LISTENER_STREAM_PRIORITY,
     ) -> None:
         self._owner_thread_id = get_ident()
@@ -771,10 +877,15 @@ class NativeGemmaListenerMicrobatch:
         self._gemm_graphs_api_available = False
         self._cache_copy_api_available = False
         self._session_fork_api_available = False
+        self._metadata_rebind_api_available = False
         self._logical_q_truncate_api_available = False
         self.gemm_graphs_enabled = False
+        self.variable_q_gemm_graphs_enabled = False
         self.gemm_graph_count = 0
+        self.variable_q_gemm_graph_count = 0
         self.gemm_graph_prepare_ms = 0.0
+        self.variable_q_gemm_graph_prepare_ms = 0.0
+        self.variable_q_gemm_graph_prepare_error: str | None = None
         self._session_by_id: dict[str, _SessionBinding] = {}
         self._session_by_context: dict[int, _SessionBinding] = {}
         self._epoch_by_numeric: dict[int, str] = {}
@@ -788,11 +899,14 @@ class NativeGemmaListenerMicrobatch:
             raise ValueError("max_batch_size must be a positive initial capacity hint")
         if type(enable_gemm_graphs) is not bool:
             raise TypeError("enable_gemm_graphs must be a bool")
+        if type(enable_variable_q_gemm_graphs) is not bool:
+            raise TypeError("enable_variable_q_gemm_graphs must be a bool")
         if isinstance(stream_priority, bool) or not isinstance(stream_priority, int):
             raise TypeError("stream_priority must be an integer")
         if stream_priority not in SUPPORTED_LISTENER_STREAM_PRIORITIES:
             raise ValueError("stream_priority must be -1 or 0")
         self._enable_gemm_graphs = enable_gemm_graphs
+        self._enable_variable_q_gemm_graphs = enable_variable_q_gemm_graphs
         self._stream_priority = stream_priority
         self.listener_stream = listener_stream
         self._model_device = getattr(provider, "_model_device", None)
@@ -810,16 +924,25 @@ class NativeGemmaListenerMicrobatch:
         path = Path(library_path).expanduser().resolve(strict=True)
         self.library_path = path
         self._lib = ctypes.CDLL(str(path))
+        self.prefix_capacity_tokens = _validate_native_prefix_capacity(self._lib)
         native_features = _configure_native_api(self._lib)
         self._probe_api_available = native_features.probe
         self._trace_api_available = native_features.trace
         self._gemm_graphs_api_available = native_features.gemm_graphs
+        self._variable_q_gemm_graphs_api_available = native_features.variable_q_gemm_graphs
+        self._variable_q_gemm_graph_count_api_available = (
+            getattr(self._lib, "gemma4_listener_batch_variable_gemm_graph_count", None)
+            is not None
+        )
         self._cache_copy_api_available = native_features.cache_copy
         self._session_fork_api_available = native_features.session_fork
+        self._metadata_rebind_api_available = native_features.ephemeral_metadata_rebind
         self._logical_q_truncate_api_available = native_features.logical_q_truncate
         self._token_embedded_input_available = native_features.token_embedded_input
         self._tail_rewind_api_available = native_features.tail_rewind
         self._queued_audio_replay_api_available = native_features.queued_audio_replay
+        self._queued_audio_batch_api_available = native_features.queued_audio_batch
+        self._variable_q_text_api_available = native_features.variable_q_text
         if self._enable_gemm_graphs and not self._gemm_graphs_api_available:
             raise RuntimeError("native batch DSO does not advertise optional GEMM graph support")
         topology_raw = self._lib.gemma4_listener_manifest_sha256()
@@ -919,6 +1042,15 @@ class NativeGemmaListenerMicrobatch:
             except Exception:
                 self._destroy_after_init_failure()
                 raise
+        if self._enable_variable_q_gemm_graphs and self._variable_q_gemm_graphs_api_available:
+            try:
+                self.prepare_variable_q_gemm_graphs()
+            except Exception as exc:
+                # Q6 graphs are an optional acceleration. Preserve the exact
+                # eager M=2 path when capture cannot be prepared.
+                self.variable_q_gemm_graph_prepare_error = (
+                    f"{type(exc).__name__}: {exc}"
+                )
 
     @staticmethod
     def _validate_signature(signature: RuntimeSignature) -> None:
@@ -1003,6 +1135,11 @@ class NativeGemmaListenerMicrobatch:
             raise RuntimeError("native listener microbatch is closed")
         if self._poisoned:
             raise RuntimeError("native listener microbatch is poisoned; no retry/fallback is allowed")
+
+    @property
+    def supports_queued_audio_batch(self) -> bool:
+        """Whether this DSO advertises the additive variable-Q append symbol."""
+        return bool(self._queued_audio_batch_api_available)
 
     @staticmethod
     def _stream_identity(stream: torch.cuda.Stream) -> str:
@@ -1107,16 +1244,30 @@ class NativeGemmaListenerMicrobatch:
                 "native capacity growth returned less than requested; context quarantined"
             )
         self.max_batch_size = actual_capacity
-        if self.gemm_graphs_enabled:
-            graph_count = int(self._lib.gemma4_listener_batch_gemm_graph_count(self._ctx))
-            if graph_count <= 0:
+        if self.gemm_graphs_enabled or getattr(
+            self, "variable_q_gemm_graphs_enabled", False,
+        ):
+            graph_count = (
+                int(self._lib.gemma4_listener_batch_gemm_graph_count(self._ctx))
+                if self._gemm_graphs_api_available else 0
+            )
+            if self.gemm_graphs_enabled and graph_count <= 0:
                 self._poisoned = True
                 raise RuntimeError("native capacity grew without rebuilding the enabled GEMM graph cache")
             self.gemm_graph_count = graph_count
+            if getattr(self, "_variable_q_gemm_graph_count_api_available", False):
+                self.variable_q_gemm_graph_count = int(
+                    self._lib.gemma4_listener_batch_variable_gemm_graph_count(self._ctx)
+                )
+                if self.variable_q_gemm_graphs_enabled and self.variable_q_gemm_graph_count <= 0:
+                    self._poisoned = True
+                    raise RuntimeError(
+                        "native capacity grew without rebuilding the enabled variable-Q GEMM graph cache"
+                    )
         return actual_capacity
 
     def prepare_gemm_graphs(self) -> int:
-        """Pre-capture stable M=4 GEMM signatures before session admission."""
+        """Pre-capture stable Q2 and variable-Q GEMM signatures before admission."""
         self._assert_open()
         if not self._gemm_graphs_api_available:
             raise RuntimeError("native batch DSO does not advertise optional GEMM graph support")
@@ -1138,7 +1289,52 @@ class NativeGemmaListenerMicrobatch:
             raise RuntimeError("native GEMM graph preparation returned an empty cache")
         self.gemm_graphs_enabled = True
         self.gemm_graph_count = graph_count
+        if getattr(self, "_variable_q_gemm_graph_count_api_available", False):
+            self.variable_q_gemm_graph_count = int(
+                self._lib.gemma4_listener_batch_variable_gemm_graph_count(self._ctx)
+            )
+            self.variable_q_gemm_graphs_enabled = (
+                self.variable_q_gemm_graph_count > 0
+            )
         self.gemm_graph_prepare_ms = elapsed_ms
+        return graph_count
+
+    def prepare_variable_q_gemm_graphs(self) -> int:
+        """Pre-capture Q6 projection GEMMs without enabling the Q2 graph path."""
+        self._assert_open()
+        if not self._variable_q_gemm_graphs_api_available:
+            raise RuntimeError(
+                "native batch DSO does not advertise independent variable-Q GEMM graphs"
+            )
+        if self.variable_q_gemm_graphs_enabled:
+            return self.variable_q_gemm_graph_count
+        if self._active_output_generation is not None:
+            raise RuntimeError(
+                "variable-Q GEMM graph preparation cannot run while an output lease is active"
+            )
+        out_count = ctypes.c_uint64()
+        started_ns = time.perf_counter_ns()
+        status = int(self._lib.gemma4_listener_batch_prepare_variable_q_gemm_graphs(
+            self._ctx, ctypes.byref(out_count),
+        ))
+        elapsed_ms = (time.perf_counter_ns() - started_ns) / 1_000_000.0
+        if status != 0:
+            raise RuntimeError(
+                f"native variable-Q GEMM graph preparation failed with code {status}"
+            )
+        graph_count = int(out_count.value)
+        if graph_count <= 0:
+            raise RuntimeError(
+                "native variable-Q GEMM graph preparation returned an empty cache"
+            )
+        self.variable_q_gemm_graphs_enabled = True
+        self.variable_q_gemm_graph_count = graph_count
+        if getattr(self, "_gemm_graphs_api_available", False):
+            self.gemm_graph_count = int(
+                self._lib.gemma4_listener_batch_gemm_graph_count(self._ctx)
+            )
+        self.variable_q_gemm_graph_prepare_ms = elapsed_ms
+        self.variable_q_gemm_graph_prepare_error = None
         return graph_count
 
     def import_session(
@@ -1285,6 +1481,54 @@ class NativeGemmaListenerMicrobatch:
             c_rows.append(_row_to_c(row))
         return tuple(c_rows)
 
+    def validate_audio_frontend_metadata(
+        self,
+        manifest: ListenerBatchManifest,
+        prepared_frontend: Any,
+    ) -> None:
+        """Bind exact Q2 tower output to the same semantic native rows.
+
+        This Python-side contract keeps frontend KV identity aligned with
+        native capacity and the manifest cursor without changing the C ABI.
+        """
+        if manifest.batch_size > self.max_batch_size:
+            self.ensure_capacity(manifest.batch_size)
+        if manifest.batch_size > self.max_batch_size:
+            raise RuntimeError("audio frontend batch exceeds native listener capacity")
+        if getattr(prepared_frontend, "manifest_id", None) != manifest.manifest_id:
+            raise RuntimeError("audio frontend metadata belongs to a different native manifest")
+        input_shape = getattr(prepared_frontend, "streaming_audio_input_shape", None)
+        cursors = tuple(getattr(prepared_frontend, "audio_stream_cursors", ()))
+        if not cursors:
+            return
+        if input_shape != (manifest.batch_size, 8, 128):
+            raise RuntimeError("incremental audio frontend must bind exact [N,8,128] Mel ticks")
+        soft_tokens = tuple(getattr(prepared_frontend, "audio_soft_tokens", ()))
+        if len(cursors) != manifest.batch_size or len(soft_tokens) != manifest.batch_size:
+            raise RuntimeError("audio frontend semantic metadata has incomplete batch rows")
+        if self.capability.stream_q_len != LISTENER_STREAM_Q_LEN:
+            raise RuntimeError("native listener capability does not accept physical Q2 audio")
+        for row, cursor, tokens in zip(manifest.rows, cursors, soft_tokens, strict=True):
+            if (
+                cursor.session_id != row.session_id
+                or cursor.generation_id != row.session_generation
+                or cursor.state_epoch_id != row.state_epoch_id
+                or cursor.frame_id != row.frame_id
+                or cursor.sequence_position != row.sequence_position
+            ):
+                raise RuntimeError(
+                    f"audio frontend semantic cursor differs from native row {row.session_id}"
+                )
+            if row.cache_position > self.capability.max_seq_len - self.capability.stream_q_len:
+                raise RuntimeError("native capacity cannot accept the prepared audio Q2 tokens")
+            if (
+                not isinstance(tokens, torch.Tensor)
+                or tuple(tokens.shape) != (self.capability.stream_q_len, GEMMA4_HIDDEN_SIZE)
+                or tokens.device != self._model_device
+                or tokens.dtype != torch.bfloat16
+            ):
+                raise RuntimeError("audio frontend output differs from native BF16 [2,1536] contract")
+
     def step_async(
         self,
         manifest: ListenerBatchManifest,
@@ -1293,7 +1537,7 @@ class NativeGemmaListenerMicrobatch:
         per_layer_inputs: torch.Tensor | None = None,
         producer_stream: torch.cuda.Stream | None = None,
     ) -> NativeBatchOutput:
-        """Run a native Q2 audio frame or token-text PLE step."""
+        """Run a Q2 audio frame or one physical token-text PLE step."""
         return self._step_async(
             manifest, audio_soft, per_layer_inputs=per_layer_inputs,
             producer_stream=producer_stream, queued_audio_replay=False,
@@ -1314,6 +1558,29 @@ class NativeGemmaListenerMicrobatch:
             producer_stream=producer_stream, queued_audio_replay=True,
         )
 
+    def step_queued_audio_batch_async(
+        self,
+        manifest: ListenerBatchManifest,
+        audio_soft: torch.Tensor,
+        *,
+        producer_stream: torch.cuda.Stream | None = None,
+    ) -> NativeBatchOutput:
+        """Append Q2-aligned replay frames in one fork forward, returning the final pair."""
+        if not self._queued_audio_batch_api_available:
+            raise RuntimeError("native DSO lacks optional variable-Q queued audio append")
+        if len(manifest.rows) != 1:
+            raise ValueError("variable-Q queued replay accepts exactly one private session row")
+        query_count = _validate_queued_audio_query_count(int(audio_soft.shape[0]))
+        self._require_cuda_tensor(
+            audio_soft, name="audio_soft", dtype=torch.bfloat16,
+            shape=(query_count, GEMMA4_HIDDEN_SIZE), device=self._model_device,
+        )
+        return self._step_async(
+            manifest, audio_soft.unsqueeze(0), per_layer_inputs=None,
+            producer_stream=producer_stream, queued_audio_replay=True,
+            queued_query_count=query_count,
+        )
+
     def _step_async(
         self,
         manifest: ListenerBatchManifest,
@@ -1322,13 +1589,29 @@ class NativeGemmaListenerMicrobatch:
         per_layer_inputs: torch.Tensor | None,
         producer_stream: torch.cuda.Stream | None,
         queued_audio_replay: bool,
+        queued_query_count: int | None = None,
     ) -> NativeBatchOutput:
-        """Execute the physical-Q2 kernel with an explicit cursor-accounting mode."""
+        """Execute a physical Q2 step or one capability-gated variable-Q append."""
         c_rows = self._preflight_manifest(manifest)
         row_count = len(c_rows)
+        variable_text_q = None
+        if per_layer_inputs is not None and per_layer_inputs.ndim == 4:
+            candidate_q = int(per_layer_inputs.shape[1])
+            if candidate_q > LISTENER_STREAM_Q_LEN:
+                variable_text_q = candidate_q
+        query_count = (
+            variable_text_q if variable_text_q is not None else
+            (LISTENER_STREAM_Q_LEN if queued_query_count is None
+            else _validate_queued_audio_query_count(queued_query_count)
+            )
+        )
+        if queued_query_count is not None and not self._queued_audio_batch_api_available:
+            raise RuntimeError("native DSO lacks optional variable-Q queued audio append")
+        if any(row.cache_position > LISTENER_MAX_SEQ_LEN - query_count for row in manifest.rows):
+            raise ValueError("queued audio append exceeds native physical Q capacity")
         self._require_cuda_tensor(
             audio_soft, name="audio_soft", dtype=torch.bfloat16,
-            shape=(row_count, LISTENER_STREAM_Q_LEN, GEMMA4_HIDDEN_SIZE),
+            shape=(row_count, query_count, GEMMA4_HIDDEN_SIZE),
             device=self._model_device,
         )
         if per_layer_inputs is not None:
@@ -1337,22 +1620,35 @@ class NativeGemmaListenerMicrobatch:
                     "native DSO does not advertise token embeddings with model-projected PLE"
                 )
             if any(int(row.logical_q_len) == 0 for row in manifest.rows):
-                raise ValueError("text-input Q2 steps require logical_q_len 1 or 2")
+                raise ValueError("text-input steps require logical_q_len between 1 and 8")
+            if variable_text_q is not None and (
+                not self._variable_q_text_api_available
+                or row_count != 1
+                or variable_text_q not in (4, 6, 8)
+            ):
+                raise RuntimeError("native DSO does not support single-session variable-Q text steps")
             self._require_cuda_tensor(
                 per_layer_inputs,
                 name="per_layer_inputs",
                 dtype=torch.bfloat16,
-                shape=(row_count, LISTENER_STREAM_Q_LEN, 35, 256),
+                shape=(row_count, query_count, 35, 256),
                 device=self._model_device,
             )
         if self._active_output_generation is not None:
             raise RuntimeError("the previous native batch output lease is still active")
         self._check_producer_stream(producer_stream)
         logical_q_lens = tuple(int(row.logical_q_len) for row in manifest.rows)
-        if any(value < 0 or value > LISTENER_STREAM_Q_LEN for value in logical_q_lens):
+        logical_q_max = MAX_STREAM_Q_LEN if variable_text_q is not None else LISTENER_STREAM_Q_LEN
+        if any(value < 0 or value > logical_q_max for value in logical_q_lens):
             raise ValueError(
-                f"logical query counts must be in [0,{LISTENER_STREAM_Q_LEN}]"
+                f"logical query counts must be in [0,{logical_q_max}]"
             )
+        if variable_text_q is not None and any(
+            value < 3 or value > MAX_STREAM_Q_LEN
+            or variable_text_q != value + (value & 1)
+            for value in logical_q_lens
+        ):
+            raise ValueError("variable-Q text requires logical Q3..Q8 and ceil-even physical Q")
         if any(value < LISTENER_STREAM_Q_LEN for value in logical_q_lens) and not self._logical_q_truncate_api_available:
             raise RuntimeError(
                 "logical-Q rows require the native cursor-truncate ABI; "
@@ -1360,6 +1656,7 @@ class NativeGemmaListenerMicrobatch:
             )
         if queued_audio_replay and (
             per_layer_inputs is not None
+            or row_count != 1
             or any(value != LISTENER_STREAM_Q_LEN for value in logical_q_lens)
         ):
             raise ValueError("queued audio replay requires raw audio soft tokens and logical Q2")
@@ -1368,7 +1665,15 @@ class NativeGemmaListenerMicrobatch:
             per_layer_inputs.record_stream(self.listener_stream)
         c_rows_array = (CBatchRow * row_count)(*c_rows)
         audio_meta = NativeGemmaListenerLM._tensor_meta(audio_soft, dtype_code=1)
-        if queued_audio_replay:
+        if queued_query_count is not None:
+            row = manifest.rows[0]
+            binding = self._session_by_id[row.session_id]
+            status = int(self._lib.gemma4_listener_batch_append_queued_audio_async(
+                self._ctx, ctypes.c_uint32(binding.slot), ctypes.byref(c_rows_array[0]),
+                ctypes.c_void_p(int(audio_soft.data_ptr())), ctypes.byref(audio_meta),
+                ctypes.c_uint32(query_count), self._stream_ptr(),
+            ))
+        elif queued_audio_replay:
             status = int(self._lib.gemma4_listener_batch_step_queued_audio_async(
                 self._ctx, c_rows_array, ctypes.c_uint32(row_count),
                 ctypes.c_void_p(int(audio_soft.data_ptr())), ctypes.byref(audio_meta),
@@ -1378,6 +1683,14 @@ class NativeGemmaListenerMicrobatch:
             status = int(self._lib.gemma4_listener_batch_step_async(
                 self._ctx, c_rows_array, ctypes.c_uint32(row_count),
                 ctypes.c_void_p(int(audio_soft.data_ptr())), ctypes.byref(audio_meta), self._stream_ptr(),
+            ))
+        elif variable_text_q is not None:
+            ple_meta = NativeGemmaListenerLM._tensor_meta(per_layer_inputs, dtype_code=1)
+            status = int(self._lib.gemma4_listener_batch_step_embedded_variable_async(
+                self._ctx, ctypes.byref(c_rows_array[0]), ctypes.c_uint32(logical_q_lens[0]),
+                ctypes.c_uint32(query_count), ctypes.c_void_p(int(audio_soft.data_ptr())),
+                ctypes.byref(audio_meta), ctypes.c_void_p(int(per_layer_inputs.data_ptr())),
+                ctypes.byref(ple_meta), self._stream_ptr(),
             ))
         else:
             ple_meta = NativeGemmaListenerLM._tensor_meta(per_layer_inputs, dtype_code=1)
@@ -1390,6 +1703,32 @@ class NativeGemmaListenerMicrobatch:
         if status != 0:
             self._poisoned = True
             raise RuntimeError(f"native batched forward failed with code {status}; all rows quarantined")
+
+        rollback_enqueue_started = time.perf_counter()
+        if queued_query_count is None and variable_text_q is None and any(
+            logical_q_len < query_count for logical_q_len in logical_q_lens
+        ):
+            for index, (row, logical_q_len) in enumerate(zip(
+                manifest.rows, logical_q_lens, strict=True
+            )):
+                if logical_q_len == query_count:
+                    continue
+                binding = self._session_by_id[row.session_id]
+                truncate_status = int(self._lib.gemma4_listener_batch_truncate_after_step_async(
+                    self._ctx,
+                    ctypes.c_uint32(binding.slot),
+                    ctypes.byref(c_rows_array[index]),
+                    ctypes.c_uint32(logical_q_len),
+                    self._stream_ptr(),
+                ))
+                if truncate_status != 0:
+                    self._poisoned = True
+                    raise RuntimeError(
+                        "native logical-Q truncate failed before output publication; "
+                        f"session={row.session_id}, logical_q_len={logical_q_len}, "
+                        f"status={truncate_status}; cache owner quarantined"
+                    )
+        rollback_enqueue_ms = (time.perf_counter() - rollback_enqueue_started) * 1000.0
 
         generation = ctypes.c_uint64()
         borrowed = ctypes.c_void_p()
@@ -1451,6 +1790,8 @@ class NativeGemmaListenerMicrobatch:
             if status != 0:
                 raise RuntimeError(f"native output clone failed with code {status}")
             clone.record_stream(self.listener_stream)
+            if variable_text_q is not None:
+                clone = clone[:, :1, :]
             completion = torch.cuda.Event(enable_timing=False, blocking=False)
             completion.record(self.listener_stream)
             status = int(self._lib.gemma4_listener_batch_output_release(
@@ -1471,32 +1812,10 @@ class NativeGemmaListenerMicrobatch:
             self._active_output_generation = None
             raise
         self._active_output_generation = None
-        rollback_enqueue_started = time.perf_counter()
         rollback_tokens_by_row = tuple(
-            LISTENER_STREAM_Q_LEN - logical_q_len for logical_q_len in logical_q_lens
+            0 if queued_query_count is not None else query_count - logical_q_len
+            for logical_q_len in logical_q_lens
         )
-        if any(rollback_tokens_by_row):
-            for index, (row, logical_q_len) in enumerate(zip(
-                manifest.rows, logical_q_lens, strict=True
-            )):
-                if logical_q_len == LISTENER_STREAM_Q_LEN:
-                    continue
-                binding = self._session_by_id[row.session_id]
-                truncate_status = int(self._lib.gemma4_listener_batch_truncate_after_step_async(
-                    self._ctx,
-                    ctypes.c_uint32(binding.slot),
-                    ctypes.byref(c_rows_array[index]),
-                    ctypes.c_uint32(logical_q_len),
-                    self._stream_ptr(),
-                ))
-                if truncate_status != 0:
-                    self._poisoned = True
-                    raise RuntimeError(
-                        "native logical-Q truncate failed after physical Q2 write; "
-                        f"session={row.session_id}, logical_q_len={logical_q_len}, "
-                        f"status={truncate_status}; cache owner quarantined"
-                    )
-        rollback_enqueue_ms = (time.perf_counter() - rollback_enqueue_started) * 1000.0
         embedded_text_input = per_layer_inputs is not None
         preserves_listener_cursors = embedded_text_input or queued_audio_replay
         for row, logical_q_len in zip(manifest.rows, logical_q_lens, strict=True):
@@ -1505,8 +1824,9 @@ class NativeGemmaListenerMicrobatch:
                 binding.expected_frame_id += 1
                 binding.expected_state_version += 1
                 binding.expected_sequence_position += 1
-            binding.cache_position += logical_q_len
-            binding.valid_history_tokens += logical_q_len
+            cache_advance = query_count if queued_query_count is not None else logical_q_len
+            binding.cache_position += cache_advance
+            binding.valid_history_tokens += cache_advance
         return NativeBatchOutput(
             manifest_id=manifest.manifest_id,
             generation=int(generation.value),
@@ -1514,6 +1834,10 @@ class NativeGemmaListenerMicrobatch:
             tensor=clone,
             completion_event=completion,
             logical_q_lens=logical_q_lens,
+            cache_advance_tokens_by_row=(
+                tuple(query_count for _ in manifest.rows)
+                if queued_query_count is not None else logical_q_lens
+            ),
             kv_rollback_tokens_by_row=rollback_tokens_by_row,
             kv_rollback_enqueue_ms=rollback_enqueue_ms,
             embedded_text_input=embedded_text_input,
@@ -1546,11 +1870,24 @@ class NativeGemmaListenerMicrobatch:
         if output.embedded_text_input and any(value == 0 for value in logical_q_lens):
             self._poisoned = True
             raise RuntimeError("embedded text output cannot have an empty logical query")
+        cache_advance_tokens = (
+            output.cache_advance_tokens_by_row
+            or logical_q_lens
+        )
+        if (
+            len(cache_advance_tokens) != len(output.rows)
+            or any(isinstance(value, bool) or not isinstance(value, int) or value < 0
+                   for value in cache_advance_tokens)
+        ):
+            self._poisoned = True
+            raise RuntimeError("output cache-advance metadata is invalid for its row provenance")
         generation = _unsigned("output generation", output.generation, 64)
         if generation == 0 or generation != self._last_health_generation + 1:
             raise RuntimeError("native output health generation is stale or out of order")
         c_rows: list[CBatchRow] = []
-        for row, logical_q_len in zip(output.rows, logical_q_lens, strict=True):
+        for row, logical_q_len, cache_advance in zip(
+            output.rows, logical_q_lens, cache_advance_tokens, strict=True,
+        ):
             binding = self._session_by_id.get(row.session_id)
             if binding is None or binding.native_context_id != row.native_context_id:
                 self._poisoned = True
@@ -1561,8 +1898,8 @@ class NativeGemmaListenerMicrobatch:
                 or row.frame_id + (0 if output.preserves_listener_cursors else 1) != binding.expected_frame_id
                 or row.listener_state_version + (0 if output.preserves_listener_cursors else 1) != binding.expected_state_version
                 or row.sequence_position + (0 if output.preserves_listener_cursors else 1) != binding.expected_sequence_position
-                or row.cache_position + logical_q_len != binding.cache_position
-                or row.valid_history_tokens + logical_q_len != binding.valid_history_tokens
+                or row.cache_position + cache_advance != binding.cache_position
+                or row.valid_history_tokens + cache_advance != binding.valid_history_tokens
             ):
                 self._poisoned = True
                 raise RuntimeError("output health row provenance is stale for its native session")
@@ -1833,11 +2170,115 @@ class NativeGemmaListenerMicrobatch:
             cache_position=fork_row.cache_position,
             valid_history_tokens=fork_row.valid_history_tokens,
             prefix_len=source_state.prefix_len,
+            ephemeral_fork=True,
         )
         self._session_by_id[fork_row.session_id] = fork_binding
         self._session_by_context[fork_row.native_context_id] = fork_binding
         self._epoch_by_numeric[epoch_numeric] = fork_row.state_epoch_id
         return fork_row
+
+    def rebind_ephemeral_session_metadata(
+        self,
+        expected_fork_row: BatchRowDescriptor,
+        current_canonical_row: BatchRowDescriptor,
+    ) -> BatchRowDescriptor:
+        """CAS-update only the four listener identities on a private fork.
+
+        The fork's owner, generation, prefix and exact KV cursor stay unchanged.
+        This additive operation is unavailable with older DSOs; callers then
+        retain the full fork-and-replay path.
+        """
+        self._assert_open()
+        if not self._metadata_rebind_api_available:
+            raise RuntimeError("native DSO lacks ephemeral metadata-only CAS")
+        if self._active_output_generation is not None:
+            raise RuntimeError("cannot rebind a fork while a native output lease is active")
+        if not isinstance(expected_fork_row, BatchRowDescriptor) or not isinstance(
+            current_canonical_row, BatchRowDescriptor
+        ):
+            raise TypeError("metadata rebind requires BatchRowDescriptor rows")
+
+        fork_binding = self._session_by_id.get(expected_fork_row.session_id)
+        canonical_binding = self._session_by_context.get(
+            current_canonical_row.native_context_id
+        )
+        if fork_binding is None or not fork_binding.ephemeral_fork:
+            raise RuntimeError("metadata rebind is restricted to a live ephemeral fork")
+        if canonical_binding is None or canonical_binding.native_context_id != \
+                current_canonical_row.native_context_id:
+            raise RuntimeError("canonical row does not identify a bound native session")
+        if canonical_binding.ephemeral_fork:
+            raise RuntimeError("canonical row cannot identify an ephemeral fork")
+        if expected_fork_row.native_context_id == current_canonical_row.native_context_id:
+            raise RuntimeError("metadata rebind requires distinct fork and canonical contexts")
+        if expected_fork_row.session_generation != current_canonical_row.session_generation or \
+                fork_binding.generation != canonical_binding.generation:
+            raise RuntimeError("metadata rebind cannot change the listener generation")
+        for row, binding, role in (
+            (expected_fork_row, fork_binding, "fork"),
+            (current_canonical_row, canonical_binding, "canonical"),
+        ):
+            if (
+                row.session_generation != binding.generation
+                or row.state_epoch_id != binding.epoch_text
+                or row.frame_id != binding.expected_frame_id
+                or row.listener_state_version != binding.expected_state_version
+                or row.sequence_position != binding.expected_sequence_position
+                or row.cache_position != binding.cache_position
+                or row.valid_history_tokens != binding.valid_history_tokens
+            ):
+                raise RuntimeError(f"{role} row is stale for its Python native-session binding")
+
+        # Both reads are CAS-protected against their exact current native rows.
+        fork_state = self.session_state(expected_fork_row)
+        canonical_state = self.session_state(current_canonical_row)
+        if fork_state.session_generation != canonical_state.session_generation or \
+                fork_state.prefix_len != canonical_state.prefix_len:
+            raise RuntimeError("fork and canonical rows do not share a generation/prefix")
+        if (
+            current_canonical_row.frame_id < expected_fork_row.frame_id
+            or current_canonical_row.listener_state_version <
+                expected_fork_row.listener_state_version
+            or current_canonical_row.sequence_position < expected_fork_row.sequence_position
+        ):
+            raise RuntimeError("metadata rebind cannot decrement listener identity")
+
+        epoch_numeric = _epoch_id_u64(current_canonical_row.state_epoch_id)
+        other_epoch = self._epoch_by_numeric.get(epoch_numeric)
+        if other_epoch is not None and other_epoch != current_canonical_row.state_epoch_id:
+            raise RuntimeError("state epoch hash collision; metadata rebind was not submitted")
+        old_epoch_numeric = fork_binding.epoch_numeric
+        old_epoch_text = fork_binding.epoch_text
+        c_fork_row = _row_to_c(expected_fork_row)
+        c_canonical_row = _row_to_c(current_canonical_row)
+        status = int(self._lib.gemma4_listener_batch_rebind_ephemeral_session_metadata_async(
+            self._ctx,
+            ctypes.c_uint32(fork_binding.slot), ctypes.byref(c_fork_row),
+            ctypes.c_uint32(canonical_binding.slot), ctypes.byref(c_canonical_row),
+            self._stream_ptr(),
+        ))
+        if status != 0:
+            raise RuntimeError(f"native ephemeral metadata CAS rejected with code {status}")
+
+        rebound = replace(
+            expected_fork_row,
+            state_epoch_id=current_canonical_row.state_epoch_id,
+            frame_id=current_canonical_row.frame_id,
+            listener_state_version=current_canonical_row.listener_state_version,
+            sequence_position=current_canonical_row.sequence_position,
+        )
+        fork_binding.epoch_text = rebound.state_epoch_id
+        fork_binding.epoch_numeric = epoch_numeric
+        fork_binding.expected_frame_id = rebound.frame_id
+        fork_binding.expected_state_version = rebound.listener_state_version
+        fork_binding.expected_sequence_position = rebound.sequence_position
+        self._epoch_by_numeric[epoch_numeric] = rebound.state_epoch_id
+        if not any(
+            other.epoch_numeric == old_epoch_numeric and other.epoch_text == old_epoch_text
+            for other in self._session_by_id.values()
+        ) and self._epoch_by_numeric.get(old_epoch_numeric) == old_epoch_text:
+            del self._epoch_by_numeric[old_epoch_numeric]
+        return rebound
 
     def prepare_cache_copy_source(
         self,
@@ -2489,6 +2930,7 @@ __all__ = [
     "BATCH_CAPABILITIES_V1",
     "BATCH_DYNAMIC_CAPABILITY",
     "BATCH_GEMM_GRAPH_CAPABILITY",
+    "BATCH_VARIABLE_Q_GEMM_GRAPH_CAPABILITY",
     "BATCH_CACHE_COPY_CAPABILITY",
     "BATCH_OUTPUT_HEALTH_CAPABILITY",
     "BATCH_PROBE_CAPABILITY",

@@ -163,6 +163,10 @@ def test_scheduler_trace_projects_one_bounded_host_timeline_without_cuda_profile
         microbatch_commit_state_lock_released_ns=1_340_000,
         microbatch_commit_state_lock_wait_ms=0.01,
         microbatch_commit_state_lock_hold_ms=0.02,
+        microbatch_decision_view_fork_count=1,
+        microbatch_decision_view_replayed_q2_count=3,
+        microbatch_decision_view_cache_hit=True,
+        microbatch_decision_view_ms=42.5,
         policy_decision_at_ns=2_000_000,
     )
 
@@ -188,6 +192,10 @@ def test_scheduler_trace_projects_one_bounded_host_timeline_without_cuda_profile
     assert with_timeline["scheduler_commit_state_lock_hold_ms"] == 0.02
     assert with_timeline["scheduler_policy_decision_at_ns"] == 2_000_000
     assert with_timeline["scheduler_deadline_to_policy_decision_ms"] == 1.0
+    assert with_timeline["listener_batch_decision_view_fork_count"] == 1
+    assert with_timeline["listener_batch_decision_view_replayed_q2_count"] == 3
+    assert with_timeline["listener_batch_decision_view_cache_hit"] is True
+    assert with_timeline["listener_batch_decision_view_ms"] == 42.5
 
 
 def test_ready_dispatch_waits_for_a_complete_frame_and_dispatches_fifo_without_empty_ticks() -> None:

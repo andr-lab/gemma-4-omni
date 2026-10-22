@@ -1,7 +1,8 @@
 """Readers for synthetic manifests and native SmoothConv/DuplexConv layouts.
 
-The external corpora provide ASR/alignment evidence only. Their action-like
-fields are deliberately not promoted to DuplexControlHead targets.
+Verified external timings can produce explicitly marked Control6 action
+targets. Source turn tags remain evidence and are never silently reinterpreted
+as REPLAN or another unobserved control action.
 """
 from __future__ import annotations
 
@@ -14,6 +15,22 @@ from typing import Any, Iterator, Mapping, Sequence
 from .schema import ACTIONS, canonicalize_conversation, sha256_file
 
 _VALID_SPLITS = {"train": "train", "training": "train", "validation": "validation", "valid": "validation", "val": "validation", "dev": "validation", "test": "test"}
+_YIELD_MIN_LOCAL_LEAD_MS = 80.0
+_YIELD_MAX_LOCAL_STOP_DELAY_MS = 320.0
+_YIELD_MIN_PEER_PERSISTENCE_MS = 160.0
+_YIELD_MIN_LOCAL_QUIET_MS = 160.0
+# Only these provenance tags identify action targets that were annotated as
+# Control6 actions. Other `verified_*` tags in endpoint_causal_data.py are
+# timing/state heuristics and must be recalculated when timestamp rules change.
+def _is_explicit_control_action(action: Any, source: Any) -> bool:
+    # The endpoint pass uses this verified tag both for interval-derived
+    # CONTINUE and for a native BACKCHANNEL annotation. Preserve only the
+    # latter; CONTINUE is recomputed so a qualifying peer onset can become
+    # YIELD. Reviewed action labels are direct regardless of class.
+    return (
+        source == "explicit_source_action_reviewed"
+        or (source == "verified_native_assistant_action" and action == "BACKCHANNEL")
+    )
 
 
 def _read_jsonl(path: Path) -> Iterator[dict[str, Any]]:
@@ -787,6 +804,553 @@ def _physical_pair(conversation: Mapping[str, Any]) -> dict[int, int] | None:
     return mapping
 
 
+def select_timestamp_speak_endpoint_seeds(
+    conversation: Mapping[str, Any],
+    local_segments: Sequence[Mapping[str, Any]],
+    remote_segments: Sequence[Mapping[str, Any]],
+    *,
+    tick_ms: int = 80,
+) -> tuple[list[tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]]], dict[str, Any]]:
+    """Select the qualified subset of prior assistant-onset SPEAK targets.
+
+    The selected set is intentionally bounded by existing, eligible natural
+    SPEAK-onset labels. For each such onset, inspect the immediately preceding
+    peer segment across all turn states; only a complete last peer segment can
+    move SPEAK back to its final vocal tick. One target is kept per
+    (conversation, peer segment), assigned to the earliest following assistant
+    onset. This helper is shared by timestamp conversion and its audit report.
+    """
+    if tick_ms != 80:
+        raise ValueError("timestamp SPEAK endpoint selection requires 80 ms ticks")
+
+    def segment_id(segment: Mapping[str, Any]) -> str:
+        return str(segment.get("segment_id") or segment.get("source_event_id") or "unknown")
+
+    local_by_id = {segment_id(segment): segment for segment in local_segments}
+    seed_frames: dict[str, Mapping[str, Any]] = {}
+    seed_count = 0
+    for raw in conversation.get("frames", ()) or ():
+        if not isinstance(raw, Mapping):
+            continue
+        action = raw.get("target_action", raw.get("action"))
+        if action != "SPEAK" or raw.get("action_mask") is not True:
+            continue
+        if raw.get("target_action_source") != "timestamp_derived_assistant_onset_after_peer_termination":
+            continue
+        evidence = raw.get("target_action_evidence")
+        local_id = evidence.get("local_segment_id") if isinstance(evidence, Mapping) else None
+        if not isinstance(local_id, str) or local_id not in local_by_id:
+            continue
+        seed_count += 1
+        prior = seed_frames.get(local_id)
+        if prior is None or int(raw.get("frame_id", -1)) < int(prior.get("frame_id", -1)):
+            seed_frames[local_id] = raw
+
+    rejections: dict[str, int] = {
+        "missing_previous_peer": 0,
+        "last_peer_not_complete": 0,
+        "own_active_at_peer_end": 0,
+        "next_own_backchannel": 0,
+        "seed_onset_mismatch": 0,
+    }
+    candidates: list[tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]]] = []
+    explicit_backchannels: set[int] = set()
+    for raw in conversation.get("frames", ()) or ():
+        if not isinstance(raw, Mapping):
+            continue
+        action = raw.get("target_action", raw.get("action"))
+        source = raw.get("target_action_source")
+        if action == "BACKCHANNEL" and raw.get("action_mask") is True and (
+            source == "explicit_native_backchannel" or _is_explicit_control_action(action, source)
+        ):
+            frame_id = raw.get("frame_id")
+            if isinstance(frame_id, int) and not isinstance(frame_id, bool):
+                explicit_backchannels.add(frame_id)
+
+    for local_id, seed in seed_frames.items():
+        local = local_by_id[local_id]
+        local_start = float(local["start_ms"])
+        local_onset_frame = int(local_start // tick_ms)
+        if int(seed.get("frame_id", -1)) != local_onset_frame:
+            rejections["seed_onset_mismatch"] += 1
+            continue
+        if (
+            _native_state(local.get("native_turn_state")) == "backchannel"
+            or local_onset_frame in explicit_backchannels
+        ):
+            rejections["next_own_backchannel"] += 1
+            continue
+        previous_peers = [
+            peer for peer in remote_segments
+            if float(peer["end_ms"]) <= local_start
+        ]
+        if not previous_peers:
+            rejections["missing_previous_peer"] += 1
+            continue
+        # Select the last peer segment overall. An older complete segment must
+        # not be substituted when the newer preceding segment is incomplete.
+        peer = max(previous_peers, key=lambda segment: float(segment["end_ms"]))
+        if _native_state(peer.get("native_turn_state")) != "complete":
+            rejections["last_peer_not_complete"] += 1
+            continue
+        peer_end = float(peer["end_ms"])
+        if any(
+            float(segment["start_ms"]) <= peer_end < float(segment["end_ms"])
+            for segment in local_segments
+        ):
+            rejections["own_active_at_peer_end"] += 1
+            continue
+        candidates.append((peer, local, seed))
+
+    # A single peer segment can have multiple following assistant onset rows.
+    # Keep only the earliest own onset for that same completed peer segment.
+    by_peer: dict[str, tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]]] = {}
+    for candidate in candidates:
+        peer, local, _seed = candidate
+        peer_id = segment_id(peer)
+        previous = by_peer.get(peer_id)
+        if previous is None or float(local["start_ms"]) < float(previous[1]["start_ms"]):
+            by_peer[peer_id] = candidate
+    selected = sorted(by_peer.values(), key=lambda item: (float(item[1]["start_ms"]), segment_id(item[0])))
+    return selected, {
+        "existing_eligible_assistant_onset_speak_seeds": seed_count,
+        "seed_local_segments": len(seed_frames),
+        "qualified_endpoint_pairs": len(selected),
+        "deduplicated_later_assistant_onsets": max(0, len(candidates) - len(selected)),
+        "rejections": rejections,
+    }
+
+
+def derive_timestamp_action_frames(
+    conversation: Mapping[str, Any],
+    *,
+    tick_ms: int = 80,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Derive sparse, directed Control6 labels from verified channel timings.
+
+    Event labels use ``floor(timestamp / tick_ms)``. A YIELD candidate is
+    emitted at peer onset only when the local channel was already active for a
+    full tick, stopped within four ticks, the peer persisted for two ticks
+    after that stop, and no local speech restarted for two ticks. The latter
+    interval checks select labels only; callers must keep model features
+    strictly causal. Native turn tags and speaker links are retained as
+    evidence but do not gate this timestamp-derived target. An explicit peer
+    BACKCHANNEL at onset is excluded from YIELD.
+    """
+    if isinstance(tick_ms, bool) or not isinstance(tick_ms, int) or tick_ms != 80:
+        raise ValueError("timestamp Control6 labels require 80 ms ticks")
+    duration = conversation.get("duration_ms")
+    if not _number(duration) or float(duration) <= 0:
+        raise ValueError("timestamp Control6 labels require a positive finite duration_ms")
+    duration_ms = float(duration)
+    frame_count = int(math.ceil(duration_ms / tick_ms))
+    channel_map = conversation.get("channel_map") or {}
+    local_channels = {int(k) for k, v in channel_map.items() if str(k).isdigit() and v == "assistant"}
+    remote_channels = {int(k) for k, v in channel_map.items() if str(k).isdigit() and v == "user"}
+    if len(local_channels) != 1 or len(remote_channels) != 1 or local_channels == remote_channels:
+        raise ValueError("timestamp Control6 labels require one explicit assistant and user channel")
+
+    local_segments: list[Mapping[str, Any]] = []
+    remote_segments: list[Mapping[str, Any]] = []
+    for segment in conversation.get("segments", ()) or ():
+        if not isinstance(segment, Mapping):
+            continue
+        role = str(segment.get("perspective_role") or segment.get("role") or "").strip().lower()
+        channel = segment.get("channel_index")
+        verified = (
+            segment.get("audio_channel_verified") is True
+            and segment.get("time_mask", True) is True
+            and isinstance(channel, int)
+            and not isinstance(channel, bool)
+            and _number(segment.get("start_ms"))
+            and _number(segment.get("end_ms"))
+            and 0 <= float(segment["start_ms"]) < float(segment["end_ms"]) <= duration_ms
+        )
+        if not verified:
+            continue
+        if role == "assistant" and channel in local_channels:
+            local_segments.append(segment)
+        elif role == "user" and channel in remote_channels:
+            remote_segments.append(segment)
+
+    def frame_id_at(time_ms: float) -> int:
+        return int(float(time_ms) // tick_ms)
+
+    def segment_id(segment: Mapping[str, Any]) -> str:
+        return str(segment.get("segment_id") or segment.get("source_event_id") or "unknown")
+
+    raw_onset_speak_by_frame: dict[int, Mapping[str, Any]] = {}
+    for raw in conversation.get("frames", ()) or ():
+        if (
+            isinstance(raw, Mapping)
+            and raw.get("target_action") == "SPEAK"
+            and raw.get("action_mask") is True
+            and raw.get("target_action_source") == "timestamp_derived_assistant_onset_after_peer_termination"
+            and isinstance(raw.get("frame_id"), int)
+            and not isinstance(raw.get("frame_id"), bool)
+        ):
+            raw_onset_speak_by_frame.setdefault(int(raw["frame_id"]), raw)
+
+    explicit_by_frame: dict[int, list[dict[str, Any]]] = {}
+    # Preserve only action labels with direct/verified action provenance.
+    # Endpoint and turn-state labels, including older derived source tags, are
+    # recomputed from the timed segments below.
+    for raw in conversation.get("frames", ()) or ():
+        if not isinstance(raw, Mapping):
+            continue
+        action = raw.get("target_action")
+        source = raw.get("target_action_source")
+        fid = raw.get("frame_id")
+        if raw.get("action_mask") is not True or action not in ACTIONS or not (
+            isinstance(fid, int) and not isinstance(fid, bool) and fid >= 0
+        ) or not _is_explicit_control_action(action, source):
+            continue
+        explicit_by_frame.setdefault(fid, []).append({
+            "action": str(action),
+            "source": source,
+            "evidence": raw.get("target_action_evidence"),
+        })
+
+    # A native BACKCHANNEL tag is a direct local action label at its onset.
+    for segment in local_segments:
+        if _native_state(segment.get("native_turn_state")) == "backchannel":
+            fid = frame_id_at(float(segment["start_ms"]))
+            explicit_by_frame.setdefault(fid, []).append({
+                "action": "BACKCHANNEL",
+                "source": "explicit_native_backchannel",
+                "evidence": {"local_segment_id": segment_id(segment)},
+            })
+
+    # Refine only the prepared eligible onset SPEAK seed set. This avoids
+    # expanding supervision to every interval in the full source corpus.
+    # The later onset timestamp selects the label; model features remain at
+    # the causal peer-end tick and never include future audio.
+    endpoint_speak_by_frame: dict[int, list[dict[str, Any]]] = {}
+    endpoint_speak_segments: dict[str, tuple[int, str]] = {}
+    endpoint_same_tick_segments: dict[str, tuple[int, str]] = {}
+    endpoint_candidate_count = 0
+    endpoint_seed_pairs, endpoint_seed_report = select_timestamp_speak_endpoint_seeds(
+        conversation, local_segments, remote_segments, tick_ms=tick_ms
+    )
+    endpoint_same_tick_count = 0
+    for peer, next_local, seed in endpoint_seed_pairs:
+        peer_end = float(peer["end_ms"])
+        endpoint_frame = frame_id_at(max(0.0, peer_end - 1e-9))
+        if not 0 <= endpoint_frame < frame_count:
+            continue
+        assistant_onset = float(next_local["start_ms"])
+        if frame_id_at(assistant_onset) == endpoint_frame:
+            # The existing onset is already the exact same decision tick.
+            endpoint_same_tick_count += 1
+            endpoint_same_tick_segments[segment_id(peer)] = (
+                endpoint_frame,
+                segment_id(next_local),
+            )
+            continue
+        endpoint_candidate_count += 1
+        endpoint_speak_segments[segment_id(peer)] = (endpoint_frame, segment_id(next_local))
+        endpoint_speak_by_frame.setdefault(endpoint_frame, []).append({
+            "peer_segment_id": segment_id(peer),
+            "assistant_segment_id": segment_id(next_local),
+            "user_complete_end_ms": peer_end,
+            "last_vocal_frame_id": endpoint_frame,
+            "assistant_onset_ms": assistant_onset,
+            "seed_onset_frame_id": int(seed["frame_id"]),
+            "seed_onset_source": seed.get("target_action_source"),
+            "decision_precedes_assistant_onset": True,
+            "lookahead_used_for_label_eligibility_only": True,
+        })
+
+    yield_by_frame: dict[int, list[dict[str, Any]]] = {}
+    yield_rejections: dict[str, int] = {
+        "peer_backchannel": 0,
+        "local_lead_below_80ms": 0,
+        "local_stop_after_320ms": 0,
+        "peer_persistence_below_160ms": 0,
+        "local_restart_within_160ms": 0,
+        "explicit_action_conflict": 0,
+    }
+    for local in local_segments:
+        local_start = float(local["start_ms"])
+        local_end = float(local["end_ms"])
+        for peer in remote_segments:
+            peer_start = float(peer["start_ms"])
+            peer_end = float(peer["end_ms"])
+            if not local_start < peer_start < local_end:
+                continue
+            onset_frame = frame_id_at(peer_start)
+            if _native_state(peer.get("native_turn_state")) == "backchannel" or any(
+                _native_state(other.get("native_turn_state")) == "backchannel"
+                and float(other["start_ms"]) <= peer_start < float(other["end_ms"])
+                for other in remote_segments
+            ):
+                yield_rejections["peer_backchannel"] += 1
+                continue
+            if peer_start - local_start < _YIELD_MIN_LOCAL_LEAD_MS:
+                yield_rejections["local_lead_below_80ms"] += 1
+                continue
+            if local_end - peer_start > _YIELD_MAX_LOCAL_STOP_DELAY_MS:
+                yield_rejections["local_stop_after_320ms"] += 1
+                continue
+            if peer_end - local_end < _YIELD_MIN_PEER_PERSISTENCE_MS:
+                yield_rejections["peer_persistence_below_160ms"] += 1
+                continue
+            local_restarted = any(
+                other is not local
+                and float(other["start_ms"]) < local_end + _YIELD_MIN_LOCAL_QUIET_MS
+                and float(other["end_ms"]) > local_end
+                for other in local_segments
+            )
+            if local_restarted:
+                yield_rejections["local_restart_within_160ms"] += 1
+                continue
+            if onset_frame in explicit_by_frame:
+                yield_rejections["explicit_action_conflict"] += 1
+                continue
+            evidence = {
+                "local_segment_id": segment_id(local),
+                "peer_segment_id": segment_id(peer),
+                "peer_onset_ms": peer_start,
+                "local_stop_ms": local_end,
+                "peer_end_ms": peer_end,
+                "assistant_active_before_peer_onset_ms": peer_start - local_start,
+                "peer_persistence_after_local_stop_ms": peer_end - local_end,
+                "local_native_turn_state_evidence": _native_state(local.get("native_turn_state")),
+                "peer_native_turn_state_evidence": _native_state(peer.get("native_turn_state")),
+                "native_interruption_tag_evidence": _has_native_interruption(local.get("native_other_turn")),
+                "source_other_speaker_link_evidence": bool(
+                    isinstance(local.get("source_other_speaker_id"), str)
+                    and local.get("source_other_speaker_id") == peer.get("source_speaker_id")
+                ),
+                "lookahead_used_for_label_eligibility_only": True,
+            }
+            yield_by_frame.setdefault(onset_frame, []).append(evidence)
+
+    candidate_frame_ids: set[int] = (
+        set(explicit_by_frame) | set(yield_by_frame) | set(endpoint_speak_by_frame)
+    )
+    for segment in local_segments + remote_segments:
+        seg_start = float(segment["start_ms"])
+        seg_end = float(segment["end_ms"])
+        onset_id = frame_id_at(seg_start)
+        if 0 <= onset_id < frame_count:
+            candidate_frame_ids.add(onset_id)
+        stop_id = frame_id_at(seg_end)
+        if 0 <= stop_id < frame_count:
+            candidate_frame_ids.add(stop_id)
+        interior_start = onset_id + 1
+        interior_stop = min(int(math.ceil(seg_end / tick_ms)), frame_count)
+        interior_ids = list(range(interior_start, interior_stop))
+        if len(interior_ids) <= 2:
+            candidate_frame_ids.update(interior_ids)
+        elif interior_ids:
+            first = round((len(interior_ids) - 1) / 3)
+            second = round(2 * (len(interior_ids) - 1) / 3)
+            candidate_frame_ids.add(interior_ids[first])
+            candidate_frame_ids.add(interior_ids[second])
+
+    def overlaps(segment: Mapping[str, Any], start_ms: float, end_ms: float) -> bool:
+        return float(segment["start_ms"]) < end_ms and float(segment["end_ms"]) > start_ms
+
+    qualified_endpoint_frame_ids = set(endpoint_speak_by_frame) | {
+        frame_id for frame_id, _local_id in endpoint_same_tick_segments.values()
+    }
+    counts: dict[str, int] = {}
+    source_counts: dict[str, int] = {}
+    frames: list[dict[str, Any]] = []
+    for fid in sorted(fid for fid in candidate_frame_ids if 0 <= fid < frame_count):
+        start_ms = fid * tick_ms
+        end_ms = min(duration_ms, start_ms + tick_ms)
+        local_active = [segment for segment in local_segments if overlaps(segment, start_ms, end_ms)]
+        remote_active = [segment for segment in remote_segments if overlaps(segment, start_ms, end_ms)]
+        action: str | None = None
+        action_source: str | None = None
+        evidence: Any = None
+        masked_reason: str | None = None
+        explicit = explicit_by_frame.get(fid, ())
+        explicit_actions = {str(item["action"]) for item in explicit}
+        if len(explicit_actions) == 1:
+            action = next(iter(explicit_actions))
+            action_source = str(explicit[0]["source"])
+            evidence = [item.get("evidence") for item in explicit if item.get("evidence") is not None]
+        elif len(explicit_actions) > 1:
+            masked_reason = "conflicting_explicit_action_labels_same_tick"
+        elif fid in yield_by_frame:
+            candidates = yield_by_frame[fid]
+            if len(candidates) == 1:
+                action = "YIELD"
+                action_source = "timestamp_derived_peer_onset_confirmed_local_stop"
+                evidence = candidates[0]
+            else:
+                masked_reason = "multiple_yield_candidates_same_tick"
+        elif fid in endpoint_speak_by_frame:
+            candidates = endpoint_speak_by_frame[fid]
+            if len(candidates) == 1:
+                action = "SPEAK"
+                action_source = "timestamp_derived_last_vocal_complete_user_turn"
+                evidence = candidates[0]
+            else:
+                masked_reason = "multiple_user_turn_speak_endpoints_same_tick"
+        elif len(local_active) == 1:
+            active = local_active[0]
+            state = _native_state(active.get("native_turn_state"))
+            onset = start_ms <= float(active["start_ms"]) < end_ms
+            if state in {"complete", "incomplete"}:
+                if not onset:
+                    action = "CONTINUE"
+                    action_source = "timestamp_derived_local_speech_active"
+                    evidence = {"local_segment_id": segment_id(active), "tick_start_ms": start_ms}
+                else:
+                    local_onset = float(active["start_ms"])
+                    prior_remote = [
+                        segment for segment in remote_segments
+                        if float(segment["end_ms"]) <= local_onset
+                    ]
+                    peer_terminated = (
+                        not prior_remote
+                        or _native_state(max(prior_remote, key=lambda segment: float(segment["end_ms"])).get("native_turn_state")) == "complete"
+                    )
+                    remote_active_at_onset = any(
+                        float(segment["start_ms"]) <= local_onset < float(segment["end_ms"])
+                        for segment in remote_segments
+                    )
+                    if peer_terminated and not remote_active_at_onset:
+                        previous_peer = (
+                            max(prior_remote, key=lambda segment: float(segment["end_ms"]))
+                            if prior_remote else None
+                        )
+                        previous_peer_id = segment_id(previous_peer) if previous_peer is not None else None
+                        endpoint = endpoint_speak_segments.get(previous_peer_id or "")
+                        if endpoint is None:
+                            endpoint = endpoint_same_tick_segments.get(previous_peer_id or "")
+                        if endpoint is not None and endpoint[0] != fid:
+                            masked_reason = "timestamp_derived_assistant_onset_deferred_to_user_endpoint"
+                        elif endpoint is not None:
+                            action = "SPEAK"
+                            action_source = "timestamp_derived_assistant_onset_after_peer_termination"
+                            evidence = {
+                                "local_segment_id": segment_id(active),
+                                "assistant_onset_ms": local_onset,
+                                "previous_peer_segment_id": previous_peer_id,
+                                "same_tick_as_user_endpoint": True,
+                                "qualified_user_endpoint_key": [
+                                    str(conversation.get("conversation_id") or ""),
+                                    int(endpoint[0]),
+                                ],
+                            }
+                        else:
+                            masked_reason = "assistant_onset_without_qualified_user_endpoint"
+                    else:
+                        masked_reason = "assistant_onset_overlaps_unterminated_peer"
+            elif state == "backchannel" and onset:
+                # Usually handled by explicit_by_frame; retained as a safe
+                # fallback when a caller supplied a frame outside its range.
+                action = "BACKCHANNEL"
+                action_source = "explicit_native_backchannel"
+                evidence = {"local_segment_id": segment_id(active)}
+        elif not local_active and len(remote_active) == 1:
+            active = remote_active[0]
+            action = "LISTEN"
+            action_source = "timestamp_derived_remote_speech_local_idle"
+            evidence = {"peer_segment_id": segment_id(active), "tick_start_ms": start_ms}
+        elif local_active and remote_active:
+            masked_reason = "overlap_without_confirmed_yield"
+
+        force_mask = False
+        qualified_endpoint_frame = fid in qualified_endpoint_frame_ids
+        raw_onset = raw_onset_speak_by_frame.get(fid)
+        if (
+            raw_onset is not None
+            and not qualified_endpoint_frame
+            and not explicit
+            and action_source in {None, "timestamp_derived_assistant_onset_after_peer_termination"}
+        ):
+            # Keep the original onset label and provenance visible for review,
+            # but train only on keys supported by a qualified user endpoint.
+            action = "SPEAK"
+            action_source = "timestamp_derived_assistant_onset_after_peer_termination"
+            evidence = raw_onset.get("target_action_evidence")
+            if masked_reason is None:
+                masked_reason = "assistant_onset_without_qualified_user_endpoint"
+            force_mask = True
+
+        frame = {
+            "frame_id": fid,
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+            "valid_ms": max(0.0, end_ms - start_ms),
+            "valid_samples": int(round(max(0.0, end_ms - start_ms) * int(conversation.get("sample_rate_hz", 16000)) / 1000.0)),
+            "target_action": action,
+            "action_mask": action in ACTIONS and not force_mask,
+            "target_action_source": action_source,
+            "target_action_evidence": evidence,
+            "action_masked_reason": masked_reason,
+            "event_onset": action in {"SPEAK", "YIELD", "BACKCHANNEL"},
+            "time_mask": end_ms > start_ms,
+            "audio_mask": bool(conversation.get("audio_path")),
+            "events": [],
+            "speaker_active_at_frame_start": any(
+                float(segment["start_ms"]) <= start_ms < float(segment["end_ms"])
+                for segment in local_segments
+            ),
+            "peer_active_during_frame": bool(remote_active),
+            "context_provenance": "verified_role_intervals",
+        }
+        if frame["action_mask"]:
+            counts[action] = counts.get(action, 0) + 1
+            source_counts[action_source or "unknown"] = source_counts.get(action_source or "unknown", 0) + 1
+        frames.append(frame)
+
+    report = {
+        "schema": "timestamp_derived_control6_v1",
+        "tick_ms": tick_ms,
+        "frame_quantization": "floor(event_timestamp_ms / 80); target observes current frame [t,t+80ms)",
+        "feature_causality": "labels may use later interval endpoints for eligibility; model features must use only user t and assistant t-1",
+        "yield_rule": {
+            "assistant_active_before_peer_onset_ms": _YIELD_MIN_LOCAL_LEAD_MS,
+            "local_stop_within_peer_onset_ms": _YIELD_MAX_LOCAL_STOP_DELAY_MS,
+            "peer_persistence_after_local_stop_ms": _YIELD_MIN_PEER_PERSISTENCE_MS,
+            "no_local_restart_after_stop_ms": _YIELD_MIN_LOCAL_QUIET_MS,
+            "explicit_peer_backchannel_excluded": True,
+            "native_turn_state_is_gate": False,
+            "explicit_interruption_tag_is_gate": False,
+        },
+        "supervised_action_counts": dict(sorted(counts.items())),
+        "action_source_counts": dict(sorted(source_counts.items())),
+        "yield_candidate_count": sum(len(candidates) for candidates in yield_by_frame.values()),
+        "yield_target_count": sum(
+            1 for frame in frames
+            if frame.get("target_action") == "YIELD"
+            and frame.get("target_action_source") == "timestamp_derived_peer_onset_confirmed_local_stop"
+        ),
+        "speak_last_vocal_endpoint_candidates": endpoint_candidate_count,
+        "speak_last_vocal_endpoint_seed_selection": endpoint_seed_report,
+        "speak_last_vocal_endpoint_same_tick_seeds": endpoint_same_tick_count,
+        "speak_last_vocal_endpoint_same_tick_keys": [
+            {
+                "frame_id": int(frame_id),
+                "peer_segment_id": peer_id,
+                "assistant_segment_id": local_id,
+            }
+            for peer_id, (frame_id, local_id) in sorted(endpoint_same_tick_segments.items())
+        ],
+        "speak_last_vocal_endpoint_targets": sum(
+            1 for frame in frames
+            if frame.get("target_action_source") == "timestamp_derived_last_vocal_complete_user_turn"
+        ),
+        "speak_last_vocal_endpoint_duplicate_ticks": sum(
+            len(candidates) > 1 for candidates in endpoint_speak_by_frame.values()
+        ),
+        "speak_assistant_onset_targets_deferred": sum(
+            1 for frame in frames
+            if frame.get("action_masked_reason") == "timestamp_derived_assistant_onset_deferred_to_user_endpoint"
+        ),
+        "yield_candidate_rejections": yield_rejections,
+        "replan_inferred": False,
+    }
+    return frames, report
+
+
 def build_real_conversational_views(
     conversations: Sequence[Mapping[str, Any]],
     *,
@@ -910,24 +1474,10 @@ def build_real_conversational_views(
         source = conversation.get("source")
         duration = conversation.get("duration_ms")
         segments = [segment for segment in (conversation.get("segments", ()) or ()) if isinstance(segment, Mapping)]
-        # A speaker-to-channel link is usable for YIELD only if observed
-        # unambiguously on verified physical speech segments.
-        speaker_channels: dict[str, set[int]] = {}
-        for segment in segments:
-            speaker = segment.get("source_speaker_id")
-            channel = segment.get("channel_index")
-            if (segment.get("audio_channel_verified") is True and segment.get("time_mask") is True
-                    and isinstance(speaker, str)
-                    and speaker.strip() and speaker.strip().lower() != "unknown"
-                    and isinstance(channel, int) and not isinstance(channel, bool) and channel in {0, 1}):
-                speaker_channels.setdefault(speaker.strip(), set()).add(channel)
-
         for local_channel in (0, 1):
             remote_channel = 1 - local_channel
             channel_map = {str(local_channel): "assistant", str(remote_channel): "user"}
             view_segments: list[dict[str, Any]] = []
-            local_segments: list[dict[str, Any]] = []
-            remote_segments: list[dict[str, Any]] = []
             for original in segments:
                 segment = dict(original)
                 channel = segment.get("channel_index")
@@ -960,11 +1510,9 @@ def build_real_conversational_views(
                             and bool(segment["text"].strip())
                         )
                         segment["target_mask"] = bool(target_ok)
-                        local_segments.append(segment)
                     else:
                         segment["task_kind"] = "context"
                         segment["target_mask"] = False
-                        remote_segments.append(segment)
                 else:
                     segment["perspective_role"] = None
                     segment["role"] = None
@@ -977,131 +1525,163 @@ def build_real_conversational_views(
                 segment["language"] = _language_name(source_lid) or _language_name(conversation.get("language")) or "Chinese"
                 view_segments.append(segment)
 
-            frame_count = int(math.ceil(float(duration) / tick_ms))
-            yield_by_frame: dict[int, list[dict[str, Any]]] = {}
-            if source == "SmoothConv":
-                for local in local_segments:
-                    start, end = local.get("start_ms"), local.get("end_ms")
-                    local_speaker = local.get("source_speaker_id")
-                    other_speaker = local.get("source_other_speaker_id")
-                    if not (
-                        _native_state(local.get("native_turn_state")) == "incomplete"
-                        and _has_native_interruption(local.get("native_other_turn"))
-                        and local.get("audio_channel_verified") is True and local.get("time_mask") is True
-                        and _number(start) and _number(end) and 0 <= start < end < duration
-                        and isinstance(local_speaker, str) and speaker_channels.get(local_speaker.strip()) == {local_channel}
-                        and isinstance(other_speaker, str) and speaker_channels.get(other_speaker.strip()) == {remote_channel}
-                    ):
-                        continue
-                    local_still_active = any(
-                        other is not local
-                        and other.get("audio_channel_verified") is True
-                        and _number(other.get("start_ms")) and _number(other.get("end_ms"))
-                        and other["start_ms"] <= end < other["end_ms"]
-                        for other in local_segments
-                    )
-                    remote_continues = any(
-                        remote.get("audio_channel_verified") is True
-                        and remote.get("time_mask") is True
-                        and isinstance(remote.get("source_speaker_id"), str)
-                        and remote["source_speaker_id"].strip() == other_speaker.strip()
-                        and _number(remote.get("start_ms")) and _number(remote.get("end_ms"))
-                        and remote["start_ms"] < end < remote["end_ms"]
-                        for remote in remote_segments
-                    )
-                    if local_still_active or not remote_continues:
-                        continue
-                    frame_id = int(float(end) // tick_ms)
-                    if 0 <= frame_id < frame_count:
-                        yield_by_frame.setdefault(frame_id, []).append(local)
-
-            candidate_frame_ids: set[int] = set(yield_by_frame)
-            for segment in local_segments + remote_segments:
-                start_ms, end_ms = segment.get("start_ms"), segment.get("end_ms")
-                if (segment.get("audio_channel_verified") is not True or segment.get("time_mask") is not True
-                        or not _number(start_ms) or not _number(end_ms) or not 0 <= start_ms < end_ms <= duration):
-                    continue
-                onset_id = int(float(start_ms) // tick_ms)
-                if 0 <= onset_id < frame_count:
-                    candidate_frame_ids.add(onset_id)
-                interior_start = onset_id + 1
-                interior_stop = min(int(math.ceil(float(end_ms) / tick_ms)), frame_count)
-                interior_ids = list(range(interior_start, interior_stop))
-                if len(interior_ids) <= 2:
-                    candidate_frame_ids.update(interior_ids)
-                elif interior_ids:
-                    first = round((len(interior_ids) - 1) / 3)
-                    second = round(2 * (len(interior_ids) - 1) / 3)
-                    candidate_frame_ids.add(interior_ids[first])
-                    candidate_frame_ids.add(interior_ids[second])
-
-            frames: list[dict[str, Any]] = []
-            for frame_id in sorted(candidate_frame_ids):
-                start = frame_id * tick_ms
-                end = min(float(duration), start + tick_ms)
-                def overlaps(segment: Mapping[str, Any]) -> bool:
-                    return bool(
-                        segment.get("audio_channel_verified") is True
-                        and segment.get("time_mask") is True
-                        and _number(segment.get("start_ms")) and _number(segment.get("end_ms"))
-                        and float(segment["start_ms"]) < end and float(segment["end_ms"]) > start
-                    )
-
-                local_active = [segment for segment in local_segments if overlaps(segment)]
-                remote_active = [segment for segment in remote_segments if overlaps(segment)]
-                action = None
-                if len(yield_by_frame.get(frame_id, ())) == 1:
-                    action = "YIELD"
-                elif not yield_by_frame.get(frame_id):
-                    if len(local_active) == 1:
-                        active = local_active[0]
-                        state = _native_state(active.get("native_turn_state"))
-                        onset = start <= float(active["start_ms"]) < end
-                        if state == "backchannel" and onset:
-                            action = "BACKCHANNEL"
-                        elif state in {"complete", "incomplete"}:
-                            action = "SPEAK" if onset else "CONTINUE"
-                    elif not local_active and len(remote_active) == 1:
-                        action = "LISTEN"
-                valid_ms = max(0.0, end - start)
-                sample_rate = int(conversation.get("sample_rate_hz", 16000))
-                frames.append({
-                    "frame_id": frame_id,
-                    "start_ms": start,
-                    "end_ms": end,
-                    "valid_ms": valid_ms,
-                    "valid_samples": int(round(valid_ms * sample_rate / 1000.0)),
-                    "target_action": action,
-                    "action_mask": action is not None,
-                    "time_mask": valid_ms > 0,
-                    "audio_mask": bool(conversation.get("audio_path")),
-                    "events": [],
-                })
-
-            original_id = str(conversation.get("conversation_id", ""))
-            view = dict(conversation)
-            view.update({
-                "conversation_id": f"{source}:{original_id}:local-channel-{local_channel}",
-                "source_group_id": str(conversation.get("source_group_id") or original_id),
+            view_context = dict(conversation)
+            view_context.update({
+                "conversation_id": f"{source}:{conversation.get('conversation_id', '')}:local-channel-{local_channel}",
+                "source_group_id": str(conversation.get("source_group_id") or conversation.get("conversation_id", "")),
                 "source": source,
-                "source_conversation_id": original_id,
+                "source_conversation_id": str(conversation.get("conversation_id", "")),
                 "view_local_channel": local_channel,
                 "view_remote_channel": remote_channel,
+                "channel_map": channel_map,
+                "segments": view_segments,
+                "tick_ms": tick_ms,
+            })
+            frames, derivation_report = derive_timestamp_action_frames(view_context, tick_ms=tick_ms)
+
+            view = view_context
+            view.update({
                 "source_view_selection_rank": selection_rank,
                 "source_view_selection_group_quality": list(selection_quality),
                 "source_view_max_conversations": max_conversations,
                 "source_view_eligible_conversations_seen": eligible_source_conversation_count,
                 "source_view_selected_conversations": selected_source_conversation_count,
-                "channel_map": channel_map,
                 "language": _language_name(conversation.get("language")) or "Chinese",
                 "source_language_lid": conversation.get("source_language_lid"),
-                "segments": view_segments,
                 "frames": frames,
-                "tick_ms": tick_ms,
-                "control_supervision": "native_turn_state_and_observed_channel_timing",
+                "timestamp_action_derivation": derivation_report,
+                "control_supervision": "explicit_native_actions_plus_timestamp_derived_control6_v1",
             })
             output.append(view)
     return output
+
+
+def relabel_prepared_timestamp_actions(
+    conversations: Sequence[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Recompute only prepared real-view Control6 labels from verified times.
+
+    Existing source-group splits and row identities are immutable. Synthetic
+    rows and non-real sources pass through unchanged; held-out ``test`` rows
+    are rejected so this utility cannot accidentally touch Candidate F.
+    """
+    output: list[dict[str, Any]] = []
+    ids_by_split: dict[str, set[str]] = {"train": set(), "validation": set()}
+    groups_by_split: dict[str, set[str]] = {"train": set(), "validation": set()}
+    old_counts: dict[str, dict[str, dict[str, int]]] = {}
+    new_counts: dict[str, dict[str, dict[str, int]]] = {}
+    old_provenance: dict[str, dict[str, dict[str, dict[str, int]]]] = {}
+    new_provenance: dict[str, dict[str, dict[str, dict[str, int]]]] = {}
+    transformed_rows: dict[str, int] = {"train": 0, "validation": 0}
+    endpoint_seed_selection: dict[str, dict[str, Any]] = {
+        split: {
+            "existing_eligible_assistant_onset_speak_seeds": 0,
+            "seed_local_segments": 0,
+            "qualified_endpoint_pairs": 0,
+            "deduplicated_later_assistant_onsets": 0,
+            "same_tick_seeds": 0,
+            "rejections": {},
+        }
+        for split in ("train", "validation")
+    }
+
+    def count_frames(target: dict[str, dict[str, dict[str, int]]], split: str, source: str, frames: Sequence[Mapping[str, Any]]) -> None:
+        bucket = target.setdefault(split, {}).setdefault(source, {})
+        for frame in frames:
+            if frame.get("action_mask") is True and frame.get("target_action") in ACTIONS:
+                action = str(frame["target_action"])
+                bucket[action] = bucket.get(action, 0) + 1
+
+    def count_provenance(
+        target: dict[str, dict[str, dict[str, dict[str, int]]]],
+        split: str,
+        source: str,
+        frames: Sequence[Mapping[str, Any]],
+    ) -> None:
+        bucket = target.setdefault(split, {}).setdefault(source, {})
+        for frame in frames:
+            if frame.get("action_mask") is not True or frame.get("target_action") not in ACTIONS:
+                continue
+            action_source = str(frame.get("target_action_source") or "unspecified")
+            action = str(frame["target_action"])
+            counts = bucket.setdefault(action_source, {})
+            counts[action] = counts.get(action, 0) + 1
+
+    for original in conversations:
+        if not isinstance(original, Mapping):
+            raise ValueError("prepared timestamp relabel requires object rows")
+        split = original.get("split")
+        if split == "test":
+            raise ValueError("timestamp relabel refuses held-out test rows")
+        if split not in {"train", "validation"}:
+            raise ValueError(f"prepared row lacks train/validation split: {original.get('conversation_id')}")
+        conversation_id = str(original.get("conversation_id", ""))
+        if not conversation_id or conversation_id in ids_by_split[str(split)]:
+            raise ValueError(f"duplicate or missing prepared conversation_id in {split}: {conversation_id!r}")
+        ids_by_split[str(split)].add(conversation_id)
+        group = str(original.get("source_group_id") or conversation_id)
+        groups_by_split[str(split)].add(group)
+        source = str(original.get("source", "unknown"))
+        prior_frames = original.get("frames", ()) or ()
+        if not isinstance(prior_frames, (list, tuple)):
+            raise ValueError(f"{conversation_id}: frames must be a sequence")
+        count_frames(old_counts, str(split), source, prior_frames)
+        count_provenance(old_provenance, str(split), source, prior_frames)
+        row = dict(original)
+        if (
+            source in {"SmoothConv", "DuplexConv"}
+            and original.get("synthetic") is not True
+            and original.get("profile") != "audio_grounded_v5"
+        ):
+            frames, derivation = derive_timestamp_action_frames(original, tick_ms=80)
+            row["frames"] = frames
+            row["timestamp_action_derivation"] = derivation
+            row["control_supervision"] = "explicit_native_actions_plus_timestamp_derived_control6_v1"
+            selection = derivation.get("speak_last_vocal_endpoint_seed_selection", {})
+            totals = endpoint_seed_selection[str(split)]
+            for key in (
+                "existing_eligible_assistant_onset_speak_seeds",
+                "seed_local_segments",
+                "qualified_endpoint_pairs",
+                "deduplicated_later_assistant_onsets",
+            ):
+                totals[key] += int(selection.get(key, 0))
+            totals["same_tick_seeds"] += int(derivation.get("speak_last_vocal_endpoint_same_tick_seeds", 0))
+            for reason, count in (selection.get("rejections", {}) or {}).items():
+                rejects = totals["rejections"]
+                rejects[reason] = int(rejects.get(reason, 0)) + int(count)
+            transformed_rows[str(split)] += 1
+        new_frames = row.get("frames", ()) or ()
+        count_frames(new_counts, str(split), source, new_frames)
+        count_provenance(new_provenance, str(split), source, new_frames)
+        output.append(row)
+
+    overlap = groups_by_split["train"] & groups_by_split["validation"]
+    if overlap:
+        raise ValueError(f"prepared source groups leak across train/validation: {sorted(overlap)[:5]}")
+    if ids_by_split["train"] & ids_by_split["validation"]:
+        raise ValueError("prepared conversation IDs leak across train/validation")
+    report = {
+        "schema": "prepared_timestamp_control6_derivation_v1",
+        "tick_ms": 80,
+        "target_quantization": "floor(event_timestamp_ms / 80); target observes [t,t+80ms)",
+        "feature_causality": "labels may use later interval endpoints for eligibility; model features stay causal",
+        "train_validation_source_groups_disjoint": True,
+        "train_validation_conversation_ids_disjoint": True,
+        "heldout_test_read": False,
+        "rows_by_split": {
+            split: sum(row.get("split") == split for row in output)
+            for split in ("train", "validation")
+        },
+        "real_rows_relabelled_by_split": transformed_rows,
+        "supervision_counts_before_by_split_source_action": old_counts,
+        "supervision_counts_after_by_split_source_action": new_counts,
+        "supervision_counts_before_by_split_source_provenance_action": old_provenance,
+        "supervision_counts_after_by_split_source_provenance_action": new_provenance,
+        "speak_endpoint_seed_selection_by_split": endpoint_seed_selection,
+        "replan_inferred": False,
+    }
+    return output, report
 
 
 def read_smoothconv(
@@ -1718,5 +2298,7 @@ __all__ = [
     "read_duplexconv",
     "select_real_conversational_source_keys",
     "build_real_conversational_views",
+    "derive_timestamp_action_frames",
+    "relabel_prepared_timestamp_actions",
     "summarize_preparation_counts",
 ]

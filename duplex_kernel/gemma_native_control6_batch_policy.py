@@ -233,15 +233,24 @@ class GemmaNativeControl6BatchPolicy:
 
     policy_id = "gemma_native_control6_batch"
 
-    def __init__(self, adapter: NativeControl6LoRA, *, checkpoint_path: str) -> None:
+    def __init__(
+        self,
+        adapter: NativeControl6LoRA,
+        *,
+        checkpoint_path: str,
+        capture_debug_inputs: bool = False,
+    ) -> None:
         if not isinstance(adapter, NativeControl6LoRA):
             raise TypeError("batched native Control6 requires NativeControl6LoRA")
         if not checkpoint_path:
             raise ValueError("batched native Control6 requires a loaded adapter checkpoint")
+        if type(capture_debug_inputs) is not bool:
+            raise TypeError("capture_debug_inputs must be a bool")
         self.adapter = adapter.eval()
         for parameter in self.adapter.parameters():
             parameter.requires_grad_(False)
         self.checkpoint_path = str(checkpoint_path)
+        self.capture_debug_inputs = capture_debug_inputs
         self.forward_call_count = 0
 
     def score_raw_batch(
@@ -673,6 +682,7 @@ class GemmaNativeControl6BatchPolicy:
             score_indices.append(index)
 
         logits_by_index: dict[int, torch.Tensor] = {}
+        debug_inputs_by_index: dict[int, dict[str, Any]] = {}
         if score_indices:
             parameter = self.adapter.lora_A
             model_hidden = torch.stack([
@@ -694,6 +704,19 @@ class GemmaNativeControl6BatchPolicy:
                 raise RuntimeError("mixed-source Control6 produced invalid batched logits")
             for batch_index, row_index in enumerate(score_indices):
                 logits_by_index[row_index] = logits[batch_index]
+                if self.capture_debug_inputs:
+                    context = contexts[row_index]
+                    debug_inputs_by_index[row_index] = {
+                        "hidden": model_hidden[batch_index].detach().to(
+                            device="cpu", dtype=torch.float32,
+                        ).numpy().copy(),
+                        "phase_t": model_phase[batch_index].detach().to(
+                            device="cpu", dtype=torch.float32,
+                        ).numpy().copy(),
+                        "frame_id": int(native_rows[row_index].frame_id),
+                        "generation_id": int(context.tick_id[1]),
+                        "phase_profile": str(context.policy.phase_profile),
+                    }
 
         available_at_ns = time.monotonic_ns()
         decisions: list[PolicyDecision] = []
@@ -737,6 +760,10 @@ class GemmaNativeControl6BatchPolicy:
                 "policy_context_captured_at_ns": context.captured_at_ns,
                 "used_for_policy": hidden is not None,
             }
+            if index in debug_inputs_by_index:
+                # Private binary-capture payload, removed by the server before
+                # publishing the ordinary decision trace.
+                diagnostics["_native_control6_debug_input"] = debug_inputs_by_index[index]
             decisions.append(replace(decision, diagnostics=diagnostics))
         return tuple(decisions)
 

@@ -9,6 +9,8 @@ token. This module never builds an HF cache or forwards audio.
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import inspect
 import time
 from dataclasses import dataclass
@@ -166,6 +168,128 @@ class UnifiedNativeDecoder:
         if any(token_id < 0 for token_id in self.eos_token_ids):
             raise ValueError("eos_token_ids non può contenere ID negativi")
 
+    @staticmethod
+    def _fork_generator(source_generator: Any, fork_id: str) -> torch.Generator | None:
+        if source_generator is None:
+            return None
+        get_state = getattr(source_generator, "get_state", None)
+        device = getattr(source_generator, "device", None)
+        if not callable(get_state) or device is None:
+            raise TypeError("sampler.generator must expose get_state() and device")
+        source_state = get_state()
+        if not isinstance(source_state, torch.Tensor):
+            raise TypeError("sampler.generator.get_state() must return a Tensor")
+        # Derive a private deterministic stream from the source RNG checkpoint
+        # and branch identity. Reading the state does not advance the canonical
+        # generator or touch PyTorch's process-global RNG.
+        state_bytes = bytes(source_state.detach().cpu().reshape(-1).tolist())
+        digest = hashlib.sha256(state_bytes + fork_id.encode("utf-8")).digest()
+        seed = int.from_bytes(digest[:8], "little") & ((1 << 63) - 1)
+        fork_generator = torch.Generator(device=device)
+        fork_generator.manual_seed(seed)
+        return fork_generator
+
+    @staticmethod
+    def _copy_sampler_local_state(source: Any, destination: Any) -> None:
+        """Copy known decoder history while leaving callbacks/state owner-local."""
+        if source is None:
+            return
+        callback_fields = (
+            "on_generation_start",
+            "on_generated_token_callback",
+            "on_candidate_token",
+            "on_candidate_fallback",
+            "on_action_logits_probe",
+            "best_native_logit_candidate_id",
+        )
+        for name in callback_fields:
+            source_callback = getattr(source, name, None)
+            if source_callback is not None and getattr(destination, name, None) is source_callback:
+                raise ValueError(f"fork sampler must own a separate {name} callback")
+        source_state = getattr(source, "state", None)
+        if source_state is not None and getattr(destination, "state", None) is source_state:
+            raise ValueError("fork sampler must use branch-owned mutable state")
+
+        source_metrics = getattr(source, "runtime_metrics", None)
+        destination_metrics = getattr(destination, "runtime_metrics", None)
+        if isinstance(source_metrics, dict):
+            if destination_metrics is source_metrics:
+                raise ValueError("fork sampler must use a private runtime_metrics mapping")
+            if isinstance(destination_metrics, dict):
+                destination_metrics.clear()
+                destination_metrics.update(copy.deepcopy(source_metrics))
+            else:
+                destination.runtime_metrics = copy.deepcopy(source_metrics)
+
+        for name in (
+            "last_decoded_output",
+            "forced_action_overrides",
+            "forced_structure_overrides",
+            "action_logits_probe_emitted",
+            "forced_action_logprobs",
+            "forced_structure_logprobs",
+            "backchannel_trie",
+            "min_new_tokens_processor",
+        ):
+            if not hasattr(source, name) or not hasattr(destination, name):
+                continue
+            value = getattr(source, name)
+            if isinstance(value, list) and value and all(
+                isinstance(item, torch.Tensor) for item in value
+            ):
+                cloned = [item.detach().clone() for item in value]
+            else:
+                cloned = copy.deepcopy(value)
+            setattr(destination, name, cloned)
+
+    def fork(
+        self,
+        *,
+        forward_tokens: Callable[[list[int]], Any],
+        sampler_factory: Callable[[Any, torch.Generator | None, str], Any],
+        fork_id: str,
+    ) -> UnifiedNativeDecoder:
+        """Create an isolated decoder branch over caller-owned forked native KV.
+
+        ``sampler_factory`` must create branch-local callbacks/state and accept
+        the private RNG generated here. The decoder shares only the read-only
+        Thinker reference and EOS token set; native forward ownership and every
+        sampler-mutated object belong to the branch. Decode callbacks are
+        call-scoped and must be supplied by the branch caller.
+        """
+        if not callable(forward_tokens):
+            raise TypeError("fork forward_tokens must be callable and bound to the forked KV slot")
+        if not callable(sampler_factory):
+            raise TypeError("fork sampler_factory must be callable")
+        if not isinstance(fork_id, str) or not fork_id.strip():
+            raise ValueError("fork_id must be non-empty")
+        source_generator = getattr(self.sampler, "generator", None)
+        if self.sampler is not None and source_generator is None:
+            temperature = getattr(self.sampler, "temperature", None)
+            if temperature is None or float(temperature) > 1e-5:
+                raise RuntimeError("stochastic decoder fork requires a private generator")
+        fork_generator = self._fork_generator(source_generator, fork_id)
+        fork_sampler = sampler_factory(self.sampler, fork_generator, fork_id)
+        if self.sampler is not None and fork_sampler is self.sampler:
+            raise ValueError("fork sampler_factory returned the source sampler")
+        if fork_sampler is None:
+            raise TypeError("fork sampler_factory must return an independent sampler")
+        sampler_generator = getattr(fork_sampler, "generator", None)
+        if fork_generator is not None and sampler_generator is not fork_generator:
+            raise ValueError("fork sampler must use the private generator supplied by the decoder")
+        if sampler_generator is source_generator and source_generator is not None:
+            raise ValueError("fork sampler cannot share the source generator")
+        if not callable(getattr(fork_sampler, "sample_token", None)):
+            raise TypeError("fork sampler must expose sample_token")
+        self._copy_sampler_local_state(self.sampler, fork_sampler)
+        return UnifiedNativeDecoder(
+            self.thinker,
+            forward_tokens=forward_tokens,
+            sampler=fork_sampler,
+            monotonic_ns=self.monotonic_ns,
+            eos_token_ids=set(self.eos_token_ids),
+        )
+
     async def _sample(self, logits: torch.Tensor, history: tuple[int, ...], *, initial: bool = False) -> Any:
         sample = None
         if initial and self.sampler is not None:
@@ -209,8 +333,8 @@ class UnifiedNativeDecoder:
         return bool(await _resolve(stop_check())) if stop_check is not None else False
 
     async def _forward(self, token_ids: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
-        if not token_ids or len(token_ids) > 2:
-            raise ValueError("forward_tokens accetta gruppi da uno o due token")
+        if not token_ids or len(token_ids) > 8:
+            raise ValueError("forward_tokens accetta gruppi da uno a otto token")
         result = await _resolve(self.forward_tokens(list(token_ids)))
         if not isinstance(result, (tuple, list)) or len(result) != 2:
             raise TypeError("forward_tokens deve restituire (logits, final_hidden)")
@@ -273,7 +397,7 @@ class UnifiedNativeDecoder:
         hidden: torch.Tensor | None = None
         source_forward_started_ns = decode_started_ns
         source_logits_ready_ns = decode_started_ns
-        for start in range(0, len(transition_ids), 2):
+        for start in range(0, len(transition_ids), 8):
             if await self._should_stop(stop_check):
                 termination_reason = "cancelled"
                 return self._result(
@@ -285,7 +409,7 @@ class UnifiedNativeDecoder:
                     len(transition_ids),
                     first_logits_event,
                 )
-            group = transition_ids[start : start + 2]
+            group = transition_ids[start : start + 8]
             source_forward_started_ns = int(self.monotonic_ns())
             logits, hidden = await self._forward(group)
             source_logits_ready_ns = int(self.monotonic_ns())

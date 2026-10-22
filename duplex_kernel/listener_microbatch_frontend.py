@@ -85,6 +85,8 @@ class _Workspace:
     capacity: int
     cpu_features: np.ndarray
     features: torch.Tensor
+    streaming_features: torch.Tensor | None
+    streaming_mask: torch.Tensor | None
     manifest_id: str | None = None
 
 
@@ -137,6 +139,10 @@ class PreparedListenerAudioBatch:
         release_workspace: Callable[[str], None],
         abort_workspace: Callable[[str], None],
         valid_mel_counts: tuple[int, ...] | None = None,
+        streaming_audio_batch: Any | None = None,
+        audio_tower_raw_tokens: tuple[torch.Tensor, ...] = (),
+        audio_stream_cursors: tuple[Any, ...] = (),
+        streaming_audio_input_shape: tuple[int, int, int] | None = None,
     ) -> None:
         self.manifest_id = manifest_id
         self.input_shape = input_shape
@@ -152,6 +158,9 @@ class PreparedListenerAudioBatch:
         self._audio_tower_row_timings = audio_tower_row_timings
         self.audio_tower_graph_submit_ms = audio_tower_graph_submit_ms
         self.audio_tower_execution_mode = audio_tower_execution_mode
+        self.audio_tower_raw_tokens = audio_tower_raw_tokens
+        self.audio_stream_cursors = audio_stream_cursors
+        self.streaming_audio_input_shape = streaming_audio_input_shape
         self.audio_tower_workspace_lock_wait_ms = round(
             sum(item.workspace_lock_wait_ms for item in audio_tower_row_timings), 3
         )
@@ -161,6 +170,7 @@ class PreparedListenerAudioBatch:
         self._owner_thread_id = owner_thread_id
         self._release_workspace = release_workspace
         self._abort_workspace = abort_workspace
+        self._streaming_audio_batch = streaming_audio_batch
         self._committed = False
         self._aborted = False
 
@@ -202,6 +212,7 @@ class PreparedListenerAudioBatch:
             raise RuntimeError("frontend state must be committed by its single owner thread")
 
         mutation_started = False
+        streaming_committed = False
         previous: list[tuple[Any, ...]] = []
         try:
             # Validate every row before mutating any row; this prevents a stale
@@ -220,6 +231,9 @@ class PreparedListenerAudioBatch:
                 for snapshot in self._snapshots
             ]
             mutation_started = True
+            if self._streaming_audio_batch is not None:
+                self._streaming_audio_batch.commit()
+                streaming_committed = True
             for snapshot in self._snapshots:
                 state = snapshot.state
                 state.user_pcm_tail = _copy_optional_tail(snapshot.user_tail)
@@ -233,6 +247,12 @@ class PreparedListenerAudioBatch:
             self._release_workspace(self.manifest_id)
         except BaseException:
             try:
+                if streaming_committed:
+                    self._streaming_audio_batch.rollback_committed()
+                elif self._streaming_audio_batch is not None:
+                    abort_stream = getattr(self._streaming_audio_batch, "abort", None)
+                    if callable(abort_stream) and not getattr(self._streaming_audio_batch, "_aborted", False):
+                        abort_stream()
                 if mutation_started:
                     for state, user_tail, assistant_tail, user_mels, assistant_mels in previous:
                         state.user_pcm_tail = user_tail
@@ -258,7 +278,11 @@ class PreparedListenerAudioBatch:
         if threading.get_ident() != self._owner_thread_id:
             raise RuntimeError("frontend transaction must be aborted by its single owner thread")
         self._aborted = True
-        self._abort_workspace(self.manifest_id)
+        try:
+            if self._streaming_audio_batch is not None:
+                self._streaming_audio_batch.abort()
+        finally:
+            self._abort_workspace(self.manifest_id)
 
 
 class ListenerMicrobatchAudioFrontend:
@@ -283,6 +307,7 @@ class ListenerMicrobatchAudioFrontend:
         mel_window_rows: int = MEL_WINDOW_ROWS,
         audio_tower_lock: Any | None = None,
         audio_tower_row_runner: AudioTowerRowRunner | None = None,
+        streaming_audio_tower: Any | None = None,
     ) -> None:
         if not callable(getattr(gemma_model, "get_audio_features", None)):
             raise TypeError("Gemma model must expose get_audio_features")
@@ -316,13 +341,59 @@ class ListenerMicrobatchAudioFrontend:
         if self.device.type == "cuda" and audio_tower_row_runner is None:
             raise ValueError("CUDA microbatch frontend requires an N=1 audio tower row runner")
         self.audio_tower_row_runner = audio_tower_row_runner
+        if streaming_audio_tower is not None and not callable(
+            getattr(streaming_audio_tower, "prepare_batch", None)
+        ):
+            raise TypeError("streaming_audio_tower must expose prepare_batch")
+        self.streaming_audio_tower = streaming_audio_tower
         self._workspace_buffer: _Workspace | None = None
         self._workspace_capacity = 0
         self._owner_thread_id: int | None = None
         self._call_lock = threading.Lock()
         self._active_manifest_id: str | None = None
         self._poisoned = False
+        self._closed = False
         self.encoder_call_count = 0
+
+    def close_session(self, session_id: str) -> None:
+        """Release one session's incremental tower state while the frontend is idle."""
+        if not isinstance(session_id, str) or not session_id:
+            raise ValueError("session_id must be a non-empty string")
+        if not self._call_lock.acquire(blocking=False):
+            raise RuntimeError("cannot close streaming audio state while the frontend is active")
+        try:
+            self._ensure_open()
+            if self._active_manifest_id is not None:
+                raise RuntimeError("cannot close streaming audio state while a batch is prepared")
+            if self.streaming_audio_tower is not None:
+                self.streaming_audio_tower.reset(session_id)
+        finally:
+            self._call_lock.release()
+
+    def close(self) -> None:
+        """Release the incremental tower and reusable frontend workspace while idle."""
+        if not self._call_lock.acquire(blocking=False):
+            raise RuntimeError("cannot close listener audio frontend while it is active")
+        try:
+            if self._active_manifest_id is not None:
+                raise RuntimeError("cannot close listener audio frontend with a prepared batch")
+            if self._closed:
+                return
+            if self.streaming_audio_tower is not None:
+                close = getattr(self.streaming_audio_tower, "close", None)
+                if callable(close):
+                    close()
+                self.streaming_audio_tower = None
+            self._workspace_buffer = None
+            self._workspace_capacity = 0
+            self._owner_thread_id = None
+            self._closed = True
+        finally:
+            self._call_lock.release()
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("listener audio frontend is closed")
 
     def workspace_data_ptr(self, batch_size: int) -> int:
         """Expose storage identity for CPU tests and preflight diagnostics."""
@@ -350,6 +421,7 @@ class ListenerMicrobatchAudioFrontend:
     ) -> PreparedListenerAudioBatch:
         rows = tuple(states)
         with self._call_lock:
+            self._ensure_open()
             current_thread = threading.get_ident()
             if self._owner_thread_id is None:
                 self._owner_thread_id = current_thread
@@ -406,6 +478,8 @@ class ListenerMicrobatchAudioFrontend:
                 audio_tower_row_timings: tuple[AudioTowerRowTiming, ...] = ()
                 audio_tower_graph_submit_ms = 0.0
                 audio_tower_execution_mode = "vectorized_cpu"
+                streaming_audio_batch: Any | None = None
+                audio_tower_raw_tokens: tuple[torch.Tensor, ...] = ()
                 try:
                     acquire_fair = getattr(lock, "acquire_fair", None)
                     if callable(acquire_fair):
@@ -421,7 +495,64 @@ class ListenerMicrobatchAudioFrontend:
                     ) / 1_000_000.0
                     if audio_tower_cuda_events is not None:
                         audio_tower_cuda_events[0].record(timing_stream)
-                    if self.audio_tower_row_runner is not None:
+                    if self.streaming_audio_tower is not None:
+                        from duplex_kernel.streaming_conformer import AudioStreamCursor
+
+                        graph_submit_started = time.perf_counter_ns()
+                        chunks = workspace.streaming_features
+                        stream_mask = workspace.streaming_mask
+                        if chunks is None or stream_mask is None:
+                            raise RuntimeError("streaming frontend workspace was not allocated")
+                        chunks = chunks[:n]
+                        stream_mask = stream_mask[:n]
+                        for index, valid_rows in enumerate(valid_mel_counts):
+                            chunks[index].copy_(
+                                features[
+                                    index,
+                                    valid_rows - MEL_ROWS_PER_FRAME:valid_rows,
+                                ],
+                                non_blocking=True,
+                            )
+                        cursors = tuple(
+                            AudioStreamCursor(
+                                session_id=snapshot.state.session_id,
+                                generation_id=snapshot.generation_id,
+                                state_epoch_id=snapshot.epoch_id,
+                                frame_id=snapshot.frame_id,
+                                sequence_position=snapshot.sequence_position,
+                            )
+                            for snapshot in snapshots
+                        )
+                        streaming_audio_batch = self.streaming_audio_tower.prepare_batch(
+                            chunks,
+                            cursors,
+                            input_mask=stream_mask,
+                            use_cuda_graph=self.device.type == "cuda",
+                        )
+                        audio_tower_graph_submit_ms = max(
+                            0, time.perf_counter_ns() - graph_submit_started
+                        ) / 1_000_000.0
+                        if audio_tower_cuda_events is not None:
+                            audio_tower_cuda_events[1].record(timing_stream)
+                        soft = streaming_audio_batch.soft_tokens
+                        raw = streaming_audio_batch.raw_tokens
+                        if tuple(soft.shape) != (n, SOFT_TOKENS_PER_FRAME, CONTROL_HIDDEN_WIDTH):
+                            raise RuntimeError("streaming audio tower did not return [N,2,1536]")
+                        audio_model = getattr(self.streaming_audio_tower, "audio_tower", None)
+                        audio_config = getattr(audio_model, "config", None)
+                        if audio_config is None:
+                            raise RuntimeError("streaming audio tower does not expose its audio config")
+                        expected_raw_width = int(audio_config.output_proj_dims)
+                        if raw.ndim != 3 or tuple(raw.shape[:2]) != (n, SOFT_TOKENS_PER_FRAME):
+                            raise RuntimeError("streaming audio tower raw output must be [N,2,D]")
+                        if raw.shape[-1] != expected_raw_width:
+                            raise RuntimeError("streaming audio tower raw width differs from output_proj_dims")
+                        soft_tokens = tuple(soft[index].detach() for index in range(n))
+                        audio_tower_raw_tokens = tuple(raw[index].detach() for index in range(n))
+                        audio_tower_execution_mode = (
+                            f"streaming_conformer_{streaming_audio_batch.execution_mode}_n{n}"
+                        )
+                    elif self.audio_tower_row_runner is not None:
                         row_outputs: list[torch.Tensor] = []
                         row_timings: list[AudioTowerRowTiming] = []
                         for index, snapshot in enumerate(snapshots):
@@ -497,6 +628,11 @@ class ListenerMicrobatchAudioFrontend:
                         ) / 1_000_000.0
                         lock.release()
             except BaseException:
+                if streaming_audio_batch is not None and not getattr(streaming_audio_batch, "_committed", False):
+                    try:
+                        streaming_audio_batch.abort()
+                    except RuntimeError:
+                        pass
                 self._abort_workspace(batch.manifest.manifest_id)
                 raise
             return PreparedListenerAudioBatch(
@@ -517,6 +653,18 @@ class ListenerMicrobatchAudioFrontend:
                 owner_thread_id=current_thread,
                 release_workspace=self._release_workspace,
                 abort_workspace=self._abort_workspace,
+                streaming_audio_batch=streaming_audio_batch,
+                audio_tower_raw_tokens=audio_tower_raw_tokens,
+                audio_stream_cursors=(
+                    tuple(streaming_audio_batch.cursors)
+                    if streaming_audio_batch is not None
+                    else ()
+                ),
+                streaming_audio_input_shape=(
+                    (n, MEL_ROWS_PER_FRAME, MEL_BINS)
+                    if streaming_audio_batch is not None
+                    else None
+                ),
             )
 
     def _release_workspace(self, manifest_id: str) -> None:
@@ -549,6 +697,24 @@ class ListenerMicrobatchAudioFrontend:
                     (capacity, self.mel_window_rows, MEL_BINS),
                     dtype=self.dtype,
                     device=self.device,
+                ),
+                streaming_features=(
+                    torch.empty(
+                        (capacity, MEL_ROWS_PER_FRAME, MEL_BINS),
+                        dtype=self.dtype,
+                        device=self.device,
+                    )
+                    if self.streaming_audio_tower is not None
+                    else None
+                ),
+                streaming_mask=(
+                    torch.ones(
+                        (capacity, MEL_ROWS_PER_FRAME),
+                        dtype=torch.bool,
+                        device=self.device,
+                    )
+                    if self.streaming_audio_tower is not None
+                    else None
                 ),
             )
             self._workspace_buffer = workspace

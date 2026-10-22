@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import math
+import inspect
 import time
 from dataclasses import replace
 
+import numpy as np
 import pytest
 import torch
 
@@ -12,6 +14,7 @@ from duplex_kernel.gemma_native_control6_policy import (
     GemmaNativeControl6Policy,
     is_controller6_policy,
     legal_control_actions as native_control6_legal_actions,
+    native_control6_effective_members,
 )
 from duplex_kernel.gemma_native_control6_batch_policy import NativeControl6RawScoreSnapshot
 from duplex_kernel.duplex_control6 import DuplexControl6Policy
@@ -51,6 +54,60 @@ def _state(**overrides: object) -> PolicyInput:
     }
     values.update(overrides)
     return PolicyInput(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("speaker_active", "user_activity_detected"),
+    [(False, False), (False, True), (True, False), (True, True)],
+)
+def test_native_control6_effective_member_mapping_is_total_and_conserves_mass(
+    speaker_active: bool,
+    user_activity_detected: bool,
+) -> None:
+    members = native_control6_effective_members(
+        speaker_active=speaker_active,
+        user_activity_detected=user_activity_detected,
+    )
+    bucket_order = ("HOLD", "SPEAK", "YIELD", "BACKCHANNEL")
+    flattened = [action for bucket in bucket_order for action in members[bucket]]
+    assert len(flattened) == len(set(flattened))
+
+    raw_probabilities = np.asarray([0.03, 0.07, 0.11, 0.17, 0.23, 0.39])
+    physical = {
+        bucket: sum(raw_probabilities[ACTIONS.index(action)] for action in members[bucket])
+        for bucket in bucket_order
+    }
+    mapped_actions = set(flattened)
+    excluded_actions = set(ACTIONS) - mapped_actions
+    expected = (
+        {
+            "HOLD": ("CONTINUE",),
+            "SPEAK": (),
+            "YIELD": ("LISTEN", "YIELD", "REPLAN"),
+            "BACKCHANNEL": (),
+        }
+        if speaker_active and user_activity_detected
+        else {
+            "HOLD": ("LISTEN", "CONTINUE"),
+            "SPEAK": (),
+            "YIELD": ("YIELD", "REPLAN"),
+            "BACKCHANNEL": (),
+        }
+        if speaker_active
+        else {
+            "HOLD": ("LISTEN", "CONTINUE"),
+            "SPEAK": ("SPEAK", "REPLAN"),
+            "YIELD": (),
+            "BACKCHANNEL": ("BACKCHANNEL",),
+        }
+    )
+    assert members == expected
+    assert mapped_actions | excluded_actions == set(ACTIONS)
+    # Raw mass for physically unavailable rows is deliberately dropped before
+    # the separate legal-action normalization; no row is silently reassigned.
+    mapped_mass = sum(physical.values())
+    expected_mapped_mass = sum(raw_probabilities[ACTIONS.index(action)] for action in mapped_actions)
+    assert mapped_mass == pytest.approx(float(expected_mapped_mass))
 
 
 def test_native_policy_does_not_turn_illegal_raw_listen_into_vocal_speak() -> None:
@@ -117,6 +174,7 @@ def test_native_policy_reports_raw_candidate_and_legal_selection_without_changin
     policy = GemmaNativeControl6Policy(
         FixedSixLogitAdapter([0.0, 1.0, 7.0, 12.0, -1.0, -2.0]),
         checkpoint_path="cpu-test.pt",
+        high_confidence_single_tick_threshold=1.0,
     )
 
     result = policy.step(_state(
@@ -138,6 +196,87 @@ def test_native_policy_reports_raw_candidate_and_legal_selection_without_changin
     assert result.diagnostics["policy_fallback_reason"] == (
         "two_distinct_consecutive_fresh_ticks_required"
     )
+
+
+def test_native_policy_accepts_high_confidence_combined_yield_on_first_tick() -> None:
+    assert "peer_turn_active" in PolicyInput.__dataclass_fields__, (
+        "PolicyInput must expose peer_turn_active for native Control6 activity"
+    )
+    assert "high_confidence_single_tick_threshold" in inspect.signature(
+        GemmaNativeControl6Policy
+    ).parameters, "native Control6 must expose its single-tick confidence threshold"
+    # REPLAN and YIELD are separate trained rows but one physical interruption
+    # action while the assistant is speaking. Their combined probability is
+    # well above .85 even though neither row alone is.
+    logits = [-10.0] * len(ACTIONS)
+    logits[ACTIONS.index("YIELD")] = 2.0
+    logits[ACTIONS.index("REPLAN")] = 2.0
+    policy = GemmaNativeControl6Policy(
+        FixedSixLogitAdapter(logits), checkpoint_path="cpu-test.pt"
+    )
+    result = policy.step(_state(
+        frame_id=12,
+        speaker_active=True,
+        peer_turn_active=True,
+        legal_actions=("CONTINUE", "YIELD"),
+    ))
+
+    assert result.action is ControlAction.YIELD
+    assert result.diagnostics["native_control6_selected_effective_probability"] >= 0.85
+    assert result.diagnostics["native_control6_hysteresis_count"] == 1
+
+
+def test_native_policy_high_confidence_speak_is_fast_but_lower_confidence_keeps_hysteresis() -> None:
+    assert "peer_turn_active" in PolicyInput.__dataclass_fields__, (
+        "PolicyInput must expose peer_turn_active for native Control6 activity"
+    )
+    assert "high_confidence_single_tick_threshold" in inspect.signature(
+        GemmaNativeControl6Policy
+    ).parameters, "native Control6 must expose its single-tick confidence threshold"
+    high_logits = [-10.0] * len(ACTIONS)
+    high_logits[ACTIONS.index("SPEAK")] = 5.0
+    high_policy = GemmaNativeControl6Policy(
+        FixedSixLogitAdapter(high_logits), checkpoint_path="cpu-test.pt"
+    )
+    high_result = high_policy.step(_state(
+        speaker_active=False,
+        peer_turn_active=True,
+        legal_actions=("LISTEN", "SPEAK"),
+    ))
+    assert high_result.action is ControlAction.SPEAK
+    assert high_result.diagnostics["native_control6_hysteresis_count"] == 1
+
+    # SPEAK+REPLAN effective probability is below .85 after legal-mass
+    # normalization; the configured default still requires adjacent ticks.
+    lower_logits = [0.0] * len(ACTIONS)
+    lower_logits[ACTIONS.index("SPEAK")] = 1.6
+    lower_logits[ACTIONS.index("REPLAN")] = 1.6
+    lower_policy = GemmaNativeControl6Policy(
+        FixedSixLogitAdapter(lower_logits), checkpoint_path="cpu-test.pt"
+    )
+    first = lower_policy.step(_state(
+        frame_id=20,
+        native_control_hidden_frame_id=20,
+        legal_actions=("LISTEN", "SPEAK"),
+    ))
+    second = lower_policy.step(_state(
+        frame_id=21,
+        native_control_hidden_frame_id=21,
+        legal_actions=("LISTEN", "SPEAK"),
+    ))
+    assert first.action is ControlAction.LISTEN
+    assert first.diagnostics["native_control6_selected_effective_probability"] < 0.85
+    assert second.action is ControlAction.SPEAK
+
+
+def test_policy_input_peer_activity_defaults_false_and_rejects_non_bool() -> None:
+    assert "peer_turn_active" in PolicyInput.__dataclass_fields__, (
+        "PolicyInput must expose peer_turn_active for native Control6 activity"
+    )
+    state = _state()
+    assert state.peer_turn_active is False
+    with pytest.raises((TypeError, ValueError), match="peer_turn_active|bool"):
+        _state(peer_turn_active=1)
 
 
 def test_idle_continue_row_contributes_to_physical_listen_hold_not_backchannel() -> None:
@@ -169,6 +308,7 @@ def test_native_policy_keeps_legal_raw_actions_and_uses_active_continue_fallback
 ) -> None:
     result = GemmaNativeControl6Policy(
         FixedSixLogitAdapter(logits), checkpoint_path="cpu-test.pt",
+        high_confidence_single_tick_threshold=1.0,
     ).step(_state(legal_actions=legal, speaker_active=speaker_active))
 
     assert result.action is expected
@@ -209,7 +349,9 @@ def test_native_policy_consumes_near_tie_raw_snapshot_but_keeps_live_legal_mask(
             return super().forward(normalized_hidden, phase_t=phase_t)
 
     adapter = CountingAdapter()
-    policy = GemmaNativeControl6Policy(adapter, checkpoint_path="cpu-test.pt")
+    policy = GemmaNativeControl6Policy(
+        adapter, checkpoint_path="cpu-test.pt",
+    )
     snapshot = NativeControl6RawScoreSnapshot(
         manifest_id="manifest-17",
         output_generation=17,
@@ -254,7 +396,10 @@ def test_phase_conditioned_policy_scores_after_phase_and_keeps_raw_snapshot_diag
             return super().forward(normalized_hidden, phase_t=phase_t)
 
     adapter = CountingAdapter()
-    policy = GemmaNativeControl6Policy(adapter, checkpoint_path="cpu-test.pt")
+    policy = GemmaNativeControl6Policy(
+        adapter, checkpoint_path="cpu-test.pt",
+        high_confidence_single_tick_threshold=1.0,
+    )
     snapshot = NativeControl6RawScoreSnapshot(
         manifest_id="manifest-17",
         output_generation=17,
@@ -435,6 +580,7 @@ def test_default_control6_readback_path_returns_required_physical_scores(monkeyp
     policy = GemmaNativeControl6Policy(
         FixedSixLogitAdapter([0.0, 1.0, 7.0, 12.0, -1.0, -2.0]),
         checkpoint_path="cpu-test.pt",
+        high_confidence_single_tick_threshold=1.0,
     )
 
     def counted_cpu(self: torch.Tensor, *args: object, **kwargs: object) -> torch.Tensor:
@@ -495,6 +641,7 @@ def test_actual_native_fastpath_selection_reaches_decision_event_and_client_proj
     policy = GemmaNativeControl6Policy(
         FixedSixLogitAdapter([0.0, 1.0, 7.0, 12.0, -1.0, -2.0]),
         checkpoint_path="cpu-test.pt",
+        high_confidence_single_tick_threshold=1.0,
     )
     decision = policy.step(_state(
         speaker_active=True,
@@ -543,6 +690,7 @@ def test_native_yield_candidate_can_select_accepted_continue_without_changing_sp
     policy = GemmaNativeControl6Policy(
         FixedSixLogitAdapter([0.0, 1.0, 7.0, 12.0, -1.0, -2.0]),
         checkpoint_path="cpu-test.pt",
+        high_confidence_single_tick_threshold=1.0,
     )
     session = type("Session", (), {})()
     session.control_state = ControlState.SPEAKING
@@ -636,6 +784,8 @@ def test_native_no_input_does_not_hide_pending_speak_but_keeps_idle_safety() -> 
         legal_actions=("LISTEN",),
     ))
     assert idle.action is ControlAction.LISTEN
+    assert idle.listener_frame_id == idle.frame_id
+    assert not idle.diagnostics.get("native_control6_head_scored", False)
     assert not any("_token" in key or "_row_index" in key for key in idle.diagnostics)
 
     active = policy.step(_state(
@@ -647,6 +797,8 @@ def test_native_no_input_does_not_hide_pending_speak_but_keeps_idle_safety() -> 
         legal_actions=("CONTINUE", "YIELD"),
     ))
     assert active.action is ControlAction.CONTINUE
+    assert active.listener_frame_id == active.frame_id
+    assert not active.diagnostics.get("native_control6_head_scored", False)
 
 
 def test_fresh_zero_pcm_tick_still_uses_native_logits() -> None:
@@ -659,7 +811,7 @@ def test_fresh_zero_pcm_tick_still_uses_native_logits() -> None:
         native_control_no_input_tick=False,
         legal_actions=("LISTEN", "SPEAK"),
     ))
-    assert result.action is ControlAction.LISTEN
+    assert result.action is ControlAction.SPEAK
     assert result.diagnostics["native_control6_effective_candidate"] == "SPEAK"
 
 
@@ -679,6 +831,7 @@ def test_physical_collapse_sums_yield_and_replan_before_argmax() -> None:
         FixedSixLogitAdapter([-8.0, -8.0, 1.0, 0.75, -8.0, 0.75]),
         checkpoint_path="cpu-test.pt",
         trace_scores=True,
+        minimum_transition_confidence=0.0,
     )
     first = policy.step(_state(
         frame_id=12,
@@ -704,6 +857,10 @@ def test_physical_collapse_sums_yield_and_replan_before_argmax() -> None:
     assert second.diagnostics["native_action_raw_probabilities"][5] < second.diagnostics[
         "native_action_raw_probabilities"][2]
     effective = second.diagnostics["native_action_effective_probabilities"]
+    assert effective["YIELD"] == pytest.approx(
+        second.diagnostics["native_action_raw_probabilities"][3]
+        + second.diagnostics["native_action_raw_probabilities"][5]
+    )
     assert effective["YIELD"] > effective["HOLD"]
     assert second.diagnostics["native_control6_legal_effective_mass"] == pytest.approx(
         effective["HOLD"] + effective["YIELD"]
@@ -721,6 +878,7 @@ def test_replan_collapses_to_speak_while_idle_and_speak_is_legal_during_peer_tur
     policy = GemmaNativeControl6Policy(
         FixedSixLogitAdapter([-8.0, 0.0, -8.0, -8.0, -8.0, 3.0]),
         checkpoint_path="cpu-test.pt",
+        high_confidence_single_tick_threshold=1.0,
     )
     first = policy.step(_state(
         frame_id=12,
@@ -787,6 +945,7 @@ def test_hysteresis_requires_distinct_consecutive_frames_and_resets_on_gap() -> 
     policy = GemmaNativeControl6Policy(
         FixedSixLogitAdapter([-8.0, 4.0, -8.0, -8.0, -8.0, -8.0]),
         checkpoint_path="cpu-test.pt",
+        high_confidence_single_tick_threshold=1.0,
     )
 
     def step(frame_id: int) -> object:
@@ -810,6 +969,7 @@ def test_hysteresis_resets_on_candidate_state_change_and_missing_hidden() -> Non
     policy = GemmaNativeControl6Policy(
         FixedSixLogitAdapter([-8.0, 4.0, -8.0, 3.0, -8.0, -8.0]),
         checkpoint_path="cpu-test.pt",
+        minimum_transition_confidence=0.0,
     )
     idle_legal = ("LISTEN", "BACKCHANNEL", "SPEAK")
     speaking_legal = ("CONTINUE", "YIELD")
@@ -871,3 +1031,227 @@ def test_idle_physical_hold_is_listen_and_idle_replan_mass_is_speak_mass() -> No
         result.diagnostics["native_action_raw_probabilities"][0]
         + result.diagnostics["native_action_raw_probabilities"][2]
     )
+
+
+def test_peer_turn_activity_and_speech_floor_are_explicit_inputs() -> None:
+    parameters = inspect.signature(GemmaNativeControl6Policy).parameters
+    assert "speech_rms_floor" in parameters, (
+        "native Control6 must expose its current-PCM speech RMS floor"
+    )
+    assert parameters["speech_rms_floor"].default == pytest.approx(0.001)
+    for invalid_floor in (0.0, -0.1, float("nan"), float("inf"), True):
+        with pytest.raises((TypeError, ValueError), match="speech_rms_floor|RMS floor"):
+            GemmaNativeControl6Policy(
+                FixedSixLogitAdapter([0.0] * len(ACTIONS)),
+                checkpoint_path="cpu-test.pt",
+                speech_rms_floor=invalid_floor,
+            )
+
+
+@pytest.mark.parametrize(
+    ("peer_turn_active", "user_pcm"),
+    [
+        (True, np.zeros(1280, dtype=np.float32)),
+        (False, np.full(1280, 0.002, dtype=np.float32)),
+    ],
+    ids=("peer-flag", "current-pcm-rms"),
+)
+@pytest.mark.parametrize(
+    ("row", "expected"),
+    [(0, "YIELD"), (2, "CONTINUE"), (3, "YIELD"), (5, "YIELD")],
+)
+def test_active_overlap_maps_hold_to_continue_and_yield_rows_to_yield(
+    peer_turn_active: bool,
+    user_pcm: np.ndarray,
+    row: int,
+    expected: str,
+) -> None:
+    assert "peer_turn_active" in PolicyInput.__dataclass_fields__, (
+        "PolicyInput must expose peer_turn_active for native Control6 activity"
+    )
+    logits = [-100.0] * len(ACTIONS)
+    logits[row] = 100.0
+    decision = GemmaNativeControl6Policy(
+        FixedSixLogitAdapter(logits), checkpoint_path="cpu-test.pt", trace_scores=True
+    ).step(_state(
+        speaker_active=True,
+        peer_turn_active=peer_turn_active,
+        user_pcm=user_pcm,
+        legal_actions=("CONTINUE", "YIELD"),
+    ))
+
+    assert decision.diagnostics["native_control6_effective_candidate"] == expected
+    assert decision.diagnostics["native_control6_user_activity_detected"] is True
+    assert sum(decision.diagnostics["native_action_effective_probabilities"].values()) == pytest.approx(1.0)
+
+
+def test_silent_active_speaker_keeps_listen_in_hold_and_omits_activity() -> None:
+    logits = [-100.0] * len(ACTIONS)
+    logits[ACTIONS.index("LISTEN")] = 100.0
+    decision = GemmaNativeControl6Policy(
+        FixedSixLogitAdapter(logits), checkpoint_path="cpu-test.pt"
+    ).step(_state(
+        speaker_active=True,
+        peer_turn_active=False,
+        user_pcm=np.zeros(1280, dtype=np.float32),
+        legal_actions=("CONTINUE", "YIELD"),
+    ))
+    assert decision.diagnostics["native_control6_user_activity_detected"] is False
+    assert decision.diagnostics["native_control6_effective_candidate"] == "CONTINUE"
+
+
+def test_native1540_valid_user_to_assistant_ratio_can_detect_activity_below_rms_floor() -> None:
+    user_rms = 0.0009
+    assistant_rms = 0.001
+    ratio = math.log10(user_rms) - math.log10(assistant_rms)
+    logits = [-100.0] * len(ACTIONS)
+    logits[ACTIONS.index("YIELD")] = 100.0
+    decision = GemmaNativeControl6Policy(
+        FixedSixLogitAdapter(logits),
+        checkpoint_path="cpu-test.pt",
+        phase_profile="native1540",
+    ).step(_state(
+        speaker_active=True,
+        peer_turn_active=False,
+        user_pcm=np.full(1280, user_rms, dtype=np.float32),
+        native_control_phase_t=np.asarray(
+            [math.log10(user_rms), 0.0, math.log10(assistant_rms), ratio],
+            dtype=np.float32,
+        ),
+        native_control_assistant_pcm_prior=np.full(1280, assistant_rms, dtype=np.float32),
+        native_control_assistant_prior_frame_id=11,
+        legal_actions=("LISTEN", "CONTINUE", "YIELD"),
+    ))
+
+    assert decision.diagnostics["native_control6_user_rms"] == pytest.approx(user_rms)
+    assert decision.diagnostics["native_control6_ratio_activity_detected"] is True
+    assert decision.diagnostics["native_control6_user_activity_detected"] is True
+    assert decision.diagnostics["native_control6_effective_members"]["HOLD"] == ["CONTINUE"]
+
+
+@pytest.mark.parametrize(
+    ("user_rms", "assistant_rms"),
+    [(0.0, 0.0), (0.0005, 0.0005)],
+    ids=("both-silent", "both-below-floor"),
+)
+def test_native1540_ratio_does_not_create_activity_from_silence_or_quiet_noise(
+    user_rms: float, assistant_rms: float
+) -> None:
+    logits = [-100.0] * len(ACTIONS)
+    logits[ACTIONS.index("LISTEN")] = 100.0
+    decision = GemmaNativeControl6Policy(
+        FixedSixLogitAdapter(logits),
+        checkpoint_path="cpu-test.pt",
+        phase_profile="native1540",
+    ).step(_state(
+        speaker_active=True,
+        peer_turn_active=False,
+        user_pcm=np.full(1280, user_rms, dtype=np.float32),
+        native_control_phase_t=np.asarray(
+            [math.log10(max(user_rms, 1e-6)), 0.0,
+             math.log10(max(assistant_rms, 1e-6)), 0.0],
+            dtype=np.float32,
+        ),
+        native_control_assistant_pcm_prior=np.full(1280, assistant_rms, dtype=np.float32),
+        native_control_assistant_prior_frame_id=11,
+        legal_actions=("LISTEN", "CONTINUE", "YIELD"),
+    ))
+
+    assert decision.diagnostics["native_control6_ratio_activity_detected"] is False
+    assert decision.diagnostics["native_control6_user_activity_detected"] is False
+    assert decision.diagnostics["native_control6_effective_members"]["HOLD"] == [
+        "LISTEN", "CONTINUE"
+    ]
+
+
+def test_silent_pcm_and_floored_phase_keep_legal_hold_at_listen() -> None:
+    result = GemmaNativeControl6Policy(
+        FixedSixLogitAdapter([100.0, -100.0, -100.0, -100.0, -100.0, -100.0]),
+        checkpoint_path="cpu-test.pt",
+    ).step(_state(
+        user_pcm=np.zeros(1280, dtype=np.float32),
+        peer_turn_active=False,
+        native_control_phase_t=(-6.0, 0.0, -6.0, 0.0),
+        legal_actions=("LISTEN", "SPEAK"),
+    ))
+
+    assert result.diagnostics["native_control6_effective_candidate"] == "LISTEN"
+    assert result.action is ControlAction.LISTEN
+
+
+def test_single_tick_confidence_threshold_defaults_and_validates() -> None:
+    parameters = inspect.signature(GemmaNativeControl6Policy).parameters
+    assert "high_confidence_single_tick_threshold" in parameters, (
+        "native Control6 must expose the high-confidence single-tick threshold"
+    )
+    assert parameters["high_confidence_single_tick_threshold"].default == pytest.approx(0.85)
+    for invalid_threshold in (-0.01, 1.01, float("nan"), float("inf"), True):
+        with pytest.raises(
+            (TypeError, ValueError),
+            match="high_confidence_single_tick_threshold|threshold",
+        ):
+            GemmaNativeControl6Policy(
+                FixedSixLogitAdapter([0.0] * len(ACTIONS)),
+                checkpoint_path="cpu-test.pt",
+                high_confidence_single_tick_threshold=invalid_threshold,
+            )
+
+
+def test_transition_confidence_floor_ignores_weak_ticks_and_requires_two_eligible_ticks() -> None:
+    policy = GemmaNativeControl6Policy(
+        FixedSixLogitAdapter([0.0] * len(ACTIONS)),
+        checkpoint_path="cpu-test.pt",
+    )
+    assert policy.minimum_transition_confidence == pytest.approx(0.70)
+
+    def apply(frame_id: int, probability: float) -> tuple[str, int, bool]:
+        state = _state(
+            frame_id=frame_id,
+            native_control_hidden_frame_id=frame_id,
+            speaker_active=False,
+            legal_actions=("LISTEN", "SPEAK"),
+        )
+        return policy._apply_hysteresis(state, "SPEAK", probability)
+
+    # A weak candidate cannot prime the streak. Two consecutive candidates
+    # inside [minimum, high-confidence) are required for the transition.
+    assert apply(30, 0.099) == ("LISTEN", 0, False)
+    assert apply(31, 0.711) == ("LISTEN", 1, True)
+    assert apply(32, 0.711) == ("SPEAK", 2, False)
+
+    # An intervening weak candidate clears an already pending transition.
+    assert apply(40, 0.711) == ("LISTEN", 1, True)
+    assert apply(41, 0.099) == ("LISTEN", 0, False)
+    assert apply(42, 0.711) == ("LISTEN", 1, True)
+    assert apply(43, 0.711) == ("SPEAK", 2, False)
+
+
+def test_transition_confidence_floor_is_configurable_but_cannot_exceed_single_tick_threshold() -> None:
+    parameters = inspect.signature(GemmaNativeControl6Policy).parameters
+    assert "minimum_transition_confidence" in parameters
+    assert parameters["minimum_transition_confidence"].default == pytest.approx(0.70)
+    GemmaNativeControl6Policy(
+        FixedSixLogitAdapter([0.0] * len(ACTIONS)),
+        checkpoint_path="cpu-test.pt",
+        minimum_transition_confidence=0.0,
+    )
+    with pytest.raises(ValueError, match="minimum_transition_confidence"):
+        GemmaNativeControl6Policy(
+            FixedSixLogitAdapter([0.0] * len(ACTIONS)),
+            checkpoint_path="cpu-test.pt",
+            high_confidence_single_tick_threshold=0.85,
+            minimum_transition_confidence=0.9,
+        )
+
+
+def test_high_confidence_collapsed_speak_and_yield_bypass_only_two_tick_wait() -> None:
+    speak_policy = GemmaNativeControl6Policy(
+        FixedSixLogitAdapter([-100.0, 10.0, -100.0, -100.0, -100.0, 9.0]),
+        checkpoint_path="cpu-test.pt",
+    )
+    speak = speak_policy.step(_state(
+        user_pcm=np.zeros(1280, dtype=np.float32),
+        legal_actions=("LISTEN", "SPEAK"),
+    ))
+    assert speak.action is ControlAction.SPEAK
+    assert speak.diagnostics["native_control6_effective_candidate"] == "SPEAK"

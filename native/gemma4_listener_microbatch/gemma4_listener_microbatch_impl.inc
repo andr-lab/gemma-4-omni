@@ -1,7 +1,7 @@
 /* New ABI surface for the listener's physical N-session forward.  The legacy
  * ABI3 executor above is intentionally left byte-for-byte behaviorally intact.
- * All projection GEMMs below use one row-major concatenated [N*2,K] operand;
- * per-session work is limited to private KV access and attention state. */
+ * Q2 projection GEMMs retain [N*2,K]; variable text-Q uses one contiguous
+ * [physicalQ,K] GEMM per session while KV/attention remain session-private. */
 
 #include <new>
 
@@ -17,7 +17,10 @@ struct gemma4_listener_batch_slot {
     uint32_t prefix_len;
     uint32_t current_position;
     bool primed;
+    bool private_fork;
 };
+
+struct gemma4_batch_workspace;
 
 typedef struct {
     cublasHandle_t handle;
@@ -46,10 +49,14 @@ enum {
     (1u + GEMMA4_NUM_LAYERS * GEMMA4_BATCH_GEMM_OPS_PER_LAYER)
 #define GEMMA4_BATCH_GEMM_OP_ID(layer, op) \
     (1u + (uint32_t)(layer) * GEMMA4_BATCH_GEMM_OPS_PER_LAYER + (uint32_t)(op))
+#define GEMMA4_VARIABLE_Q_GEMM_GRAPH_COUNT 1u
+#define GEMMA4_VARIABLE_Q_GEMM_GRAPH_Q_LEN 6u
 
 typedef struct gemma4_batch_gemm_graph {
     cudaGraph_t graph;
     cudaGraphExec_t executable;
+    cublasHandle_t handle;
+    cudaStream_t lane_stream;
     const void *weight;
     const void *input;
     void *output;
@@ -111,6 +118,10 @@ struct gemma4_listener_batch_ctx {
      * output-health check complete. Text appends do not advance audio identity. */
     bool output_embedded_text_input;
     bool output_preserves_listener_cursors;
+    uint32_t output_cache_advance_tokens;
+    /* Lazy variable-Q scratch is independent of session-slot capacity. */
+    gemma4_batch_workspace *query_workspace;
+    uint32_t query_workspace_rows;
     cudaEvent_t completion_event;
     cudaEvent_t clone_event;
     bool clone_enqueued;
@@ -121,9 +132,12 @@ struct gemma4_listener_batch_ctx {
     gemma4_batch_gemm_lane *gemm_lanes;
     cudaEvent_t gemm_ready_event;
     gemma4_batch_gemm_graph *gemm_graphs;
+    gemma4_batch_gemm_graph *variable_q_gemm_graphs;
     bool gemm_graphs_enabled;
+    bool variable_q_gemm_graphs_enabled;
     uint32_t gemm_graph_bucket_count;
     uint64_t gemm_graph_count;
+    uint64_t variable_q_gemm_graph_count;
     __nv_bfloat16 *hidden_a;
     __nv_bfloat16 *hidden_b;
     __nv_bfloat16 *norm;
@@ -166,6 +180,49 @@ struct gemma4_listener_batch_ctx {
     uint64_t session_rows;
 };
 
+static void gemma4_batch_clear_variable_q_gemm_graphs(
+    gemma4_listener_batch_ctx *batch);
+
+#if defined(GEMMA4_BATCH_DIAGNOSTIC_LAYER_TRACE)
+static int gemma4_batch_diagnostic_dump_layer_stage(
+    gemma4_listener_batch_ctx *batch, const char *stage,
+    const void *device_data, uint32_t rows, uint32_t width,
+    int layer_idx, uint32_t query_count, cudaStream_t stream
+) {
+    const char *directory = getenv("GEMMA4_BATCH_LAYER_TRACE_DIR");
+    if (!directory || !*directory || layer_idx < 0 || layer_idx > 6) return 0;
+    if (!batch || !stage || !device_data || !batch->capacity ||
+        batch->active_slots[0] >= batch->capacity || rows != query_count) return -1;
+    const uint32_t base = batch->slots[batch->active_slots[0]].current_position;
+    const size_t elements = (size_t)rows * width;
+    if (!width || elements > SIZE_MAX / sizeof(__nv_bfloat16) ||
+        cudaStreamSynchronize(stream) != cudaSuccess) return -2;
+    const size_t bytes = elements * sizeof(__nv_bfloat16);
+    void *host = malloc(bytes);
+    if (!host) return -3;
+    char path[1024];
+    const int path_len = snprintf(path, sizeof(path),
+        "%s/l%02d_%s_base%u_q%u.bf16", directory, layer_idx, stage, base, query_count);
+    int status = -4;
+    if (path_len > 0 && (size_t)path_len < sizeof(path) &&
+        cudaMemcpy(host, device_data, bytes, cudaMemcpyDeviceToHost) == cudaSuccess) {
+        FILE *file = fopen(path, "wb");
+        if (file) {
+            const size_t written = fwrite(host, 1, bytes, file);
+            const int close_status = fclose(file);
+            status = written == bytes && close_status == 0 ? 0 : -5;
+        }
+    }
+    free(host);
+    return status;
+}
+#define GEMMA4_BATCH_DIAG_DUMP(batch, stage, data, rows, width, layer, q, stream) \
+    do { if (gemma4_batch_diagnostic_dump_layer_stage( \
+        batch, stage, data, rows, width, layer, q, stream) != 0) return -90; } while (0)
+#else
+#define GEMMA4_BATCH_DIAG_DUMP(batch, stage, data, rows, width, layer, q, stream) do {} while (0)
+#endif
+
 __global__ static void gemma4_batch_fill_projection_ptrs(
     const void *weight,
     const __nv_bfloat16 *input,
@@ -204,8 +261,8 @@ static uint32_t gemma4_batch_graph_bucket_width(uint32_t capacity, uint32_t inde
 }
 
 /* Run the standard ABI3 per-session GemmEx shape on independent CUDA lanes.
- * Graph mode dispatches the smallest prewarmed geometric width that covers
- * the active rows, avoiding work proportional to the maximum capacity. */
+ * Keep each listener Q2 pair at M=2 even when one forward carries several
+ * queued frames; all non-GEMM work can still span the full query width. */
 static int gemma4_batch_run_per_session_gemm(
     gemma4_listener_batch_ctx *batch,
     uint32_t operation_id,
@@ -223,7 +280,7 @@ static int gemma4_batch_run_per_session_gemm(
         !output_width || !input_width) return -1;
     const uint32_t session_count = rows / rows_per_session;
     if (session_count > batch->capacity) return -2;
-    if (batch->gemm_graphs_enabled) {
+    if (batch->gemm_graphs_enabled && rows_per_session == GEMMA4_STREAM_Q_LEN) {
         if (rows_per_session != GEMMA4_STREAM_Q_LEN ||
             operation_id >= GEMMA4_BATCH_GEMM_OP_COUNT || !batch->gemm_graphs ||
             !batch->gemm_graph_bucket_count)
@@ -247,9 +304,36 @@ static int gemma4_batch_run_per_session_gemm(
             entry.k != input_width || entry.lane_width != bucket_width) return -7;
         return cudaGraphLaunch(entry.executable, stream) == cudaSuccess ? 0 : -5;
     }
-    if (!batch->gemm_graphs_enabled && session_count == 1) {
+    if (batch->variable_q_gemm_graphs_enabled && session_count == 1u &&
+        rows_per_session == GEMMA4_VARIABLE_Q_GEMM_GRAPH_Q_LEN &&
+        operation_id < GEMMA4_BATCH_GEMM_OP_COUNT && batch->variable_q_gemm_graphs) {
+        const gemma4_batch_gemm_graph &entry =
+            batch->variable_q_gemm_graphs[operation_id];
+        if (entry.ready && entry.executable && entry.weight == weight &&
+            entry.input == input && entry.output == output &&
+            entry.m == rows_per_session && entry.n == output_width &&
+            entry.k == input_width && entry.lane_width == 1u &&
+            entry.handle == batch->gemm_lanes[0].handle &&
+            entry.lane_stream == batch->gemm_lanes[0].stream) {
+            return cudaGraphLaunch(entry.executable, stream) == cudaSuccess ? 0 : -5;
+        }
+    }
+    if (session_count == 1 && rows_per_session > GEMMA4_STREAM_Q_LEN) {
         return run_linear_cublas(batch->model->cublas, weight, input, output,
-            (int)rows_per_session, (int)output_width, (int)input_width, stream);
+            (int)rows_per_session, (int)output_width, (int)input_width,
+            stream) == 0 ? 0 : -3;
+    }
+    if (session_count == 1 && !batch->gemm_graphs_enabled) {
+        for (uint32_t q_offset = 0; q_offset < rows_per_session;
+             q_offset += GEMMA4_STREAM_Q_LEN) {
+            const size_t input_offset = (size_t)q_offset * input_width;
+            const size_t output_offset = (size_t)q_offset * output_width;
+            if (run_linear_cublas(batch->model->cublas, weight,
+                    input + input_offset, output + output_offset,
+                    GEMMA4_STREAM_Q_LEN, (int)output_width,
+                    (int)input_width, stream) != 0) return -3;
+        }
+        return 0;
     }
     if (!batch->gemm_lanes || !batch->gemm_ready_event) return -2;
     if (cudaEventRecord(batch->gemm_ready_event, stream) != cudaSuccess) return -3;
@@ -258,18 +342,56 @@ static int gemma4_batch_run_per_session_gemm(
         if (!lane.handle || !lane.stream || !lane.done_event ||
             cudaStreamWaitEvent(lane.stream, batch->gemm_ready_event, 0) != cudaSuccess)
             return -4;
-        const size_t input_offset = (size_t)i * rows_per_session * input_width;
-        const size_t output_offset = (size_t)i * rows_per_session * output_width;
-        if (run_linear_cublas(lane.handle, weight, input + input_offset,
-                output + output_offset, (int)rows_per_session,
-                (int)output_width, (int)input_width, lane.stream) != 0 ||
-            cudaEventRecord(lane.done_event, lane.stream) != cudaSuccess) return -5;
+        const size_t session_input_offset = (size_t)i * rows_per_session * input_width;
+        const size_t session_output_offset = (size_t)i * rows_per_session * output_width;
+        if (rows_per_session > GEMMA4_STREAM_Q_LEN) {
+            if (run_linear_cublas(lane.handle, weight,
+                    input + session_input_offset, output + session_output_offset,
+                    (int)rows_per_session, (int)output_width,
+                    (int)input_width, lane.stream) != 0) return -5;
+        } else {
+            for (uint32_t q_offset = 0; q_offset < rows_per_session;
+                 q_offset += GEMMA4_STREAM_Q_LEN) {
+                const size_t input_offset = session_input_offset + (size_t)q_offset * input_width;
+                const size_t output_offset = session_output_offset + (size_t)q_offset * output_width;
+                if (run_linear_cublas(lane.handle, weight, input + input_offset,
+                        output + output_offset, GEMMA4_STREAM_Q_LEN,
+                        (int)output_width, (int)input_width, lane.stream) != 0) return -5;
+            }
+        }
+        if (cudaEventRecord(lane.done_event, lane.stream) != cudaSuccess) return -5;
     }
     for (uint32_t i = 0; i < session_count; ++i) {
         if (cudaStreamWaitEvent(stream, batch->gemm_lanes[i].done_event, 0) != cudaSuccess)
             return -6;
     }
     return 0;
+}
+
+/* Variable-Q append keeps the Q2 reduction tile while processing every row
+ * in one launch. Q2 continues through its original geometry unchanged. */
+static int gemma4_batch_run_q2_grouped_rmsnorm(
+    gemma4_listener_ctx *ctx,
+    const __nv_bfloat16 *input,
+    const void *weight,
+    __nv_bfloat16 *output,
+    uint32_t rows,
+    uint32_t rows_per_query,
+    uint32_t dim,
+    double eps,
+    cudaStream_t stream,
+    uint32_t query_count,
+    uint32_t legacy_reduction_geometry_rows
+) {
+    if (!ctx || !input || !output || !query_count || !rows_per_query ||
+        query_count < GEMMA4_STREAM_Q_LEN || query_count > 64u ||
+        (query_count & 1u) != 0u ||
+        (uint64_t)rows_per_query * query_count != rows) return -1;
+    const uint32_t geometry_rows = query_count == GEMMA4_STREAM_Q_LEN
+        ? legacy_reduction_geometry_rows
+        : GEMMA4_STREAM_Q_LEN * rows_per_query;
+    return run_rmsnorm_exact_or_custom(ctx, input, weight, output, rows, dim,
+        eps, stream, geometry_rows);
 }
 
 static const uint64_t GEMMA4_BATCH_CAPABILITIES_V2 =
@@ -290,7 +412,10 @@ static const uint64_t GEMMA4_BATCH_CAPABILITIES_V2 =
     UINT64_C(16384) | /* text embeddings with model-projected token PLE */
     UINT64_C(32768) | /* compare-and-swap rollback of an assistant KV tail */
     UINT64_C(65536) | /* queued Q2 audio replay without listener-cursor advance */
-    UINT64_C(131072); /* same-owner private session-slot fork */
+    UINT64_C(131072) | /* same-owner private session-slot fork */
+    GEMMA4_BATCH_VARIABLE_Q_QUEUED_AUDIO_CAPABILITY | /* one-call queued-Q audio append */
+    GEMMA4_BATCH_VARIABLE_Q_TEXT_CAPABILITY | /* one-call logical Q3..Q8 text append */
+    GEMMA4_BATCH_VARIABLE_Q_GEMM_GRAPH_CAPABILITY; /* independent Q6 GEMM graphs */
 
 static bool gemma4_batch_size_supported(uint32_t n) {
     return n >= 1;
@@ -404,14 +529,13 @@ static bool gemma4_batch_workspace_alloc_field(
     return true;
 }
 
-static int gemma4_batch_workspace_allocate(
-    uint32_t capacity,
+static int gemma4_batch_workspace_allocate_rows(
+    uint32_t row_capacity,
     gemma4_batch_workspace *workspace
 ) {
-    if (!capacity || !workspace) return -1;
+    if (!row_capacity || !workspace) return -1;
     memset(workspace, 0, sizeof(*workspace));
-    size_t rows = 0;
-    if (!gemma4_batch_mul_size((size_t)capacity, GEMMA4_STREAM_Q_LEN, &rows)) return -20;
+    const size_t rows = row_capacity;
 #define GEMMA4_WORKSPACE_ALLOC(field, a, b) \
     do { \
         size_t elements = 0; \
@@ -441,7 +565,7 @@ static int gemma4_batch_workspace_allocate(
     GEMMA4_WORKSPACE_ALLOC(output, GEMMA4_HIDDEN_SIZE, 1u);
 #undef GEMMA4_WORKSPACE_ALLOC
     size_t pointer_bytes = 0;
-    if (!gemma4_batch_mul_size((size_t)capacity, sizeof(void *), &pointer_bytes)) {
+    if (!gemma4_batch_mul_size((size_t)row_capacity, sizeof(void *), &pointer_bytes)) {
         gemma4_batch_workspace_free(workspace);
         return -20;
     }
@@ -455,6 +579,15 @@ static int gemma4_batch_workspace_allocate(
         return -4;
     }
     return 0;
+}
+
+static int gemma4_batch_workspace_allocate(
+    uint32_t capacity,
+    gemma4_batch_workspace *workspace
+) {
+    if (!capacity || capacity > UINT32_MAX / GEMMA4_STREAM_Q_LEN) return -1;
+    return gemma4_batch_workspace_allocate_rows(
+        capacity * GEMMA4_STREAM_Q_LEN, workspace);
 }
 
 static gemma4_batch_workspace gemma4_batch_workspace_take(
@@ -494,6 +627,42 @@ static void gemma4_batch_workspace_free_ctx(gemma4_listener_batch_ctx *batch) {
     gemma4_batch_workspace_install(batch, &empty);
 }
 
+static int gemma4_batch_ensure_query_workspace(
+    gemma4_listener_batch_ctx *batch,
+    uint32_t query_count
+) {
+    if (!batch || query_count < GEMMA4_STREAM_Q_LEN || query_count > 64u ||
+        (query_count & 1u) != 0u) return -1;
+    if (batch->query_workspace_rows >= query_count) return 0;
+    if (batch->output_lease_active || !batch->stream_bound ||
+        cudaStreamSynchronize(batch->listener_stream) != cudaSuccess) return -2;
+    uint32_t target = query_count;
+    if (batch->query_workspace_rows && batch->query_workspace_rows <= 32u) {
+        target = batch->query_workspace_rows * 2u;
+        if (target < query_count) target = query_count;
+    }
+    if (target > 64u) target = 64u;
+    gemma4_batch_workspace *replacement =
+        static_cast<gemma4_batch_workspace *>(calloc(1, sizeof(*replacement)));
+    if (!replacement) return -3;
+    const int status = gemma4_batch_workspace_allocate_rows(target, replacement);
+    if (status != 0) {
+        free(replacement);
+        return status;
+    }
+    if (batch->query_workspace) {
+        /* Variable-Q graphs capture addresses from this private scratch. Drop
+         * those graphs before retiring any captured pointer; the eager M=2
+         * loop remains available until a cache is prepared again. */
+        gemma4_batch_clear_variable_q_gemm_graphs(batch);
+        gemma4_batch_workspace_free(batch->query_workspace);
+        free(batch->query_workspace);
+    }
+    batch->query_workspace = replacement;
+    batch->query_workspace_rows = target;
+    return 0;
+}
+
 static void gemma4_batch_destroy_graph_table(
     gemma4_listener_batch_ctx *batch,
     gemma4_batch_gemm_graph *graphs,
@@ -513,8 +682,41 @@ static void gemma4_batch_destroy_graph_table(
     free(graphs);
 }
 
+static void gemma4_batch_destroy_variable_q_graph_table(
+    gemma4_listener_batch_ctx *batch,
+    gemma4_batch_gemm_graph *graphs
+) {
+    if (!graphs) return;
+    if (batch && batch->listener_stream) cudaStreamSynchronize(batch->listener_stream);
+    if (batch && batch->gemm_lanes && batch->gemm_lanes[0].stream)
+        cudaStreamSynchronize(batch->gemm_lanes[0].stream);
+    for (size_t index = 0;
+         index < (size_t)GEMMA4_VARIABLE_Q_GEMM_GRAPH_COUNT *
+                 GEMMA4_BATCH_GEMM_OP_COUNT; ++index) {
+        gemma4_batch_gemm_graph &entry = graphs[index];
+        if (entry.executable) cudaGraphExecDestroy(entry.executable);
+        if (entry.graph) cudaGraphDestroy(entry.graph);
+    }
+    free(graphs);
+}
+
+static void gemma4_batch_clear_variable_q_gemm_graphs(
+    gemma4_listener_batch_ctx *batch
+) {
+    if (!batch) return;
+    const uint64_t old_count = batch->variable_q_gemm_graph_count;
+    gemma4_batch_destroy_variable_q_graph_table(
+        batch, batch->variable_q_gemm_graphs);
+    batch->variable_q_gemm_graphs = nullptr;
+    batch->variable_q_gemm_graph_count = 0;
+    batch->variable_q_gemm_graphs_enabled = false;
+    if (batch->gemm_graph_count >= old_count) batch->gemm_graph_count -= old_count;
+    else batch->gemm_graph_count = 0;
+}
+
 static void gemma4_batch_clear_graphs(gemma4_listener_batch_ctx *batch) {
     if (!batch) return;
+    gemma4_batch_clear_variable_q_gemm_graphs(batch);
     gemma4_batch_destroy_graph_table(
         batch, batch->gemm_graphs, batch->gemm_graph_bucket_count);
     batch->gemm_graphs = nullptr;
@@ -768,20 +970,236 @@ static int gemma4_batch_build_gemm_graphs(
     return 0;
 }
 
+static int gemma4_batch_capture_variable_q_gemm_graph(
+    gemma4_listener_batch_ctx *batch,
+    gemma4_batch_gemm_graph *entry,
+    uint64_t *graph_count,
+    uint32_t operation_id,
+    const void *weight,
+    const __nv_bfloat16 *input,
+    __nv_bfloat16 *output,
+    uint32_t n,
+    uint32_t k
+) {
+    if (!batch || !entry || !graph_count || !batch->gemm_lanes ||
+        !batch->gemm_lanes[0].handle || !batch->gemm_lanes[0].stream ||
+        !batch->gemm_lanes[0].done_event ||
+        batch->gemm_lanes[0].cublas_workspace_bytes <
+            GEMMA4_BATCH_CUBLAS_WORKSPACE_BYTES ||
+        !batch->gemm_ready_event || !batch->listener_stream || !weight ||
+        !input || !output || !n || !k || entry->ready ||
+        operation_id >= GEMMA4_BATCH_GEMM_OP_COUNT) return -1;
+
+    const uint32_t query_len = GEMMA4_VARIABLE_Q_GEMM_GRAPH_Q_LEN;
+    gemma4_batch_gemm_lane &lane = batch->gemm_lanes[0];
+    cudaError_t cuda_status = cudaStreamBeginCapture(
+        batch->listener_stream, cudaStreamCaptureModeThreadLocal);
+    if (cuda_status != cudaSuccess) {
+        return gemma4_batch_capture_failure(
+            operation_id, batch->capacity, query_len,
+            "variable_begin_capture", -2, cuda_status);
+    }
+
+    int capture_status = 0;
+    const char *capture_stage = nullptr;
+    cuda_status = cudaEventRecord(batch->gemm_ready_event, batch->listener_stream);
+    if (cuda_status != cudaSuccess) {
+        capture_status = -3;
+        capture_stage = "variable_record_ready";
+    }
+    if (capture_status == 0) {
+        cuda_status = cudaStreamWaitEvent(lane.stream, batch->gemm_ready_event, 0);
+        if (cuda_status != cudaSuccess) {
+            capture_status = -4;
+            capture_stage = "variable_lane_wait_ready";
+        }
+    }
+    if (run_linear_cublas_bound(lane.handle, weight, input,
+            output, (int)query_len, (int)n, (int)k, lane.stream) != 0) {
+        capture_status = -5;
+        capture_stage = "variable_cublas_mq";
+    }
+    if (capture_status == 0) {
+        cuda_status = cudaEventRecord(lane.done_event, lane.stream);
+        if (cuda_status != cudaSuccess) {
+            capture_status = -6;
+            capture_stage = "variable_record_done";
+        }
+    }
+    if (capture_status == 0) {
+        cuda_status = cudaStreamWaitEvent(batch->listener_stream, lane.done_event, 0);
+        if (cuda_status != cudaSuccess) {
+            capture_status = -7;
+            capture_stage = "variable_owner_wait_done";
+        }
+    }
+
+    cudaGraph_t graph = nullptr;
+    const cudaError_t end_status = cudaStreamEndCapture(batch->listener_stream, &graph);
+    if (capture_status != 0 || end_status != cudaSuccess || !graph) {
+        if (graph) cudaGraphDestroy(graph);
+        if (capture_status != 0) {
+            return gemma4_batch_capture_failure(operation_id, batch->capacity,
+                query_len, capture_stage ? capture_stage : "variable_capture",
+                capture_status, cuda_status);
+        }
+        return gemma4_batch_capture_failure(operation_id, batch->capacity,
+            query_len, "variable_end_capture", -8, end_status);
+    }
+
+    cudaGraphExec_t executable = nullptr;
+    cuda_status = cudaGraphInstantiate(&executable, graph, nullptr, nullptr, 0);
+    if (cuda_status != cudaSuccess || !executable) {
+        cudaGraphDestroy(graph);
+        return gemma4_batch_capture_failure(operation_id, batch->capacity,
+            query_len, "variable_instantiate", -9, cuda_status);
+    }
+    entry->graph = graph;
+    entry->executable = executable;
+    entry->handle = lane.handle;
+    entry->lane_stream = lane.stream;
+    entry->weight = weight;
+    entry->input = input;
+    entry->output = output;
+    entry->m = query_len;
+    entry->n = n;
+    entry->k = k;
+    entry->lane_width = 1u;
+    entry->ready = true;
+    (*graph_count)++;
+    return 0;
+}
+
+static int gemma4_batch_build_variable_q_gemm_graphs(
+    gemma4_listener_batch_ctx *batch,
+    gemma4_batch_gemm_graph **out_graphs,
+    uint64_t *out_graph_count
+) {
+    if (!batch || !out_graphs || !out_graph_count || !batch->stream_bound ||
+        !batch->listener_stream || !batch->capacity || !batch->gemm_lanes ||
+        !batch->query_workspace || batch->query_workspace_rows <
+            GEMMA4_VARIABLE_Q_GEMM_GRAPH_Q_LEN) return -1;
+    *out_graphs = nullptr;
+    *out_graph_count = 0;
+    const size_t graph_entries =
+        (size_t)GEMMA4_VARIABLE_Q_GEMM_GRAPH_COUNT * GEMMA4_BATCH_GEMM_OP_COUNT;
+    gemma4_batch_gemm_graph *graphs = static_cast<gemma4_batch_gemm_graph *>(
+        calloc(graph_entries, sizeof(gemma4_batch_gemm_graph)));
+    if (!graphs) return -2;
+
+    /* The captured addresses belong to this context's private Q8 scratch,
+     * which is independent of the capacity-sized Q2 workspace. */
+    gemma4_batch_workspace base_workspace = gemma4_batch_workspace_take(batch);
+    gemma4_batch_workspace variable_workspace = *batch->query_workspace;
+    gemma4_batch_workspace_install(batch, &variable_workspace);
+
+    gemma4_listener_ctx *ctx = batch->model;
+    uint64_t graph_count = 0;
+    int status = gemma4_batch_capture_variable_q_gemm_graph(batch, graphs,
+        &graph_count, GEMMA4_BATCH_GEMM_OP_PRELUDE,
+        ctx->weights.per_layer_model_proj_w, batch->hidden_a, batch->ple_raw,
+        GEMMA4_NUM_LAYERS * GEMMA4_PLE_DIM, GEMMA4_HIDDEN_SIZE);
+    for (int layer = 0; status == 0 && layer < GEMMA4_NUM_LAYERS; ++layer) {
+        const GemmaLayerSpec *spec = &gemma4_layers[layer];
+        const gemma4_layer_weights *lw = &ctx->weights.layers[layer];
+        const uint32_t base = GEMMA4_BATCH_GEMM_OP_ID(layer, 0);
+        const uint32_t d = spec->head_dim;
+        const uint32_t qdim = GEMMA4_NUM_ATTN_HEADS * d;
+        const uint32_t intermediate = spec->intermediate_size;
+        status = gemma4_batch_capture_variable_q_gemm_graph(batch,
+            graphs + base + GEMMA4_BATCH_GEMM_OP_Q, &graph_count,
+            base + GEMMA4_BATCH_GEMM_OP_Q, lw->q_proj_w, batch->norm,
+            batch->q, qdim, GEMMA4_HIDDEN_SIZE);
+        if (status == 0 && !spec->is_kv_shared) {
+            status = gemma4_batch_capture_variable_q_gemm_graph(batch,
+                graphs + base + GEMMA4_BATCH_GEMM_OP_K, &graph_count,
+                base + GEMMA4_BATCH_GEMM_OP_K, lw->k_proj_w, batch->norm,
+                batch->k, d, GEMMA4_HIDDEN_SIZE);
+            if (status == 0) status = gemma4_batch_capture_variable_q_gemm_graph(
+                batch, graphs + base + GEMMA4_BATCH_GEMM_OP_V, &graph_count,
+                base + GEMMA4_BATCH_GEMM_OP_V, lw->v_proj_w, batch->norm,
+                batch->v, d, GEMMA4_HIDDEN_SIZE);
+        }
+        if (status == 0) status = gemma4_batch_capture_variable_q_gemm_graph(
+            batch, graphs + base + GEMMA4_BATCH_GEMM_OP_O, &graph_count,
+            base + GEMMA4_BATCH_GEMM_OP_O, lw->o_proj_w, batch->attn,
+            batch->hidden_b, GEMMA4_HIDDEN_SIZE, qdim);
+        if (status == 0) status = gemma4_batch_capture_variable_q_gemm_graph(
+            batch, graphs + base + GEMMA4_BATCH_GEMM_OP_GATE, &graph_count,
+            base + GEMMA4_BATCH_GEMM_OP_GATE, lw->gate_proj_w, batch->norm,
+            batch->gate, intermediate, GEMMA4_HIDDEN_SIZE);
+        if (status == 0) status = gemma4_batch_capture_variable_q_gemm_graph(
+            batch, graphs + base + GEMMA4_BATCH_GEMM_OP_UP, &graph_count,
+            base + GEMMA4_BATCH_GEMM_OP_UP, lw->up_proj_w, batch->norm,
+            batch->up, intermediate, GEMMA4_HIDDEN_SIZE);
+        if (status == 0) status = gemma4_batch_capture_variable_q_gemm_graph(
+            batch, graphs + base + GEMMA4_BATCH_GEMM_OP_DOWN, &graph_count,
+            base + GEMMA4_BATCH_GEMM_OP_DOWN, lw->down_proj_w, batch->mlp,
+            batch->hidden_b, GEMMA4_HIDDEN_SIZE, intermediate);
+        if (status == 0) status = gemma4_batch_capture_variable_q_gemm_graph(
+            batch, graphs + base + GEMMA4_BATCH_GEMM_OP_PLE_GATE, &graph_count,
+            base + GEMMA4_BATCH_GEMM_OP_PLE_GATE, lw->ple_gate_w,
+            batch->hidden_a, batch->ple_gate, GEMMA4_PLE_DIM,
+            GEMMA4_HIDDEN_SIZE);
+        if (status == 0) status = gemma4_batch_capture_variable_q_gemm_graph(
+            batch, graphs + base + GEMMA4_BATCH_GEMM_OP_PLE_PROJ, &graph_count,
+            base + GEMMA4_BATCH_GEMM_OP_PLE_PROJ, lw->ple_proj_w,
+            batch->ple_act, batch->ple_out, GEMMA4_HIDDEN_SIZE,
+            GEMMA4_PLE_DIM);
+    }
+
+    *batch->query_workspace = gemma4_batch_workspace_take(batch);
+    gemma4_batch_workspace_install(batch, &base_workspace);
+    if (status != 0) {
+        gemma4_batch_destroy_variable_q_graph_table(batch, graphs);
+        return status;
+    }
+    *out_graphs = graphs;
+    *out_graph_count = graph_count;
+    return 0;
+}
+
 static int gemma4_batch_prepare_gemm_graphs_internal(
     gemma4_listener_batch_ctx *batch
 ) {
     gemma4_batch_gemm_graph *graphs = nullptr;
+    gemma4_batch_gemm_graph *variable_q_graphs = nullptr;
     uint64_t graph_count = 0;
+    uint64_t variable_q_graph_count = 0;
     uint32_t bucket_count = 0;
-    const int status = gemma4_batch_build_gemm_graphs(
+    int status = gemma4_batch_build_gemm_graphs(
         batch, &graphs, &graph_count, &bucket_count);
     if (status != 0) return status;
+    status = gemma4_batch_build_variable_q_gemm_graphs(
+        batch, &variable_q_graphs, &variable_q_graph_count);
+    if (status != 0) {
+        gemma4_batch_destroy_graph_table(batch, graphs, bucket_count);
+        return status;
+    }
     gemma4_batch_clear_graphs(batch);
     batch->gemm_graphs = graphs;
-    batch->gemm_graph_count = graph_count;
+    batch->variable_q_gemm_graphs = variable_q_graphs;
+    batch->variable_q_gemm_graph_count = variable_q_graph_count;
+    batch->gemm_graph_count = graph_count + variable_q_graph_count;
     batch->gemm_graph_bucket_count = bucket_count;
     batch->gemm_graphs_enabled = true;
+    batch->variable_q_gemm_graphs_enabled = true;
+    return 0;
+}
+
+static int gemma4_batch_prepare_variable_q_gemm_graphs_internal(
+    gemma4_listener_batch_ctx *batch
+) {
+    gemma4_batch_gemm_graph *graphs = nullptr;
+    uint64_t graph_count = 0;
+    const int status = gemma4_batch_build_variable_q_gemm_graphs(
+        batch, &graphs, &graph_count);
+    if (status != 0) return status;
+    gemma4_batch_clear_variable_q_gemm_graphs(batch);
+    batch->variable_q_gemm_graphs = graphs;
+    batch->variable_q_gemm_graph_count = graph_count;
+    batch->gemm_graph_count += graph_count;
+    batch->variable_q_gemm_graphs_enabled = true;
     return 0;
 }
 
@@ -857,7 +1275,7 @@ static int gemma4_batch_resize_capacity(
         if (gemma4_cache_create(&new_slots[i].cache,
                 batch->model->config.max_seq_len, true) != 0 ||
             cudaMalloc((void **)&new_slots[i].prefix_attention,
-                GEMMA4_CANONICAL_LM_PREFILL_TARGET_LEN * sizeof(int64_t)) != cudaSuccess) {
+                GEMMA4_RUNTIME_PREFIX_MAX_TOKENS * sizeof(int64_t)) != cudaSuccess) {
             for (uint32_t j = first_new_slot; j <= i; ++j) {
                 if (new_slots[j].cache) gemma4_cache_destroy(new_slots[j].cache);
                 if (new_slots[j].prefix_attention) cudaFree(new_slots[j].prefix_attention);
@@ -880,24 +1298,41 @@ static int gemma4_batch_resize_capacity(
         }
     }
     const bool rebuild_gemm_graphs = batch->gemm_graphs_enabled;
+    const bool rebuild_variable_q_gemm_graphs = batch->variable_q_gemm_graphs_enabled;
     gemma4_batch_gemm_graph *new_graphs = nullptr;
+    gemma4_batch_gemm_graph *new_variable_q_graphs = nullptr;
     uint64_t new_graph_count = 0;
+    uint64_t new_variable_q_graph_count = 0;
     uint32_t new_graph_bucket_count = 0;
-    if (rebuild_gemm_graphs) {
+    if (rebuild_gemm_graphs || rebuild_variable_q_gemm_graphs) {
         gemma4_listener_batch_ctx candidate = *batch;
         candidate.capacity = target_capacity;
         candidate.gemm_lanes = new_lanes;
         candidate.gemm_graphs = nullptr;
+        candidate.variable_q_gemm_graphs = nullptr;
         candidate.gemm_graphs_enabled = false;
+        candidate.variable_q_gemm_graphs_enabled = false;
         candidate.gemm_graph_bucket_count = 0;
         candidate.gemm_graph_count = 0;
         gemma4_batch_workspace candidate_workspace = new_workspace;
         gemma4_batch_workspace_install(&candidate, &candidate_workspace);
-        const int graph_status = gemma4_batch_build_gemm_graphs(
-            &candidate, &new_graphs, &new_graph_count, &new_graph_bucket_count);
-        if (graph_status != 0) {
+        int graph_status = 0;
+        int variable_q_graph_status = 0;
+        if (rebuild_gemm_graphs) {
+            graph_status = gemma4_batch_build_gemm_graphs(
+                &candidate, &new_graphs, &new_graph_count, &new_graph_bucket_count);
+        }
+        if (graph_status == 0 && rebuild_variable_q_gemm_graphs) {
+            variable_q_graph_status = gemma4_batch_build_variable_q_gemm_graphs(
+                &candidate, &new_variable_q_graphs, &new_variable_q_graph_count);
+        }
+        if (graph_status != 0 || variable_q_graph_status != 0) {
             /* Candidate capture failed; keep the old capacity, slots,
              * workspace and graph cache intact. */
+            gemma4_batch_destroy_graph_table(
+                &candidate, new_graphs, new_graph_bucket_count);
+            gemma4_batch_destroy_variable_q_graph_table(
+                &candidate, new_variable_q_graphs);
             gemma4_batch_destroy_lane_range(new_lanes, old_capacity, target_capacity);
             for (uint32_t j = first_new_slot; j < target_capacity; ++j) {
                 if (new_slots[j].cache) gemma4_cache_destroy(new_slots[j].cache);
@@ -905,7 +1340,7 @@ static int gemma4_batch_resize_capacity(
             }
             gemma4_batch_workspace_free(&new_workspace);
             free(new_slots); free(new_active); free(new_rows); free(new_lanes);
-            return -1000 + graph_status;
+            return -1000 + (graph_status != 0 ? graph_status : variable_q_graph_status);
         }
     }
     gemma4_listener_batch_slot *old_slots = batch->slots;
@@ -920,11 +1355,14 @@ static int gemma4_batch_resize_capacity(
     batch->output_rows = new_rows; batch->gemm_lanes = new_lanes;
     gemma4_batch_workspace_install(batch, &new_workspace);
     batch->capacity = target_capacity;
-    if (rebuild_gemm_graphs) {
+    if (rebuild_gemm_graphs || rebuild_variable_q_gemm_graphs) {
         batch->gemm_graphs = new_graphs;
-        batch->gemm_graph_count = new_graph_count;
+        batch->variable_q_gemm_graphs = new_variable_q_graphs;
+        batch->variable_q_gemm_graph_count = new_variable_q_graph_count;
+        batch->gemm_graph_count = new_graph_count + new_variable_q_graph_count;
         batch->gemm_graph_bucket_count = new_graph_bucket_count;
-        batch->gemm_graphs_enabled = true;
+        batch->gemm_graphs_enabled = rebuild_gemm_graphs;
+        batch->variable_q_gemm_graphs_enabled = rebuild_variable_q_gemm_graphs;
     }
     free(old_slots); free(old_active); free(old_rows); free(old_lanes);
     gemma4_batch_workspace_free(&old_workspace);
@@ -946,6 +1384,10 @@ static void gemma4_batch_destroy_allocations(gemma4_listener_batch_ctx *batch) {
     gemma4_batch_destroy_lane_range(batch->gemm_lanes, 0, batch->capacity);
     free(batch->slots); free(batch->active_slots); free(batch->output_rows); free(batch->gemm_lanes);
     gemma4_batch_workspace_free_ctx(batch);
+    if (batch->query_workspace) {
+        gemma4_batch_workspace_free(batch->query_workspace);
+        free(batch->query_workspace);
+    }
     if (batch->probe_rms_input) cudaFree(batch->probe_rms_input);
     if (batch->probe_rms_batched) cudaFree(batch->probe_rms_batched);
     if (batch->probe_rms_split) cudaFree(batch->probe_rms_split);
@@ -1020,6 +1462,19 @@ int gemma4_listener_batch_create(
         gemma4_batch_destroy_allocations(batch);
         return capacity_status;
     }
+    batch->query_workspace = static_cast<gemma4_batch_workspace *>(
+        calloc(1, sizeof(*batch->query_workspace)));
+    if (!batch->query_workspace) {
+        gemma4_batch_destroy_allocations(batch);
+        return -4;
+    }
+    const int query_workspace_status = gemma4_batch_workspace_allocate_rows(
+        GEMMA4_MAX_STREAM_Q_LEN, batch->query_workspace);
+    if (query_workspace_status != 0) {
+        gemma4_batch_destroy_allocations(batch);
+        return query_workspace_status;
+    }
+    batch->query_workspace_rows = GEMMA4_MAX_STREAM_Q_LEN;
     *out_batch = batch;
     return 0;
 }
@@ -2092,10 +2547,39 @@ int gemma4_listener_batch_prepare_gemm_graphs(
     return 0;
 }
 
+int gemma4_listener_batch_prepare_variable_q_gemm_graphs(
+    gemma4_listener_batch_ctx *batch,
+    uint64_t *out_graph_count
+) {
+    if (!batch || !out_graph_count || batch->poisoned || !batch->stream_bound ||
+        batch->output_lease_active || batch->probe_state == GEMMA4_BATCH_PROBE_ARMED ||
+        batch->trace_state == GEMMA4_BATCH_TRACE_ARMED) return -1;
+    *out_graph_count = 0;
+    for (uint32_t i = 0; i < batch->capacity; ++i) {
+        if (batch->slots[i].primed) return -2;
+    }
+    if (batch->variable_q_gemm_graphs_enabled) {
+        *out_graph_count = batch->variable_q_gemm_graph_count;
+        return 0;
+    }
+    if (cudaStreamSynchronize(batch->listener_stream) != cudaSuccess) return -3;
+    const int status = gemma4_batch_prepare_variable_q_gemm_graphs_internal(batch);
+    if (status != 0) return status;
+    *out_graph_count = batch->variable_q_gemm_graph_count;
+    return 0;
+}
+
 uint64_t gemma4_listener_batch_gemm_graph_count(
     const gemma4_listener_batch_ctx *batch
 ) {
     return batch && batch->gemm_graphs_enabled ? batch->gemm_graph_count : 0;
+}
+
+uint64_t gemma4_listener_batch_variable_gemm_graph_count(
+    const gemma4_listener_batch_ctx *batch
+) {
+    return batch && batch->variable_q_gemm_graphs_enabled
+        ? batch->variable_q_gemm_graph_count : 0;
 }
 
 int gemma4_listener_batch_import_cache_async(
@@ -2110,7 +2594,7 @@ int gemma4_listener_batch_import_cache_async(
     if (!batch || !row || !cache || slot >= batch->capacity || batch->poisoned ||
         batch->slots[slot].primed || row->native_context_id == 0 || !prefix_attention_meta ||
         prefix_len == 0 ||
-        prefix_len > GEMMA4_CANONICAL_LM_PREFILL_TARGET_LEN ||
+        prefix_len > GEMMA4_RUNTIME_PREFIX_MAX_TOKENS ||
         row->cache_position < prefix_len ||
         row->valid_history_tokens != row->cache_position ||
         row->frame_id == UINT64_MAX ||
@@ -2151,6 +2635,7 @@ int gemma4_listener_batch_import_cache_async(
     state.prefix_len = prefix_len;
     state.current_position = row->cache_position;
     state.primed = true;
+    state.private_fork = false;
     batch->model->last_stream = listener_stream;
     return 0;
 }
@@ -2164,6 +2649,7 @@ static int gemma4_batch_attention_one(
     const __nv_bfloat16 *query,
     __nv_bfloat16 *attention_out,
     uint32_t base_position,
+    uint32_t query_count,
     cudaStream_t stream
 ) {
     gemma4_listener_ctx *ctx = batch->model;
@@ -2172,17 +2658,24 @@ static int gemma4_batch_attention_one(
     const int q_dim = GEMMA4_NUM_ATTN_HEADS * d;
     const int64_t *prefix = batch->slots[slot].prefix_attention;
     const uint32_t prefix_len = batch->slots[slot].prefix_len;
+    for (uint32_t q_offset = 0; q_offset < query_count; q_offset += GEMMA4_STREAM_Q_LEN) {
+    const uint32_t chunk_base_position = base_position + q_offset;
+    const uint32_t cumulative_query_len = q_offset + GEMMA4_STREAM_Q_LEN;
+    const __nv_bfloat16 *query_pair = query + (size_t)q_offset * q_dim;
+    __nv_bfloat16 *attention_pair = attention_out + (size_t)q_offset * q_dim;
     const __nv_bfloat16 *key = nullptr;
     const __nv_bfloat16 *value = nullptr;
     int total_k_len = 0;
     int start = 0;
-    gemma4_cache_get_ptrs(batch->slots[slot].cache, layer_idx, GEMMA4_STREAM_Q_LEN,
-                          base_position, &key, &value, &total_k_len, &start);
+    /* The cache cursor remains at the operation base until all Q rows commit.
+     * A cumulative q_len makes each pair see exactly its sequential Q2 window. */
+    gemma4_cache_get_ptrs(batch->slots[slot].cache, layer_idx, cumulative_query_len,
+                          chunk_base_position, &key, &value, &total_k_len, &start);
     const int visible = total_k_len - start;
     if (!key || !value || visible <= 0 || visible > (int)ctx->config.max_seq_len) return -8;
     if (batch->trace_state == GEMMA4_BATCH_TRACE_ARMED && layer_idx == 0 &&
-        gemma4_batch_trace_record_attention_input(batch, slot, layer_idx, query,
-            key, value, (uint32_t)start, (uint32_t)visible, base_position,
+        gemma4_batch_trace_record_attention_input(batch, slot, layer_idx, query_pair,
+            key, value, (uint32_t)start, (uint32_t)visible, chunk_base_position,
             (uint32_t)d, stream) != 0) return -8;
 
     const bool ordered = ctx->attention_backend == GEMMA4_ATTN_NATIVE_SPLITK_GQA &&
@@ -2193,14 +2686,15 @@ static int gemma4_batch_attention_one(
         if (!ctx->ordered_workspace.initialized ||
             visible > (int)ctx->ordered_workspace.max_keys ||
             gemma4_ordered_attention_launch(
-                query, key, value, prefix, prefix_len, (uint32_t)visible,
-                base_position, spec->attn_scaling, attention_out,
+                query_pair, key, value, prefix, prefix_len, (uint32_t)visible,
+                chunk_base_position, spec->attn_scaling, attention_pair,
                 stream, &ctx->ordered_workspace) != 0) return -8;
         ctx->ordered_calls_by_layer[layer_idx]++;
         if (batch->trace_state == GEMMA4_BATCH_TRACE_ARMED && layer_idx == 0 &&
             gemma4_batch_trace_record_attention_output(batch, slot,
-                attention_out, stream) != 0) return -8;
-        return cudaPeekAtLastError() == cudaSuccess ? 0 : -8;
+                attention_pair, stream) != 0) return -8;
+        if (cudaPeekAtLastError() != cudaSuccess) return -8;
+        continue;
     }
 
     const int full_slot = d == 512 ? full_repeat_slot_for_layer(layer_idx) : -1;
@@ -2209,7 +2703,7 @@ static int gemma4_batch_attention_one(
 
     kernel_build_explicit_sdpa_mask<<<
         (GEMMA4_STREAM_Q_LEN * visible + 255) / 256, 256, 0, stream
-    >>>(ctx->d_sdpa_mask, GEMMA4_STREAM_Q_LEN, visible, start, base_position,
+    >>>(ctx->d_sdpa_mask, GEMMA4_STREAM_Q_LEN, visible, start, chunk_base_position,
         spec->sliding_window, prefix, prefix_len);
     if (cudaPeekAtLastError() != cudaSuccess) return -8;
 
@@ -2257,21 +2751,23 @@ static int gemma4_batch_attention_one(
     kernel_repeat_kv_bf16<<<repeat_blocks, 256, 0, stream>>>(
         static_cast<const __nv_bfloat16 *>(bridge_v), repeat_v, visible, d);
     if (cudaPeekAtLastError() != cudaSuccess) return -8;
-    gemma4_tensor_meta q_meta = make_bridge_meta(query, GEMMA4_META_BF16, 4, q_dims, q_strides, 0);
+    gemma4_tensor_meta q_meta = make_bridge_meta(query_pair, GEMMA4_META_BF16, 4, q_dims, q_strides, 0);
     gemma4_tensor_meta k_meta = make_bridge_meta(repeat_k, GEMMA4_META_BF16, 4, kv_dims, kv_strides, 1);
     gemma4_tensor_meta v_meta = make_bridge_meta(repeat_v, GEMMA4_META_BF16, 4, kv_dims, kv_strides, 1);
     gemma4_tensor_meta mask_meta = make_bridge_meta(
         ctx->d_sdpa_mask, GEMMA4_META_BOOL, 4, mask_dims, mask_strides, 1);
     gemma4_tensor_meta out_meta = make_bridge_meta(
-        attention_out, GEMMA4_META_BF16, 4, q_dims, q_strides, 0);
+        attention_pair, GEMMA4_META_BF16, 4, q_dims, q_strides, 0);
     if (gemma4_listener_debug_attention(
-            query, &q_meta, repeat_k, &k_meta, repeat_v, &v_meta,
-            ctx->d_sdpa_mask, &mask_meta, attention_out, &out_meta,
+            query_pair, &q_meta, repeat_k, &k_meta, repeat_v, &v_meta,
+            ctx->d_sdpa_mask, &mask_meta, attention_pair, &out_meta,
             (double)spec->attn_scaling, stream) != 0) return -8;
     if (batch->trace_state == GEMMA4_BATCH_TRACE_ARMED && layer_idx == 0 &&
         gemma4_batch_trace_record_attention_output(batch, slot,
-            attention_out, stream) != 0) return -8;
-    return cudaPeekAtLastError() == cudaSuccess ? 0 : -8;
+            attention_pair, stream) != 0) return -8;
+    if (cudaPeekAtLastError() != cudaSuccess) return -8;
+    }
+    return 0;
 }
 
 /* Uses the same BF16 boundaries/order as execute_layer(), except each dense
@@ -2279,17 +2775,20 @@ static int gemma4_batch_attention_one(
 static int gemma4_batch_execute_layer(
     gemma4_listener_batch_ctx *batch,
     uint32_t n,
+    uint32_t query_count,
     int layer_idx,
     cudaStream_t stream
 ) {
     gemma4_listener_ctx *ctx = batch->model;
-    const int rows = (int)(n * GEMMA4_STREAM_Q_LEN);
+    const int rows = (int)(n * query_count);
     const int hidden = GEMMA4_HIDDEN_SIZE;
     const GemmaLayerSpec *spec = &gemma4_layers[layer_idx];
     const gemma4_layer_weights *lw = &ctx->weights.layers[layer_idx];
     const int d = (int)spec->head_dim;
     const int qdim = GEMMA4_NUM_ATTN_HEADS * d;
     const int intermediate = (int)spec->intermediate_size;
+    GEMMA4_BATCH_DIAG_DUMP(batch, "hidden_in", batch->hidden_a,
+        (uint32_t)rows, (uint32_t)hidden, layer_idx, query_count, stream);
     const bool capture_trace = batch->trace_state == GEMMA4_BATCH_TRACE_ARMED && layer_idx == 0;
 #define GEMMA4_TRACE_BEGIN(id, in0, in1, in2) \
     do { if (capture_trace && gemma4_batch_trace_begin(batch, id, in0, in1, in2, stream) != 0) return -1000 - (int)(id); } while (0)
@@ -2310,9 +2809,12 @@ static int gemma4_batch_execute_layer(
         }
     }
     GEMMA4_TRACE_BEGIN(GEMMA4_BATCH_TRACE_L0_INPUT_NORM, batch->hidden_a, nullptr, nullptr);
-    if (run_rmsnorm_exact_or_custom(ctx, batch->hidden_a, lw->input_norm_w,
-            batch->norm, (uint32_t)rows, hidden, spec->input_norm_eps, stream,
-            GEMMA4_STREAM_Q_LEN) != 0) return -8;
+    if (gemma4_batch_run_q2_grouped_rmsnorm(ctx, batch->hidden_a,
+            lw->input_norm_w, batch->norm, (uint32_t)rows,
+            (uint32_t)rows / query_count, hidden, spec->input_norm_eps, stream,
+            query_count, GEMMA4_STREAM_Q_LEN) != 0) return -8;
+    GEMMA4_BATCH_DIAG_DUMP(batch, "input_norm", batch->norm,
+        (uint32_t)rows, (uint32_t)hidden, layer_idx, query_count, stream);
     GEMMA4_TRACE_FINISH(GEMMA4_BATCH_TRACE_L0_INPUT_NORM, batch->norm);
     if (capture_probe_rms) {
         const size_t rms_bytes = (size_t)rows * hidden * sizeof(__nv_bfloat16);
@@ -2359,7 +2861,7 @@ static int gemma4_batch_execute_layer(
     if (gemma4_batch_run_per_session_gemm(batch,
             GEMMA4_BATCH_GEMM_OP_ID(layer_idx, GEMMA4_BATCH_GEMM_OP_Q),
             lw->q_proj_w, batch->norm, batch->q,
-            (uint32_t)rows, GEMMA4_STREAM_Q_LEN, (uint32_t)qdim,
+            (uint32_t)rows, query_count, (uint32_t)qdim,
             (uint32_t)hidden, stream) != 0) return -4;
     GEMMA4_TRACE_FINISH(GEMMA4_BATCH_TRACE_L0_Q_PROJ, batch->q);
     batch->projection_gemm_calls++;
@@ -2384,18 +2886,19 @@ static int gemma4_batch_execute_layer(
             (uint64_t)(uintptr_t)lw->q_proj_w;
     }
     GEMMA4_TRACE_BEGIN(GEMMA4_BATCH_TRACE_L0_Q_NORM, batch->q, nullptr, nullptr);
-    if (run_rmsnorm_exact_or_custom(ctx, batch->q, lw->q_norm_w, batch->q,
-            (uint32_t)(rows * GEMMA4_NUM_ATTN_HEADS), (uint32_t)d,
-            spec->q_norm_eps, stream,
+    const uint32_t q_norm_rows = (uint32_t)(rows * GEMMA4_NUM_ATTN_HEADS);
+    if (gemma4_batch_run_q2_grouped_rmsnorm(ctx, batch->q, lw->q_norm_w,
+            batch->q, q_norm_rows, q_norm_rows / query_count, (uint32_t)d,
+            spec->q_norm_eps, stream, query_count,
             GEMMA4_STREAM_Q_LEN * GEMMA4_NUM_ATTN_HEADS) != 0) return -8;
     GEMMA4_TRACE_FINISH(GEMMA4_BATCH_TRACE_L0_Q_NORM, batch->q);
     const float *inv_freq = spec->attn_type == GEMMA_ATTN_FULL
         ? ctx->d_inv_freq_full : ctx->d_inv_freq_sliding;
     for (uint32_t slot = 0; slot < n; ++slot) {
         __nv_bfloat16 *session_q = batch->q +
-            (size_t)slot * GEMMA4_STREAM_Q_LEN * qdim;
-        kernel_rope_bf16<<<dim3(GEMMA4_STREAM_Q_LEN, GEMMA4_NUM_ATTN_HEADS), d / 2, 0, stream>>>(
-            session_q, inv_freq, GEMMA4_NUM_ATTN_HEADS, GEMMA4_STREAM_Q_LEN, d,
+            (size_t)slot * query_count * qdim;
+        kernel_rope_bf16<<<dim3(query_count, GEMMA4_NUM_ATTN_HEADS), d / 2, 0, stream>>>(
+            session_q, inv_freq, GEMMA4_NUM_ATTN_HEADS, query_count, d,
             batch->slots[batch->active_slots[slot]].current_position, nullptr, spec->attn_scaling);
     }
     if (cudaPeekAtLastError() != cudaSuccess) return -8;
@@ -2405,64 +2908,75 @@ static int gemma4_batch_execute_layer(
         if (gemma4_batch_run_per_session_gemm(batch,
                 GEMMA4_BATCH_GEMM_OP_ID(layer_idx, GEMMA4_BATCH_GEMM_OP_K),
                 lw->k_proj_w, batch->norm, batch->k,
-                (uint32_t)rows, GEMMA4_STREAM_Q_LEN, (uint32_t)d,
+                (uint32_t)rows, query_count, (uint32_t)d,
                 (uint32_t)hidden, stream) != 0) return -4;
+        GEMMA4_BATCH_DIAG_DUMP(batch, "k_projection", batch->k,
+            (uint32_t)rows, (uint32_t)d, layer_idx, query_count, stream);
         GEMMA4_TRACE_FINISH(GEMMA4_BATCH_TRACE_L0_K_PROJ, batch->k);
         GEMMA4_TRACE_BEGIN(GEMMA4_BATCH_TRACE_L0_V_PROJ, batch->norm, nullptr, nullptr);
         if (gemma4_batch_run_per_session_gemm(batch,
                 GEMMA4_BATCH_GEMM_OP_ID(layer_idx, GEMMA4_BATCH_GEMM_OP_V),
                 lw->v_proj_w, batch->norm, batch->v,
-                (uint32_t)rows, GEMMA4_STREAM_Q_LEN, (uint32_t)d,
+                (uint32_t)rows, query_count, (uint32_t)d,
                 (uint32_t)hidden, stream) != 0) return -4;
         GEMMA4_TRACE_FINISH(GEMMA4_BATCH_TRACE_L0_V_PROJ, batch->v);
         batch->projection_gemm_calls += 2;
         batch->projection_rows += (uint64_t)rows * 2;
         GEMMA4_TRACE_BEGIN(GEMMA4_BATCH_TRACE_L0_K_NORM, batch->k, nullptr, nullptr);
-        if (run_rmsnorm_exact_or_custom(ctx, batch->k, lw->k_norm_w, batch->k,
-                (uint32_t)rows, (uint32_t)d, spec->k_norm_eps, stream,
+        if (gemma4_batch_run_q2_grouped_rmsnorm(ctx, batch->k, lw->k_norm_w,
+                batch->k, (uint32_t)rows, (uint32_t)rows / query_count,
+                (uint32_t)d, spec->k_norm_eps, stream, query_count,
                 GEMMA4_STREAM_Q_LEN) != 0) return -8;
+        GEMMA4_BATCH_DIAG_DUMP(batch, "k_keynorm", batch->k,
+            (uint32_t)rows, (uint32_t)d, layer_idx, query_count, stream);
         GEMMA4_TRACE_FINISH(GEMMA4_BATCH_TRACE_L0_K_NORM, batch->k);
         GEMMA4_TRACE_BEGIN(GEMMA4_BATCH_TRACE_L0_V_NORM, batch->v, nullptr, nullptr);
-        if (run_rmsnorm_exact_or_custom(ctx, batch->v, lw->v_norm_w, batch->v,
-                (uint32_t)rows, (uint32_t)d, spec->v_norm_eps, stream,
+        if (gemma4_batch_run_q2_grouped_rmsnorm(ctx, batch->v, lw->v_norm_w,
+                batch->v, (uint32_t)rows, (uint32_t)rows / query_count,
+                (uint32_t)d, spec->v_norm_eps, stream, query_count,
                 GEMMA4_STREAM_Q_LEN) != 0) return -8;
         GEMMA4_TRACE_FINISH(GEMMA4_BATCH_TRACE_L0_V_NORM, batch->v);
         for (uint32_t slot = 0; slot < n; ++slot) {
-            __nv_bfloat16 *session_k = batch->k + (size_t)slot * GEMMA4_STREAM_Q_LEN * d;
+            __nv_bfloat16 *session_k = batch->k + (size_t)slot * query_count * d;
             const uint32_t native_slot = batch->active_slots[slot];
-            kernel_rope_bf16<<<dim3(GEMMA4_STREAM_Q_LEN, 1), d / 2, 0, stream>>>(
-                session_k, inv_freq, 1, GEMMA4_STREAM_Q_LEN, d,
+            kernel_rope_bf16<<<dim3(query_count, 1), d / 2, 0, stream>>>(
+                session_k, inv_freq, 1, query_count, d,
                 batch->slots[native_slot].current_position, nullptr, spec->attn_scaling);
             if (gemma4_cache_append_async(batch->slots[native_slot].cache, layer_idx,
-                    session_k, batch->v + (size_t)slot * GEMMA4_STREAM_Q_LEN * d,
-                    GEMMA4_STREAM_Q_LEN, stream) != 0) return -3;
+                    session_k, batch->v + (size_t)slot * query_count * d,
+                    query_count, stream) != 0) return -3;
         }
         if (cudaPeekAtLastError() != cudaSuccess) return -8;
+        GEMMA4_BATCH_DIAG_DUMP(batch, "k_rope", batch->k,
+            (uint32_t)rows, (uint32_t)d, layer_idx, query_count, stream);
     }
 
     for (uint32_t slot = 0; slot < n; ++slot) {
         const __nv_bfloat16 *session_q = batch->q +
-            (size_t)slot * GEMMA4_STREAM_Q_LEN * qdim;
+            (size_t)slot * query_count * qdim;
         __nv_bfloat16 *session_attn = batch->attn +
-            (size_t)slot * GEMMA4_STREAM_Q_LEN * qdim;
+            (size_t)slot * query_count * qdim;
         const uint32_t native_slot = batch->active_slots[slot];
         if (gemma4_batch_attention_one(batch, native_slot, layer_idx, session_q,
-                session_attn, batch->slots[native_slot].current_position, stream) != 0) return -8;
+                session_attn, batch->slots[native_slot].current_position, query_count, stream) != 0) return -8;
     }
+    GEMMA4_BATCH_DIAG_DUMP(batch, "attention_output", batch->attn,
+        (uint32_t)rows, (uint32_t)qdim, layer_idx, query_count, stream);
 
     GEMMA4_TRACE_BEGIN(GEMMA4_BATCH_TRACE_L0_O_PROJ, batch->attn, nullptr, nullptr);
     if (gemma4_batch_run_per_session_gemm(batch,
             GEMMA4_BATCH_GEMM_OP_ID(layer_idx, GEMMA4_BATCH_GEMM_OP_O),
             lw->o_proj_w, batch->attn,
-            batch->hidden_b, (uint32_t)rows, GEMMA4_STREAM_Q_LEN,
+            batch->hidden_b, (uint32_t)rows, query_count,
             (uint32_t)hidden, (uint32_t)qdim, stream) != 0) return -4;
     GEMMA4_TRACE_FINISH(GEMMA4_BATCH_TRACE_L0_O_PROJ, batch->hidden_b);
     batch->projection_gemm_calls++;
     batch->projection_rows += rows;
     GEMMA4_TRACE_BEGIN(GEMMA4_BATCH_TRACE_L0_POST_ATTN_NORM, batch->hidden_b, nullptr, nullptr);
-    if (run_rmsnorm_exact_or_custom(ctx, batch->hidden_b, lw->post_attn_norm_w,
-            batch->hidden_b, (uint32_t)rows, hidden, spec->post_attn_norm_eps, stream,
-            GEMMA4_STREAM_Q_LEN) != 0) return -8;
+    if (gemma4_batch_run_q2_grouped_rmsnorm(ctx, batch->hidden_b,
+            lw->post_attn_norm_w, batch->hidden_b, (uint32_t)rows,
+            (uint32_t)rows / query_count, hidden, spec->post_attn_norm_eps,
+            stream, query_count, GEMMA4_STREAM_Q_LEN) != 0) return -8;
     GEMMA4_TRACE_FINISH(GEMMA4_BATCH_TRACE_L0_POST_ATTN_NORM, batch->hidden_b);
     const int hidden_elems = rows * hidden;
     GEMMA4_TRACE_BEGIN(GEMMA4_BATCH_TRACE_L0_POST_ATTN_RESIDUAL,
@@ -2473,22 +2987,23 @@ static int gemma4_batch_execute_layer(
     GEMMA4_TRACE_FINISH(GEMMA4_BATCH_TRACE_L0_POST_ATTN_RESIDUAL, batch->hidden_a);
 
     GEMMA4_TRACE_BEGIN(GEMMA4_BATCH_TRACE_L0_PRE_FF_NORM, batch->hidden_a, nullptr, nullptr);
-    if (run_rmsnorm_exact_or_custom(ctx, batch->hidden_a, lw->pre_ff_norm_w,
-            batch->norm, (uint32_t)rows, hidden, spec->pre_ff_norm_eps, stream,
-            GEMMA4_STREAM_Q_LEN) != 0) return -8;
+    if (gemma4_batch_run_q2_grouped_rmsnorm(ctx, batch->hidden_a,
+            lw->pre_ff_norm_w, batch->norm, (uint32_t)rows,
+            (uint32_t)rows / query_count, hidden, spec->pre_ff_norm_eps, stream,
+            query_count, GEMMA4_STREAM_Q_LEN) != 0) return -8;
     GEMMA4_TRACE_FINISH(GEMMA4_BATCH_TRACE_L0_PRE_FF_NORM, batch->norm);
     GEMMA4_TRACE_BEGIN(GEMMA4_BATCH_TRACE_L0_GATE_PROJ, batch->norm, nullptr, nullptr);
     if (gemma4_batch_run_per_session_gemm(batch,
             GEMMA4_BATCH_GEMM_OP_ID(layer_idx, GEMMA4_BATCH_GEMM_OP_GATE),
             lw->gate_proj_w, batch->norm,
-            batch->gate, (uint32_t)rows, GEMMA4_STREAM_Q_LEN,
+            batch->gate, (uint32_t)rows, query_count,
             (uint32_t)intermediate, (uint32_t)hidden, stream) != 0) return -4;
     GEMMA4_TRACE_FINISH(GEMMA4_BATCH_TRACE_L0_GATE_PROJ, batch->gate);
     GEMMA4_TRACE_BEGIN(GEMMA4_BATCH_TRACE_L0_UP_PROJ, batch->norm, nullptr, nullptr);
     if (gemma4_batch_run_per_session_gemm(batch,
             GEMMA4_BATCH_GEMM_OP_ID(layer_idx, GEMMA4_BATCH_GEMM_OP_UP),
             lw->up_proj_w, batch->norm,
-            batch->up, (uint32_t)rows, GEMMA4_STREAM_Q_LEN,
+            batch->up, (uint32_t)rows, query_count,
             (uint32_t)intermediate, (uint32_t)hidden, stream) != 0) return -4;
     GEMMA4_TRACE_FINISH(GEMMA4_BATCH_TRACE_L0_UP_PROJ, batch->up);
     batch->projection_gemm_calls += 2;
@@ -2507,15 +3022,16 @@ static int gemma4_batch_execute_layer(
     if (gemma4_batch_run_per_session_gemm(batch,
             GEMMA4_BATCH_GEMM_OP_ID(layer_idx, GEMMA4_BATCH_GEMM_OP_DOWN),
             lw->down_proj_w, batch->mlp,
-            batch->hidden_b, (uint32_t)rows, GEMMA4_STREAM_Q_LEN, (uint32_t)hidden,
+            batch->hidden_b, (uint32_t)rows, query_count, (uint32_t)hidden,
             (uint32_t)intermediate, stream) != 0) return -4;
     GEMMA4_TRACE_FINISH(GEMMA4_BATCH_TRACE_L0_DOWN_PROJ, batch->hidden_b);
     batch->projection_gemm_calls++;
     batch->projection_rows += rows;
     GEMMA4_TRACE_BEGIN(GEMMA4_BATCH_TRACE_L0_POST_FF_NORM, batch->hidden_b, nullptr, nullptr);
-    if (run_rmsnorm_exact_or_custom(ctx, batch->hidden_b, lw->post_ff_norm_w,
-            batch->hidden_b, (uint32_t)rows, hidden, spec->post_ff_norm_eps, stream,
-            GEMMA4_STREAM_Q_LEN) != 0) return -8;
+    if (gemma4_batch_run_q2_grouped_rmsnorm(ctx, batch->hidden_b,
+            lw->post_ff_norm_w, batch->hidden_b, (uint32_t)rows,
+            (uint32_t)rows / query_count, hidden, spec->post_ff_norm_eps, stream,
+            query_count, GEMMA4_STREAM_Q_LEN) != 0) return -8;
     GEMMA4_TRACE_FINISH(GEMMA4_BATCH_TRACE_L0_POST_FF_NORM, batch->hidden_b);
     GEMMA4_TRACE_BEGIN(GEMMA4_BATCH_TRACE_L0_POST_FF_RESIDUAL,
         batch->hidden_a, batch->hidden_b, nullptr);
@@ -2528,7 +3044,7 @@ static int gemma4_batch_execute_layer(
     if (gemma4_batch_run_per_session_gemm(batch,
             GEMMA4_BATCH_GEMM_OP_ID(layer_idx, GEMMA4_BATCH_GEMM_OP_PLE_GATE),
             lw->ple_gate_w, batch->hidden_a,
-            batch->ple_gate, (uint32_t)rows, GEMMA4_STREAM_Q_LEN,
+            batch->ple_gate, (uint32_t)rows, query_count,
             GEMMA4_PLE_DIM, (uint32_t)hidden, stream) != 0) return -4;
     GEMMA4_TRACE_FINISH(GEMMA4_BATCH_TRACE_L0_PLE_GATE_PROJ, batch->ple_gate);
     batch->projection_gemm_calls++;
@@ -2548,14 +3064,15 @@ static int gemma4_batch_execute_layer(
     if (gemma4_batch_run_per_session_gemm(batch,
             GEMMA4_BATCH_GEMM_OP_ID(layer_idx, GEMMA4_BATCH_GEMM_OP_PLE_PROJ),
             lw->ple_proj_w, batch->ple_act,
-            batch->ple_out, (uint32_t)rows, GEMMA4_STREAM_Q_LEN,
+            batch->ple_out, (uint32_t)rows, query_count,
             (uint32_t)hidden, GEMMA4_PLE_DIM, stream) != 0) return -4;
     GEMMA4_TRACE_FINISH(GEMMA4_BATCH_TRACE_L0_PLE_PROJ, batch->ple_out);
     batch->projection_gemm_calls++;
     batch->projection_rows += rows;
     GEMMA4_TRACE_BEGIN(GEMMA4_BATCH_TRACE_L0_PLE_NORM, batch->ple_out, nullptr, nullptr);
-    if (run_rmsnorm_exact_or_custom(ctx, batch->ple_out, lw->ple_norm_w,
-            batch->ple_out, (uint32_t)rows, hidden, spec->post_ple_norm_eps, stream,
+    if (gemma4_batch_run_q2_grouped_rmsnorm(ctx, batch->ple_out, lw->ple_norm_w,
+            batch->ple_out, (uint32_t)rows, (uint32_t)rows / query_count,
+            hidden, spec->post_ple_norm_eps, stream, query_count,
             GEMMA4_STREAM_Q_LEN) != 0) return -8;
     GEMMA4_TRACE_FINISH(GEMMA4_BATCH_TRACE_L0_PLE_NORM, batch->ple_out);
     GEMMA4_TRACE_BEGIN(GEMMA4_BATCH_TRACE_L0_PLE_RESIDUAL,
@@ -2567,6 +3084,8 @@ static int gemma4_batch_execute_layer(
     kernel_scale_bf16<<<(hidden_elems + 255) / 256, 256, 0, stream>>>(
         batch->hidden_a, batch->hidden_a, hidden_elems, spec->layer_scalar);
     GEMMA4_TRACE_FINISH(GEMMA4_BATCH_TRACE_L0_LAYER_SCALE, batch->hidden_a);
+    GEMMA4_BATCH_DIAG_DUMP(batch, "hidden_next", batch->hidden_a,
+        (uint32_t)rows, (uint32_t)hidden, layer_idx, query_count, stream);
     if (batch->trace_state == GEMMA4_BATCH_TRACE_ARMED &&
         layer_idx == GEMMA4_NUM_LAYERS - 1) {
         if (gemma4_batch_trace_begin(batch, GEMMA4_BATCH_TRACE_FINAL_LAYER_OUTPUT,
@@ -2584,6 +3103,7 @@ static int gemma4_listener_batch_step_core(
     gemma4_listener_batch_ctx *batch,
     const gemma4_listener_batch_row *rows,
     uint32_t row_count,
+    uint32_t query_count,
     const void *inputs_embeds,
     const gemma4_tensor_meta *inputs_embeds_meta,
     const void *per_layer_inputs,
@@ -2594,23 +3114,26 @@ static int gemma4_listener_batch_step_core(
 ) {
     if (!batch || !rows || !inputs_embeds || !inputs_embeds_meta || batch->poisoned ||
         !gemma4_batch_size_supported(row_count) || row_count > batch->capacity ||
+        query_count < GEMMA4_STREAM_Q_LEN || query_count > 64u ||
+        (query_count & 1u) != 0u ||
+        (query_count > GEMMA4_STREAM_Q_LEN && row_count != 1u) ||
         batch->output_lease_active || batch->output_generation == UINT64_MAX) return -1;
     if ((batch->probe_state == GEMMA4_BATCH_PROBE_ARMED &&
-         !gemma4_batch_probe_rows_valid(row_count)) ||
+         (query_count != GEMMA4_STREAM_Q_LEN || !gemma4_batch_probe_rows_valid(row_count))) ||
         (batch->trace_state == GEMMA4_BATCH_TRACE_ARMED &&
-         !gemma4_batch_trace_rows_valid(row_count)) ||
+         (query_count != GEMMA4_STREAM_Q_LEN || !gemma4_batch_trace_rows_valid(row_count))) ||
         (batch->probe_state != GEMMA4_BATCH_PROBE_IDLE &&
          batch->probe_state != GEMMA4_BATCH_PROBE_ARMED &&
          batch->probe_state != GEMMA4_BATCH_PROBE_DONE)) return -25;
     const int stream_status = gemma4_batch_bind_stream(batch, listener_stream);
     if (stream_status != 0) return stream_status;
     int device = -1;
-    const uint64_t dims[] = {row_count, GEMMA4_STREAM_Q_LEN, GEMMA4_HIDDEN_SIZE, 0};
+    const uint64_t dims[] = {row_count, query_count, GEMMA4_HIDDEN_SIZE, 0};
     if (cudaGetDevice(&device) != cudaSuccess ||
         !validate_tensor_meta(inputs_embeds_meta, inputs_embeds, device,
                               GEMMA4_META_BF16, 3, dims)) return -10;
     const uint64_t ple_dims[] = {
-        row_count, GEMMA4_STREAM_Q_LEN, GEMMA4_NUM_LAYERS, GEMMA4_PLE_DIM
+        row_count, query_count, GEMMA4_NUM_LAYERS, GEMMA4_PLE_DIM
     };
     if (embedded_text_input) {
         if (!per_layer_inputs || !per_layer_inputs_meta ||
@@ -2630,7 +3153,7 @@ static int gemma4_listener_batch_step_core(
         }
         if (native_slot == batch->capacity ||
             !gemma4_batch_row_identity_matches(batch, native_slot, &rows[i], true) ||
-            rows[i].cache_position > batch->model->config.max_seq_len - GEMMA4_STREAM_Q_LEN ||
+            rows[i].cache_position > batch->model->config.max_seq_len - query_count ||
             rows[i].valid_history_tokens != rows[i].cache_position) return -1;
         for (uint32_t j = 0; j < i; ++j) {
             if (rows[i].native_context_id == rows[j].native_context_id) return -1;
@@ -2647,13 +3170,13 @@ static int gemma4_listener_batch_step_core(
     if (batch->trace_state == GEMMA4_BATCH_TRACE_ARMED &&
         gemma4_batch_trace_update_attention_layout(batch, row_count) != 0) return -25;
     if (cudaMemcpyAsync(batch->hidden_a, inputs_embeds,
-            (size_t)row_count * GEMMA4_STREAM_Q_LEN * GEMMA4_HIDDEN_SIZE * sizeof(__nv_bfloat16),
+            (size_t)row_count * query_count * GEMMA4_HIDDEN_SIZE * sizeof(__nv_bfloat16),
             cudaMemcpyDeviceToDevice, listener_stream) != cudaSuccess) {
         gemma4_batch_poison(batch);
         return -7;
     }
     gemma4_listener_ctx *ctx = batch->model;
-    const int rows_n = (int)(row_count * GEMMA4_STREAM_Q_LEN);
+    const int rows_n = (int)(row_count * query_count);
     const int ple_width = GEMMA4_NUM_LAYERS * GEMMA4_PLE_DIM;
     const int ple_elements = rows_n * ple_width;
     const bool trace_prelude = batch->trace_state == GEMMA4_BATCH_TRACE_ARMED;
@@ -2662,7 +3185,7 @@ static int gemma4_listener_batch_step_core(
          * and Gemma's per-layer input scale. Do not apply audio frame padding
          * or a second projection/scale here. */
         if (trace_prelude) return -25;
-        const size_t token_ple_bytes = (size_t)row_count * GEMMA4_STREAM_Q_LEN *
+        const size_t token_ple_bytes = (size_t)row_count * query_count *
             GEMMA4_NUM_LAYERS * GEMMA4_PLE_DIM * sizeof(__nv_bfloat16);
         if (cudaMemcpyAsync(batch->projected_ple, per_layer_inputs,
                 token_ple_bytes, cudaMemcpyDeviceToDevice, listener_stream) != cudaSuccess) {
@@ -2679,7 +3202,7 @@ static int gemma4_listener_batch_step_core(
     if (gemma4_batch_run_per_session_gemm(batch,
             GEMMA4_BATCH_GEMM_OP_PRELUDE,
             ctx->weights.per_layer_model_proj_w, batch->hidden_a,
-            batch->ple_raw, (uint32_t)rows_n, GEMMA4_STREAM_Q_LEN,
+            batch->ple_raw, (uint32_t)rows_n, query_count,
             (uint32_t)ple_width, GEMMA4_HIDDEN_SIZE, listener_stream) != 0) {
         gemma4_batch_poison(batch);
         return -4;
@@ -2717,10 +3240,11 @@ static int gemma4_listener_batch_step_core(
         gemma4_batch_poison(batch);
         return -303;
     }
-    if (run_rmsnorm_exact_or_custom(ctx, batch->projected_ple,
+    const uint32_t audio_ple_rows = (uint32_t)(rows_n * GEMMA4_NUM_LAYERS);
+    if (gemma4_batch_run_q2_grouped_rmsnorm(ctx, batch->projected_ple,
             ctx->weights.per_layer_proj_norm_w, batch->projected_ple,
-            (uint32_t)(rows_n * GEMMA4_NUM_LAYERS), GEMMA4_PLE_DIM,
-            1e-6, listener_stream,
+            audio_ple_rows, row_count * GEMMA4_NUM_LAYERS, GEMMA4_PLE_DIM,
+            1e-6, listener_stream, query_count,
             GEMMA4_STREAM_Q_LEN * GEMMA4_NUM_LAYERS) != 0) {
         gemma4_batch_poison(batch);
         return -8;
@@ -2786,17 +3310,18 @@ static int gemma4_listener_batch_step_core(
     }
 
     for (int layer = 0; layer < GEMMA4_NUM_LAYERS; ++layer) {
-        const int layer_status = gemma4_batch_execute_layer(batch, row_count, layer, listener_stream);
+        const int layer_status = gemma4_batch_execute_layer(
+            batch, row_count, query_count, layer, listener_stream);
         if (layer_status != 0) {
             gemma4_batch_poison(batch);
             return layer_status;
         }
         batch->layers_executed++;
     }
-    if (run_rmsnorm_exact_or_custom(ctx, batch->hidden_a, ctx->weights.final_norm_w,
-            batch->output, (uint32_t)rows_n, GEMMA4_HIDDEN_SIZE,
-            GEMMA4_FINAL_NORM_EPS, listener_stream,
-            GEMMA4_STREAM_Q_LEN) != 0 ||
+    if (gemma4_batch_run_q2_grouped_rmsnorm(ctx, batch->hidden_a,
+            ctx->weights.final_norm_w, batch->output, (uint32_t)rows_n,
+            row_count, GEMMA4_HIDDEN_SIZE, GEMMA4_FINAL_NORM_EPS,
+            listener_stream, query_count, GEMMA4_STREAM_Q_LEN) != 0 ||
         guard_output_finite(ctx, batch->output, rows_n * GEMMA4_HIDDEN_SIZE,
                             listener_stream) != 0) {
         gemma4_batch_poison(batch);
@@ -2805,14 +3330,14 @@ static int gemma4_listener_batch_step_core(
     for (uint32_t i = 0; i < row_count; ++i) {
         const uint32_t native_slot = batch->active_slots[i];
         if (gemma4_cache_advance_position(batch->slots[native_slot].cache,
-                                          GEMMA4_STREAM_Q_LEN) != 0 ||
+                                          query_count) != 0 ||
             gemma4_cache_set_device_position_async(batch->slots[native_slot].cache,
-                batch->slots[native_slot].current_position + GEMMA4_STREAM_Q_LEN,
+                batch->slots[native_slot].current_position + query_count,
                 listener_stream) != 0) {
             gemma4_batch_poison(batch);
             return -23;
         }
-        batch->slots[native_slot].current_position += GEMMA4_STREAM_Q_LEN;
+        batch->slots[native_slot].current_position += query_count;
         if (!preserve_listener_cursors) {
             batch->slots[native_slot].expected_frame_id = rows[i].frame_id + 1;
             batch->slots[native_slot].expected_state_version = rows[i].listener_state_version + 1;
@@ -2843,6 +3368,7 @@ static int gemma4_listener_batch_step_core(
     batch->output_row_count = row_count;
     batch->output_embedded_text_input = embedded_text_input;
     batch->output_preserves_listener_cursors = preserve_listener_cursors;
+    batch->output_cache_advance_tokens = query_count;
     batch->output_generation++;
     batch->completed_output_generation = 0;
     batch->completed_output_row_count = 0;
@@ -2864,7 +3390,7 @@ int gemma4_listener_batch_step_async(
     cudaStream_t listener_stream
 ) {
     return gemma4_listener_batch_step_core(
-        batch, rows, row_count, audio_soft, audio_soft_meta,
+        batch, rows, row_count, GEMMA4_STREAM_Q_LEN, audio_soft, audio_soft_meta,
         nullptr, nullptr, false, false, listener_stream);
 }
 
@@ -2877,8 +3403,59 @@ int gemma4_listener_batch_step_queued_audio_async(
     cudaStream_t listener_stream
 ) {
     return gemma4_listener_batch_step_core(
-        batch, rows, row_count, audio_soft, audio_soft_meta,
+        batch, rows, row_count, GEMMA4_STREAM_Q_LEN, audio_soft, audio_soft_meta,
         nullptr, nullptr, false, true, listener_stream);
+}
+
+int gemma4_listener_batch_append_queued_audio_async(
+    gemma4_listener_batch_ctx *batch,
+    uint32_t slot,
+    const gemma4_listener_batch_row *expected_row,
+    const void *audio_soft,
+    const gemma4_tensor_meta *audio_soft_meta,
+    uint32_t query_count,
+    cudaStream_t listener_stream
+) {
+    if (!batch || !expected_row || !audio_soft || !audio_soft_meta || batch->poisoned ||
+        slot >= batch->capacity || query_count < GEMMA4_STREAM_Q_LEN ||
+        query_count > 64u || (query_count & 1u) != 0u ||
+        !batch->slots[slot].primed || !batch->slots[slot].private_fork ||
+        batch->slots[slot].context_id != expected_row->native_context_id ||
+        batch->gemm_graphs_enabled || batch->output_lease_active) return -1;
+
+    gemma4_batch_workspace base_workspace = {};
+    bool workspace_swapped = false;
+    if (query_count > GEMMA4_STREAM_Q_LEN) {
+        const int workspace_status = gemma4_batch_ensure_query_workspace(batch, query_count);
+        if (workspace_status != 0) return workspace_status;
+        base_workspace = gemma4_batch_workspace_take(batch);
+        gemma4_batch_workspace_install(batch, batch->query_workspace);
+        workspace_swapped = true;
+    }
+
+    const int status = gemma4_listener_batch_step_core(
+        batch, expected_row, 1u, query_count, audio_soft, audio_soft_meta,
+        nullptr, nullptr, false, true, listener_stream);
+    int result = status;
+    if (workspace_swapped) {
+        if (status == 0) {
+            const size_t last_pair_offset = (size_t)(query_count - GEMMA4_STREAM_Q_LEN) *
+                GEMMA4_HIDDEN_SIZE * sizeof(__nv_bfloat16);
+            const size_t last_pair_bytes = (size_t)GEMMA4_STREAM_Q_LEN *
+                GEMMA4_HIDDEN_SIZE * sizeof(__nv_bfloat16);
+            if (cudaMemcpyAsync(base_workspace.output,
+                    batch->output + last_pair_offset / sizeof(__nv_bfloat16),
+                    last_pair_bytes, cudaMemcpyDeviceToDevice, listener_stream) != cudaSuccess ||
+                cudaEventRecord(batch->completion_event, listener_stream) != cudaSuccess ||
+                cudaPeekAtLastError() != cudaSuccess) {
+                gemma4_batch_poison(batch);
+                result = -24;
+            }
+        }
+        *batch->query_workspace = gemma4_batch_workspace_take(batch);
+        gemma4_batch_workspace_install(batch, &base_workspace);
+    }
+    return result;
 }
 
 int gemma4_listener_batch_step_embedded_async(
@@ -2892,8 +3469,61 @@ int gemma4_listener_batch_step_embedded_async(
     cudaStream_t listener_stream
 ) {
     return gemma4_listener_batch_step_core(
-        batch, rows, row_count, inputs_embeds, inputs_embeds_meta,
+        batch, rows, row_count, GEMMA4_STREAM_Q_LEN, inputs_embeds, inputs_embeds_meta,
         per_layer_inputs, per_layer_inputs_meta, true, true, listener_stream);
+}
+
+int gemma4_listener_batch_step_embedded_variable_async(
+    gemma4_listener_batch_ctx *batch,
+    const gemma4_listener_batch_row *row,
+    uint32_t logical_q_len,
+    uint32_t physical_q_len,
+    const void *inputs_embeds,
+    const gemma4_tensor_meta *inputs_embeds_meta,
+    const void *per_layer_inputs,
+    const gemma4_tensor_meta *per_layer_inputs_meta,
+    cudaStream_t listener_stream
+) {
+    if (!batch || !row || logical_q_len < 3u || logical_q_len > GEMMA4_MAX_STREAM_Q_LEN ||
+        physical_q_len != logical_q_len + (logical_q_len & 1u) ||
+        physical_q_len > GEMMA4_MAX_STREAM_Q_LEN) return -1;
+    const int workspace_status = gemma4_batch_ensure_query_workspace(batch, physical_q_len);
+    if (workspace_status != 0) return workspace_status;
+    gemma4_batch_workspace base_workspace = gemma4_batch_workspace_take(batch);
+    gemma4_batch_workspace_install(batch, batch->query_workspace);
+    const int status = gemma4_listener_batch_step_core(
+        batch, row, 1u, physical_q_len, inputs_embeds, inputs_embeds_meta,
+        per_layer_inputs, per_layer_inputs_meta, true, true, listener_stream);
+    int result = status;
+    if (status == 0) {
+        const size_t logical_hidden_offset = (size_t)(logical_q_len - 1u) *
+            GEMMA4_HIDDEN_SIZE;
+        if (cudaMemcpyAsync(base_workspace.output,
+                batch->output + logical_hidden_offset,
+                GEMMA4_HIDDEN_SIZE * sizeof(__nv_bfloat16),
+                cudaMemcpyDeviceToDevice, listener_stream) != cudaSuccess ||
+            cudaEventRecord(batch->completion_event, listener_stream) != cudaSuccess ||
+            cudaPeekAtLastError() != cudaSuccess) {
+            gemma4_batch_poison(batch);
+            result = -24;
+        }
+    }
+    *batch->query_workspace = gemma4_batch_workspace_take(batch);
+    gemma4_batch_workspace_install(batch, &base_workspace);
+    if (result == 0 && logical_q_len < physical_q_len) {
+        int slot = -1;
+        for (uint32_t candidate = 0; candidate < batch->capacity; ++candidate) {
+            if (batch->slots[candidate].primed &&
+                batch->slots[candidate].context_id == row->native_context_id) {
+                slot = (int)candidate;
+                break;
+            }
+        }
+        if (slot < 0) return -2;
+        result = gemma4_listener_batch_truncate_after_step_async(
+            batch, (uint32_t)slot, row, logical_q_len, listener_stream);
+    }
+    return result;
 }
 
 int gemma4_listener_batch_truncate_after_step_async(
@@ -2903,8 +3533,9 @@ int gemma4_listener_batch_truncate_after_step_async(
     uint32_t logical_q_len,
     cudaStream_t listener_stream
 ) {
-    if (!batch || !pre_step_row || batch->poisoned || batch->output_lease_active ||
-        slot >= batch->capacity || logical_q_len >= GEMMA4_STREAM_Q_LEN ||
+    if (!batch || !pre_step_row || batch->poisoned ||
+        (batch->output_lease_active && batch->clone_enqueued) ||
+        slot >= batch->capacity || logical_q_len >= batch->output_cache_advance_tokens ||
         !batch->stream_bound || listener_stream != batch->listener_stream) return -1;
     const int stream_status = gemma4_batch_bind_stream(batch, listener_stream);
     if (stream_status != 0) return stream_status;
@@ -2914,12 +3545,13 @@ int gemma4_listener_batch_truncate_after_step_async(
     if (!state.primed || pre_step_row->native_context_id != state.context_id ||
         pre_step_row->session_generation != state.session_generation ||
         pre_step_row->state_epoch_id != state.state_epoch_id ||
-        pre_step_row->cache_position > batch->model->config.max_seq_len - GEMMA4_STREAM_Q_LEN ||
+        pre_step_row->cache_position > batch->model->config.max_seq_len -
+            batch->output_cache_advance_tokens ||
         pre_step_row->valid_history_tokens != pre_step_row->cache_position ||
         (!preserve_listener_cursors && (pre_step_row->frame_id == UINT64_MAX ||
          pre_step_row->listener_state_version == UINT64_MAX ||
          pre_step_row->sequence_position == UINT64_MAX)) ||
-        state.current_position != pre_step_row->cache_position + GEMMA4_STREAM_Q_LEN ||
+        state.current_position != pre_step_row->cache_position + batch->output_cache_advance_tokens ||
         (embedded_text_input && logical_q_len == 0u) ||
         (embedded_text_input &&
          (state.expected_frame_id != pre_step_row->frame_id ||
@@ -2941,6 +3573,14 @@ int gemma4_listener_batch_truncate_after_step_async(
         return -4;
     }
     state.current_position = logical_position;
+    /* This scalar is the physical Q width shared by every row in the forward.
+     * Keep it stable while the caller truncates each slot; normal output
+     * acquisition receives each row's logical Q separately. */
+    if (cudaEventRecord(batch->completion_event, listener_stream) != cudaSuccess ||
+        cudaPeekAtLastError() != cudaSuccess) {
+        gemma4_batch_poison(batch);
+        return -5;
+    }
     batch->model->last_stream = listener_stream;
     return 0;
 }
@@ -3090,7 +3730,9 @@ int gemma4_listener_batch_output_health(
             }
         }
         const uint32_t logical_q_len = logical_q_lens[i];
-        if (logical_q_len > GEMMA4_STREAM_Q_LEN || slot == batch->capacity ||
+        const uint32_t max_logical_q_len = batch->output_embedded_text_input
+            ? GEMMA4_MAX_STREAM_Q_LEN : GEMMA4_STREAM_Q_LEN;
+        if (logical_q_len > max_logical_q_len || slot == batch->capacity ||
             !gemma4_batch_row_identity_matches(batch, slot, &row, false)) {
             gemma4_batch_poison(batch);
             return -3;
@@ -3098,6 +3740,10 @@ int gemma4_listener_batch_output_health(
         const gemma4_listener_batch_slot &state = batch->slots[slot];
         const bool embedded_text_input = batch->output_embedded_text_input;
         const bool preserve_listener_cursors = batch->output_preserves_listener_cursors;
+        const uint32_t cache_advance_tokens = embedded_text_input
+            ? logical_q_len
+            : (preserve_listener_cursors
+                ? batch->output_cache_advance_tokens : logical_q_len);
         const bool audio_identity_matches =
             state.expected_frame_id == row.frame_id + 1u &&
             state.expected_state_version == row.listener_state_version + 1u &&
@@ -3106,8 +3752,8 @@ int gemma4_listener_batch_output_health(
             state.expected_frame_id == row.frame_id &&
             state.expected_state_version == row.listener_state_version &&
             state.expected_sequence_position == row.sequence_position;
-        if (row.cache_position > UINT32_MAX - logical_q_len ||
-            state.current_position != row.cache_position + logical_q_len ||
+        if (row.cache_position > UINT32_MAX - cache_advance_tokens ||
+            state.current_position != row.cache_position + cache_advance_tokens ||
             (embedded_text_input && logical_q_len == 0u) ||
             !(preserve_listener_cursors ? preserved_identity_matches : audio_identity_matches) ||
             gemma4_cache_valid_kv_len(state.cache) != state.current_position) {
@@ -3120,6 +3766,7 @@ int gemma4_listener_batch_output_health(
     batch->completed_output_row_count = 0;
     batch->output_embedded_text_input = false;
     batch->output_preserves_listener_cursors = false;
+    batch->output_cache_advance_tokens = 0;
     if (status != 0) {
         gemma4_batch_poison(batch);
         return status == 1 ? 1 : -5;
@@ -3180,6 +3827,7 @@ int gemma4_listener_batch_release_session_async(
     state.prefix_len = 0;
     state.current_position = 0;
     state.primed = false;
+    state.private_fork = false;
     batch->model->last_stream = listener_stream;
     return 0;
 }
@@ -3291,6 +3939,41 @@ int gemma4_listener_batch_get_session_state(
     return 0;
 }
 
+int gemma4_listener_batch_rebind_ephemeral_session_metadata_async(
+    gemma4_listener_batch_ctx *batch,
+    uint32_t fork_slot,
+    const gemma4_listener_batch_row *expected_fork_row,
+    uint32_t canonical_slot,
+    const gemma4_listener_batch_row *current_canonical_row,
+    cudaStream_t listener_stream
+) {
+    if (!batch || !expected_fork_row || !current_canonical_row || batch->poisoned ||
+        batch->output_lease_active || !batch->stream_bound ||
+        listener_stream != batch->listener_stream || batch->model->last_stream != listener_stream ||
+        fork_slot >= batch->capacity || canonical_slot >= batch->capacity ||
+        fork_slot == canonical_slot ||
+        !gemma4_batch_snapshot_row_matches(batch, fork_slot, expected_fork_row) ||
+        !gemma4_batch_snapshot_row_matches(batch, canonical_slot, current_canonical_row)) return -1;
+
+    gemma4_listener_batch_slot &fork_state = batch->slots[fork_slot];
+    const gemma4_listener_batch_slot &canonical_state = batch->slots[canonical_slot];
+    if (fork_state.context_id == canonical_state.context_id ||
+        fork_state.session_generation != canonical_state.session_generation ||
+        fork_state.prefix_len != canonical_state.prefix_len ||
+        !fork_state.prefix_attention || !canonical_state.prefix_attention ||
+        current_canonical_row->frame_id < expected_fork_row->frame_id ||
+        current_canonical_row->listener_state_version <
+            expected_fork_row->listener_state_version ||
+        current_canonical_row->sequence_position < expected_fork_row->sequence_position) return -2;
+
+    /* This CAS intentionally does not touch KV, prefix, cursor, or generation. */
+    fork_state.state_epoch_id = current_canonical_row->state_epoch_id;
+    fork_state.expected_frame_id = current_canonical_row->frame_id;
+    fork_state.expected_state_version = current_canonical_row->listener_state_version;
+    fork_state.expected_sequence_position = current_canonical_row->sequence_position;
+    return 0;
+}
+
 int gemma4_listener_batch_copy_session_kv_async(
     gemma4_listener_batch_ctx *batch,
     uint32_t slot,
@@ -3389,7 +4072,7 @@ int gemma4_listener_batch_clone_session_slot_async(
         destination_row->valid_history_tokens != source_row->valid_history_tokens ||
         destination_row->valid_history_tokens != destination_row->cache_position ||
         source_state.prefix_len == 0 ||
-        source_state.prefix_len > GEMMA4_CANONICAL_LM_PREFILL_TARGET_LEN ||
+        source_state.prefix_len > GEMMA4_RUNTIME_PREFIX_MAX_TOKENS ||
         source_state.current_position < source_state.prefix_len ||
         source_state.current_position > batch->model->config.max_seq_len ||
         gemma4_cache_valid_kv_len(destination_state.cache) != 0 ||
@@ -3430,6 +4113,7 @@ int gemma4_listener_batch_clone_session_slot_async(
     destination_state.prefix_len = source_state.prefix_len;
     destination_state.current_position = source_state.current_position;
     destination_state.primed = true;
+    destination_state.private_fork = true;
     batch->model->last_stream = listener_stream;
     return 0;
 }
@@ -3465,7 +4149,7 @@ int gemma4_listener_batch_copy_session_cache_async(
         destination_state.session_generation != source_state.session_generation ||
         destination_state.state_epoch_id != source_state.state_epoch_id ||
         destination_state.prefix_len == 0 || source_state.prefix_len == 0 ||
-        source_state.prefix_len > GEMMA4_CANONICAL_LM_PREFILL_TARGET_LEN ||
+        source_state.prefix_len > GEMMA4_RUNTIME_PREFIX_MAX_TOKENS ||
         source_state.current_position < source_state.prefix_len ||
         (source_state.current_position - source_state.prefix_len) % GEMMA4_STREAM_Q_LEN != 0 ||
         source_state.current_position > destination->model->config.max_seq_len ||

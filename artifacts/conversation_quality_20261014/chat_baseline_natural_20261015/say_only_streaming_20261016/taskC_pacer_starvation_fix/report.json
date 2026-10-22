@@ -1,0 +1,165 @@
+{
+  "started_utc": "2026-10-21T13:39:11.252057+00:00",
+  "mode": "single_realtime_stream",
+  "ws_url": "ws://127.0.0.1:8000/v1/realtime?duplex=1",
+  "session_id": "1ed359f5e5a94f40a81000bbef26c231",
+  "input_wav": "/workspace/artifacts/conversation_quality_20261014/chat_baseline_natural_20261015/say_only_streaming_20261016/fixture.wav",
+  "followup_wav": null,
+  "followup_timing": {
+    "mode": "none",
+    "configured_delay_ms": null,
+    "first_response_done_ns": 5373867912121360,
+    "first_followup_input_frame_index": null,
+    "first_followup_sent_at_ns": null,
+    "actual_delay_ms": null,
+    "last_followup_sent_at_ns": null,
+    "followup_frames_sent": 0
+  },
+  "requested_input_duration_s": 3.1,
+  "source_timing_basis": "prerecorded_wav_scheduled_at_80ms_intervals",
+  "requested_input_frames": 39,
+  "tts_quality_diagnostics": false,
+  "diagnostic_seed_sha256": null,
+  "ack_capacity_frames": 6,
+  "input_frames_sent": 39,
+  "input_frames_not_dispatched": 0,
+  "source_playback_complete": true,
+  "input_frames_acked": 39,
+  "ack_ids_unique": true,
+  "missing_ack_ids": [],
+  "duplicate_acks": 0,
+  "out_of_order_acks": 0,
+  "capacity_overflow": false,
+  "pending_high_water_frames": 3,
+  "pending_after_close": 0,
+  "final_ack_drain_complete": true,
+  "final_ack_drain_timed_out": false,
+  "ack_credit_timeout_count": 0,
+  "ack_latency_ms": {
+    "p50": 126.12,
+    "p95": 208.85,
+    "max": 229.07
+  },
+  "ack_capacity_backpressure_ms": {
+    "wait_count": 0,
+    "p50": 0.0,
+    "p95": 0.0,
+    "max": 0.0
+  },
+  "server_listener_queue_ms": {
+    "p50": 121.08,
+    "p95": 204.69,
+    "max": 225.03
+  },
+  "server_listener_step_ms": {
+    "p50": 60.8,
+    "p95": 62.41,
+    "max": 149.14
+  },
+  "server_ack_queue_ms": {
+    "p50": 0.16,
+    "p95": 0.47,
+    "max": 0.62
+  },
+  "input_send_interval_ms": {
+    "p50": 80.57,
+    "p95": 82.02,
+    "max": 82.13,
+    "deadline_misses_gt_100ms": 0
+  },
+  "input_send_lag_ms": {
+    "p50": 14.78,
+    "p95": 25.08,
+    "max": 25.26,
+    "frames_over_80ms": 0
+  },
+  "input_frames_during_response": 9,
+  "non_silent_input_frames_during_response": 0,
+  "input_frames_during_audio_generation": 0,
+  "non_silent_input_frames_during_audio_generation": 0,
+  "responses": [
+    {
+      "response_id": "resp_630286c5f0e9",
+      "action": "SPEAK",
+      "created_ns": 5373865253429411,
+      "first_audio_ns": 5373866361076587,
+      "last_audio_ns": 5373867909971364,
+      "done_ns": 5373867912119300,
+      "text": "Le ore sono le nove e trenta.",
+      "packets": 17,
+      "audio_samples": 65280,
+      "audio_duration_s": 2.72,
+      "first_audio_ms": 1107.6,
+      "response_wall_ms": 2658.7,
+      "wav_path": "/workspace/artifacts/conversation_quality_20261014/chat_baseline_natural_20261015/say_only_streaming_20261016/taskC_pacer_starvation_fix/response_resp_630286c5f0e9.wav"
+    }
+  ],
+  "response_completion_timed_out": false,
+  "errors": [],
+  "sender_error": null,
+  "taskC_probe": {
+    "result": "target_missed",
+    "runner": "client.duplex_stream_e2e single_realtime_stream",
+    "runner_invocation": "/workspace/.venv_e2e_runtime/bin/python /tmp/taskC_run_client.py --mode single --turn-policy gemma_native_control6 --ws-url ws://127.0.0.1:8000/v1/realtime?duplex=1 --audio /workspace/artifacts/conversation_quality_20261014/chat_baseline_natural_20261015/say_only_streaming_20261016/fixture.wav --duration-s 3.1 --output-dir /workspace/artifacts/conversation_quality_20261014/chat_baseline_natural_20261015/say_only_streaming_20261016/taskC_pacer_starvation_fix",
+    "client_module": "/workspace/client/duplex_stream_e2e.py",
+    "client_wrapper": "/tmp/taskC_run_client.py preloaded duplex_kernel from the runtime artifact then ran the existing client module; no client source changes",
+    "input_fixture": "/workspace/artifacts/conversation_quality_20261014/chat_baseline_natural_20261015/say_only_streaming_20261016/fixture.wav",
+    "duration_s": 3.1,
+    "measurement_boundary": "client monotonic receipt of response.created to client monotonic receipt of first response.audio.delta",
+    "first_audio_ms": 1107.6,
+    "event_at_ms": {
+      "response_created": 2499.065,
+      "first_response_audio_delta": 3606.522
+    },
+    "runtime_metrics_from_response_done": {
+      "thinker_ttft_ms": 81.997624,
+      "thinker_first_packet_hidden_ready_ms": 81.997624,
+      "talker_live_say_consumer_started_at_ns": 5373866062034713,
+      "talker_live_say_consumer_started_before_thinker_return": false,
+      "server_first_audio_chunk_pcm_timestamp_exported": false,
+      "server_first_audio_chunk_pcm_timestamp_ns": null,
+      "fifo_capacity": 4,
+      "fifo_peak_packets": 4,
+      "pacer_sleep_ms_before_first_vocal_token": 0.0,
+      "live_gemma_token_pacer": {
+        "tick_ms": 80,
+        "max_tokens_per_tick": 2,
+        "total_tokens": 29,
+        "peak_tokens_in_tick": 1
+      }
+    },
+    "target_check": {
+      "first_audio_ms_lt_800": false,
+      "fifo_peak_lte_4": true,
+      "pacer_sleep_ms_before_first_vocal_token_eq_0": true
+    },
+    "runtime_provenance": {
+      "container": "gemma4-listener-control6-h3000-eos-build14-taskC-v2-20261021",
+      "image": "gemma4-listener-control6-baseline-snapshot-20261014:latest",
+      "runtime_root": "/workspace/artifacts/runtime/control6_runtime_pendingpcm_phaseonly_q2cachemeta_build14_stableturn_q2_context_h3000_eos_20261021",
+      "server_source_sha256": "43d0f1c9d1e78b848089cbf05b9bbacf9790971afa3f22afef038222ac68298f",
+      "session_source_sha256": "0ce43d96e6bad5b7223f8822f12472ef3135c8c7ac877b4cbe46fe4047f561b9",
+      "temporary_runtime_only_instrumentation": "server.py serializer filter temporarily retained pacer_sleep_ms_before_first_vocal_token from response.done; this probe-only filter edit was restored after the run and is not in the checkout",
+      "runtime_overrides": {
+        "DUPLEX_AUDIO_RESPONSE_PROTOCOL": "heard_action_say_v2",
+        "DUPLEX_UNIFIED_KV": "1"
+      },
+      "launch_argv": "/workspace/.venv_e2e_runtime/bin/python /workspace/artifacts/runtime/control6_runtime_pendingpcm_phaseonly_q2cachemeta_build14_stableturn_q2_context_h3000_eos_20261021/duplex_kernel/launch.py --workspace /workspace --host 0.0.0.0 --port 8000 --thinker-prefill-chunk-tokens 16 --thinker-compile-mode default --duplex-response-bundle-dir /workspace/checkpoints/experimental-v5-repair200-fphase-20261003 --runtime-backend native --frame-residual-adapter-checkpoint /workspace/checkpoints/frame_residual_adapter_emovo_query_film_v2_candidate.pt --ablate-response-lora --controller-guided-talk-context-pool --enforce-v9-training-voice --enable-gemma-native-control6 --native-control6-adapter /workspace/checkpoints/native_control6_gemma_native_rows_rank16_control6_temporal100_candidate_h_3000_20261021.pt",
+      "container_constraints": {
+        "user": "1000:1000",
+        "ipc": "host",
+        "network": "bridge",
+        "port_mapping": "8000:8000",
+        "workspace_mount": "/home/administrator/gemma-4-omni:/workspace"
+      },
+      "sensitive_inherited_environment": "not copied into this report; only the two probe-specific overrides above are recorded"
+    },
+    "task5_reference": {
+      "report": "/workspace/artifacts/conversation_quality_20261014/chat_baseline_natural_20261015/say_only_streaming_20261016/task5_unified_v2_live_fifo_20261018_final/report.json",
+      "first_audio_ms": 2649.6,
+      "same_runner_mode_fixture_duration_ws_url_and_measurement_boundary": true,
+      "note": "This is a live repeated inference, not deterministic replay; generated response text and packet count differed."
+    },
+    "latency_diagnosis": "The pre-vocal pacer contributed 0.0 ms. The runtime reports the live SAY consumer started after thinker return; response.done did not export t_first_audio_chunk_pcm_at_ns, so no server-side first-PCM time is claimed. The measured client first-audio target remains missed."
+  }
+}

@@ -17,19 +17,28 @@ on another worker command.
 from __future__ import annotations
 
 from concurrent.futures import Future
+import copy
 from dataclasses import dataclass, replace
 import hashlib
+import logging
 import math
+import os
 import queue
 import threading
 import time
 import uuid
-from collections import deque
+from collections import OrderedDict, deque
 from typing import Any, Callable, Mapping, Sequence
 
+import numpy as np
 import torch
 
-from duplex_kernel.gemma_native_control6_batch_policy import GemmaNativeControl6BatchPolicy
+from duplex_kernel.gemma_native_control6_batch_policy import (
+    DecisionRowSource,
+    GemmaNativeControl6BatchPolicy,
+    PolicyPreHeadContext,
+)
+from duplex_kernel.gemma_native_control6_policy import GemmaNativeControl6Policy
 from duplex_kernel.listener_microbatch import ListenerMicrobatchCoordinator, RetiredSession
 from duplex_kernel.listener_microbatch_frontend import ListenerMicrobatchAudioFrontend
 from duplex_kernel.microbatch_contract import (
@@ -45,8 +54,48 @@ from duplex_kernel.microbatch_contract import (
     RowStateUpdate,
     snapshot_listener_state,
 )
-from duplex_kernel.native_listener_microbatch import NativeBatchOutput, NativeBatchOutputHealth
-from duplex_kernel.turn_policy import PolicyDecision, PolicyInput
+from duplex_kernel.native_listener_microbatch import (
+    MAX_STREAM_Q_LEN,
+    NativeBatchOutput,
+    NativeBatchOutputHealth,
+)
+from duplex_kernel.native_control6_prompt import NATIVE_CONTROL6_PREFIX_MAX_TOKENS
+from duplex_kernel.turn_policy import ControlAction, PolicyDecision, PolicyInput
+
+MAX_QUEUED_Q2_BATCH_FRAMES = 32
+
+
+def _chunk_queued_q2_replay(
+    replay: list[tuple[int, torch.Tensor]],
+) -> tuple[tuple[tuple[int, torch.Tensor], ...], ...]:
+    return tuple(
+        tuple(replay[offset:offset + MAX_QUEUED_Q2_BATCH_FRAMES])
+        for offset in range(0, len(replay), MAX_QUEUED_Q2_BATCH_FRAMES)
+    )
+
+
+def _is_exact_no_input_speaker_continue_context(
+    context: PolicyPreHeadContext | PolicyInput,
+    row: BatchRowDescriptor,
+) -> bool:
+    if not isinstance(context, PolicyPreHeadContext) or not isinstance(
+        context.policy, GemmaNativeControl6Policy
+    ):
+        return False
+    state = context.policy_input
+    legal = tuple(state.legal_actions or ())
+    return bool(
+        context.tick_id == (state.session_id, state.generation_id, state.frame_id)
+        and context.tick_id[0] == row.session_id
+        and state.session_id == row.session_id
+        and state.frame_id == row.frame_id
+        and context.listener_generation_id == row.session_generation
+        and state.native_listener_generation == context.listener_generation_id
+        and state.native_control_no_input_tick is True
+        and state.speaker_active is True
+        and ControlAction.CONTINUE.value in legal
+        and ControlAction.SPEAK.value not in legal
+    )
 
 
 PrefixImportFactory = Callable[
@@ -80,6 +129,52 @@ class TextAppendResult:
     final_norm_hidden: torch.Tensor
     ready_event: Any
     timings_ns: Mapping[str, int]
+    cache_position: int
+    prepared_transition_cache_hit: bool | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class EphemeralDecodeHandle:
+    """Opaque owner-issued identity for an isolated, bounded decode branch."""
+
+    handle_id: str
+    parent_session_id: str
+    parent_generation_id: int
+    parent_state_epoch_id: str
+    source_cache_position: int
+    fork_session_id: str
+    fork_native_context_id: int
+    max_tokens: int
+
+    @property
+    def cache_position(self) -> int:
+        """The immutable source cursor captured when this fork was created."""
+        return self.source_cache_position
+
+
+@dataclass(frozen=True, slots=True)
+class PrivateTextAppendResult:
+    """One private-branch append, with the branch cursor kept out of main state."""
+
+    handle: EphemeralDecodeHandle
+    cache_position: int
+    token_count: int
+    logits: torch.Tensor
+    final_norm_hidden: torch.Tensor
+    ready_event: Any
+    timings_ns: Mapping[str, int]
+
+
+@dataclass(slots=True)
+class _EphemeralDecodeBranch:
+    handle: EphemeralDecodeHandle
+    row: BatchRowDescriptor
+    token_count: int = 0
+    transition_token_count: int = 0
+
+
+class _Q2DecisionViewUnavailable(RuntimeError):
+    """Raised when queued onset audio cannot form a truthful scratch view."""
 
 
 def _new_shadow_timing_stats() -> dict[str, float | int]:
@@ -201,7 +296,8 @@ class ListenerMicrobatchRuntime:
     native: Any
     policy: GemmaNativeControl6BatchPolicy | None
     policy_inputs: Callable[
-        [ListenerBatch, tuple[ListenerSessionState, ...]], Sequence[PolicyInput]
+        [ListenerBatch, tuple[ListenerSessionState, ...]],
+        Sequence[PolicyInput | PolicyPreHeadContext],
     ] | None
     listener_model_lock: Any | None = None
     completion_barrier: Callable[[Any], None] | None = None
@@ -1792,6 +1888,30 @@ class WorkerStopReport:
 
 
 @dataclass(frozen=True, slots=True)
+class TemporaryQ2DecisionView:
+    """True provenance for a short-lived Q2 replay on a private native slot."""
+
+    source_row: BatchRowDescriptor
+    fork_row: BatchRowDescriptor
+    source_q2_frame_ids: tuple[int, ...]
+    manifest: ListenerBatchManifest
+    native_output: NativeBatchOutput
+    native_output_health: NativeBatchOutputHealth
+    gemma_hidden_t: torch.Tensor
+    gemma_audio_queries_t: torch.Tensor
+    replay_count: int
+    fork_count: int = 1
+    replayed_q2_count: int = 0
+    cache_hit: bool = False
+    decision_view_ms: float = 0.0
+    context_mode: str = "legacy"
+
+    @property
+    def output_generation(self) -> int:
+        return self.native_output.generation
+
+
+@dataclass(frozen=True, slots=True)
 class ListenerMicrobatchRowOutput:
     """Committed current-frame output for one listener row."""
 
@@ -1810,6 +1930,7 @@ class ListenerMicrobatchRowOutput:
     state_snapshot: ListenerSessionSnapshot
     native_output_health: NativeBatchOutputHealth
     ephemeral_reason: str | None = None
+    decision_view_unavailable_reason: str | None = None
     queue_audio_for_next_turn: bool = False
     kv_rollback_tokens: int = 0
     kv_rollback_enqueue_ms: float = 0.0
@@ -1822,6 +1943,8 @@ class ListenerMicrobatchRowOutput:
     semantic_prefix_refresh_event_id: str | None = None
     semantic_prefix_refresh_revision: int | None = None
     native_state: Any | None = None
+    decision_view: TemporaryQ2DecisionView | None = None
+    policy_decision: PolicyDecision | None = None
     listener_model_lock_wait_ms: float | None = None
     listener_model_lock_hold_ms: float | None = None
     capacity_growth_ms: float | None = None
@@ -1860,6 +1983,16 @@ class QueuedAudioSoftFrame:
     source_state_version: int
     source_sequence_position: int
     audio_soft_tokens: torch.Tensor
+
+
+@dataclass(slots=True)
+class _Q2DecisionCache:
+    queue_epoch: str
+    anchor: tuple[Any, ...]
+    frame_keys: tuple[tuple[Any, ...], ...]
+    fork_row: BatchRowDescriptor
+    base_cache_position: int
+    stable_turn_context: bool = False
 
 
 @dataclass(slots=True)
@@ -1918,13 +2051,17 @@ class ListenerMicrobatchWorker:
             [ListenerBatch, Mapping[str, ListenerMicrobatchRowOutput]], None
         ] | None = None,
         on_error: Callable[[ListenerBatch, BaseException], None] | None = None,
+        stable_turn_policy_q2_context: bool = False,
     ) -> None:
         if coordinator is not None and not isinstance(coordinator, ListenerMicrobatchCoordinator):
             raise TypeError("coordinator must be ListenerMicrobatchCoordinator or None")
         if not callable(runtime_factory):
             raise TypeError("runtime_factory must create owner-thread resources")
+        if type(stable_turn_policy_q2_context) is not bool:
+            raise TypeError("stable_turn_policy_q2_context must be a bool")
         self._coordinator = coordinator
         self._runtime_factory = runtime_factory
+        self._stable_turn_policy_q2_context = stable_turn_policy_q2_context
         self._on_result = on_result
         self._on_batch_result = on_batch_result
         self._on_error = on_error
@@ -1943,14 +2080,50 @@ class ListenerMicrobatchWorker:
         self._prefix_replay_frame_ids: dict[str, tuple[int, ...]] = {}
         self._imported_sessions: set[str] = set()
         self._last_native_rows: dict[str, BatchRowDescriptor] = {}
+        self._text_append_committed_scopes: dict[str, set[str]] = {}
         self._queued_audio_soft: dict[str, deque[QueuedAudioSoftFrame]] = {}
+        self._ephemeral_decode_branches: dict[str, _EphemeralDecodeBranch] = {}
         self._assistant_audio_queue_open: set[str] = set()
+        self._assistant_audio_queue_first_frame_id: dict[str, int] = {}
+        self._assistant_audio_queue_epoch: dict[str, str] = {}
+        self._assistant_audio_queue_response_id: dict[str, str] = {}
+        self._q2_decision_caches: dict[str, _Q2DecisionCache] = {}
+        self._prepared_transition_ready_events: OrderedDict[int, Any] = OrderedDict()
+        self._stable_q2_unusable_epochs: dict[str, str] = {}
+        self._pending_q2_prefills: dict[str, tuple[int, str]] = {}
+        self._q2_cache_disabled_for_tick: set[str] = set()
+        self._control6_queue_trace_counts: dict[str, int] = {}
         self._reserved_tail_tokens: dict[str, int] = {}
         self._pending_promotions: dict[str, _PendingShadowPromotion] = {}
         self._outstanding_frames: dict[str, int] = {}
         self._tick_future: Future[Mapping[str, ListenerMicrobatchRowOutput]] | None = None
         self._tick_expected: dict[str, int] | None = None
         self._processed_batches = 0
+        self._torch_profile_trace_path = os.environ.get(
+            "DUPLEX_LISTENER_TORCH_PROFILE_TRACE_PATH", ""
+        ).strip()
+        self._torch_profile_frame_ids: frozenset[int] = frozenset()
+        self._torch_profiled_frame_ids: set[int] = set()
+        self._torch_profiler: Any | None = None
+        self._torch_profile_failed = False
+        if self._torch_profile_trace_path:
+            raw_profile_frames = os.environ.get(
+                "DUPLEX_LISTENER_TORCH_PROFILE_FRAME_IDS", ""
+            )
+            try:
+                parsed_profile_frames = frozenset(
+                    int(part.strip())
+                    for part in raw_profile_frames.split(",")
+                    if part.strip()
+                )
+                if not parsed_profile_frames or any(frame_id < 0 for frame_id in parsed_profile_frames):
+                    raise ValueError("frame IDs must be a non-empty set of non-negative integers")
+                self._torch_profile_frame_ids = parsed_profile_frames
+            except (TypeError, ValueError) as exc:
+                logging.getLogger(__name__).warning(
+                    "listener torch profiler disabled: invalid frame ID selection: %s", exc
+                )
+                self._torch_profile_trace_path = ""
         self._fatal_error: BaseException | None = None
         self._cleanup_error: BaseException | None = None
         self._notification_error: BaseException | None = None
@@ -1963,6 +2136,26 @@ class ListenerMicrobatchWorker:
         owner_thread_id = lambda: self._owner_thread_id
         self._startup: Future[None] = _OwnerAwareFuture(owner_thread_id)
         self._stopped: Future[WorkerStopReport] = _OwnerAwareFuture(owner_thread_id)
+
+    def _trace_control6_queue_handoff(
+        self,
+        session_id: str,
+        event: str,
+        **fields: Any,
+    ) -> None:
+        if os.environ.get("DUPLEX_NATIVE_CONTROL6_TRACE") != "1":
+            return
+        emitted = self._control6_queue_trace_counts.get(session_id, 0)
+        if emitted >= 30:
+            return
+        self._control6_queue_trace_counts[session_id] = emitted + 1
+        logging.getLogger(__name__).info(
+            "[control6_queue_handoff] seq=%d session=%s event=%s fields=%s",
+            emitted + 1,
+            session_id,
+            event,
+            fields,
+        )
 
     def start(self) -> Future[None]:
         """Start the dedicated owner and return a future for resource readiness."""
@@ -2058,11 +2251,14 @@ class ListenerMicrobatchWorker:
         token_ids = tuple(prefix_token_ids)
         if (
             not token_ids
-            or len(token_ids) > 291
+            or len(token_ids) > NATIVE_CONTROL6_PREFIX_MAX_TOKENS
             or any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in token_ids)
         ):
             future: Future[None] = Future()
-            future.set_exception(ValueError("unified prefix IDs must be 1..291 non-negative integers"))
+            future.set_exception(ValueError(
+                "unified prefix IDs must be 1.."
+                f"{NATIVE_CONTROL6_PREFIX_MAX_TOKENS} non-negative integers"
+            ))
             return future
         if (
             isinstance(new_revision, bool)
@@ -2122,8 +2318,12 @@ class ListenerMicrobatchWorker:
         expected_generation_id: int,
         expected_cache_position: int,
         consume_reserved_tokens: int = 0,
+        allow_initial_cursor_rebase: bool = False,
+        append_scope_id: str | None = None,
+        response_cancel_event: Any | None = None,
+        prepared_protocol: str | None = None,
     ) -> Future[TextAppendResult]:
-        """Append one or two text token IDs to the session's native KV owner.
+        """Append one to eight text token IDs to the session's native KV owner.
 
         The future resolves to logits and final-norm hidden for the last
         committed token, plus a CUDA event recorded after the LM head on the
@@ -2132,12 +2332,12 @@ class ListenerMicrobatchWorker:
         importer is invoked.
         """
         ids = tuple(token_ids)
-        if len(ids) not in (1, 2) or any(
+        if not 1 <= len(ids) <= 8 or any(
             isinstance(value, bool) or not isinstance(value, int) or value < 0
             for value in ids
         ):
             future: Future[TextAppendResult] = Future()
-            future.set_exception(ValueError("text append requires one or two non-negative token IDs"))
+            future.set_exception(ValueError("text append requires one to eight non-negative token IDs"))
             return future
         if (
             isinstance(consume_reserved_tokens, bool)
@@ -2147,11 +2347,162 @@ class ListenerMicrobatchWorker:
             future: Future[TextAppendResult] = Future()
             future.set_exception(ValueError("consume_reserved_tokens must be a non-negative integer"))
             return future
+        if not isinstance(allow_initial_cursor_rebase, bool):
+            future = Future()
+            future.set_exception(ValueError("allow_initial_cursor_rebase must be a bool"))
+            return future
+        if append_scope_id is not None and (
+            not isinstance(append_scope_id, str) or not append_scope_id
+        ):
+            future = Future()
+            future.set_exception(ValueError("append_scope_id must be a non-empty string when provided"))
+            return future
+        if allow_initial_cursor_rebase and append_scope_id is None:
+            future = Future()
+            future.set_exception(ValueError("initial cursor rebase requires an append_scope_id"))
+            return future
+        if response_cancel_event is not None and not callable(
+            getattr(response_cancel_event, "is_set", None)
+        ):
+            future = Future()
+            future.set_exception(ValueError("response_cancel_event must expose is_set()"))
+            return future
+        if prepared_protocol is not None and (
+            not isinstance(prepared_protocol, str) or not prepared_protocol.strip()
+        ):
+            future = Future()
+            future.set_exception(ValueError("prepared_protocol must be a non-empty string or None"))
+            return future
         return self._submit_command(
             "append_text_tokens", session_id, ids,
             int(expected_generation_id), int(expected_cache_position),
-            int(consume_reserved_tokens),
+            int(consume_reserved_tokens), allow_initial_cursor_rebase, append_scope_id,
+            response_cancel_event, prepared_protocol,
         )
+
+    def prepare_text_token_inputs(
+        self,
+        token_ids: Sequence[int],
+        *,
+        protocol: str,
+    ) -> Future[Mapping[str, int]]:
+        """Precompute one stable protocol transition on the GPU owner stream."""
+        ids = tuple(token_ids)
+        if not 1 <= len(ids) <= 8 or any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in ids
+        ):
+            future: Future[Mapping[str, int]] = Future()
+            future.set_exception(ValueError(
+                "prepared transition requires one to eight non-negative token IDs"
+            ))
+            return future
+        if not isinstance(protocol, str) or not protocol.strip():
+            future = Future()
+            future.set_exception(ValueError("prepared transition requires a non-empty protocol"))
+            return future
+        return self._submit_command("prepare_text_token_inputs", ids, protocol.strip())
+
+    def begin_ephemeral_decode(
+        self,
+        session_id: str,
+        *,
+        expected_generation_id: int,
+        expected_cache_position: int,
+    ) -> Future[EphemeralDecodeHandle]:
+        """Fork an isolated native decode slot with a hard two-token budget.
+
+        The fork does not register a listener session, open an assistant audio
+        queue, or move any canonical cursor. Owner commands serialize its
+        native work with listener Q2 while leaving the main row untouched.
+        """
+        return self._submit_command(
+            "begin_ephemeral_decode", str(session_id),
+            int(expected_generation_id), int(expected_cache_position),
+        )
+
+    def append_private_tokens(
+        self,
+        handle: EphemeralDecodeHandle,
+        token_ids: Sequence[int],
+        *,
+        expected_cache_position: int,
+    ) -> Future[PrivateTextAppendResult]:
+        """Append one or two token IDs to a private decode branch."""
+        ids = tuple(token_ids)
+        if not isinstance(handle, EphemeralDecodeHandle):
+            future: Future[PrivateTextAppendResult] = Future()
+            future.set_exception(TypeError("private append requires an EphemeralDecodeHandle"))
+            return future
+        if len(ids) not in (1, 2) or any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in ids
+        ):
+            future = Future()
+            future.set_exception(ValueError("private append requires one or two non-negative token IDs"))
+            return future
+        if (
+            isinstance(expected_cache_position, bool)
+            or not isinstance(expected_cache_position, int)
+            or expected_cache_position < 0
+        ):
+            future = Future()
+            future.set_exception(ValueError("expected_cache_position must be a non-negative integer"))
+            return future
+        return self._submit_command(
+            "append_private_tokens", handle, ids, int(expected_cache_position),
+        )
+
+    def append_private_transition_tokens(
+        self,
+        handle: EphemeralDecodeHandle,
+        token_ids: Sequence[int],
+        *,
+        expected_cache_position: int,
+    ) -> Future[PrivateTextAppendResult]:
+        """Append branch-local transition/prompt IDs without using sample budget.
+
+        One logical transition of up to eight IDs is committed through one
+        variable-Q native step. Physical even padding is excluded from the
+        private cursor. The transition is accepted once before sampled tokens
+        and never mutates the canonical session.
+        """
+        ids = tuple(token_ids)
+        if not isinstance(handle, EphemeralDecodeHandle):
+            future: Future[PrivateTextAppendResult] = Future()
+            future.set_exception(TypeError("private transition requires an EphemeralDecodeHandle"))
+            return future
+        if len(ids) > MAX_STREAM_Q_LEN:
+            future = Future()
+            future.set_exception(ValueError("private transition accepts one to eight token IDs per native step"))
+            return future
+        if not ids or any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in ids
+        ):
+            future = Future()
+            future.set_exception(ValueError("private transition requires non-empty non-negative token IDs"))
+            return future
+        if (
+            isinstance(expected_cache_position, bool)
+            or not isinstance(expected_cache_position, int)
+            or expected_cache_position < 0
+        ):
+            future = Future()
+            future.set_exception(ValueError("expected_cache_position must be a non-negative integer"))
+            return future
+        return self._submit_command(
+            "append_private_transition_tokens", handle, ids,
+            int(expected_cache_position),
+        )
+
+    def end_ephemeral_decode(self, handle: EphemeralDecodeHandle) -> Future[None]:
+        """Release a private decode slot; repeated end calls are harmless."""
+        if not isinstance(handle, EphemeralDecodeHandle):
+            future: Future[None] = Future()
+            future.set_exception(TypeError("private decode end requires an EphemeralDecodeHandle"))
+            return future
+        return self._submit_command("end_ephemeral_decode", handle)
 
     def begin_assistant_audio_queue(
         self,
@@ -2160,6 +2511,7 @@ class ListenerMicrobatchWorker:
         expected_generation_id: int,
         expected_cache_position: int,
         reserve_tail_tokens: int = 0,
+        response_id: str | None = None,
     ) -> Future[ListenerSessionSnapshot]:
         """Atomically reserve the close tail and open bounded soft-audio capture."""
         if (
@@ -2170,10 +2522,45 @@ class ListenerMicrobatchWorker:
             future: Future[ListenerSessionSnapshot] = Future()
             future.set_exception(ValueError("reserve_tail_tokens must be a non-negative integer"))
             return future
+        if response_id is not None and (not isinstance(response_id, str) or not response_id):
+            future = Future()
+            future.set_exception(ValueError("response_id must be a non-empty string when provided"))
+            return future
         return self._submit_command(
             "begin_assistant_audio_queue", session_id,
             int(expected_generation_id), int(expected_cache_position),
-            reserve_tail_tokens,
+            reserve_tail_tokens, response_id,
+        )
+
+    @property
+    def q2_decision_prefill_supported(self) -> bool:
+        runtime = self._runtime
+        native = None if runtime is None else runtime.native
+        return bool(
+            native is not None
+            and getattr(native, "_metadata_rebind_api_available", False) is True
+            and callable(getattr(native, "rebind_ephemeral_session_metadata", None))
+            and callable(getattr(native, "fork_session_slot", None))
+            and callable(getattr(native, "step_queued_audio_async", None))
+        )
+
+    def request_q2_decision_prefill(
+        self,
+        session_id: str,
+        *,
+        expected_generation_id: int,
+        response_id: str,
+    ) -> Future[bool]:
+        """Request owner-idle prefill without waiting on native replay."""
+        if not isinstance(response_id, str) or not response_id:
+            future: Future[bool] = Future()
+            future.set_exception(ValueError("response_id must be a non-empty string"))
+            return future
+        return self._submit_command(
+            "request_q2_decision_prefill",
+            str(session_id),
+            int(expected_generation_id),
+            response_id,
         )
 
     def reserve_tail_tokens(
@@ -2280,6 +2667,12 @@ class ListenerMicrobatchWorker:
     def close_session(self, session_id: str) -> Future[RetiredSession]:
         """Close an idle session after ordered native-context release."""
         return self._submit_command("close", session_id)
+
+    def fork_native_session(self, source_session_id: str, fork_session_id: str) -> Future[str]:
+        """Create an independent native slot at one idle primary boundary."""
+        return self._submit_command(
+            "fork_native_session", str(source_session_id), str(fork_session_id)
+        )
 
     def session_state(self, session_id: str) -> Future[ListenerSessionSnapshot]:
         """Request an owner-thread snapshot between batches, never during one."""
@@ -2420,6 +2813,8 @@ class ListenerMicrobatchWorker:
                 if batch is not None:
                     self._process_batch(batch)
                     continue
+                if self._run_pending_q2_prefill_idle_step():
+                    continue
                 self._wait_for_work(self._next_timeout_seconds())
         except BaseException as exc:
             if not self._startup.done():
@@ -2433,6 +2828,17 @@ class ListenerMicrobatchWorker:
                 self._wake.notify_all()
             runtime = self._runtime
             if runtime is not None:
+                try:
+                    self._end_all_ephemeral_decodes()
+                except BaseException as exc:
+                    if self._cleanup_error is None:
+                        self._cleanup_error = exc
+                for session_id in tuple(self._q2_decision_caches):
+                    try:
+                        self._release_q2_decision_cache(session_id)
+                    except BaseException as exc:
+                        if self._cleanup_error is None:
+                            self._cleanup_error = exc
                 try:
                     _drain_cuda_stream_for_cleanup(runtime.listener_stream)
                 except BaseException as exc:
@@ -2534,9 +2940,20 @@ class ListenerMicrobatchWorker:
             except queue.Empty:
                 return
             try:
+                if command.future is not None and command.future.cancelled():
+                    continue
                 if self._fatal_error is not None and command.operation not in {"snapshot", "stop"}:
                     raise RuntimeError(f"worker is fail-closed after batch error: {self._fatal_error}")
                 result = self._execute_command(command)
+                if (
+                    command.operation == "fork_native_session"
+                    and command.future is not None
+                    and command.future.cancelled()
+                ):
+                    fork_session_id = str(command.args[1])
+                    if fork_session_id in self._session_states:
+                        self._close_session(fork_session_id)
+                    continue
                 if (
                     command.operation != "submit_tick"
                     and command.future is not None
@@ -2551,6 +2968,9 @@ class ListenerMicrobatchWorker:
         if command.operation == "register":
             state, prefix_import = command.args
             return self._register_session(state, prefix_import)
+        if command.operation == "fork_native_session":
+            source_session_id, fork_session_id = command.args
+            return self._fork_native_session(source_session_id, fork_session_id)
         if command.operation == "frame":
             (frame,) = command.args
             if not isinstance(frame, ListenerFrame):
@@ -2566,6 +2986,37 @@ class ListenerMicrobatchWorker:
                 raise RuntimeError("submit_tick requires a result Future")
             if self._tick_future is not None and not self._tick_future.done():
                 raise RuntimeError("only one shared tick may be in flight")
+            normalized_frames: list[ListenerFrame] = []
+            for frame in frames:
+                if (
+                    frame.session_id in self._assistant_audio_queue_open
+                    and not frame.queue_audio_for_next_turn
+                ):
+                    self._trace_control6_queue_handoff(
+                        frame.session_id,
+                        "owner_normalize_shared_queue",
+                        frame_id=int(frame.frame_id),
+                        source_logical_q_len=int(frame.logical_q_len),
+                        source_ephemeral_reason=frame.ephemeral_reason,
+                        source_queue_audio_for_next_turn=False,
+                        queue_open=True,
+                    )
+                    frame = ListenerFrame(
+                        session_id=frame.session_id,
+                        generation_id=frame.generation_id,
+                        state_epoch_id=frame.state_epoch_id,
+                        frame_id=frame.frame_id,
+                        ready_at_ns=frame.ready_at_ns,
+                        pcm=frame.pcm,
+                        logical_q_len=0,
+                        ephemeral_reason="assistant_turn_open",
+                        queue_audio_for_next_turn=True,
+                        reference_pcm=frame.reference_pcm,
+                        reference_frame_id=frame.reference_frame_id,
+                        policy_context=frame.policy_context,
+                    )
+                normalized_frames.append(frame)
+            frames = tuple(normalized_frames)
             expected = {frame.session_id: int(frame.frame_id) for frame in frames}
             if len(expected) != len(frames):
                 raise ValueError("shared tick session IDs must be unique")
@@ -2591,6 +3042,15 @@ class ListenerMicrobatchWorker:
             # cannot start a singleton before sibling rows are admitted.
             self._coordinator.coalesce_window_ns = 0
             for frame in frames:
+                self._trace_control6_queue_handoff(
+                    frame.session_id,
+                    "frame_enqueue",
+                    frame_id=int(frame.frame_id),
+                    logical_q_len=int(frame.logical_q_len),
+                    queue_audio_for_next_turn=bool(frame.queue_audio_for_next_turn),
+                    queue_open_at_enqueue=frame.session_id in self._assistant_audio_queue_open,
+                    cache_position=int(self._session_states[frame.session_id].cache_position),
+                )
                 self._coordinator.enqueue(frame)
                 self._outstanding_frames[frame.session_id] = (
                     self._outstanding_frames.get(frame.session_id, 0) + 1
@@ -2624,19 +3084,56 @@ class ListenerMicrobatchWorker:
             session_id, prepared = command.args
             return self._prime_initial_prefix(session_id, prepared)
         if command.operation == "append_text_tokens":
-            session_id, token_ids, generation_id, cache_position, consume_reserved_tokens = command.args
+            (session_id, token_ids, generation_id, cache_position,
+             consume_reserved_tokens, allow_initial_cursor_rebase, append_scope_id,
+             response_cancel_event, prepared_protocol) = command.args
             return self._append_text_tokens(
                 session_id, token_ids,
                 expected_generation_id=generation_id,
                 expected_cache_position=cache_position,
                 consume_reserved_tokens=consume_reserved_tokens,
+                allow_initial_cursor_rebase=allow_initial_cursor_rebase,
+                append_scope_id=append_scope_id,
+                response_cancel_event=response_cancel_event,
+                prepared_protocol=prepared_protocol,
             )
+        if command.operation == "prepare_text_token_inputs":
+            token_ids, protocol = command.args
+            return self._prepare_text_token_inputs(token_ids, protocol=protocol)
+        if command.operation == "begin_ephemeral_decode":
+            session_id, generation_id, cache_position = command.args
+            return self._begin_ephemeral_decode(
+                session_id,
+                expected_generation_id=generation_id,
+                expected_cache_position=cache_position,
+            )
+        if command.operation == "append_private_tokens":
+            handle, token_ids, cache_position = command.args
+            return self._append_private_tokens(
+                handle, token_ids, expected_cache_position=cache_position,
+            )
+        if command.operation == "append_private_transition_tokens":
+            handle, token_ids, cache_position = command.args
+            return self._append_private_transition_tokens(
+                handle, token_ids, expected_cache_position=cache_position,
+            )
+        if command.operation == "end_ephemeral_decode":
+            (handle,) = command.args
+            return self._end_ephemeral_decode(handle)
         if command.operation == "begin_assistant_audio_queue":
-            session_id, generation_id, cache_position, reserve_tail_tokens = command.args
+            session_id, generation_id, cache_position, reserve_tail_tokens, response_id = command.args
             return self._begin_assistant_audio_queue(
                 session_id, expected_generation_id=generation_id,
                 expected_cache_position=cache_position,
                 reserve_tail_tokens=reserve_tail_tokens,
+                response_id=response_id,
+            )
+        if command.operation == "request_q2_decision_prefill":
+            session_id, generation_id, response_id = command.args
+            return self._request_q2_decision_prefill(
+                session_id,
+                expected_generation_id=generation_id,
+                response_id=response_id,
             )
         if command.operation == "reserve_tail_tokens":
             session_id, generation_id, cache_position, token_count = command.args
@@ -2682,6 +3179,10 @@ class ListenerMicrobatchWorker:
         expected_generation_id: int,
         expected_cache_position: int,
         consume_reserved_tokens: int = 0,
+        allow_initial_cursor_rebase: bool = False,
+        append_scope_id: str | None = None,
+        response_cancel_event: Any | None = None,
+        prepared_protocol: str | None = None,
     ) -> TextAppendResult:
         timings_ns: dict[str, int] = {"owner_started_ns": time.monotonic_ns()}
         runtime = self._runtime
@@ -2697,17 +3198,111 @@ class ListenerMicrobatchWorker:
             raise RuntimeError(
                 "unified text append requires the session's true chat prefix imported into native KV"
             )
+        if response_cancel_event is not None and response_cancel_event.is_set():
+            raise RuntimeError("text append response canceled before native KV mutation")
         snapshot = coordinator.session_state(session_id)
+        if snapshot.generation_id != expected_generation_id:
+            self._trace_control6_queue_handoff(
+                session_id,
+                "append_reject_generation",
+                scope=append_scope_id,
+                expected_generation=int(expected_generation_id),
+                actual_generation=int(snapshot.generation_id),
+                expected_cursor=int(expected_cache_position),
+                actual_cursor=int(snapshot.cache_position),
+                valid_history=int(snapshot.valid_history_tokens),
+            )
+            raise RuntimeError(
+                "unified text append lost its generation/cache-position compare-and-swap: "
+                f"expected_generation={expected_generation_id}, "
+                f"actual_generation={snapshot.generation_id}, "
+                f"expected_cache_position={expected_cache_position}, "
+                f"actual_cache_position={snapshot.cache_position}, "
+                f"actual_valid_history_tokens={snapshot.valid_history_tokens}"
+            )
         if (
-            snapshot.generation_id != expected_generation_id
-            or snapshot.cache_position != expected_cache_position
-            or snapshot.valid_history_tokens != expected_cache_position
+            allow_initial_cursor_rebase
+            and append_scope_id in self._text_append_committed_scopes.get(session_id, set())
         ):
-            raise RuntimeError("unified text append lost its generation/cache-position compare-and-swap")
+            self._trace_control6_queue_handoff(
+                session_id,
+                "append_reject_rebase_reused",
+                scope=append_scope_id,
+                expected_cursor=int(expected_cache_position),
+                actual_cursor=int(snapshot.cache_position),
+            )
+            raise RuntimeError("initial text cursor rebase is only valid before this response's first append")
+        self._trace_control6_queue_handoff(
+            session_id,
+            "append_check",
+            scope=append_scope_id,
+            token_count=len(token_ids),
+            first_append=(append_scope_id not in self._text_append_committed_scopes.get(session_id, set())),
+            allow_initial_cursor_rebase=bool(allow_initial_cursor_rebase),
+            expected_generation=int(expected_generation_id),
+            actual_generation=int(snapshot.generation_id),
+            expected_cursor=int(expected_cache_position),
+            actual_cursor=int(snapshot.cache_position),
+            valid_history=int(snapshot.valid_history_tokens),
+            queue_open=session_id in self._assistant_audio_queue_open,
+            outstanding_frames=int(self._outstanding_frames.get(session_id, 0)),
+        )
+        if snapshot.cache_position != expected_cache_position:
+            can_rebase_initial_append = (
+                allow_initial_cursor_rebase
+                and snapshot.cache_position >= expected_cache_position
+                and snapshot.valid_history_tokens == snapshot.cache_position
+            )
+            if not can_rebase_initial_append:
+                self._trace_control6_queue_handoff(
+                    session_id,
+                    "append_reject_cursor",
+                    scope=append_scope_id,
+                    expected_cursor=int(expected_cache_position),
+                    actual_cursor=int(snapshot.cache_position),
+                    valid_history=int(snapshot.valid_history_tokens),
+                )
+                raise RuntimeError(
+                    "unified text append lost its generation/cache-position compare-and-swap: "
+                    f"expected_generation={expected_generation_id}, "
+                    f"actual_generation={snapshot.generation_id}, "
+                    f"expected_cache_position={expected_cache_position}, "
+                    f"actual_cache_position={snapshot.cache_position}, "
+                    f"actual_valid_history_tokens={snapshot.valid_history_tokens}"
+                )
+            # This command runs on the same owner thread as listener KV advancement.
+            # Use the current, contiguous cursor for the very first uncommitted append.
+            self._trace_control6_queue_handoff(
+                session_id,
+                "append_rebase_first",
+                scope=append_scope_id,
+                expected_cursor=int(expected_cache_position),
+                actual_cursor=int(snapshot.cache_position),
+                valid_history=int(snapshot.valid_history_tokens),
+            )
+            expected_cache_position = int(snapshot.cache_position)
+        elif snapshot.valid_history_tokens != expected_cache_position:
+            self._trace_control6_queue_handoff(
+                session_id,
+                "append_reject_valid_history",
+                scope=append_scope_id,
+                expected_cursor=int(expected_cache_position),
+                actual_cursor=int(snapshot.cache_position),
+                valid_history=int(snapshot.valid_history_tokens),
+            )
+            raise RuntimeError(
+                "unified text append lost its generation/cache-position compare-and-swap: "
+                f"expected_generation={expected_generation_id}, "
+                f"actual_generation={snapshot.generation_id}, "
+                f"expected_cache_position={expected_cache_position}, "
+                f"actual_cache_position={snapshot.cache_position}, "
+                f"actual_valid_history_tokens={snapshot.valid_history_tokens}"
+            )
         if self._outstanding_frames.get(session_id, 0) != 0 or (
             self._tick_expected is not None and session_id in self._tick_expected
         ):
             raise RuntimeError("text append requires completed listener frame watermark")
+        self._end_parent_ephemeral_decodes(session_id)
         reserved_tail = self._reserved_tail_tokens.get(session_id, 0)
         if (
             isinstance(consume_reserved_tokens, bool)
@@ -2733,11 +3328,12 @@ class ListenerMicrobatchWorker:
                 f"reserved_tail_tokens={remaining_reserved}, "
                 f"max_seq_len={coordinator.capability.max_seq_len}"
             )
-        if snapshot.cache_position > coordinator.capability.max_seq_len - LISTENER_Q_PER_FRAME:
+        physical_q = max(LISTENER_Q_PER_FRAME, len(token_ids) + (len(token_ids) & 1))
+        if snapshot.cache_position > coordinator.capability.max_seq_len - physical_q:
             raise RuntimeError(
-                "native listener physical Q2 capacity exhausted before text append; "
+                "native listener physical text-Q capacity exhausted before text append; "
                 f"session={session_id}, cache_position={snapshot.cache_position}, "
-                f"max_seq_len={coordinator.capability.max_seq_len}"
+                f"physical_q={physical_q}, max_seq_len={coordinator.capability.max_seq_len}"
             )
 
         ready_ns = time.monotonic_ns()
@@ -2775,17 +3371,37 @@ class ListenerMicrobatchWorker:
         )
         with _listener_stream_context(runtime.listener_stream), torch.inference_mode():
             timings_ns["token_prepare_started_ns"] = time.monotonic_ns()
-            prepared = adapter.prepare(token_ids, logical_q_lens=len(token_ids))
+            prepare_kwargs = {"logical_q_lens": len(token_ids)}
+            if prepared_protocol is not None:
+                prepare_kwargs["protocol"] = prepared_protocol
+            cache_before = getattr(adapter, "prepared_transition_cache_info", {})
+            hits_before = int(cache_before.get("hits", 0)) if isinstance(cache_before, Mapping) else 0
+            prepared = adapter.prepare(token_ids, **prepare_kwargs)
+            cache_after = getattr(adapter, "prepared_transition_cache_info", {})
+            hits_after = int(cache_after.get("hits", 0)) if isinstance(cache_after, Mapping) else hits_before
+            transition_cache_hit = (
+                hits_after > hits_before if prepared_protocol is not None else None
+            )
+            for tensor in (prepared.inputs_embeds, prepared.per_layer_inputs):
+                if tensor.is_cuda:
+                    tensor.record_stream(runtime.listener_stream)
+            readiness_event = self._prepared_transition_ready_events.get(id(prepared))
+            if readiness_event is not None:
+                runtime.listener_stream.wait_event(readiness_event)
+                self._prepared_transition_ready_events.move_to_end(id(prepared))
             timings_ns["token_prepare_returned_ns"] = time.monotonic_ns()
             if tuple(prepared.logical_q_lens) != (len(token_ids),):
                 raise RuntimeError("token adapter logical-Q metadata differs from text append")
-            if tuple(prepared.inputs_embeds.shape) != (1, LISTENER_Q_PER_FRAME, CONTROL_HIDDEN_WIDTH):
-                raise RuntimeError("token adapter returned an incompatible physical Q2 embedding shape")
-            if tuple(prepared.per_layer_inputs.shape) != (1, LISTENER_Q_PER_FRAME, 35, 256):
+            if tuple(prepared.inputs_embeds.shape) != (1, physical_q, CONTROL_HIDDEN_WIDTH):
+                raise RuntimeError("token adapter returned an incompatible physical text-Q embedding shape")
+            if tuple(prepared.per_layer_inputs.shape) != (1, physical_q, 35, 256):
                 raise RuntimeError("token adapter returned an incompatible projected PLE shape")
             mutation_started = False
             try:
                 mutation_started = True
+                if response_cancel_event is not None and response_cancel_event.is_set():
+                    mutation_started = False
+                    raise RuntimeError("text append response canceled before native KV mutation")
                 timings_ns["native_step_started_ns"] = time.monotonic_ns()
                 output = runtime.native.step_async(
                     manifest,
@@ -2811,6 +3427,19 @@ class ListenerMicrobatchWorker:
                     expected_generation_id=expected_generation_id,
                     expected_cache_position=expected_cache_position,
                 )
+                if append_scope_id is not None:
+                    self._text_append_committed_scopes.setdefault(session_id, set()).add(
+                        append_scope_id
+                    )
+                self._trace_control6_queue_handoff(
+                    session_id,
+                    "append_commit",
+                    scope=append_scope_id,
+                    token_count=len(token_ids),
+                    previous_cursor=int(expected_cache_position),
+                    actual_cursor=int(updated.cache_position),
+                    queue_open=session_id in self._assistant_audio_queue_open,
+                )
                 self._last_native_rows[session_id] = replace(
                     row,
                     frame_id=updated.next_frame_id,
@@ -2820,7 +3449,8 @@ class ListenerMicrobatchWorker:
                     valid_history_tokens=updated.valid_history_tokens,
                 )
                 self._reserved_tail_tokens[session_id] = remaining_reserved
-                hidden = output.tensor[0, len(token_ids) - 1, :].reshape(1, 1, -1)
+                output_row = 0 if len(token_ids) > LISTENER_Q_PER_FRAME else len(token_ids) - 1
+                hidden = output.tensor[0, output_row, :].reshape(1, 1, -1)
                 timings_ns["lm_head_started_ns"] = time.monotonic_ns()
                 logits = adapter.logits_from_final_norm_hidden(hidden)
                 timings_ns["lm_head_returned_ns"] = time.monotonic_ns()
@@ -2841,14 +3471,65 @@ class ListenerMicrobatchWorker:
                     final_norm_hidden=hidden,
                     ready_event=ready_event,
                     timings_ns=dict(timings_ns),
+                    cache_position=int(updated.cache_position),
+                    prepared_transition_cache_hit=transition_cache_hit,
                 )
             except BaseException as exc:
+                self._trace_control6_queue_handoff(
+                    session_id,
+                    "append_exception",
+                    scope=append_scope_id,
+                    expected_cursor=int(expected_cache_position),
+                    queue_open=session_id in self._assistant_audio_queue_open,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
                 if mutation_started:
                     self._fatal_error = RuntimeError(
                         f"unified native text append failed after cache mutation: {exc}"
                     )
                     raise self._fatal_error from exc
                 raise
+
+    def _prepare_text_token_inputs(
+        self,
+        token_ids: tuple[int, ...],
+        *,
+        protocol: str,
+    ) -> Mapping[str, int]:
+        runtime = self._runtime
+        adapter = None if runtime is None else runtime.token_adapter
+        if runtime is None or adapter is None or not callable(getattr(adapter, "prepare", None)):
+            raise RuntimeError("unified native text runtime is unavailable for transition preparation")
+        with _listener_stream_context(runtime.listener_stream), torch.inference_mode():
+            prepared = adapter.prepare(
+                token_ids,
+                logical_q_lens=len(token_ids),
+                protocol=protocol,
+            )
+            for tensor in (prepared.inputs_embeds, prepared.per_layer_inputs):
+                if tensor.is_cuda:
+                    tensor.record_stream(runtime.listener_stream)
+            if prepared.inputs_embeds.is_cuda:
+                readiness_event = torch.cuda.Event(
+                    enable_timing=False,
+                    blocking=False,
+                    interprocess=False,
+                )
+                readiness_event.record(runtime.listener_stream)
+                prepared_id = id(prepared)
+                self._prepared_transition_ready_events[prepared_id] = readiness_event
+                self._prepared_transition_ready_events.move_to_end(prepared_id)
+                while len(self._prepared_transition_ready_events) > 8:
+                    self._prepared_transition_ready_events.popitem(last=False)
+        info = getattr(adapter, "prepared_transition_cache_info", {})
+        return {
+            "logical_q_len": len(token_ids),
+            "physical_q_len": int(prepared.inputs_embeds.shape[1]),
+            "cache_size": int(info.get("size", 0)),
+            "cache_hits": int(info.get("hits", 0)),
+            "cache_misses": int(info.get("misses", 0)),
+        }
 
     def _check_unified_session_cas(
         self,
@@ -2872,6 +3553,1033 @@ class ListenerMicrobatchWorker:
             raise RuntimeError("unified native operation lost its generation/cache-position compare-and-swap")
         return snapshot
 
+    def _private_context_id(self, source_context_id: int) -> int:
+        context_id = int(uuid.uuid4().int & ((1 << 63) - 1)) or 1
+        while context_id == int(source_context_id) or any(
+            context_id == branch.handle.fork_native_context_id
+            for branch in self._ephemeral_decode_branches.values()
+        ) or any(
+            context_id == int(snapshot.native_context_id)
+            for snapshot in self._session_states.values()
+            if snapshot.native_context_id is not None
+        ):
+            context_id = int(uuid.uuid4().int & ((1 << 63) - 1)) or 1
+        return context_id
+
+    def _begin_ephemeral_decode(
+        self,
+        session_id: str,
+        *,
+        expected_generation_id: int,
+        expected_cache_position: int,
+    ) -> EphemeralDecodeHandle:
+        runtime = self._runtime
+        coordinator = self._coordinator
+        if runtime is None or coordinator is None:
+            raise RuntimeError("private decode requires the active native owner")
+        if not callable(getattr(runtime.native, "fork_session_slot", None)):
+            raise RuntimeError("native owner lacks same-owner session-slot fork")
+        adapter = runtime.token_adapter
+        if adapter is None or not callable(getattr(adapter, "prepare", None)) or not callable(
+            getattr(adapter, "logits_from_final_norm_hidden", None)
+        ):
+            raise RuntimeError("private decode requires the exact Gemma token/PLE adapter")
+        snapshot = self._check_unified_session_cas(
+            session_id,
+            expected_generation_id=expected_generation_id,
+            expected_cache_position=expected_cache_position,
+        )
+        if self._outstanding_frames.get(session_id, 0) != 0 or (
+            self._tick_expected is not None and session_id in self._tick_expected
+        ):
+            raise RuntimeError("private decode fork requires a completed listener frame watermark")
+        if any(
+            branch.handle.parent_session_id == session_id
+            for branch in self._ephemeral_decode_branches.values()
+        ):
+            raise RuntimeError("session already has a live private decode fork")
+        source_row = self._last_native_rows.get(session_id)
+        if source_row is None or snapshot.native_context_id is None:
+            raise RuntimeError("private decode source has no imported native cache row")
+        if (
+            source_row.session_generation != snapshot.generation_id
+            or source_row.state_epoch_id != snapshot.state_epoch_id
+            or source_row.cache_position != snapshot.cache_position
+            or source_row.valid_history_tokens != snapshot.valid_history_tokens
+            or source_row.native_context_id != int(snapshot.native_context_id)
+        ):
+            raise RuntimeError("private decode source row no longer matches its CAS snapshot")
+
+        handle_id = uuid.uuid4().hex
+        fork_session_id = f"__decode__{session_id}__{handle_id}"
+        fork_context_id = self._private_context_id(int(snapshot.native_context_id))
+        handle = EphemeralDecodeHandle(
+            handle_id=handle_id,
+            parent_session_id=session_id,
+            parent_generation_id=snapshot.generation_id,
+            parent_state_epoch_id=snapshot.state_epoch_id,
+            source_cache_position=snapshot.cache_position,
+            fork_session_id=fork_session_id,
+            fork_native_context_id=fork_context_id,
+            max_tokens=2,
+        )
+        expected_fork_row = replace(
+            source_row,
+            session_id=fork_session_id,
+            native_context_id=fork_context_id,
+        )
+        self._ensure_capacity_for_registration(
+            len(self._session_states) + len(self._ephemeral_decode_branches) + 1
+        )
+        forked = False
+        try:
+            with _listener_stream_context(runtime.listener_stream):
+                fork_row = runtime.native.fork_session_slot(
+                    source_row,
+                    fork_session_id=fork_session_id,
+                    fork_native_context_id=fork_context_id,
+                )
+            forked = True
+            if fork_row != expected_fork_row:
+                raise RuntimeError("native private decode fork changed its source boundary or cursor")
+            self._ephemeral_decode_branches[handle_id] = _EphemeralDecodeBranch(
+                handle=handle,
+                row=fork_row,
+            )
+            return handle
+        except BaseException:
+            # A failed native clone can have reserved a destination slot before
+            # reporting its failure. Retire it best-effort without touching the
+            # canonical source row.
+            if forked:
+                try:
+                    runtime.native.release_session_async(fork_row)
+                except BaseException as cleanup_error:
+                    if self._cleanup_error is None:
+                        self._cleanup_error = cleanup_error
+            raise
+
+    def _append_private_tokens(
+        self,
+        handle: EphemeralDecodeHandle,
+        token_ids: tuple[int, ...],
+        *,
+        expected_cache_position: int,
+    ) -> PrivateTextAppendResult:
+        return self._append_private_ids(
+            handle,
+            token_ids,
+            expected_cache_position=expected_cache_position,
+            is_transition=False,
+        )
+
+    def _append_private_transition_tokens(
+        self,
+        handle: EphemeralDecodeHandle,
+        token_ids: tuple[int, ...],
+        *,
+        expected_cache_position: int,
+    ) -> PrivateTextAppendResult:
+        return self._append_private_ids(
+            handle,
+            token_ids,
+            expected_cache_position=expected_cache_position,
+            is_transition=True,
+        )
+
+    def _append_private_ids(
+        self,
+        handle: EphemeralDecodeHandle,
+        token_ids: tuple[int, ...],
+        *,
+        expected_cache_position: int,
+        is_transition: bool,
+    ) -> PrivateTextAppendResult:
+        runtime = self._runtime
+        coordinator = self._coordinator
+        if runtime is None or coordinator is None:
+            raise RuntimeError("private decode owner is unavailable")
+        branch = self._ephemeral_decode_branches.get(handle.handle_id)
+        if branch is None or branch.handle != handle:
+            raise RuntimeError("unknown private decode fork")
+        parent = self._session_states.get(handle.parent_session_id)
+        if (
+            parent is None
+            or parent.generation_id != handle.parent_generation_id
+            or parent.state_epoch_id != handle.parent_state_epoch_id
+        ):
+            self._end_ephemeral_decode(handle)
+            raise RuntimeError("private decode fork lost its parent generation fence")
+        if expected_cache_position != branch.row.cache_position:
+            raise RuntimeError("private decode append lost its branch cache-position compare-and-swap")
+        if is_transition and branch.token_count:
+            raise RuntimeError("private transition is allowed once before sampled tokens")
+        if is_transition and len(token_ids) > (
+            coordinator.capability.max_seq_len - branch.row.cache_position
+        ):
+            raise RuntimeError("private transition exceeds remaining native KV context")
+        if not is_transition and branch.token_count + len(token_ids) > handle.max_tokens:
+            raise RuntimeError("private decode budget is limited to two generated tokens")
+        adapter = runtime.token_adapter
+        if adapter is None:
+            raise RuntimeError("private decode requires the exact Gemma token/PLE adapter")
+
+        if not token_ids or len(token_ids) > MAX_STREAM_Q_LEN:
+            raise ValueError("private append accepts one to eight token IDs per native step")
+        physical_q = max(LISTENER_Q_PER_FRAME, len(token_ids) + (len(token_ids) & 1))
+        if branch.row.cache_position > coordinator.capability.max_seq_len - physical_q:
+            raise RuntimeError("private decode branch exhausted physical text-Q cache capacity")
+
+        mutation_started = False
+        try:
+            with _listener_stream_context(runtime.listener_stream), torch.inference_mode():
+                ready_ns = time.monotonic_ns()
+                digest = hashlib.sha256(
+                    (b"private-decode-transition:" if is_transition else b"private-decode-token-ids:")
+                    + handle.handle_id.encode("ascii") + b":"
+                    + b",".join(str(value).encode("ascii") for value in token_ids)
+                ).hexdigest()
+                row = replace(
+                    branch.row,
+                    input_frame_sha256=digest,
+                    reference_pcm_sha256=None,
+                    frame_ready_at_ns=ready_ns,
+                    reference_frame_id=None,
+                    logical_q_len=len(token_ids),
+                    ephemeral_reason=None,
+                    queue_audio_for_next_turn=False,
+                )
+                manifest = self._single_row_private_manifest(row)
+                prepared = adapter.prepare(token_ids, logical_q_lens=len(token_ids))
+                if tuple(prepared.logical_q_lens) != (len(token_ids),):
+                    raise RuntimeError("private token adapter logical-Q metadata differs")
+                if tuple(prepared.inputs_embeds.shape) != (1, physical_q, CONTROL_HIDDEN_WIDTH) or tuple(
+                    prepared.per_layer_inputs.shape
+                ) != (1, physical_q, 35, 256):
+                    raise RuntimeError("private token adapter returned incompatible physical text-Q inputs")
+                mutation_started = True
+                output = runtime.native.step_async(
+                    manifest,
+                    prepared.inputs_embeds,
+                    per_layer_inputs=prepared.per_layer_inputs,
+                    producer_stream=runtime.listener_stream,
+                )
+                health = tuple(runtime.native.verify_output_health(output))
+                if (
+                    len(health) != 1
+                    or health[0].row != row
+                    or health[0].generation != output.generation
+                    or not health[0].checked
+                    or health[0].nonfinite
+                    or output.manifest_id != manifest.manifest_id
+                    or output.rows != (row,)
+                ):
+                    raise RuntimeError("private token output health/provenance check failed")
+                output_row = 0 if len(token_ids) > LISTENER_Q_PER_FRAME else len(token_ids) - 1
+                final_hidden = output.tensor[0, output_row, :].reshape(1, 1, -1)
+                final_logits = adapter.logits_from_final_norm_hidden(final_hidden)
+                if final_logits.ndim == 3:
+                    final_logits = final_logits[:, -1, :]
+                if final_logits.ndim != 2 or final_logits.shape[0] != 1:
+                    raise RuntimeError("private token LM head returned incompatible logits")
+                new_position = row.cache_position + len(token_ids)
+                branch.row = replace(
+                    row,
+                    cache_position=new_position,
+                    valid_history_tokens=new_position,
+                )
+                ready_event = _record_shadow_event(runtime.listener_stream)
+                if is_transition:
+                    branch.transition_token_count += len(token_ids)
+                else:
+                    branch.token_count += len(token_ids)
+                return PrivateTextAppendResult(
+                    handle=handle,
+                    cache_position=branch.row.cache_position,
+                    token_count=branch.token_count,
+                    logits=final_logits,
+                    final_norm_hidden=final_hidden,
+                    ready_event=ready_event,
+                    timings_ns={"owner_completed_ns": time.monotonic_ns()},
+                )
+        except BaseException as exc:
+            if mutation_started:
+                self._end_ephemeral_decode(handle)
+                if bool(getattr(runtime.native, "_poisoned", False)):
+                    self._fatal_error = RuntimeError(
+                        f"native private decode failed after KV mutation: {exc}"
+                    )
+                    raise self._fatal_error from exc
+            raise
+
+    def _end_ephemeral_decode(self, handle: EphemeralDecodeHandle) -> None:
+        branch = self._ephemeral_decode_branches.get(handle.handle_id)
+        if branch is None:
+            return
+        if branch.handle != handle:
+            raise RuntimeError("private decode handle identity does not match its owner record")
+        runtime = self._runtime
+        if runtime is None:
+            raise RuntimeError("private decode owner is unavailable")
+        try:
+            with _listener_stream_context(runtime.listener_stream):
+                runtime.native.release_session_async(branch.row)
+        except BaseException as exc:
+            if self._cleanup_error is None:
+                self._cleanup_error = exc
+            raise
+        finally:
+            self._ephemeral_decode_branches.pop(handle.handle_id, None)
+
+    def _end_parent_ephemeral_decodes(self, session_id: str) -> None:
+        handles = tuple(
+            branch.handle
+            for branch in self._ephemeral_decode_branches.values()
+            if branch.handle.parent_session_id == session_id
+        )
+        first_error: BaseException | None = None
+        for handle in handles:
+            try:
+                self._end_ephemeral_decode(handle)
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
+
+    def _end_all_ephemeral_decodes(self) -> None:
+        handles = tuple(branch.handle for branch in self._ephemeral_decode_branches.values())
+        for handle in handles:
+            self._end_ephemeral_decode(handle)
+
+    def _single_row_private_manifest(self, row: BatchRowDescriptor) -> ListenerBatchManifest:
+        coordinator = self._coordinator
+        if coordinator is None:
+            raise RuntimeError("private manifest requires the live listener coordinator")
+        capability = coordinator.capability
+        return ListenerBatchManifest(
+            manifest_id=uuid.uuid4().hex,
+            runtime_signature=coordinator.runtime_signature,
+            stream_identity=capability.stream_identity,
+            stream_priority=capability.stream_priority,
+            dispatch_at_ns=time.monotonic_ns(),
+            max_coalesce_wait_ns=0,
+            dispatch_reason="carryover_ready",
+            rows=(row,),
+        )
+
+    def _release_q2_decision_cache(self, session_id: str) -> None:
+        self._mark_stable_q2_epoch_unusable(session_id)
+        cache = self._q2_decision_caches.get(session_id)
+        if cache is None:
+            return
+        runtime = self._runtime
+        if runtime is None:
+            raise RuntimeError("cannot release a Q2 decision fork without its native owner")
+        with _listener_stream_context(runtime.listener_stream):
+            runtime.native.release_session_async(cache.fork_row)
+        self._q2_decision_caches.pop(session_id, None)
+
+    def _mark_stable_q2_epoch_unusable(
+        self, session_id: str, *, queue_epoch: str | None = None,
+    ) -> None:
+        if not self._stable_turn_policy_q2_context:
+            return
+        if session_id not in self._assistant_audio_queue_open:
+            return
+        active_epoch = self._assistant_audio_queue_epoch.get(session_id)
+        if active_epoch is not None and (queue_epoch is None or queue_epoch == active_epoch):
+            self._stable_q2_unusable_epochs[session_id] = active_epoch
+
+    def _stable_q2_epoch_usable(self, session_id: str, queue_epoch: str) -> bool:
+        return bool(
+            self._stable_turn_policy_q2_context
+            and session_id in self._assistant_audio_queue_open
+            and self._stable_q2_unusable_epochs.get(session_id) != queue_epoch
+        )
+
+    def _q2_cache_anchor(
+        self, source_row: BatchRowDescriptor, queue_epoch: str,
+    ) -> tuple[Any, ...]:
+        prefix_anchor = (
+            self._prefix_lengths.get(source_row.session_id),
+            self._prefix_revisions.get(source_row.session_id),
+            self._unified_prefix_revisions.get(source_row.session_id),
+            self._prefix_replay_frame_ids.get(source_row.session_id, ()),
+            id(self._prefix_importers.get(source_row.session_id)),
+        )
+        return (
+            queue_epoch,
+            source_row.session_generation,
+            source_row.native_context_id,
+            source_row.cache_position,
+            source_row.valid_history_tokens,
+            *prefix_anchor,
+        )
+
+    def _stable_q2_cache_anchor(
+        self,
+        source_row: BatchRowDescriptor,
+        queue_epoch: str,
+        first_frame_id: int,
+    ) -> tuple[Any, ...]:
+        prefix_anchor = (
+            self._prefix_lengths.get(source_row.session_id),
+            self._prefix_revisions.get(source_row.session_id),
+            self._unified_prefix_revisions.get(source_row.session_id),
+            self._prefix_replay_frame_ids.get(source_row.session_id, ()),
+            id(self._prefix_importers.get(source_row.session_id)),
+        )
+        return (
+            queue_epoch,
+            int(first_frame_id),
+            source_row.session_generation,
+            source_row.native_context_id,
+            *prefix_anchor,
+        )
+
+    def _capture_stable_q2_context(
+        self,
+        source_row: BatchRowDescriptor,
+        *,
+        queue_epoch: str,
+        first_frame_id: int,
+    ) -> _Q2DecisionCache | None:
+        """Fork one frozen policy context at queue-open, before text can advance KV."""
+        runtime = self._runtime
+        coordinator = self._coordinator
+        if (
+            runtime is None
+            or coordinator is None
+            or getattr(runtime.native, "_metadata_rebind_api_available", False) is not True
+            or not callable(getattr(runtime.native, "rebind_ephemeral_session_metadata", None))
+            or not callable(getattr(runtime.native, "fork_session_slot", None))
+            or not callable(getattr(runtime.native, "step_queued_audio_async", None))
+        ):
+            return None
+        native_capacity = getattr(runtime.native, "max_batch_size", None)
+        required_capacity = (
+            len(self._session_states)
+            + len(self._ephemeral_decode_branches)
+            + len(self._q2_decision_caches)
+            + 1
+        )
+        if (
+            isinstance(native_capacity, int)
+            and not isinstance(native_capacity, bool)
+            and required_capacity > native_capacity
+        ):
+            return None
+        self._ensure_capacity_for_registration(required_capacity)
+        fork_session_id = f"__q2view__{source_row.session_id}__{uuid.uuid4().hex}"
+        fork_context_id = self._private_context_id(source_row.native_context_id)
+        expected_fork_row = replace(
+            source_row,
+            session_id=fork_session_id,
+            native_context_id=fork_context_id,
+        )
+        fork_row = runtime.native.fork_session_slot(
+            source_row,
+            fork_session_id=fork_session_id,
+            fork_native_context_id=fork_context_id,
+        )
+        if fork_row != expected_fork_row:
+            try:
+                runtime.native.release_session_async(fork_row)
+            finally:
+                raise RuntimeError("stable queue-open Q2 fork changed its canonical source boundary")
+        return _Q2DecisionCache(
+            queue_epoch=queue_epoch,
+            anchor=self._stable_q2_cache_anchor(source_row, queue_epoch, first_frame_id),
+            frame_keys=(),
+            fork_row=fork_row,
+            base_cache_position=source_row.cache_position,
+            stable_turn_context=True,
+        )
+
+    @staticmethod
+    def _q2_cache_expected_cursor(cache: _Q2DecisionCache) -> int:
+        return cache.base_cache_position + LISTENER_Q_PER_FRAME * len(cache.frame_keys)
+
+    @staticmethod
+    def _q2_cache_frame_key(item: QueuedAudioSoftFrame) -> tuple[Any, ...]:
+        return (
+            item.session_generation,
+            item.state_epoch_id,
+            item.source_frame_id,
+            item.source_state_version,
+            item.source_sequence_position,
+        )
+
+    def _run_pending_q2_prefill_idle_step(self) -> bool:
+        """Advance at most one already-queued Q2 while the owner has no ready work."""
+        runtime = self._runtime
+        coordinator = self._coordinator
+        if (
+            not self._pending_q2_prefills
+            or runtime is None
+            or coordinator is None
+            or not self.q2_decision_prefill_supported
+            or not self._commands.empty()
+            or coordinator.ready_depth != 0
+            or self._tick_expected is not None
+            or any(self._outstanding_frames.values())
+        ):
+            return False
+        with self._wake:
+            if not self._commands.empty():
+                return False
+        session_id, (generation_id, response_id) = next(iter(self._pending_q2_prefills.items()))
+        if (
+            session_id not in self._assistant_audio_queue_open
+            or self._assistant_audio_queue_response_id.get(session_id) != response_id
+        ):
+            self._pending_q2_prefills.pop(session_id, None)
+            return False
+        snapshot = coordinator.session_state(session_id)
+        if snapshot.generation_id != generation_id or snapshot.native_context_id is None:
+            self._pending_q2_prefills.pop(session_id, None)
+            self._release_q2_decision_cache(session_id)
+            return False
+        queued = tuple(self._queued_audio_soft.get(session_id, ()))
+        if not queued:
+            return False
+        first_frame_id = self._assistant_audio_queue_first_frame_id.get(session_id)
+        queue_epoch = self._assistant_audio_queue_epoch.get(session_id)
+        if first_frame_id is None or queue_epoch is None:
+            self._pending_q2_prefills.pop(session_id, None)
+            self._release_q2_decision_cache(session_id)
+            return False
+        expected_frame_id = int(first_frame_id)
+        frame_keys: list[tuple[Any, ...]] = []
+        for item in queued:
+            if (
+                item.session_id != session_id
+                or item.session_generation != generation_id
+                or item.source_frame_id != expected_frame_id
+                or item.source_frame_id >= snapshot.next_frame_id
+                or item.source_state_version >= snapshot.state_version
+                or item.source_sequence_position >= snapshot.sequence_position
+                or tuple(item.audio_soft_tokens.shape) != (LISTENER_Q_PER_FRAME, CONTROL_HIDDEN_WIDTH)
+                or item.audio_soft_tokens.dtype != torch.bfloat16
+            ):
+                self._pending_q2_prefills.pop(session_id, None)
+                self._release_q2_decision_cache(session_id)
+                return False
+            frame_keys.append(self._q2_cache_frame_key(item))
+            expected_frame_id += 1
+
+        previous_row = self._last_native_rows.get(session_id)
+        if previous_row is None:
+            self._pending_q2_prefills.pop(session_id, None)
+            return False
+        source_row = replace(
+            previous_row,
+            session_generation=snapshot.generation_id,
+            state_epoch_id=snapshot.state_epoch_id,
+            frame_id=snapshot.next_frame_id,
+            listener_state_version=snapshot.state_version,
+            sequence_position=snapshot.sequence_position,
+            cache_position=snapshot.cache_position,
+            valid_history_tokens=snapshot.valid_history_tokens,
+            native_context_id=int(snapshot.native_context_id),
+        )
+        all_frame_keys = tuple(frame_keys)
+        cache = self._q2_decision_caches.get(session_id)
+        stable_context = self._stable_q2_epoch_usable(session_id, queue_epoch)
+        if self._stable_turn_policy_q2_context and stable_context and (
+            cache is None or not cache.stable_turn_context
+        ):
+            # A stable fork is created exactly once at queue-open. A missing
+            # or replaced slot must never silently re-anchor from text-advanced KV.
+            self._mark_stable_q2_epoch_unusable(session_id, queue_epoch=queue_epoch)
+            stable_context = False
+        anchor = (
+            self._stable_q2_cache_anchor(source_row, queue_epoch, int(first_frame_id))
+            if stable_context
+            else self._q2_cache_anchor(source_row, queue_epoch)
+        )
+        if cache is not None and (
+            cache.queue_epoch != queue_epoch
+            or cache.anchor != anchor
+            or len(cache.frame_keys) > len(all_frame_keys)
+            or cache.frame_keys != all_frame_keys[:len(cache.frame_keys)]
+            or cache.fork_row.cache_position != self._q2_cache_expected_cursor(cache)
+        ):
+            self._release_q2_decision_cache(session_id)
+            cache = None
+            stable_context = False
+            anchor = self._q2_cache_anchor(source_row, queue_epoch)
+        if cache is not None and len(cache.frame_keys) == len(all_frame_keys):
+            self._pending_q2_prefills.pop(session_id, None)
+            return False
+
+        forked = cache is None
+        replay_offset = 0
+        branch_row: BatchRowDescriptor
+        if not forked:
+            try:
+                rebind = runtime.native.rebind_ephemeral_session_metadata
+                branch_row = rebind(cache.fork_row, source_row)
+                if (
+                    branch_row.session_id != cache.fork_row.session_id
+                    or branch_row.native_context_id != cache.fork_row.native_context_id
+                    or branch_row.session_generation != cache.fork_row.session_generation
+                    or branch_row.cache_position != cache.fork_row.cache_position
+                    or branch_row.valid_history_tokens != cache.fork_row.valid_history_tokens
+                    or branch_row.frame_id != source_row.frame_id
+                    or branch_row.state_epoch_id != source_row.state_epoch_id
+                    or branch_row.listener_state_version != source_row.listener_state_version
+                    or branch_row.sequence_position != source_row.sequence_position
+                ):
+                    raise RuntimeError("idle Q2 prefill metadata CAS changed fork KV provenance")
+            except Exception:
+                self._release_q2_decision_cache(session_id)
+                cache = None
+                forked = True
+                stable_context = False
+                anchor = self._q2_cache_anchor(source_row, queue_epoch)
+            else:
+                self._q2_decision_caches[session_id] = replace(
+                    cache, fork_row=branch_row,
+                )
+                replay_offset = len(cache.frame_keys)
+        if forked:
+            native_capacity = getattr(runtime.native, "max_batch_size", None)
+            required_capacity = (
+                len(self._session_states)
+                + len(self._ephemeral_decode_branches)
+                + len(self._q2_decision_caches)
+                + 1
+            )
+            if (
+                isinstance(native_capacity, int)
+                and not isinstance(native_capacity, bool)
+                and required_capacity > native_capacity
+            ):
+                return False
+            self._ensure_capacity_for_registration(required_capacity)
+            handle = uuid.uuid4().hex
+            fork_session_id = f"__q2view__{session_id}__{handle}"
+            fork_context_id = self._private_context_id(source_row.native_context_id)
+            expected_fork_row = replace(
+                source_row,
+                session_id=fork_session_id,
+                native_context_id=fork_context_id,
+            )
+            branch_row = runtime.native.fork_session_slot(
+                source_row,
+                fork_session_id=fork_session_id,
+                fork_native_context_id=fork_context_id,
+            )
+            if branch_row != expected_fork_row:
+                runtime.native.release_session_async(branch_row)
+                raise RuntimeError("idle Q2 prefill fork changed the canonical source boundary")
+            replay_offset = 0
+
+        item = queued[replay_offset]
+        source_frame_id = item.source_frame_id
+        cursor = branch_row.cache_position
+        if cursor > coordinator.capability.max_seq_len - LISTENER_Q_PER_FRAME:
+            if forked:
+                runtime.native.release_session_async(branch_row)
+            self._pending_q2_prefills.pop(session_id, None)
+            return False
+        step_row = replace(
+            branch_row,
+            cache_position=cursor,
+            valid_history_tokens=cursor,
+            logical_q_len=LISTENER_Q_PER_FRAME,
+            ephemeral_reason=None,
+            queue_audio_for_next_turn=False,
+            input_frame_sha256=hashlib.sha256(
+                f"q2-view:{session_id}:{generation_id}:{source_row.state_epoch_id}:"
+                f"{source_frame_id}".encode("utf-8")
+            ).hexdigest(),
+        )
+        manifest = self._single_row_private_manifest(step_row)
+        try:
+            with _listener_stream_context(runtime.listener_stream), torch.inference_mode():
+                if bool(getattr(
+                    item.audio_soft_tokens,
+                    "is_cuda",
+                    item.audio_soft_tokens.device.type == "cuda",
+                )):
+                    item.audio_soft_tokens.record_stream(runtime.listener_stream)
+                output = runtime.native.step_queued_audio_async(
+                    manifest,
+                    item.audio_soft_tokens.unsqueeze(0).contiguous(),
+                    producer_stream=runtime.listener_stream,
+                )
+                health_rows = tuple(runtime.native.verify_output_health(output))
+                if (
+                    not output.preserves_listener_cursors
+                    or output.manifest_id != manifest.manifest_id
+                    or output.rows != (step_row,)
+                    or len(health_rows) != 1
+                    or health_rows[0].row != step_row
+                    or health_rows[0].generation != output.generation
+                    or not health_rows[0].checked
+                    or health_rows[0].nonfinite
+                ):
+                    raise RuntimeError("idle Q2 prefill output health/provenance failed")
+            next_cursor = cursor + LISTENER_Q_PER_FRAME
+            fork_row = replace(
+                step_row,
+                cache_position=next_cursor,
+                valid_history_tokens=next_cursor,
+            )
+            self._q2_decision_caches[session_id] = _Q2DecisionCache(
+                queue_epoch=queue_epoch,
+                anchor=anchor,
+                frame_keys=all_frame_keys[:replay_offset + 1],
+                fork_row=fork_row,
+                base_cache_position=(
+                    cache.base_cache_position if cache is not None else source_row.cache_position
+                ),
+                stable_turn_context=bool(cache is not None and cache.stable_turn_context),
+            )
+            if replay_offset + 1 == len(all_frame_keys):
+                self._pending_q2_prefills.pop(session_id, None)
+            return True
+        except BaseException:
+            self._pending_q2_prefills.pop(session_id, None)
+            self._release_q2_decision_cache(session_id)
+            if forked:
+                try:
+                    runtime.native.release_session_async(branch_row)
+                except BaseException:
+                    pass
+            raise
+
+    def _build_speaking_q2_decision_view(
+        self,
+        source_row: BatchRowDescriptor,
+        current_audio_soft: torch.Tensor,
+    ) -> TemporaryQ2DecisionView:
+        """Build an exact Q2 view, extending its private fork within one queue."""
+        decision_started_ns = time.perf_counter_ns()
+        runtime = self._runtime
+        coordinator = self._coordinator
+        if runtime is None or coordinator is None:
+            raise RuntimeError("temporary Q2 view requires the active native owner")
+        if not callable(getattr(runtime.native, "fork_session_slot", None)) or not callable(
+            getattr(runtime.native, "step_queued_audio_async", None)
+        ):
+            raise RuntimeError("native owner lacks the isolated Q2 replay APIs")
+        if source_row.session_id not in self._assistant_audio_queue_open:
+            raise RuntimeError("temporary Q2 view requires an open assistant-phase queue")
+        if not source_row.queue_audio_for_next_turn or source_row.logical_q_len != 0:
+            raise RuntimeError("temporary Q2 view requires an assistant-phase Q0 listener row")
+
+        queued = tuple(self._queued_audio_soft.get(source_row.session_id, ()))
+        first_frame_id = self._assistant_audio_queue_first_frame_id.get(source_row.session_id)
+        queue_epoch = self._assistant_audio_queue_epoch.get(source_row.session_id)
+        if first_frame_id is None or queue_epoch is None:
+            self._release_q2_decision_cache(source_row.session_id)
+            raise _Q2DecisionViewUnavailable(
+                "assistant-turn queue epoch/watermark is unavailable; canonical Q0 is the explicit fallback"
+            )
+        expected_frame_id = int(first_frame_id)
+        replay: list[tuple[int, torch.Tensor]] = []
+        frame_keys: list[tuple[Any, ...]] = []
+        for item in queued:
+            # A queued Q2 keeps its source epoch as per-frame provenance; the
+            # current Q0 epoch may advance without changing canonical KV.
+            if (
+                item.session_id != source_row.session_id
+                or item.session_generation != source_row.session_generation
+                or item.source_frame_id != expected_frame_id
+                or item.source_frame_id >= source_row.frame_id
+                or item.source_state_version >= source_row.listener_state_version
+                or item.source_sequence_position >= source_row.sequence_position
+                or tuple(item.audio_soft_tokens.shape) != (LISTENER_Q_PER_FRAME, CONTROL_HIDDEN_WIDTH)
+                or item.audio_soft_tokens.dtype != torch.bfloat16
+            ):
+                self._release_q2_decision_cache(source_row.session_id)
+                raise RuntimeError("temporary Q2 view onset queue provenance is stale or non-contiguous")
+            replay.append((item.source_frame_id, item.audio_soft_tokens))
+            frame_keys.append(self._q2_cache_frame_key(item))
+            expected_frame_id += 1
+        if expected_frame_id != source_row.frame_id:
+            self._release_q2_decision_cache(source_row.session_id)
+            raise _Q2DecisionViewUnavailable(
+                "temporary Q2 view is missing one or more onset frames; canonical Q0 is the explicit fallback"
+            )
+        if (
+            tuple(current_audio_soft.shape) != (LISTENER_Q_PER_FRAME, CONTROL_HIDDEN_WIDTH)
+            or current_audio_soft.dtype != torch.bfloat16
+        ):
+            raise RuntimeError("temporary Q2 view current frontend output is not exact BF16 Q2")
+        replay.append((source_row.frame_id, current_audio_soft))
+        frame_keys.append((
+            source_row.session_generation,
+            source_row.state_epoch_id,
+            source_row.frame_id,
+            source_row.listener_state_version,
+            source_row.sequence_position,
+        ))
+        all_frame_keys = tuple(frame_keys)
+        rebind = getattr(runtime.native, "rebind_ephemeral_session_metadata", None)
+        persistent_cache_available = (
+            getattr(runtime.native, "_metadata_rebind_api_available", False) is True
+            and callable(rebind)
+            and source_row.session_id not in self._q2_cache_disabled_for_tick
+        )
+        cache = self._q2_decision_caches.get(source_row.session_id)
+        stable_context = self._stable_q2_epoch_usable(source_row.session_id, queue_epoch)
+        if self._stable_turn_policy_q2_context and stable_context and (
+            not persistent_cache_available
+            or cache is None
+            or not cache.stable_turn_context
+        ):
+            # Rebinding is required to preserve current frame identity while
+            # retaining the private physical cursor. Never recreate this fork.
+            self._mark_stable_q2_epoch_unusable(source_row.session_id, queue_epoch=queue_epoch)
+            stable_context = False
+        anchor = (
+            self._stable_q2_cache_anchor(source_row, queue_epoch, int(first_frame_id))
+            if stable_context
+            else self._q2_cache_anchor(source_row, queue_epoch)
+        )
+        cache_hit = False
+        replay_offset = 0
+        branch_row: BatchRowDescriptor | None = None
+        if cache is not None and (
+            not persistent_cache_available
+            or cache.stable_turn_context != stable_context
+            or cache.queue_epoch != queue_epoch
+            or cache.anchor != anchor
+            or len(cache.frame_keys) >= len(all_frame_keys)
+            or cache.frame_keys != all_frame_keys[:len(cache.frame_keys)]
+            or cache.fork_row.cache_position != self._q2_cache_expected_cursor(cache)
+        ):
+            self._release_q2_decision_cache(source_row.session_id)
+            cache = None
+            stable_context = False
+            anchor = self._q2_cache_anchor(source_row, queue_epoch)
+        if cache is not None and persistent_cache_available:
+            try:
+                rebound = rebind(cache.fork_row, source_row)
+                if (
+                    rebound.session_id != cache.fork_row.session_id
+                    or rebound.native_context_id != cache.fork_row.native_context_id
+                    or rebound.session_generation != cache.fork_row.session_generation
+                    or rebound.cache_position != cache.fork_row.cache_position
+                    or rebound.valid_history_tokens != cache.fork_row.valid_history_tokens
+                    or rebound.frame_id != source_row.frame_id
+                    or rebound.state_epoch_id != source_row.state_epoch_id
+                    or rebound.listener_state_version != source_row.listener_state_version
+                    or rebound.sequence_position != source_row.sequence_position
+                ):
+                    raise RuntimeError("metadata CAS changed Q2 fork provenance or KV cursor")
+                branch_row = rebound
+                replay_offset = len(cache.frame_keys)
+                cache_hit = True
+            except Exception:
+                self._release_q2_decision_cache(source_row.session_id)
+                cache = None
+                stable_context = False
+                anchor = self._q2_cache_anchor(source_row, queue_epoch)
+
+        forked_this_tick = False
+        if not cache_hit:
+            handle = uuid.uuid4().hex
+            fork_session_id = f"__q2view__{source_row.session_id}__{handle}"
+            fork_context_id = self._private_context_id(source_row.native_context_id)
+            expected_fork_row = replace(
+                source_row,
+                session_id=fork_session_id,
+                native_context_id=fork_context_id,
+            )
+            requested = (
+                len(self._session_states)
+                + len(self._ephemeral_decode_branches)
+                + len(self._q2_decision_caches)
+                + 1
+            )
+            self._ensure_capacity_for_registration(requested)
+            branch_row = runtime.native.fork_session_slot(
+                source_row,
+                fork_session_id=fork_session_id,
+                fork_native_context_id=fork_context_id,
+            )
+            forked_this_tick = True
+            if branch_row != expected_fork_row:
+                try:
+                    runtime.native.release_session_async(branch_row)
+                finally:
+                    raise RuntimeError("temporary Q2 fork changed source boundary or cursor")
+            replay_offset = 0
+
+        final_output: NativeBatchOutput | None = None
+        final_health: NativeBatchOutputHealth | None = None
+        final_manifest: ListenerBatchManifest | None = None
+        cursor = branch_row.cache_position
+        base_cache_position = (
+            cache.base_cache_position if cache is not None else source_row.cache_position
+        )
+        source_q2_frame_ids = tuple(frame_id for frame_id, _audio in replay)
+        replay_to_run = replay[replay_offset:]
+        if not replay_to_run:
+            if forked_this_tick:
+                runtime.native.release_session_async(branch_row)
+            raise RuntimeError("temporary Q2 cache did not receive a new current frame")
+        try:
+            with _listener_stream_context(runtime.listener_stream), torch.inference_mode():
+                batch_append = getattr(runtime.native, "step_queued_audio_batch_async", None)
+                can_batch_append = (
+                    bool(getattr(runtime.native, "supports_queued_audio_batch", False))
+                    and callable(batch_append)
+                )
+
+                def replay_row(source_frame_id: int, cache_cursor: int) -> BatchRowDescriptor:
+                    row = replace(
+                        branch_row,
+                        cache_position=cache_cursor,
+                        valid_history_tokens=cache_cursor,
+                        logical_q_len=LISTENER_Q_PER_FRAME,
+                        ephemeral_reason=None,
+                        queue_audio_for_next_turn=False,
+                    )
+                    # The row identifies the decision boundary; its digest
+                    # carries the last real Q2 source included by this call.
+                    if source_frame_id != source_row.frame_id:
+                        return replace(
+                            row,
+                            input_frame_sha256=hashlib.sha256(
+                                f"q2-view:{source_row.session_id}:{source_row.session_generation}:"
+                                f"{source_row.state_epoch_id}:{source_frame_id}".encode("utf-8")
+                            ).hexdigest(),
+                        )
+                    return replace(row, input_frame_sha256=source_row.input_frame_sha256)
+
+                def accept_replay_output(
+                    output: NativeBatchOutput, manifest: ListenerBatchManifest,
+                    step_row: BatchRowDescriptor,
+                ) -> None:
+                    nonlocal final_output, final_health, final_manifest
+                    health_rows = tuple(runtime.native.verify_output_health(output))
+                    if (
+                        not output.preserves_listener_cursors
+                        or output.manifest_id != manifest.manifest_id
+                        or output.rows != (step_row,)
+                        or len(health_rows) != 1
+                        or health_rows[0].row != step_row
+                        or health_rows[0].generation != output.generation
+                        or not health_rows[0].checked
+                        or health_rows[0].nonfinite
+                    ):
+                        raise RuntimeError("temporary Q2 view output health/provenance failed")
+                    final_output = output
+                    final_health = health_rows[0]
+                    final_manifest = manifest
+
+                if can_batch_append:
+                    for chunk in _chunk_queued_q2_replay(replay_to_run):
+                        query_count = len(chunk) * LISTENER_Q_PER_FRAME
+                        if cursor > coordinator.capability.max_seq_len - query_count:
+                            raise RuntimeError("temporary Q2 view exceeds native physical Q capacity")
+                        step_row = replay_row(chunk[-1][0], cursor)
+                        manifest = self._single_row_private_manifest(step_row)
+                        for _source_frame_id, audio_soft in chunk:
+                            if bool(getattr(audio_soft, "is_cuda", audio_soft.device.type == "cuda")):
+                                audio_soft.record_stream(runtime.listener_stream)
+                        packed_audio = torch.cat(
+                            [audio_soft for _source_frame_id, audio_soft in chunk], dim=0
+                        ).contiguous()
+                        if bool(getattr(
+                            packed_audio, "is_cuda", packed_audio.device.type == "cuda"
+                        )):
+                            packed_audio.record_stream(runtime.listener_stream)
+                        output = batch_append(
+                            manifest, packed_audio, producer_stream=runtime.listener_stream,
+                        )
+                        accept_replay_output(output, manifest, step_row)
+                        cursor += query_count
+                        branch_row = replace(
+                            step_row,
+                            cache_position=cursor,
+                            valid_history_tokens=cursor,
+                        )
+                else:
+                    for source_frame_id, audio_soft in replay_to_run:
+                        if cursor > coordinator.capability.max_seq_len - LISTENER_Q_PER_FRAME:
+                            raise RuntimeError("temporary Q2 view exceeds native physical Q2 capacity")
+                        step_row = replay_row(source_frame_id, cursor)
+                        manifest = self._single_row_private_manifest(step_row)
+                        if bool(getattr(audio_soft, "is_cuda", audio_soft.device.type == "cuda")):
+                            audio_soft.record_stream(runtime.listener_stream)
+                        output = runtime.native.step_queued_audio_async(
+                            manifest,
+                            audio_soft.unsqueeze(0).contiguous(),
+                            producer_stream=runtime.listener_stream,
+                        )
+                        accept_replay_output(output, manifest, step_row)
+                        cursor += LISTENER_Q_PER_FRAME
+                        branch_row = replace(
+                            step_row,
+                            cache_position=cursor,
+                            valid_history_tokens=cursor,
+                        )
+            if final_output is None or final_health is None or final_manifest is None:
+                raise RuntimeError("temporary Q2 view replay produced no current-frame output")
+            current_step_row = final_manifest.rows[0]
+            self._q2_decision_caches.pop(source_row.session_id, None)
+            if persistent_cache_available:
+                self._q2_decision_caches[source_row.session_id] = _Q2DecisionCache(
+                    queue_epoch=queue_epoch,
+                    anchor=anchor,
+                    frame_keys=all_frame_keys,
+                    fork_row=branch_row,
+                    base_cache_position=base_cache_position,
+                    stable_turn_context=stable_context,
+                )
+            decision_view_ms = round(
+                max(0, time.perf_counter_ns() - decision_started_ns) / 1_000_000.0,
+                3,
+            )
+            return TemporaryQ2DecisionView(
+                source_row=source_row,
+                fork_row=current_step_row,
+                source_q2_frame_ids=source_q2_frame_ids,
+                manifest=final_manifest,
+                native_output=final_output,
+                native_output_health=final_health,
+                gemma_hidden_t=final_output.tensor[0, 0, :].reshape(1, 1, -1),
+                gemma_audio_queries_t=final_output.tensor[0],
+                replay_count=len(replay),
+                fork_count=int(forked_this_tick),
+                replayed_q2_count=len(replay_to_run),
+                cache_hit=cache_hit,
+                decision_view_ms=decision_view_ms,
+                context_mode=(
+                    "stable_turn" if stable_context else
+                    "legacy_fallback" if self._stable_turn_policy_q2_context else "legacy"
+                ),
+            )
+        except BaseException:
+            if persistent_cache_available:
+                self._q2_decision_caches.pop(source_row.session_id, None)
+                if forked_this_tick or cache_hit:
+                    try:
+                        with _listener_stream_context(runtime.listener_stream):
+                            runtime.native.release_session_async(branch_row)
+                    except BaseException as cleanup_error:
+                        if self._cleanup_error is None:
+                            self._cleanup_error = cleanup_error
+                        raise
+            raise
+        finally:
+            if not persistent_cache_available and forked_this_tick:
+                try:
+                    with _listener_stream_context(runtime.listener_stream):
+                        runtime.native.release_session_async(branch_row)
+                except BaseException as cleanup_error:
+                    if self._cleanup_error is None:
+                        self._cleanup_error = cleanup_error
+                    raise
+
     def _begin_assistant_audio_queue(
         self,
         session_id: str,
@@ -2879,6 +4587,7 @@ class ListenerMicrobatchWorker:
         expected_generation_id: int,
         expected_cache_position: int,
         reserve_tail_tokens: int,
+        response_id: str | None = None,
     ) -> ListenerSessionSnapshot:
         snapshot = self._check_unified_session_cas(
             session_id,
@@ -2901,12 +4610,92 @@ class ListenerMicrobatchWorker:
                 f"reserved_tail_tokens={reserve_tail_tokens}, "
                 f"max_seq_len={coordinator.capability.max_seq_len}"
             )
+        self._release_q2_decision_cache(session_id)
         runtime = self._runtime
         if runtime is None or not callable(getattr(runtime.native, "step_queued_audio_async", None)):
             raise RuntimeError("native runtime lacks queued-audio replay; no PCM re-tower fallback is allowed")
+        queue_epoch = uuid.uuid4().hex
+        first_frame_id = int(snapshot.next_frame_id)
+        stable_cache: _Q2DecisionCache | None = None
+        stable_epoch_unusable = False
+        if self._stable_turn_policy_q2_context:
+            previous_row = self._last_native_rows.get(session_id)
+            if (
+                previous_row is None
+                or previous_row.session_generation != snapshot.generation_id
+                or previous_row.state_epoch_id != snapshot.state_epoch_id
+                or previous_row.frame_id != snapshot.next_frame_id
+                or previous_row.listener_state_version != snapshot.state_version
+                or previous_row.sequence_position != snapshot.sequence_position
+                or previous_row.cache_position != snapshot.cache_position
+                or previous_row.valid_history_tokens != snapshot.valid_history_tokens
+                or previous_row.native_context_id != snapshot.native_context_id
+            ):
+                stable_epoch_unusable = True
+            else:
+                source_row = replace(
+                    previous_row,
+                    session_generation=snapshot.generation_id,
+                    state_epoch_id=snapshot.state_epoch_id,
+                    frame_id=snapshot.next_frame_id,
+                    listener_state_version=snapshot.state_version,
+                    sequence_position=snapshot.sequence_position,
+                    cache_position=snapshot.cache_position,
+                    valid_history_tokens=snapshot.valid_history_tokens,
+                    native_context_id=int(snapshot.native_context_id),
+                )
+                stable_cache = self._capture_stable_q2_context(
+                    source_row,
+                    queue_epoch=queue_epoch,
+                    first_frame_id=first_frame_id,
+                )
+                stable_epoch_unusable = stable_cache is None
         self._reserved_tail_tokens[session_id] = reserve_tail_tokens
         self._assistant_audio_queue_open.add(session_id)
+        self._assistant_audio_queue_first_frame_id[session_id] = first_frame_id
+        self._assistant_audio_queue_epoch[session_id] = queue_epoch
+        self._stable_q2_unusable_epochs.pop(session_id, None)
+        if stable_cache is not None:
+            self._q2_decision_caches[session_id] = stable_cache
+        elif stable_epoch_unusable:
+            self._stable_q2_unusable_epochs[session_id] = queue_epoch
+        if response_id is None:
+            self._assistant_audio_queue_response_id.pop(session_id, None)
+        else:
+            self._assistant_audio_queue_response_id[session_id] = response_id
+        self._pending_q2_prefills.pop(session_id, None)
+        self._trace_control6_queue_handoff(
+            session_id,
+            "queue_open",
+            generation=int(snapshot.generation_id),
+            cursor=int(snapshot.cache_position),
+            next_frame_id=int(snapshot.next_frame_id),
+            outstanding_frames=int(self._outstanding_frames.get(session_id, 0)),
+            reserve_tail_tokens=int(reserve_tail_tokens),
+        )
         return snapshot
+
+    def _request_q2_decision_prefill(
+        self,
+        session_id: str,
+        *,
+        expected_generation_id: int,
+        response_id: str,
+    ) -> bool:
+        if (
+            not self.q2_decision_prefill_supported
+            or session_id not in self._assistant_audio_queue_open
+            or self._assistant_audio_queue_response_id.get(session_id) != response_id
+        ):
+            return False
+        try:
+            snapshot = self._coordinator.session_state(session_id)
+        except KeyError:
+            return False
+        if snapshot.generation_id != expected_generation_id:
+            return False
+        self._pending_q2_prefills[session_id] = (int(expected_generation_id), response_id)
+        return True
 
     @staticmethod
     def _validate_tail_reservation(token_count: int) -> None:
@@ -2979,6 +4768,10 @@ class ListenerMicrobatchWorker:
         row = self._last_native_rows.get(session_id)
         if row is None:
             raise RuntimeError("assistant rollback has no native owner row")
+        self._release_q2_decision_cache(session_id)
+        self._pending_q2_prefills.pop(session_id, None)
+        self._assistant_audio_queue_response_id.pop(session_id, None)
+        self._end_parent_ephemeral_decodes(session_id)
         current_row = replace(
             row,
             session_generation=snapshot.generation_id,
@@ -3063,13 +4856,16 @@ class ListenerMicrobatchWorker:
                 f"queued_tokens={required}, reserved_tail_tokens={reserved_tail}, "
                 f"max_seq_len={max_seq_len})"
             )
-        previous_frame_id = -1
+        expected_frame_id = self._assistant_audio_queue_first_frame_id.get(session_id)
+        if queued and expected_frame_id is None:
+            raise RuntimeError("queued Q2 onset/prebuffer frame watermark is missing")
         for item in queued:
+            # Historical soft Q2 belongs to its source epoch. Current canonical
+            # epoch may move independently while its KV cursor remains stable.
             if (
                 item.session_id != session_id
                 or item.session_generation != snapshot.generation_id
-                or item.state_epoch_id != snapshot.state_epoch_id
-                or item.source_frame_id <= previous_frame_id
+                or item.source_frame_id != expected_frame_id
                 or item.source_frame_id >= snapshot.next_frame_id
                 or item.source_state_version >= snapshot.state_version
                 or item.source_sequence_position >= snapshot.sequence_position
@@ -3077,13 +4873,25 @@ class ListenerMicrobatchWorker:
                 or item.audio_soft_tokens.dtype != torch.bfloat16
                 or item.audio_soft_tokens.device.type != "cuda"
             ):
+                if item.source_frame_id != expected_frame_id:
+                    raise RuntimeError(
+                        "non-contiguous Q2 frame IDs in assistant-turn replay; queued audio was retained"
+                    )
                 raise RuntimeError("queued audio provenance/tensor does not match the current listener turn")
-            previous_frame_id = item.source_frame_id
+            expected_frame_id += 1
+
+        self._end_parent_ephemeral_decodes(session_id)
 
         # Closing this phase before native replay is the FIFO watermark: every
         # accepted pre-boundary frame is already committed, and later Q0 queue
         # submissions are rejected until the next model turn explicitly opens.
+        self._release_q2_decision_cache(session_id)
         self._assistant_audio_queue_open.remove(session_id)
+        self._assistant_audio_queue_first_frame_id.pop(session_id, None)
+        self._assistant_audio_queue_epoch.pop(session_id, None)
+        self._stable_q2_unusable_epochs.pop(session_id, None)
+        self._assistant_audio_queue_response_id.pop(session_id, None)
+        self._pending_q2_prefills.pop(session_id, None)
         if not queued:
             self._reserved_tail_tokens[session_id] = 0
             return snapshot
@@ -3203,6 +5011,109 @@ class ListenerMicrobatchWorker:
         self._queued_audio_soft[state.session_id] = deque()
         self._reserved_tail_tokens[state.session_id] = 0
 
+    def _fork_native_session(self, source_session_id: str, fork_session_id: str) -> str:
+        """Copy one idle native cache into a separate slot and private row state."""
+        source_id = str(source_session_id)
+        fork_id = str(fork_session_id)
+        if not fork_id or fork_id == source_id:
+            raise ValueError("secondary native fork needs a distinct non-empty session ID")
+        if fork_id in self._session_states:
+            raise ValueError("secondary native fork session ID is already registered")
+        if self._runtime is None or self._coordinator is None:
+            raise RuntimeError("secondary native fork requires the live primary owner")
+        if source_id not in self._imported_sessions:
+            raise RuntimeError("secondary native fork requires an imported primary cache")
+        if (self._outstanding_frames.get(source_id, 0) != 0
+                or (self._tick_expected is not None and source_id in self._tick_expected)
+                or source_id in self._assistant_audio_queue_open
+                or self._queued_audio_soft.get(source_id)):
+            raise RuntimeError("secondary native fork requires an idle primary frame/queue boundary")
+        fork_api = getattr(self._runtime.native, "fork_session_cache_within_owner", None)
+        if not callable(fork_api):
+            raise RuntimeError("native owner lacks independent secondary-slot cache fork")
+        source_snapshot = self._coordinator.session_state(source_id)
+        source_row = self._last_native_rows.get(source_id)
+        source_state = self._session_states[source_id]
+        if source_row is None or source_state.native_context_id is None:
+            raise RuntimeError("secondary native fork has no primary native row/context")
+        context_id = int(uuid.uuid4().int & ((1 << 63) - 1)) or 1
+        while any(
+            int(state.native_context_id or 0) == context_id
+            for state in self._session_states.values()
+        ):
+            context_id = int(uuid.uuid4().int & ((1 << 63) - 1)) or 1
+
+        def clone_state(value: Any) -> Any:
+            if isinstance(value, torch.Tensor):
+                return value.detach().clone()
+            if isinstance(value, np.ndarray):
+                return np.array(value, copy=True)
+            return copy.deepcopy(value)
+
+        fork_state = ListenerSessionState(
+            session_id=fork_id,
+            generation_id=int(source_snapshot.generation_id),
+            state_epoch_id=str(source_snapshot.state_epoch_id),
+            runtime_signature=source_state.runtime_signature,
+            next_frame_id=int(source_snapshot.next_frame_id),
+            state_version=int(source_snapshot.state_version),
+            sequence_position=int(source_snapshot.sequence_position),
+            cache_position=int(source_snapshot.cache_position),
+            valid_history_tokens=int(source_snapshot.valid_history_tokens),
+            native_context_id=context_id,
+            user_pcm_tail=clone_state(source_state.user_pcm_tail),
+            assistant_pcm_tail=clone_state(source_state.assistant_pcm_tail),
+            user_mel_history=clone_state(source_state.user_mel_history),
+            assistant_mel_history=clone_state(source_state.assistant_mel_history),
+            attention_mask=clone_state(source_state.attention_mask),
+            # Native KV/context live in the copied slot, never by Python alias.
+            native_kv_cache=None,
+            native_context=None,
+        )
+        digest = hashlib.sha256(
+            f"secondary-native-fork:{source_id}:{fork_id}:{source_snapshot.cache_position}".encode()
+        ).hexdigest()
+        destination_row = replace(
+            source_row,
+            session_id=fork_id,
+            native_context_id=context_id,
+            input_frame_sha256=digest,
+            frame_ready_at_ns=time.monotonic_ns(),
+        )
+        self._ensure_capacity_for_registration(len(self._session_states) + 1)
+        self._coordinator.register_session(fork_state)
+        self._session_states[fork_id] = fork_state
+        self._prefix_importers[fork_id] = self._prefix_importers[source_id]
+        self._prefix_revisions[fork_id] = self._prefix_revisions.get(source_id)
+        self._unified_prefix_revisions[fork_id] = self._unified_prefix_revisions.get(source_id, 0)
+        self._prefix_fallback_reasons[fork_id] = self._prefix_fallback_reasons.get(source_id)
+        self._prefix_lengths[fork_id] = self._prefix_lengths[source_id]
+        self._prefix_replay_frame_ids[fork_id] = self._prefix_replay_frame_ids.get(source_id, ())
+        self._outstanding_frames[fork_id] = 0
+        self._queued_audio_soft[fork_id] = deque()
+        self._reserved_tail_tokens[fork_id] = 0
+        try:
+            copied = fork_api(source_row, destination_row)
+            copied_row = getattr(copied, "destination_row", copied)
+            if copied_row != destination_row:
+                raise RuntimeError("secondary native fork returned a different destination boundary")
+            self._last_native_rows[fork_id] = destination_row
+            self._imported_sessions.add(fork_id)
+            return fork_id
+        except BaseException:
+            self._coordinator.close_session(fork_id)
+            self._session_states.pop(fork_id, None)
+            self._prefix_importers.pop(fork_id, None)
+            self._prefix_revisions.pop(fork_id, None)
+            self._unified_prefix_revisions.pop(fork_id, None)
+            self._prefix_fallback_reasons.pop(fork_id, None)
+            self._prefix_lengths.pop(fork_id, None)
+            self._prefix_replay_frame_ids.pop(fork_id, None)
+            self._outstanding_frames.pop(fork_id, None)
+            self._queued_audio_soft.pop(fork_id, None)
+            self._reserved_tail_tokens.pop(fork_id, None)
+            raise
+
     def _refresh_unified_prefix_before_audio(
         self,
         session_id: str,
@@ -3218,8 +5129,11 @@ class ListenerMicrobatchWorker:
             raise RuntimeError("unified prefix refresh requires a listener coordinator")
         if not callable(prefix_import):
             raise TypeError("prefix_import must be a callable owner-thread cache provider")
-        if not 1 <= len(prefix_token_ids) <= 291:
-            raise ValueError("unified prefix token count must be in [1,291]")
+        if not 1 <= len(prefix_token_ids) <= NATIVE_CONTROL6_PREFIX_MAX_TOKENS:
+            raise ValueError(
+                "unified prefix token count must be in [1,"
+                f"{NATIVE_CONTROL6_PREFIX_MAX_TOKENS}]"
+            )
         state = self._session_states.get(session_id)
         if state is None:
             raise KeyError(f"unknown listener session: {session_id}")
@@ -3269,6 +5183,8 @@ class ListenerMicrobatchWorker:
             raise RuntimeError("unified prefix refresh found an unowned native cache row")
 
         try:
+            self._release_q2_decision_cache(session_id)
+            self._end_parent_ephemeral_decodes(session_id)
             if imported:
                 self._release_native_session(session_id)
             self._coordinator.rebase_cache_position(
@@ -3311,6 +5227,8 @@ class ListenerMicrobatchWorker:
         if self._tick_future is not None and not self._tick_future.done():
             raise RuntimeError("semantic prefix refresh cannot overlap a shared tick")
         try:
+            self._release_q2_decision_cache(session_id)
+            self._end_parent_ephemeral_decodes(session_id)
             self._release_native_session(session_id)
             self._coordinator.rebase_cache_position(session_id, int(cache_position))
             self._prefix_importers[session_id] = prefix_import
@@ -3340,8 +5258,11 @@ class ListenerMicrobatchWorker:
             if prepared.prefix.cache_position is None
             else prepared.prefix.cache_position
         )
-        if not 1 <= prefix_position <= 291:
-            raise ValueError("initial semantic prefix position must be in [1,291]")
+        if not 1 <= prefix_position <= NATIVE_CONTROL6_PREFIX_MAX_TOKENS:
+            raise ValueError(
+                "initial semantic prefix position must be in [1,"
+                f"{NATIVE_CONTROL6_PREFIX_MAX_TOKENS}]"
+            )
 
         # The owner deliberately accepts only a pristine listener cursor.  A
         # frame arriving during preparation is left for the existing lazy
@@ -3376,6 +5297,7 @@ class ListenerMicrobatchWorker:
                 # Repeated session.update before frame zero is a safe prefix
                 # replacement: retire the old private row, then import the
                 # newest frozen semantic revision without advancing cursors.
+                self._release_q2_decision_cache(session_id)
                 self._release_native_session(session_id)
             self._coordinator.rebase_cache_position(session_id, int(prefix_position))
             row = BatchRowDescriptor(
@@ -3475,12 +5397,17 @@ class ListenerMicrobatchWorker:
         if state.native_context_id is None or not callable(prefix_import):
             raise ValueError("reset requires a native context and owner-thread prefix importer")
         try:
+            self._end_parent_ephemeral_decodes(session_id)
+            self._release_q2_decision_cache(session_id)
             if self._shadow_worker is not None:
                 self._shadow_worker.invalidate_session(session_id)
             self._release_native_session(session_id)
+            with _listener_stream_context(self._runtime.listener_stream):
+                self._runtime.frontend.close_session(session_id)
             self._coordinator.close_session(session_id)
             del self._session_states[session_id]
             del self._prefix_importers[session_id]
+            self._text_append_committed_scopes.pop(session_id, None)
             self._prefix_revisions.pop(session_id, None)
             self._unified_prefix_revisions.pop(session_id, None)
             self._prefix_fallback_reasons.pop(session_id, None)
@@ -3489,6 +5416,11 @@ class ListenerMicrobatchWorker:
             self._queued_audio_soft.pop(session_id, None)
             self._reserved_tail_tokens.pop(session_id, None)
             self._assistant_audio_queue_open.discard(session_id)
+            self._assistant_audio_queue_first_frame_id.pop(session_id, None)
+            self._assistant_audio_queue_epoch.pop(session_id, None)
+            self._stable_q2_unusable_epochs.pop(session_id, None)
+            self._assistant_audio_queue_response_id.pop(session_id, None)
+            self._pending_q2_prefills.pop(session_id, None)
             del self._outstanding_frames[session_id]
             self._register_session(state, prefix_import)
         except BaseException as exc:
@@ -3503,12 +5435,17 @@ class ListenerMicrobatchWorker:
         if session_id not in self._session_states:
             raise KeyError(f"unknown listener session: {session_id}")
         try:
+            self._end_parent_ephemeral_decodes(session_id)
+            self._release_q2_decision_cache(session_id)
             if self._shadow_worker is not None:
                 self._shadow_worker.invalidate_session(session_id)
             self._release_native_session(session_id)
+            with _listener_stream_context(self._runtime.listener_stream):
+                self._runtime.frontend.close_session(session_id)
             retired = self._coordinator.close_session(session_id)
             self._session_states.pop(session_id)
             self._prefix_importers.pop(session_id)
+            self._text_append_committed_scopes.pop(session_id, None)
             self._prefix_revisions.pop(session_id, None)
             self._unified_prefix_revisions.pop(session_id, None)
             self._prefix_fallback_reasons.pop(session_id, None)
@@ -3518,6 +5455,11 @@ class ListenerMicrobatchWorker:
             self._queued_audio_soft.pop(session_id, None)
             self._reserved_tail_tokens.pop(session_id, None)
             self._assistant_audio_queue_open.discard(session_id)
+            self._assistant_audio_queue_first_frame_id.pop(session_id, None)
+            self._assistant_audio_queue_epoch.pop(session_id, None)
+            self._stable_q2_unusable_epochs.pop(session_id, None)
+            self._assistant_audio_queue_response_id.pop(session_id, None)
+            self._pending_q2_prefills.pop(session_id, None)
             return retired
         except BaseException as exc:
             self._fatal_error = exc
@@ -3600,7 +5542,54 @@ class ListenerMicrobatchWorker:
         runtime = self._runtime
         if runtime is None:
             raise RuntimeError("worker runtime is unavailable")
+        profile_frames = (
+            {
+                int(row.frame_id) for row in batch.manifest.rows
+                if int(row.frame_id) in self._torch_profile_frame_ids
+            }
+            if self._torch_profile_trace_path and not self._torch_profile_failed
+            else set()
+        )
+        if profile_frames and self._torch_profile_trace_path and not self._torch_profile_failed:
+            self._torch_profiled_frame_ids.update(profile_frames)
+            if self._torch_profiler is None:
+                try:
+                    profiler = torch.profiler.profile(
+                        activities=[
+                            torch.profiler.ProfilerActivity.CPU,
+                            torch.profiler.ProfilerActivity.CUDA,
+                        ],
+                        record_shapes=False,
+                        profile_memory=False,
+                        with_stack=False,
+                    )
+                    profiler.start()
+                    self._torch_profiler = profiler
+                    logging.getLogger(__name__).info(
+                        "listener torch profiler started: frames=%s trace=%s",
+                        sorted(self._torch_profile_frame_ids),
+                        self._torch_profile_trace_path,
+                    )
+                except Exception as exc:
+                    self._torch_profile_failed = True
+                    logging.getLogger(__name__).warning(
+                        "listener torch profiler unavailable: %s: %s",
+                        type(exc).__name__, exc,
+                    )
+        self._q2_cache_disabled_for_tick.clear()
         states = tuple(self._session_states[row.session_id] for row in batch.manifest.rows)
+        for row, state in zip(batch.manifest.rows, states, strict=True):
+            self._trace_control6_queue_handoff(
+                row.session_id,
+                "frame_process",
+                frame_id=int(row.frame_id),
+                logical_q_len=int(row.logical_q_len),
+                queue_audio_for_next_turn=bool(row.queue_audio_for_next_turn),
+                queue_open_at_process=row.session_id in self._assistant_audio_queue_open,
+                cache_position=int(row.cache_position),
+                valid_history=int(row.valid_history_tokens),
+                next_frame_id=int(state.next_frame_id),
+            )
         prepared = None
         frontend_commit_attempted = False
         listener_model_lock_wait_ms: float | None = None
@@ -3634,6 +5623,10 @@ class ListenerMicrobatchWorker:
         prefix_refresh_revisions_by_session: dict[str, int | None] = {}
         batch_promotions: dict[str, _PendingShadowPromotion] = {}
         queued_soft_to_commit: list[QueuedAudioSoftFrame] = []
+        decision_views: dict[str, TemporaryQ2DecisionView] = {}
+        decision_view_unavailable_reasons: dict[str, str] = {}
+        no_input_q2_prefill_sessions: set[str] = set()
+        policy_inputs: tuple[PolicyInput | PolicyPreHeadContext, ...] | None = None
         for row in batch.manifest.rows:
             pending_promotion = self._pending_promotions.get(row.session_id)
             if pending_promotion is None:
@@ -3666,8 +5659,51 @@ class ListenerMicrobatchWorker:
         try:
             with _listener_stream_context(runtime.listener_stream):
                 capacity_started_ns = time.perf_counter_ns()
-                actual_capacity = runtime.native.ensure_capacity(
+                q2_session_ids = {
+                    row.session_id for row in batch.manifest.rows
+                    if row.queue_audio_for_next_turn
+                }
+                metadata_rebind_available = (
+                    getattr(runtime.native, "_metadata_rebind_api_available", False) is True
+                    and callable(getattr(
+                        runtime.native, "rebind_ephemeral_session_metadata", None,
+                    ))
+                )
+                new_q2_slots = (
+                    sum(session_id not in self._q2_decision_caches for session_id in q2_session_ids)
+                    if metadata_rebind_available
+                    else int(bool(q2_session_ids))
+                )
+                requested_capacity = (
                     len(self._session_states)
+                    + len(self._ephemeral_decode_branches)
+                    + len(self._q2_decision_caches)
+                    + new_q2_slots
+                )
+                # Avoid growing the native slot pool solely to retain a Q2
+                # snapshot: under slot pressure, retire cached forks and use
+                # the original one-scratch-slot replay path for this tick.
+                legacy_capacity = (
+                    len(self._session_states)
+                    + len(self._ephemeral_decode_branches)
+                    + int(bool(q2_session_ids))
+                )
+                current_capacity = getattr(runtime.native, "max_batch_size", None)
+                if (
+                    metadata_rebind_available
+                    and q2_session_ids
+                    and self._q2_decision_caches
+                    and isinstance(current_capacity, int)
+                    and not isinstance(current_capacity, bool)
+                    and requested_capacity > current_capacity
+                    and legacy_capacity <= current_capacity
+                ):
+                    for cached_session_id in tuple(self._q2_decision_caches):
+                        self._release_q2_decision_cache(cached_session_id)
+                    self._q2_cache_disabled_for_tick.update(q2_session_ids)
+                    requested_capacity = legacy_capacity
+                actual_capacity = runtime.native.ensure_capacity(
+                    requested_capacity
                 )
                 capacity_growth_ms = round(
                     max(0, time.perf_counter_ns() - capacity_started_ns) / 1_000_000.0,
@@ -3676,11 +5712,11 @@ class ListenerMicrobatchWorker:
                 if (
                     isinstance(actual_capacity, bool)
                     or not isinstance(actual_capacity, int)
-                    or actual_capacity < len(self._session_states)
+                    or actual_capacity < requested_capacity
                 ):
                     raise RuntimeError(
                         "native listener returned insufficient capacity at tick boundary: "
-                        f"requested={len(self._session_states)}, actual={actual_capacity!r}"
+                        f"requested={requested_capacity}, actual={actual_capacity!r}"
                     )
                 for row, state in zip(batch.manifest.rows, states, strict=True):
                     if row.session_id in self._imported_sessions:
@@ -3751,7 +5787,11 @@ class ListenerMicrobatchWorker:
 
             with _listener_stream_context(runtime.listener_stream):
                 frontend_started_ns = time.perf_counter_ns()
-                prepared = runtime.frontend.encode_batch(batch, states)
+                if self._torch_profiler is not None:
+                    with torch.profiler.record_function("listener.frontend_encode_batch"):
+                        prepared = runtime.frontend.encode_batch(batch, states)
+                else:
+                    prepared = runtime.frontend.encode_batch(batch, states)
                 frontend_encode_ms = round(
                     max(0, time.perf_counter_ns() - frontend_started_ns) / 1_000_000.0,
                     3,
@@ -3771,6 +5811,15 @@ class ListenerMicrobatchWorker:
                     raise RuntimeError(
                         "frontend must return exact BF16 [N,2,1536] real listener tokens"
                     )
+                if prepared.audio_stream_cursors:
+                    validate_frontend = getattr(
+                        runtime.native, "validate_audio_frontend_metadata", None
+                    )
+                    if not callable(validate_frontend):
+                        raise RuntimeError(
+                            "native listener adapter lacks incremental audio cursor validation"
+                        )
+                    validate_frontend(batch.manifest, prepared)
                 for index, row in enumerate(batch.manifest.rows):
                     if not row.queue_audio_for_next_turn:
                         continue
@@ -3799,15 +5848,53 @@ class ListenerMicrobatchWorker:
                         )
                     if pending and row.frame_id <= pending[-1].source_frame_id:
                         raise RuntimeError("queued assistant-phase audio frames are not strictly ordered")
+                if (
+                    runtime.policy is not None
+                    and runtime.policy_inputs is not None
+                    and any(row.queue_audio_for_next_turn for row in batch.manifest.rows)
+                ):
+                    policy_inputs = tuple(runtime.policy_inputs(batch, states))
+                    if len(policy_inputs) != batch.manifest.batch_size:
+                        raise RuntimeError("batched Control6 policy inputs returned an incomplete row set")
+                for index, row in enumerate(batch.manifest.rows):
+                    if not row.queue_audio_for_next_turn:
+                        continue
+                    context = None if policy_inputs is None else policy_inputs[index]
+                    if _is_exact_no_input_speaker_continue_context(context, row):
+                        no_input_q2_prefill_sessions.add(row.session_id)
+                        continue
+                    try:
+                        if self._torch_profiler is not None:
+                            with torch.profiler.record_function("listener.q2_decision_view"):
+                                decision_views[row.session_id] = self._build_speaking_q2_decision_view(
+                                    row,
+                                    prepared.audio_soft_tokens[index],
+                                )
+                        else:
+                            decision_views[row.session_id] = self._build_speaking_q2_decision_view(
+                                row,
+                                prepared.audio_soft_tokens[index],
+                            )
+                    except _Q2DecisionViewUnavailable as exc:
+                        decision_view_unavailable_reasons[row.session_id] = str(exc)
+                self._q2_cache_disabled_for_tick.clear()
                 native_cuda_events = _timed_cuda_event_pair(runtime.listener_stream)
                 if native_cuda_events is not None:
                     native_cuda_events[0].record(runtime.listener_stream)
                 native_started_ns = time.perf_counter_ns()
-                native_output = runtime.native.step_async(
-                    batch.manifest,
-                    audio_soft,
-                    producer_stream=runtime.listener_stream,
-                )
+                if self._torch_profiler is not None:
+                    with torch.profiler.record_function("listener.native_step_async"):
+                        native_output = runtime.native.step_async(
+                            batch.manifest,
+                            audio_soft,
+                            producer_stream=runtime.listener_stream,
+                        )
+                else:
+                    native_output = runtime.native.step_async(
+                        batch.manifest,
+                        audio_soft,
+                        producer_stream=runtime.listener_stream,
+                    )
                 if native_cuda_events is not None:
                     native_cuda_events[1].record(runtime.listener_stream)
                 native_submit_ms = round(
@@ -3879,29 +5966,71 @@ class ListenerMicrobatchWorker:
                 if runtime.policy is not None:
                     if runtime.policy_inputs is None:
                         raise RuntimeError("batched Control6 requires policy_inputs")
-                    policy_inputs = tuple(runtime.policy_inputs(batch, states))
+                    mixed_source_policy = getattr(runtime.policy, "step_native_output_views", None)
+                    if not callable(mixed_source_policy):
+                        raise RuntimeError("batched Control6 lacks single-pass mixed-source policy evaluation")
+                    if policy_inputs is None:
+                        policy_inputs = tuple(runtime.policy_inputs(batch, states))
                     policy_started_ns = time.perf_counter_ns()
-                    decisions = tuple(runtime.policy.step_native_output_batch(
-                        native_output,
-                        batch.manifest,
-                        policy_inputs,
-                    ))
+                    output_views = tuple(
+                        DecisionRowSource(
+                            native_output=view.native_output,
+                            manifest=view.manifest,
+                            row_index=0,
+                            decision_row=row,
+                        )
+                        if (view := decision_views.get(row.session_id)) is not None
+                        else DecisionRowSource(
+                            native_output=native_output,
+                            manifest=batch.manifest,
+                            row_index=index,
+                            decision_row=row,
+                        )
+                        for index, row in enumerate(batch.manifest.rows)
+                    )
+                    decisions_list = list(mixed_source_policy(output_views, policy_inputs))
+                    if len(decisions_list) != batch.manifest.batch_size:
+                        raise RuntimeError("Control6 returned an incomplete row set")
+                    for index, row in enumerate(batch.manifest.rows):
+                        reason = decision_view_unavailable_reasons.get(row.session_id)
+                        if reason is not None:
+                            diagnostics = dict(decisions_list[index].diagnostics or {})
+                            diagnostics["decision_view_fallback_reason"] = reason
+                            decisions_list[index] = replace(
+                                decisions_list[index], diagnostics=diagnostics,
+                            )
+                    decisions = tuple(decisions_list)
                     control6_policy_ms = round(
                         max(0, time.perf_counter_ns() - policy_started_ns) / 1_000_000.0,
                         3,
                     )
-                    if len(decisions) != batch.manifest.batch_size:
-                        raise RuntimeError("Control6 returned an incomplete row set")
-                    for row, decision in zip(batch.manifest.rows, decisions, strict=True):
+                    for row, context, decision in zip(
+                        batch.manifest.rows, policy_inputs, decisions, strict=True
+                    ):
+                        expected_turn_generation = (
+                            context.tick_id[1]
+                            if isinstance(context, PolicyPreHeadContext)
+                            else row.session_generation
+                        )
                         if (
                             decision.session != row.session_id
-                            or decision.generation_id != row.session_generation
+                            or decision.generation_id != expected_turn_generation
                             or decision.frame_id != row.frame_id
                             or decision.listener_frame_id != row.frame_id
                         ):
-                            raise RuntimeError("Control6 decision identity does not match its native row")
+                            raise RuntimeError(
+                                "Control6 decision identity does not match its native row: "
+                                f"session={decision.session!r}/{row.session_id!r}, "
+                                f"generation={decision.generation_id}/{expected_turn_generation}, "
+                                f"frame={decision.frame_id}/{row.frame_id}, "
+                                f"listener_frame={decision.listener_frame_id}/{row.frame_id}"
+                            )
                 completion_started_ns = time.perf_counter_ns()
-                self._wait_batch_completion(runtime)
+                if self._torch_profiler is not None:
+                    with torch.profiler.record_function("listener.cuda_completion_wait"):
+                        self._wait_batch_completion(runtime)
+                else:
+                    self._wait_batch_completion(runtime)
                 for index, row in enumerate(batch.manifest.rows):
                     if not row.queue_audio_for_next_turn:
                         continue
@@ -4001,6 +6130,17 @@ class ListenerMicrobatchWorker:
                 )
             for queued_soft in queued_soft_to_commit:
                 self._queued_audio_soft[queued_soft.session_id].append(queued_soft)
+            for row in batch.manifest.rows:
+                if row.session_id not in no_input_q2_prefill_sessions:
+                    continue
+                response_id = self._assistant_audio_queue_response_id.get(row.session_id)
+                if response_id is None:
+                    continue
+                self._request_q2_decision_prefill(
+                    row.session_id,
+                    expected_generation_id=row.session_generation,
+                    response_id=response_id,
+                )
             shadow = self._shadow_worker
             if shadow is not None:
                 for shadow_q2 in shadow_q2_rows:
@@ -4057,6 +6197,11 @@ class ListenerMicrobatchWorker:
                         audio_tower_hidden=prepared.audio_soft_tokens[index],
                         state_snapshot=snapshot_listener_state(state),
                         native_state=native_state,
+                        decision_view=decision_views.get(row.session_id),
+                        decision_view_unavailable_reason=(
+                            decision_view_unavailable_reasons.get(row.session_id)
+                        ),
+                        policy_decision=(None if decisions is None else decisions[index]),
                         native_output_health=native_output_health[index],
                         native_output_health_ms=native_output_health_ms,
                         native_control6_raw_scores=(
@@ -4139,6 +6284,32 @@ class ListenerMicrobatchWorker:
                     self._on_error(batch, exc)
                 except BaseException as notification_error:
                     self._notification_error = notification_error
+        finally:
+            if self._torch_profiler is not None and (
+                profile_frames.intersection(self._torch_profile_frame_ids)
+                and self._torch_profile_frame_ids.issubset(self._torch_profiled_frame_ids)
+                and (
+                    self._fatal_error is not None
+                    or max(self._torch_profile_frame_ids) in profile_frames
+                )
+            ):
+                profiler = self._torch_profiler
+                self._torch_profiler = None
+                try:
+                    profiler.stop()
+                    trace_path = os.path.abspath(self._torch_profile_trace_path)
+                    os.makedirs(os.path.dirname(trace_path), exist_ok=True)
+                    profiler.export_chrome_trace(trace_path)
+                    logging.getLogger(__name__).info(
+                        "listener torch profiler exported: frames=%s trace=%s",
+                        sorted(self._torch_profiled_frame_ids), trace_path,
+                    )
+                except Exception as exc:
+                    self._torch_profile_failed = True
+                    logging.getLogger(__name__).warning(
+                        "listener torch profiler export failed: %s: %s",
+                        type(exc).__name__, exc,
+                    )
 
     def _promote_semantic_before_manifest(
         self,
@@ -4453,8 +6624,11 @@ def _validate_shadow_stage(stage: ShadowPrefixStage) -> None:
         # generation used for cancellation and promotion is carried separately
         # by ShadowPrefixStage and must remain authoritative there.
         _strict_nonnegative_int_value("session_generation_id", request_generation)
-    if not 1 <= int(request.prefix_len) <= 291:
-        raise ValueError("semantic request prefix_len must be in [1,291]")
+    if not 1 <= int(request.prefix_len) <= NATIVE_CONTROL6_PREFIX_MAX_TOKENS:
+        raise ValueError(
+            "semantic request prefix_len must be in [1,"
+            f"{NATIVE_CONTROL6_PREFIX_MAX_TOKENS}]"
+        )
     replay_q2 = tuple(request.replay_q2)
     replay_ids = tuple(request.replay_frame_ids)
     if len(replay_q2) != len(replay_ids) or len(replay_q2) > 64:

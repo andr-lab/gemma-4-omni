@@ -77,10 +77,10 @@ def test_decode_forwards_only_transition_suffix_and_samples_first_token_from_its
         )
     )
 
-    assert forwarded == [[10, 11], [12], [42], [43]]
+    assert forwarded == [[10, 11, 12], [42], [43]]
     assert sampled_from == [12, 42, 43]
     assert [token_id for token_id, _, _ in emitted] == [42, 43]
-    assert dispatch_count_at_emit == [3, 4]
+    assert dispatch_count_at_emit == [2, 3]
     assert sampled_history == [(), (42,), (42, 43)]
     assert first_tokens[0].token_id == emitted[0][0]
     assert len(first_logits_events) == 1
@@ -94,6 +94,39 @@ def test_decode_forwards_only_transition_suffix_and_samples_first_token_from_its
     assert result.transition_token_count == 3
     assert result.pending_token_id is None
     assert result.owner_action == "handle_terminal_eos"
+
+
+@pytest.mark.parametrize("transition_len", [5, 8])
+def test_decode_forwards_transition_up_to_eight_tokens_in_one_native_call(transition_len: int) -> None:
+    forwarded: list[list[int]] = []
+    first_logits_events = []
+    sample_ids = iter((42, 99))
+
+    async def forward_tokens(token_ids: list[int]):
+        forwarded.append(list(token_ids))
+        return torch.tensor([[float(token_ids[-1]), 0.0]]), torch.tensor([token_ids[-1]])
+
+    def sample_token(logits: torch.Tensor, _generated_ids: tuple[int, ...]):
+        token_id = next(sample_ids)
+        return torch.tensor([[token_id]]), token_id, logits
+
+    decoder = UnifiedNativeDecoder(
+        _thinker(),
+        forward_tokens=forward_tokens,
+        sample_token=sample_token,
+        monotonic_ns=_Clock(),
+    )
+    result = asyncio.run(decoder.decode(
+        transition_token_ids=list(range(10, 10 + transition_len)),
+        max_new_tokens=2,
+        first_logits_ready=first_logits_events.append,
+    ))
+
+    assert forwarded == [list(range(10, 10 + transition_len)), [42]]
+    assert len(first_logits_events) == 1
+    assert int(first_logits_events[0].final_hidden.item()) == 10 + transition_len - 1
+    assert result.generated_count == 1
+    assert result.transition_token_count == transition_len
 
 
 def test_decode_does_not_commit_or_emit_eos_token() -> None:

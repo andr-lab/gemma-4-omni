@@ -1,0 +1,446 @@
+[
+  {
+    "frame_id": 0,
+    "session_id": "578bcbd450814802883c72e0595c0b1d",
+    "legal_actions": [
+      "LISTEN"
+    ],
+    "speaker_active": false,
+    "peer_turn_active": false,
+    "generation_id": 0,
+    "recorded_action": "LISTEN",
+    "recorded_pSpeak": 0.2211969494819641,
+    "recorded_legal_pSpeak": 0.0
+  },
+  {
+    "frame_id": 1,
+    "session_id": "578bcbd450814802883c72e0595c0b1d",
+    "legal_actions": [
+      "LISTEN"
+    ],
+    "speaker_active": false,
+    "peer_turn_active": false,
+    "generation_id": 0,
+    "recorded_action": "LISTEN",
+    "recorded_pSpeak": 0.0006702487589791417,
+    "recorded_legal_pSpeak": 0.0
+  },
+  {
+    "frame_id": 2,
+    "session_id": "578bcbd450814802883c72e0595c0b1d",
+    "legal_actions": [
+      "LISTEN",
+      "BACKCHANNEL",
+      "SPEAK"
+    ],
+    "speaker_active": false,
+    "peer_turn_active": true,
+    "generation_id": 0,
+    "recorded_action": "LISTEN",
+    "recorded_pSpeak": 0.0002495725639164448,
+    "recorded_legal_pSpeak": 0.0002495725639164448
+  },
+  {
+    "frame_id": 3,
+    "session_id": "578bcbd450814802883c72e0595c0b1d",
+    "legal_actions": [
+      "LISTEN",
+      "BACKCHANNEL",
+      "SPEAK"
+    ],
+    "speaker_active": false,
+    "peer_turn_active": true,
+    "generation_id": 0,
+    "recorded_action": "LISTEN",
+    "recorded_pSpeak": 0.001261195633560419,
+    "recorded_legal_pSpeak": 0.001261195633560419
+  },
+  {
+    "frame_id": 4,
+    "session_id": "578bcbd450814802883c72e0595c0b1d",
+    "legal_actions": [
+      "LISTEN",
+      "BACKCHANNEL",
+      "SPEAK"
+    ],
+    "speaker_active": false,
+    "peer_turn_active": true,
+    "generation_id": 0,
+    "recorded_action": "LISTEN",
+    "recorded_pSpeak": 1.467331713911335E-07,
+    "recorded_legal_pSpeak": 1.467331713911335E-07
+  },
+  {
+    "frame_id": 5,
+    "session_id": "578bcbd450814802883c72e0595c0b1d",
+    "legal_actions": [
+      "LISTEN",
+      "BACKCHANNEL",
+      "SPEAK"
+    ],
+    "speaker_active": false,
+    "peer_turn_active": true,
+    "generation_id": 0,
+    "recorded_action": "LISTEN",
+    "recorded_pSpeak": 0.008303247392177582,
+    "recorded_legal_pSpeak": 0.008303247392177582
+  },
+  {
+    "frame_id": 6,
+    "session_id": "578bcbd450814802883c72e0595c0b1d",
+    "legal_actions": [
+      "LISTEN",
+      "BACKCHANNEL",
+      "SPEAK"
+    ],
+    "speaker_active": false,
+    "peer_turn_active": true,
+    "generation_id": 0,
+    "recorded_action": "LISTEN",
+    "recorded_pSpeak": 0.0004888091352768242,
+    "recorded_legal_pSpeak": 0.0004888091352768242
+  },
+  {
+    "frame_id": 7,
+    "session_id": "578bcbd450814802883c72e0595c0b1d",
+    "legal_actions": [
+      "LISTEN",
+      "BACKCHANNEL",
+      "SPEAK"
+    ],
+    "speaker_active": false,
+    "peer_turn_active": true,
+    "generation_id": 0,
+    "recorded_action": "LISTEN",
+    "recorded_pSpeak": 0.0019603720866143703,
+    "recorded_legal_pSpeak": 0.0019603720866143703
+  },
+  {
+    "frame_id": 8,
+    "session_id": "578bcbd450814802883c72e0595c0b1d",
+    "legal_actions": [
+      "LISTEN",
+      "BACKCHANNEL",
+      "SPEAK"
+    ],
+    "speaker_active": false,
+    "peer_turn_active": true,
+    "generation_id": 0,
+    "recorded_action": "LISTEN",
+    "recorded_pSpeak": 5.779487401014194E-05,
+    "recorded_legal_pSpeak": 5.779487401014194E-05
+  },
+  {
+    "frame_id": 9,
+    "session_id": "578bcbd450814802883c72e0595c0b1d",
+    "legal_actions": [
+      "LISTEN",
+      "BACKCHANNEL",
+      "SPEAK"
+    ],
+    "speaker_active": false,
+    "peer_turn_active": true,
+    "generation_id": 0,
+    "recorded_action": "LISTEN",
+    "recorded_pSpeak": 0.0012613472063094378,
+    "recorded_legal_pSpeak": 0.0012613472063094378
+  },
+  {
+    "frame_id": 10,
+    "session_id": "578bcbd450814802883c72e0595c0b1d",
+    "legal_actions": [
+      "LISTEN",
+      "BACKCHANNEL",
+      "SPEAK"
+    ],
+    "speaker_active": false,
+    "peer_turn_active": true,
+    "generation_id": 0,
+    "recorded_action": "LISTEN",
+    "recorded_pSpeak": 0.04091145470738411,
+    "recorded_legal_pSpeak": 0.04091145470738411
+  },
+  {
+    "frame_id": 11,
+    "session_id": "578bcbd450814802883c72e0595c0b1d",
+    "legal_actions": [
+      "LISTEN",
+      "BACKCHANNEL",
+      "SPEAK"
+    ],
+    "speaker_active": false,
+    "peer_turn_active": true,
+    "generation_id": 0,
+    "recorded_action": "LISTEN",
+    "recorded_pSpeak": 0.00030721418443135917,
+    "recorded_legal_pSpeak": 0.00030721418443135917
+  },
+  {
+    "frame_id": 12,
+    "session_id": "578bcbd450814802883c72e0595c0b1d",
+    "legal_actions": [
+      "LISTEN",
+      "BACKCHANNEL",
+      "SPEAK"
+    ],
+    "speaker_active": false,
+    "peer_turn_active": true,
+    "generation_id": 0,
+    "recorded_action": "LISTEN",
+    "recorded_pSpeak": 2.374009682171163E-06,
+    "recorded_legal_pSpeak": 2.374009682171163E-06
+  },
+  {
+    "frame_id": 13,
+    "session_id": "578bcbd450814802883c72e0595c0b1d",
+    "legal_actions": [
+      "LISTEN",
+      "BACKCHANNEL",
+      "SPEAK"
+    ],
+    "speaker_active": false,
+    "peer_turn_active": true,
+    "generation_id": 0,
+    "recorded_action": "LISTEN",
+    "recorded_pSpeak": 0.017176315188407898,
+    "recorded_legal_pSpeak": 0.017176315188407898
+  },
+  {
+    "frame_id": 14,
+    "session_id": "578bcbd450814802883c72e0595c0b1d",
+    "legal_actions": [
+      "LISTEN",
+      "BACKCHANNEL",
+      "SPEAK"
+    ],
+    "speaker_active": false,
+    "peer_turn_active": true,
+    "generation_id": 0,
+    "recorded_action": "LISTEN",
+    "recorded_pSpeak": 0.08941983431577682,
+    "recorded_legal_pSpeak": 0.08941983431577682
+  },
+  {
+    "frame_id": 15,
+    "session_id": "578bcbd450814802883c72e0595c0b1d",
+    "legal_actions": [
+      "LISTEN",
+      "BACKCHANNEL",
+      "SPEAK"
+    ],
+    "speaker_active": false,
+    "peer_turn_active": true,
+    "generation_id": 0,
+    "recorded_action": "LISTEN",
+    "recorded_pSpeak": 0.0005275961593724787,
+    "recorded_legal_pSpeak": 0.0005275961593724787
+  },
+  {
+    "frame_id": 16,
+    "session_id": "578bcbd450814802883c72e0595c0b1d",
+    "legal_actions": [
+      "LISTEN",
+      "BACKCHANNEL",
+      "SPEAK"
+    ],
+    "speaker_active": false,
+    "peer_turn_active": true,
+    "generation_id": 0,
+    "recorded_action": "LISTEN",
+    "recorded_pSpeak": 0.00010267909237882122,
+    "recorded_legal_pSpeak": 0.00010267909237882122
+  },
+  {
+    "frame_id": 17,
+    "session_id": "578bcbd450814802883c72e0595c0b1d",
+    "legal_actions": [
+      "LISTEN",
+      "BACKCHANNEL",
+      "SPEAK"
+    ],
+    "speaker_active": false,
+    "peer_turn_active": true,
+    "generation_id": 0,
+    "recorded_action": "LISTEN",
+    "recorded_pSpeak": 9.725972631713375E-06,
+    "recorded_legal_pSpeak": 9.725972631713375E-06
+  },
+  {
+    "frame_id": 18,
+    "session_id": "578bcbd450814802883c72e0595c0b1d",
+    "legal_actions": [
+      "LISTEN",
+      "BACKCHANNEL",
+      "SPEAK"
+    ],
+    "speaker_active": false,
+    "peer_turn_active": true,
+    "generation_id": 0,
+    "recorded_action": "LISTEN",
+    "recorded_pSpeak": 0.00014717316662427038,
+    "recorded_legal_pSpeak": 0.00014717316662427038
+  },
+  {
+    "frame_id": 19,
+    "session_id": "578bcbd450814802883c72e0595c0b1d",
+    "legal_actions": [
+      "LISTEN",
+      "BACKCHANNEL",
+      "SPEAK"
+    ],
+    "speaker_active": false,
+    "peer_turn_active": true,
+    "generation_id": 0,
+    "recorded_action": "LISTEN",
+    "recorded_pSpeak": 0.003061383031308651,
+    "recorded_legal_pSpeak": 0.003061383031308651
+  },
+  {
+    "frame_id": 20,
+    "session_id": "578bcbd450814802883c72e0595c0b1d",
+    "legal_actions": [
+      "LISTEN",
+      "BACKCHANNEL",
+      "SPEAK"
+    ],
+    "speaker_active": false,
+    "peer_turn_active": true,
+    "generation_id": 0,
+    "recorded_action": "LISTEN",
+    "recorded_pSpeak": 2.8941572693952367E-08,
+    "recorded_legal_pSpeak": 2.8941572693952367E-08
+  },
+  {
+    "frame_id": 21,
+    "session_id": "578bcbd450814802883c72e0595c0b1d",
+    "legal_actions": [
+      "LISTEN",
+      "BACKCHANNEL",
+      "SPEAK"
+    ],
+    "speaker_active": false,
+    "peer_turn_active": true,
+    "generation_id": 0,
+    "recorded_action": "LISTEN",
+    "recorded_pSpeak": 0.001813538372516632,
+    "recorded_legal_pSpeak": 0.001813538372516632
+  },
+  {
+    "frame_id": 23,
+    "session_id": "578bcbd450814802883c72e0595c0b1d",
+    "legal_actions": [
+      "CONTINUE",
+      "YIELD"
+    ],
+    "speaker_active": true,
+    "peer_turn_active": false,
+    "generation_id": 1,
+    "recorded_action": "CONTINUE",
+    "recorded_pSpeak": 0.0,
+    "recorded_legal_pSpeak": 0.0
+  },
+  {
+    "frame_id": 24,
+    "session_id": "578bcbd450814802883c72e0595c0b1d",
+    "legal_actions": [
+      null
+    ],
+    "speaker_active": true,
+    "peer_turn_active": false,
+    "generation_id": 1,
+    "recorded_action": "CONTINUE",
+    "recorded_pSpeak": 0.0,
+    "recorded_legal_pSpeak": 0.0
+  },
+  {
+    "frame_id": 25,
+    "session_id": "578bcbd450814802883c72e0595c0b1d",
+    "legal_actions": [
+      null
+    ],
+    "speaker_active": true,
+    "peer_turn_active": false,
+    "generation_id": 1,
+    "recorded_action": "CONTINUE",
+    "recorded_pSpeak": 0.0,
+    "recorded_legal_pSpeak": 0.0
+  },
+  {
+    "frame_id": 26,
+    "session_id": "578bcbd450814802883c72e0595c0b1d",
+    "legal_actions": [
+      null
+    ],
+    "speaker_active": true,
+    "peer_turn_active": false,
+    "generation_id": 1,
+    "recorded_action": "CONTINUE",
+    "recorded_pSpeak": 0.0,
+    "recorded_legal_pSpeak": 0.0
+  },
+  {
+    "frame_id": 27,
+    "session_id": "578bcbd450814802883c72e0595c0b1d",
+    "legal_actions": [
+      null
+    ],
+    "speaker_active": true,
+    "peer_turn_active": false,
+    "generation_id": 1,
+    "recorded_action": "CONTINUE",
+    "recorded_pSpeak": 0.0,
+    "recorded_legal_pSpeak": 0.0
+  },
+  {
+    "frame_id": 28,
+    "session_id": "578bcbd450814802883c72e0595c0b1d",
+    "legal_actions": [
+      null
+    ],
+    "speaker_active": true,
+    "peer_turn_active": false,
+    "generation_id": 1,
+    "recorded_action": "CONTINUE",
+    "recorded_pSpeak": 0.0,
+    "recorded_legal_pSpeak": 0.0
+  },
+  {
+    "frame_id": 29,
+    "session_id": "578bcbd450814802883c72e0595c0b1d",
+    "legal_actions": [
+      null
+    ],
+    "speaker_active": true,
+    "peer_turn_active": false,
+    "generation_id": 1,
+    "recorded_action": "CONTINUE",
+    "recorded_pSpeak": 0.0,
+    "recorded_legal_pSpeak": 0.0
+  },
+  {
+    "frame_id": 30,
+    "session_id": "578bcbd450814802883c72e0595c0b1d",
+    "legal_actions": [
+      null
+    ],
+    "speaker_active": true,
+    "peer_turn_active": false,
+    "generation_id": 1,
+    "recorded_action": "CONTINUE",
+    "recorded_pSpeak": 0.0,
+    "recorded_legal_pSpeak": 0.0
+  },
+  {
+    "frame_id": 31,
+    "session_id": "578bcbd450814802883c72e0595c0b1d",
+    "legal_actions": [
+      null
+    ],
+    "speaker_active": true,
+    "peer_turn_active": false,
+    "generation_id": 1,
+    "recorded_action": "CONTINUE",
+    "recorded_pSpeak": 0.0,
+    "recorded_legal_pSpeak": 0.0
+  }
+]

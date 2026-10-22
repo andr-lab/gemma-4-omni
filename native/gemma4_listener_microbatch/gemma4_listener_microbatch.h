@@ -12,6 +12,10 @@ extern "C" {
 #define GEMMA4_LISTENER_BATCH_PROBE_API_VERSION 1u
 #define GEMMA4_LISTENER_BATCH_TRACE_API_VERSION 1u
 #define GEMMA4_BATCH_SUPPORTED_MASK_ANY_POSITIVE_N 0x1u
+#define GEMMA4_MAX_STREAM_Q_LEN 8u
+#define GEMMA4_BATCH_VARIABLE_Q_QUEUED_AUDIO_CAPABILITY (UINT64_C(1) << 18)
+#define GEMMA4_BATCH_VARIABLE_Q_TEXT_CAPABILITY (UINT64_C(1) << 19)
+#define GEMMA4_BATCH_VARIABLE_Q_GEMM_GRAPH_CAPABILITY (UINT64_C(1) << 20)
 
 enum {
     GEMMA4_BATCH_TRACE_GEMM_WRAPPER_NONE = 0u,
@@ -214,15 +218,23 @@ int gemma4_listener_batch_destroy(gemma4_listener_batch_ctx *batch);
 int gemma4_listener_batch_bind_stream(
     gemma4_listener_batch_ctx *batch,
     cudaStream_t listener_stream);
-/* Optional startup-only GEMM graphs. Each stable M=4 projection operation
- * has one graph per geometric lane-width bucket (1, 2, 4, ... through the
- * capacity); dispatch launches the smallest bucket covering the active rows.
- * Capacity growth prepares all replacement buckets before commit; a failed
- * growth keeps the old capacity and graph cache usable. */
+/* Optional startup-only Q2 GEMM graphs. Q2 projections use one graph per
+ * geometric lane-width bucket. This switch retains the existing private
+ * queued-audio restriction and remains independent of Q6 graphs below. */
 int gemma4_listener_batch_prepare_gemm_graphs(
     gemma4_listener_batch_ctx *batch,
     uint64_t *out_graph_count);
+/* Optional startup-only Q6 projection GEMM graphs. Each projection graph
+ * preserves the sequential M=2 calls over the worker-owned variable-Q scratch.
+ * Capacity growth rebuilds with the replacement lane before commit; workspace
+ * growth destroys captures before freeing their addresses and retains eager
+ * M=2 fallback. */
+int gemma4_listener_batch_prepare_variable_q_gemm_graphs(
+    gemma4_listener_batch_ctx *batch,
+    uint64_t *out_graph_count);
 uint64_t gemma4_listener_batch_gemm_graph_count(
+    const gemma4_listener_batch_ctx *batch);
+uint64_t gemma4_listener_batch_variable_gemm_graph_count(
     const gemma4_listener_batch_ctx *batch);
 int gemma4_listener_batch_import_cache_async(
     gemma4_listener_batch_ctx *batch,
@@ -250,6 +262,18 @@ int gemma4_listener_batch_step_queued_audio_async(
     const void *audio_soft,
     const gemma4_tensor_meta *audio_soft_meta,
     cudaStream_t listener_stream);
+/* Append one already-accounted private-fork audio history as contiguous
+ * BF16 [1,Q,1536], Q even in [2,64].  Listener frame/state/sequence cursors
+ * remain unchanged while the cache cursor advances by Q. The leased output
+ * contains only the final Q2 pair for policy evaluation. */
+int gemma4_listener_batch_append_queued_audio_async(
+    gemma4_listener_batch_ctx *batch,
+    uint32_t slot,
+    const gemma4_listener_batch_row *expected_row,
+    const void *audio_soft,
+    const gemma4_tensor_meta *audio_soft_meta,
+    uint32_t query_count,
+    cudaStream_t listener_stream);
 /* Run a token-text Q2 step using model-produced embeddings and complete
  * projected PLE. Tensors are contiguous BF16 [N,2,1536] and
  * [N,2,35,256] respectively; final norm remains part of the native step. */
@@ -257,6 +281,19 @@ int gemma4_listener_batch_step_embedded_async(
     gemma4_listener_batch_ctx *batch,
     const gemma4_listener_batch_row *rows,
     uint32_t row_count,
+    const void *inputs_embeds,
+    const gemma4_tensor_meta *inputs_embeds_meta,
+    const void *per_layer_inputs,
+    const gemma4_tensor_meta *per_layer_inputs_meta,
+    cudaStream_t listener_stream);
+/* Run one text step with logical Q in [3,8] and physical even Q in [4,8].
+ * Embeddings and projected PLE use [1,physical_Q,...]. The native owner hides
+ * physical pad KV and publishes only the final logical hidden row at output[0]. */
+int gemma4_listener_batch_step_embedded_variable_async(
+    gemma4_listener_batch_ctx *batch,
+    const gemma4_listener_batch_row *row,
+    uint32_t logical_q_len,
+    uint32_t physical_q_len,
     const void *inputs_embeds,
     const gemma4_tensor_meta *inputs_embeds_meta,
     const void *per_layer_inputs,
@@ -341,6 +378,16 @@ int gemma4_listener_batch_get_session_state(
     uint32_t slot,
     const gemma4_listener_batch_row *row,
     gemma4_listener_batch_session_state *out_state);
+/* CAS-update only frame/epoch/state-version/sequence metadata on an idle
+ * private fork. Both rows must identify current same-generation slots owned
+ * by this batch; fork KV cursor and prefix are preserved exactly. */
+int gemma4_listener_batch_rebind_ephemeral_session_metadata_async(
+    gemma4_listener_batch_ctx *batch,
+    uint32_t fork_slot,
+    const gemma4_listener_batch_row *expected_fork_row,
+    uint32_t canonical_slot,
+    const gemma4_listener_batch_row *current_canonical_row,
+    cudaStream_t listener_stream);
 /* Copies one non-shared source layer's valid K/V rows to caller-owned
  * contiguous CUDA BF16 [1,1,current_position,head_dim] tensors. The caller
  * records a CUDA event on listener_stream after all requested layer copies. */

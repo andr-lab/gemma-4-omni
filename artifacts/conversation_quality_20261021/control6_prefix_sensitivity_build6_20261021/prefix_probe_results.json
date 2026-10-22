@@ -1,0 +1,2666 @@
+{
+  "source": {
+    "stage2": "/workspace/artifacts/runtime/control6_runtime_pendingpcm_phaseonly_q2cachemeta_build6_20261020/training/duplex_qlora/stage2.py",
+    "listener": "/workspace/artifacts/runtime/control6_runtime_pendingpcm_phaseonly_q2cachemeta_build6_20261020/duplex_kernel/listener.py",
+    "server": "/workspace/artifacts/runtime/control6_runtime_pendingpcm_phaseonly_q2cachemeta_build6_20261020/duplex_kernel/server.py",
+    "worker_factory": "/workspace/artifacts/runtime/control6_runtime_pendingpcm_phaseonly_q2cachemeta_build6_20261020/duplex_kernel/listener_microbatch_serving.py",
+    "dso": "/workspace/artifacts/runtime/libgemma4_listener_microbatch_prefix512_q2cachemeta_20261020_build6.so",
+    "runtime_source_root": "/workspace/artifacts/runtime/control6_runtime_pendingpcm_phaseonly_q2cachemeta_build6_20261020"
+  },
+  "base": {
+    "loader": "duplex_kernel.models.thinker.load_thinker",
+    "loader_source": "/workspace/artifacts/runtime/control6_runtime_pendingpcm_phaseonly_q2cachemeta_build6_20261020/duplex_kernel/models/thinker.py",
+    "workspace": "/workspace",
+    "base_model_path": "/workspace/.hf_cache/models--google--gemma-4-E2B-it/full",
+    "model_dtype": "bfloat16",
+    "response_lora_applied": false,
+    "stage1_adapter_applied": false
+  },
+  "prefixes": {
+    "prefix190": {
+      "worker": "duplex_kernel.listener_microbatch_serving.make_listener_microbatch_worker",
+      "worker_factory_source": "/workspace/artifacts/runtime/control6_runtime_pendingpcm_phaseonly_q2cachemeta_build6_20261020/duplex_kernel/listener_microbatch_serving.py",
+      "prefix_builder": "duplex_kernel.server._build_unified_listener_prefix_token_ids",
+      "prefix_builder_source": "/workspace/artifacts/runtime/control6_runtime_pendingpcm_phaseonly_q2cachemeta_build6_20261020/duplex_kernel/server.py",
+      "runtime_source_root": "/workspace/artifacts/runtime/control6_runtime_pendingpcm_phaseonly_q2cachemeta_build6_20261020",
+      "native_library_path": "/workspace/artifacts/runtime/libgemma4_listener_microbatch_prefix512_q2cachemeta_20261020_build6.so",
+      "runtime_signature": {
+        "model_id": "google/gemma-4-E2B-it",
+        "native_abi_version": 3,
+        "batch_api_version": 5,
+        "attention_backend_id": 3,
+        "rmsnorm_backend_id": 2,
+        "max_seq_len": 16384,
+        "stream_q_len": 2
+      },
+      "runtime_info": {
+        "enabled": true,
+        "mode": "shared_fixed_80ms_microbatch",
+        "unified_kv_enabled": true,
+        "native_abi_version": 3,
+        "batch_api_version": 5,
+        "attention_backend_id": 3,
+        "rmsnorm_backend_id": 2,
+        "max_seq_len": 16384,
+        "stream_q_len": 2,
+        "supports_arbitrary_batch_size": true,
+        "initial_capacity_hint": 4,
+        "allocated_capacity": 4,
+        "gemm_graphs_enabled": false,
+        "gemm_graph_count": 0,
+        "gemm_graph_prepare_ms": 0.0,
+        "stream_priority": -1,
+        "topology_sha256": "53787ab382f05cc6b6c3ca7aa391cc863eb95403c08a827abb009215b2c96b60",
+        "library_path": "/workspace/artifacts/runtime/libgemma4_listener_microbatch_prefix512_q2cachemeta_20261020_build6.so",
+        "native_control6_raw_batch_scoring": false,
+        "native_control6_mixed_source_policy": false,
+        "native_control6_checkpoint_path": null,
+        "semantic_shadow_enabled": false,
+        "semantic_shadow_ready": false
+      },
+      "prefix": {
+        "contract": "serving_unified_chat_prefix_v2",
+        "history_messages": 0,
+        "session_instructions": "empty_session_default",
+        "audio_marker": "final_user_audio_marker_then_boa",
+        "token_ids": [
+          2,
+          105,
+          9731,
+          107,
+          108239,
+          4176,
+          759,
+          57553,
+          18279,
+          5955,
+          7787,
+          6537,
+          545,
+          537,
+          236789,
+          20156,
+          10038,
+          236789,
+          182752,
+          105356,
+          236761,
+          10973,
+          509,
+          8461,
+          1287,
+          157612,
+          723,
+          117594,
+          10434,
+          777,
+          12350,
+          236764,
+          32060,
+          127532,
+          236764,
+          591,
+          202852,
+          674,
+          22027,
+          4176,
+          545,
+          30504,
+          236858,
+          96888,
+          3714,
+          92887,
+          12375,
+          1390,
+          4337,
+          2064,
+          12375,
+          194202,
+          236909,
+          29632,
+          111481,
+          236909,
+          1357,
+          93868,
+          4337,
+          30468,
+          12375,
+          24002,
+          5721,
+          623,
+          92887,
+          236775,
+          4478,
+          759,
+          136439,
+          82082,
+          10038,
+          236858,
+          224323,
+          4120,
+          3194,
+          105356,
+          109611,
+          236787,
+          810,
+          233842,
+          545,
+          4769,
+          93868,
+          1372,
+          236747,
+          537,
+          236858,
+          224323,
+          105356,
+          39278,
+          15225,
+          4478,
+          14026,
+          2156,
+          236793,
+          810,
+          43182,
+          111481,
+          116164,
+          759,
+          2483,
+          236746,
+          11042,
+          5241,
+          236764,
+          810,
+          943,
+          236789,
+          537,
+          236789,
+          20156,
+          105356,
+          545,
+          236789,
+          37908,
+          944,
+          130569,
+          545,
+          674,
+          40782,
+          3402,
+          1908,
+          9651,
+          129381,
+          236761,
+          555,
+          588,
+          55550,
+          537,
+          236858,
+          6537,
+          126011,
+          3194,
+          591,
+          537,
+          236858,
+          20156,
+          545,
+          759,
+          57553,
+          18279,
+          236761,
+          623,
+          30468,
+          236775,
+          47955,
+          1998,
+          87788,
+          1776,
+          14480,
+          4094,
+          29044,
+          236761,
+          73172,
+          60376,
+          545,
+          57616,
+          8935,
+          623,
+          30468,
+          1083,
+          623,
+          92887,
+          236775,
+          545,
+          623,
+          2064,
+          236775,
+          9651,
+          47960,
+          185035,
+          236761,
+          10645,
+          10149,
+          733,
+          40782,
+          1273,
+          537,
+          236858,
+          20156,
+          1908,
+          1894,
+          236746,
+          236761,
+          106,
+          107,
+          105,
+          2364,
+          107,
+          256000
+        ],
+        "length": 190
+      },
+      "conversation_history_policy": "first-session parity: prepared speech history is not appended; each recording starts with the serving default empty history/instructions"
+    },
+    "prefix265": {
+      "worker": "duplex_kernel.listener_microbatch_serving.make_listener_microbatch_worker",
+      "worker_factory_source": "/workspace/artifacts/runtime/control6_runtime_pendingpcm_phaseonly_q2cachemeta_build6_20261020/duplex_kernel/listener_microbatch_serving.py",
+      "prefix_builder": "duplex_kernel.server._build_unified_listener_prefix_token_ids",
+      "prefix_builder_source": "/workspace/artifacts/runtime/control6_runtime_pendingpcm_phaseonly_q2cachemeta_build6_20261020/duplex_kernel/server.py",
+      "runtime_source_root": "/workspace/artifacts/runtime/control6_runtime_pendingpcm_phaseonly_q2cachemeta_build6_20261020",
+      "native_library_path": "/workspace/artifacts/runtime/libgemma4_listener_microbatch_prefix512_q2cachemeta_20261020_build6.so",
+      "runtime_signature": {
+        "model_id": "google/gemma-4-E2B-it",
+        "native_abi_version": 3,
+        "batch_api_version": 5,
+        "attention_backend_id": 3,
+        "rmsnorm_backend_id": 2,
+        "max_seq_len": 16384,
+        "stream_q_len": 2
+      },
+      "runtime_info": {
+        "enabled": true,
+        "mode": "shared_fixed_80ms_microbatch",
+        "unified_kv_enabled": true,
+        "native_abi_version": 3,
+        "batch_api_version": 5,
+        "attention_backend_id": 3,
+        "rmsnorm_backend_id": 2,
+        "max_seq_len": 16384,
+        "stream_q_len": 2,
+        "supports_arbitrary_batch_size": true,
+        "initial_capacity_hint": 4,
+        "allocated_capacity": 4,
+        "gemm_graphs_enabled": false,
+        "gemm_graph_count": 0,
+        "gemm_graph_prepare_ms": 0.0,
+        "stream_priority": -1,
+        "topology_sha256": "53787ab382f05cc6b6c3ca7aa391cc863eb95403c08a827abb009215b2c96b60",
+        "library_path": "/workspace/artifacts/runtime/libgemma4_listener_microbatch_prefix512_q2cachemeta_20261020_build6.so",
+        "native_control6_raw_batch_scoring": false,
+        "native_control6_mixed_source_policy": false,
+        "native_control6_checkpoint_path": null,
+        "semantic_shadow_enabled": false,
+        "semantic_shadow_ready": false
+      },
+      "prefix": {
+        "contract": "serving_unified_chat_prefix_v2",
+        "history_messages": 0,
+        "session_instructions": "empty_session_default",
+        "audio_marker": "final_user_audio_marker_then_boa",
+        "token_ids": [
+          2,
+          105,
+          9731,
+          107,
+          1584,
+          20675,
+          545,
+          3526,
+          816,
+          36205,
+          5955,
+          7787,
+          6537,
+          236787,
+          107,
+          1869,
+          236747,
+          723,
+          6361,
+          3194,
+          7787,
+          73794,
+          61264,
+          236761,
+          44214,
+          110146,
+          591,
+          125241,
+          545,
+          2770,
+          966,
+          5035,
+          528,
+          18573,
+          84904,
+          545,
+          3300,
+          11208,
+          236764,
+          610,
+          115436,
+          2779,
+          1685,
+          4166,
+          236761,
+          37971,
+          72455,
+          858,
+          47960,
+          152714,
+          25193,
+          21886,
+          1625,
+          545,
+          4018,
+          236746,
+          674,
+          11289,
+          36205,
+          10554,
+          4803,
+          236747,
+          236761,
+          1339,
+          1908,
+          8693,
+          226488,
+          236764,
+          109266,
+          236747,
+          75220,
+          47563,
+          236761,
+          10645,
+          10149,
+          733,
+          61533,
+          236761,
+          108,
+          108239,
+          4176,
+          759,
+          57553,
+          18279,
+          5955,
+          7787,
+          6537,
+          545,
+          537,
+          236789,
+          20156,
+          10038,
+          236789,
+          182752,
+          105356,
+          236761,
+          10973,
+          509,
+          8461,
+          1287,
+          157612,
+          723,
+          117594,
+          10434,
+          777,
+          12350,
+          236764,
+          32060,
+          127532,
+          236764,
+          591,
+          202852,
+          674,
+          22027,
+          4176,
+          545,
+          30504,
+          236858,
+          96888,
+          3714,
+          92887,
+          12375,
+          1390,
+          4337,
+          2064,
+          12375,
+          194202,
+          236909,
+          29632,
+          111481,
+          236909,
+          1357,
+          93868,
+          4337,
+          30468,
+          12375,
+          24002,
+          5721,
+          623,
+          92887,
+          236775,
+          4478,
+          759,
+          136439,
+          82082,
+          10038,
+          236858,
+          224323,
+          4120,
+          3194,
+          105356,
+          109611,
+          236787,
+          810,
+          233842,
+          545,
+          4769,
+          93868,
+          1372,
+          236747,
+          537,
+          236858,
+          224323,
+          105356,
+          39278,
+          15225,
+          4478,
+          14026,
+          2156,
+          236793,
+          810,
+          43182,
+          111481,
+          116164,
+          759,
+          2483,
+          236746,
+          11042,
+          5241,
+          236764,
+          810,
+          943,
+          236789,
+          537,
+          236789,
+          20156,
+          105356,
+          545,
+          236789,
+          37908,
+          944,
+          130569,
+          545,
+          674,
+          40782,
+          3402,
+          1908,
+          9651,
+          129381,
+          236761,
+          555,
+          588,
+          55550,
+          537,
+          236858,
+          6537,
+          126011,
+          3194,
+          591,
+          537,
+          236858,
+          20156,
+          545,
+          759,
+          57553,
+          18279,
+          236761,
+          623,
+          30468,
+          236775,
+          47955,
+          1998,
+          87788,
+          1776,
+          14480,
+          4094,
+          29044,
+          236761,
+          73172,
+          60376,
+          545,
+          57616,
+          8935,
+          623,
+          30468,
+          1083,
+          623,
+          92887,
+          236775,
+          545,
+          623,
+          2064,
+          236775,
+          9651,
+          47960,
+          185035,
+          236761,
+          10645,
+          10149,
+          733,
+          40782,
+          1273,
+          537,
+          236858,
+          20156,
+          1908,
+          1894,
+          236746,
+          236761,
+          106,
+          107,
+          105,
+          2364,
+          107,
+          256000
+        ],
+        "length": 265
+      },
+      "conversation_history_policy": "first-session parity: prepared speech history is not appended; each recording starts with the serving default empty history/instructions"
+    }
+  },
+  "replay_match": {
+    "hidden": {
+      "frames": 22,
+      "max_abs": 79.5,
+      "rms_abs": 4.125521659851074,
+      "ref_abs_max": 191.0,
+      "max_relative_to_ref_absmax": 0.4162303664921466,
+      "exact_equal": false
+    },
+    "phase": {
+      "frames": 22,
+      "max_abs": 0.04232168197631836,
+      "exact_equal": false
+    }
+  },
+  "scores": {
+    "prefix190_full3000": {
+      "prefix": "prefix190",
+      "head": "full3000",
+      "scores": [
+        {
+          "frame_id": 0,
+          "legal_actions": [
+            "LISTEN"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": false,
+          "pS_effective": 0.6999122500419617,
+          "pS_legal": 0.0,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 1.0
+        },
+        {
+          "frame_id": 1,
+          "legal_actions": [
+            "LISTEN"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": false,
+          "pS_effective": 0.0886128768324852,
+          "pS_legal": 0.0,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 1.0
+        },
+        {
+          "frame_id": 2,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.0006188349798321724,
+          "pS_legal": 0.0006188349798321724,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9991681575775146
+        },
+        {
+          "frame_id": 3,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.021986857056617737,
+          "pS_legal": 0.021986857056617737,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9780077934265137
+        },
+        {
+          "frame_id": 4,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.0004009238036815077,
+          "pS_legal": 0.0004009238036815077,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9457443356513977
+        },
+        {
+          "frame_id": 5,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.0027103519532829523,
+          "pS_legal": 0.0027103519532829523,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9972896575927734
+        },
+        {
+          "frame_id": 6,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.0019701975397765636,
+          "pS_legal": 0.0019701975397765636,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9980207085609436
+        },
+        {
+          "frame_id": 7,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 1.2574276979648857e-06,
+          "pS_legal": 1.2574276979648857e-06,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9999985098838806
+        },
+        {
+          "frame_id": 8,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.002274925820529461,
+          "pS_legal": 0.002274925820529461,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9977247714996338
+        },
+        {
+          "frame_id": 9,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.002092566341161728,
+          "pS_legal": 0.002092566341161728,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9967913627624512
+        },
+        {
+          "frame_id": 10,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.02598937414586544,
+          "pS_legal": 0.02598937414586544,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.973840594291687
+        },
+        {
+          "frame_id": 11,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.009248274378478527,
+          "pS_legal": 0.009248274378478527,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9907504916191101
+        },
+        {
+          "frame_id": 12,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 2.0790850612684153e-05,
+          "pS_legal": 2.0790850612684153e-05,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9999786615371704
+        },
+        {
+          "frame_id": 13,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.1627897024154663,
+          "pS_legal": 0.1627897024154663,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.8364657759666443
+        },
+        {
+          "frame_id": 14,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.033480286598205566,
+          "pS_legal": 0.033480286598205566,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9665197134017944
+        },
+        {
+          "frame_id": 15,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.008782509714365005,
+          "pS_legal": 0.008782509714365005,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9911951422691345
+        },
+        {
+          "frame_id": 16,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.0009939464507624507,
+          "pS_legal": 0.0009939464507624507,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9989663362503052
+        },
+        {
+          "frame_id": 17,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 1.5913453808025224e-06,
+          "pS_legal": 1.5913453808025224e-06,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9999983310699463
+        },
+        {
+          "frame_id": 18,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.23221909999847412,
+          "pS_legal": 0.23221909999847412,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.6914858222007751
+        },
+        {
+          "frame_id": 19,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 1.4328828683574102e-06,
+          "pS_legal": 1.4328828683574102e-06,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9998565316200256
+        },
+        {
+          "frame_id": 20,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.001618573092855513,
+          "pS_legal": 0.001618573092855513,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.991252064704895
+        },
+        {
+          "frame_id": 21,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.0007766460184939206,
+          "pS_legal": 0.0007766460184939206,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9992233514785767
+        },
+        {
+          "frame_id": 23,
+          "legal_actions": [
+            "CONTINUE",
+            "YIELD"
+          ],
+          "speaker_active": true,
+          "peer_turn_active": false,
+          "pS_effective": 0.0,
+          "pS_legal": 0.0,
+          "candidate": "CONTINUE",
+          "applied_action": "CONTINUE",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9948240518569946
+        }
+      ],
+      "peak_f2_21": {
+        "frame_id": 18,
+        "legal_actions": [
+          "LISTEN",
+          "BACKCHANNEL",
+          "SPEAK"
+        ],
+        "speaker_active": false,
+        "peer_turn_active": true,
+        "pS_effective": 0.23221909999847412,
+        "pS_legal": 0.23221909999847412,
+        "candidate": "LISTEN",
+        "applied_action": "LISTEN",
+        "hysteresis_count": 0,
+        "hysteresis_pending": false,
+        "confidence": 0.6914858222007751
+      },
+      "first_candidate_threshold_crossing": {
+        "0.7": null,
+        "0.85": null
+      },
+      "selected_ticks": {
+        "12": {
+          "frame_id": 12,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 2.0790850612684153e-05,
+          "pS_legal": 2.0790850612684153e-05,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9999786615371704
+        },
+        "13": {
+          "frame_id": 13,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.1627897024154663,
+          "pS_legal": 0.1627897024154663,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.8364657759666443
+        },
+        "14": {
+          "frame_id": 14,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.033480286598205566,
+          "pS_legal": 0.033480286598205566,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9665197134017944
+        },
+        "15": {
+          "frame_id": 15,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.008782509714365005,
+          "pS_legal": 0.008782509714365005,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9911951422691345
+        },
+        "21": {
+          "frame_id": 21,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.0007766460184939206,
+          "pS_legal": 0.0007766460184939206,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9992233514785767
+        },
+        "23": {
+          "frame_id": 23,
+          "legal_actions": [
+            "CONTINUE",
+            "YIELD"
+          ],
+          "speaker_active": true,
+          "peer_turn_active": false,
+          "pS_effective": 0.0,
+          "pS_legal": 0.0,
+          "candidate": "CONTINUE",
+          "applied_action": "CONTINUE",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9948240518569946
+        }
+      }
+    },
+    "prefix190_warm": {
+      "prefix": "prefix190",
+      "head": "warm",
+      "scores": [
+        {
+          "frame_id": 0,
+          "legal_actions": [
+            "LISTEN"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": false,
+          "pS_effective": 0.796220600605011,
+          "pS_legal": 0.0,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 1.0
+        },
+        {
+          "frame_id": 1,
+          "legal_actions": [
+            "LISTEN"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": false,
+          "pS_effective": 0.6018069386482239,
+          "pS_legal": 0.0,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 1.0
+        },
+        {
+          "frame_id": 2,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.9999889135360718,
+          "pS_legal": 0.9999889135360718,
+          "candidate": "SPEAK",
+          "applied_action": "SPEAK",
+          "hysteresis_count": 1,
+          "hysteresis_pending": false,
+          "confidence": 0.9999890923500061
+        },
+        {
+          "frame_id": 3,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.9987248182296753,
+          "pS_legal": 0.9987248182296753,
+          "candidate": "SPEAK",
+          "applied_action": "SPEAK",
+          "hysteresis_count": 1,
+          "hysteresis_pending": false,
+          "confidence": 0.9987286925315857
+        },
+        {
+          "frame_id": 4,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.6642690300941467,
+          "pS_legal": 0.6642690300941467,
+          "candidate": "SPEAK",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.6651484370231628
+        },
+        {
+          "frame_id": 5,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.7924928665161133,
+          "pS_legal": 0.7924928665161133,
+          "candidate": "SPEAK",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 1,
+          "hysteresis_pending": true,
+          "confidence": 0.7924929261207581
+        },
+        {
+          "frame_id": 6,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.10962630063295364,
+          "pS_legal": 0.10962630063295364,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.8893231749534607
+        },
+        {
+          "frame_id": 7,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 5.324339144863188e-05,
+          "pS_legal": 5.324339144863188e-05,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9999460577964783
+        },
+        {
+          "frame_id": 8,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.0005902197444811463,
+          "pS_legal": 0.0005902197444811463,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9990408420562744
+        },
+        {
+          "frame_id": 9,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 3.4484426691960834e-07,
+          "pS_legal": 3.4484426691960834e-07,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9985901117324829
+        },
+        {
+          "frame_id": 10,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 2.6904844574460185e-08,
+          "pS_legal": 2.6904844574460185e-08,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9981971383094788
+        },
+        {
+          "frame_id": 11,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 2.376322214558968e-07,
+          "pS_legal": 2.376322214558968e-07,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9997527599334717
+        },
+        {
+          "frame_id": 12,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 9.61219437378702e-10,
+          "pS_legal": 9.61219437378702e-10,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9999881982803345
+        },
+        {
+          "frame_id": 13,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 2.1138565386991104e-07,
+          "pS_legal": 2.1138565386991104e-07,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9991785883903503
+        },
+        {
+          "frame_id": 14,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 5.5019999223304694e-08,
+          "pS_legal": 5.5019999223304694e-08,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9999775290489197
+        },
+        {
+          "frame_id": 15,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 5.768023569885372e-08,
+          "pS_legal": 5.768023569885372e-08,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.999994158744812
+        },
+        {
+          "frame_id": 16,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.00034886086359620094,
+          "pS_legal": 0.00034886086359620094,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9996398091316223
+        },
+        {
+          "frame_id": 17,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.9426546096801758,
+          "pS_legal": 0.9426546096801758,
+          "candidate": "SPEAK",
+          "applied_action": "SPEAK",
+          "hysteresis_count": 1,
+          "hysteresis_pending": false,
+          "confidence": 0.9426546692848206
+        },
+        {
+          "frame_id": 18,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.969022274017334,
+          "pS_legal": 0.969022274017334,
+          "candidate": "SPEAK",
+          "applied_action": "SPEAK",
+          "hysteresis_count": 1,
+          "hysteresis_pending": false,
+          "confidence": 0.9691097736358643
+        },
+        {
+          "frame_id": 19,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.6247549653053284,
+          "pS_legal": 0.6247549653053284,
+          "candidate": "SPEAK",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.6247639656066895
+        },
+        {
+          "frame_id": 20,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.9906610250473022,
+          "pS_legal": 0.9906610250473022,
+          "candidate": "SPEAK",
+          "applied_action": "SPEAK",
+          "hysteresis_count": 1,
+          "hysteresis_pending": false,
+          "confidence": 0.9906814098358154
+        },
+        {
+          "frame_id": 21,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.9985695481300354,
+          "pS_legal": 0.9985695481300354,
+          "candidate": "SPEAK",
+          "applied_action": "SPEAK",
+          "hysteresis_count": 1,
+          "hysteresis_pending": false,
+          "confidence": 0.9985697269439697
+        },
+        {
+          "frame_id": 23,
+          "legal_actions": [
+            "CONTINUE",
+            "YIELD"
+          ],
+          "speaker_active": true,
+          "peer_turn_active": false,
+          "pS_effective": 0.0,
+          "pS_legal": 0.0,
+          "candidate": "CONTINUE",
+          "applied_action": "CONTINUE",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9838725328445435
+        }
+      ],
+      "peak_f2_21": {
+        "frame_id": 2,
+        "legal_actions": [
+          "LISTEN",
+          "BACKCHANNEL",
+          "SPEAK"
+        ],
+        "speaker_active": false,
+        "peer_turn_active": true,
+        "pS_effective": 0.9999889135360718,
+        "pS_legal": 0.9999889135360718,
+        "candidate": "SPEAK",
+        "applied_action": "SPEAK",
+        "hysteresis_count": 1,
+        "hysteresis_pending": false,
+        "confidence": 0.9999890923500061
+      },
+      "first_candidate_threshold_crossing": {
+        "0.7": 2,
+        "0.85": 2
+      },
+      "selected_ticks": {
+        "12": {
+          "frame_id": 12,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 9.61219437378702e-10,
+          "pS_legal": 9.61219437378702e-10,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9999881982803345
+        },
+        "13": {
+          "frame_id": 13,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 2.1138565386991104e-07,
+          "pS_legal": 2.1138565386991104e-07,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9991785883903503
+        },
+        "14": {
+          "frame_id": 14,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 5.5019999223304694e-08,
+          "pS_legal": 5.5019999223304694e-08,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9999775290489197
+        },
+        "15": {
+          "frame_id": 15,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 5.768023569885372e-08,
+          "pS_legal": 5.768023569885372e-08,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.999994158744812
+        },
+        "21": {
+          "frame_id": 21,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.9985695481300354,
+          "pS_legal": 0.9985695481300354,
+          "candidate": "SPEAK",
+          "applied_action": "SPEAK",
+          "hysteresis_count": 1,
+          "hysteresis_pending": false,
+          "confidence": 0.9985697269439697
+        },
+        "23": {
+          "frame_id": 23,
+          "legal_actions": [
+            "CONTINUE",
+            "YIELD"
+          ],
+          "speaker_active": true,
+          "peer_turn_active": false,
+          "pS_effective": 0.0,
+          "pS_legal": 0.0,
+          "candidate": "CONTINUE",
+          "applied_action": "CONTINUE",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9838725328445435
+        }
+      }
+    },
+    "prefix265_full3000": {
+      "prefix": "prefix265",
+      "head": "full3000",
+      "scores": [
+        {
+          "frame_id": 0,
+          "legal_actions": [
+            "LISTEN"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": false,
+          "pS_effective": 0.977473258972168,
+          "pS_legal": 0.0,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 1.0
+        },
+        {
+          "frame_id": 1,
+          "legal_actions": [
+            "LISTEN"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": false,
+          "pS_effective": 0.054151006042957306,
+          "pS_legal": 0.0,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 1.0
+        },
+        {
+          "frame_id": 2,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.0031006205826997757,
+          "pS_legal": 0.0031006205826997757,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9968993663787842
+        },
+        {
+          "frame_id": 3,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.007823063060641289,
+          "pS_legal": 0.007823063060641289,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9921694993972778
+        },
+        {
+          "frame_id": 4,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 2.546487909427242e-09,
+          "pS_legal": 2.546487909427242e-09,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9996731281280518
+        },
+        {
+          "frame_id": 5,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.0014919827226549387,
+          "pS_legal": 0.0014919827226549387,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9985080361366272
+        },
+        {
+          "frame_id": 6,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.0007521139341406524,
+          "pS_legal": 0.0007521139341406524,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9992316365242004
+        },
+        {
+          "frame_id": 7,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 4.8593265091767535e-05,
+          "pS_legal": 4.8593265091767535e-05,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9999514222145081
+        },
+        {
+          "frame_id": 8,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 3.2053540053311735e-05,
+          "pS_legal": 3.2053540053311735e-05,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9999679327011108
+        },
+        {
+          "frame_id": 9,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.0017772127175703645,
+          "pS_legal": 0.0017772127175703645,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.997953474521637
+        },
+        {
+          "frame_id": 10,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.027055753394961357,
+          "pS_legal": 0.027055753394961357,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9723297953605652
+        },
+        {
+          "frame_id": 11,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.0006246751872822642,
+          "pS_legal": 0.0006246751872822642,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9993748068809509
+        },
+        {
+          "frame_id": 12,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 6.124416245256725e-07,
+          "pS_legal": 6.124416245256725e-07,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9999994039535522
+        },
+        {
+          "frame_id": 13,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.10097382217645645,
+          "pS_legal": 0.10097382217645645,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.898976743221283
+        },
+        {
+          "frame_id": 14,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.028723346069455147,
+          "pS_legal": 0.028723346069455147,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9712766408920288
+        },
+        {
+          "frame_id": 15,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.0027029397897422314,
+          "pS_legal": 0.0027029397897422314,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9972878098487854
+        },
+        {
+          "frame_id": 16,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.00010536074114497751,
+          "pS_legal": 0.00010536074114497751,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9998631477355957
+        },
+        {
+          "frame_id": 17,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.00025492251734249294,
+          "pS_legal": 0.00025492251734249294,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9997450709342957
+        },
+        {
+          "frame_id": 18,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.0007864278159104288,
+          "pS_legal": 0.0007864278159104288,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.999042272567749
+        },
+        {
+          "frame_id": 19,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.0025575170293450356,
+          "pS_legal": 0.0025575170293450356,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9896395802497864
+        },
+        {
+          "frame_id": 20,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.00023354530276264995,
+          "pS_legal": 0.00023354530276264995,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9997649788856506
+        },
+        {
+          "frame_id": 21,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.0026230914518237114,
+          "pS_legal": 0.0026230914518237114,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.99737149477005
+        },
+        {
+          "frame_id": 23,
+          "legal_actions": [
+            "CONTINUE",
+            "YIELD"
+          ],
+          "speaker_active": true,
+          "peer_turn_active": false,
+          "pS_effective": 0.0,
+          "pS_legal": 0.0,
+          "candidate": "CONTINUE",
+          "applied_action": "CONTINUE",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9922608733177185
+        }
+      ],
+      "peak_f2_21": {
+        "frame_id": 13,
+        "legal_actions": [
+          "LISTEN",
+          "BACKCHANNEL",
+          "SPEAK"
+        ],
+        "speaker_active": false,
+        "peer_turn_active": true,
+        "pS_effective": 0.10097382217645645,
+        "pS_legal": 0.10097382217645645,
+        "candidate": "LISTEN",
+        "applied_action": "LISTEN",
+        "hysteresis_count": 0,
+        "hysteresis_pending": false,
+        "confidence": 0.898976743221283
+      },
+      "first_candidate_threshold_crossing": {
+        "0.7": null,
+        "0.85": null
+      },
+      "selected_ticks": {
+        "12": {
+          "frame_id": 12,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 6.124416245256725e-07,
+          "pS_legal": 6.124416245256725e-07,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9999994039535522
+        },
+        "13": {
+          "frame_id": 13,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.10097382217645645,
+          "pS_legal": 0.10097382217645645,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.898976743221283
+        },
+        "14": {
+          "frame_id": 14,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.028723346069455147,
+          "pS_legal": 0.028723346069455147,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9712766408920288
+        },
+        "15": {
+          "frame_id": 15,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.0027029397897422314,
+          "pS_legal": 0.0027029397897422314,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9972878098487854
+        },
+        "21": {
+          "frame_id": 21,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.0026230914518237114,
+          "pS_legal": 0.0026230914518237114,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.99737149477005
+        },
+        "23": {
+          "frame_id": 23,
+          "legal_actions": [
+            "CONTINUE",
+            "YIELD"
+          ],
+          "speaker_active": true,
+          "peer_turn_active": false,
+          "pS_effective": 0.0,
+          "pS_legal": 0.0,
+          "candidate": "CONTINUE",
+          "applied_action": "CONTINUE",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9922608733177185
+        }
+      },
+      "live_full3000_legal_pS_match": {
+        "n": 22,
+        "max_abs_delta": 0.08379750698804855,
+        "worst_frame": 13
+      }
+    },
+    "prefix265_warm": {
+      "prefix": "prefix265",
+      "head": "warm",
+      "scores": [
+        {
+          "frame_id": 0,
+          "legal_actions": [
+            "LISTEN"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": false,
+          "pS_effective": 1.0,
+          "pS_legal": 0.0,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 1.0
+        },
+        {
+          "frame_id": 1,
+          "legal_actions": [
+            "LISTEN"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": false,
+          "pS_effective": 0.35690388083457947,
+          "pS_legal": 0.0,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 1.0
+        },
+        {
+          "frame_id": 2,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.9999952912330627,
+          "pS_legal": 0.9999952912330627,
+          "candidate": "SPEAK",
+          "applied_action": "SPEAK",
+          "hysteresis_count": 1,
+          "hysteresis_pending": false,
+          "confidence": 0.9999952912330627
+        },
+        {
+          "frame_id": 3,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.9972356557846069,
+          "pS_legal": 0.9972356557846069,
+          "candidate": "SPEAK",
+          "applied_action": "SPEAK",
+          "hysteresis_count": 1,
+          "hysteresis_pending": false,
+          "confidence": 0.9972475171089172
+        },
+        {
+          "frame_id": 4,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.9778215885162354,
+          "pS_legal": 0.9778215885162354,
+          "candidate": "SPEAK",
+          "applied_action": "SPEAK",
+          "hysteresis_count": 1,
+          "hysteresis_pending": false,
+          "confidence": 0.9778225421905518
+        },
+        {
+          "frame_id": 5,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.091035395860672,
+          "pS_legal": 0.091035395860672,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9089645743370056
+        },
+        {
+          "frame_id": 6,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.9436938166618347,
+          "pS_legal": 0.9436938166618347,
+          "candidate": "SPEAK",
+          "applied_action": "SPEAK",
+          "hysteresis_count": 1,
+          "hysteresis_pending": false,
+          "confidence": 0.9448406100273132
+        },
+        {
+          "frame_id": 7,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.005468764808028936,
+          "pS_legal": 0.005468764808028936,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9945312142372131
+        },
+        {
+          "frame_id": 8,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 3.410921635804698e-06,
+          "pS_legal": 3.410921635804698e-06,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9999432563781738
+        },
+        {
+          "frame_id": 9,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 7.299945536942687e-08,
+          "pS_legal": 7.299945536942687e-08,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.999254584312439
+        },
+        {
+          "frame_id": 10,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 7.703379623080764e-08,
+          "pS_legal": 7.703379623080764e-08,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9947813153266907
+        },
+        {
+          "frame_id": 11,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 8.198559164895869e-09,
+          "pS_legal": 8.198559164895869e-09,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9999770522117615
+        },
+        {
+          "frame_id": 12,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 3.639412989725477e-12,
+          "pS_legal": 3.639412989725477e-12,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9999988675117493
+        },
+        {
+          "frame_id": 13,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 4.523156960090091e-09,
+          "pS_legal": 4.523156960090091e-09,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9997305274009705
+        },
+        {
+          "frame_id": 14,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 1.1265183275099844e-07,
+          "pS_legal": 1.1265183275099844e-07,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9996379613876343
+        },
+        {
+          "frame_id": 15,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 4.421898580631023e-08,
+          "pS_legal": 4.421898580631023e-08,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9999539852142334
+        },
+        {
+          "frame_id": 16,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 1.698099367786199e-05,
+          "pS_legal": 1.698099367786199e-05,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9999648928642273
+        },
+        {
+          "frame_id": 17,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.9867908954620361,
+          "pS_legal": 0.9867908954620361,
+          "candidate": "SPEAK",
+          "applied_action": "SPEAK",
+          "hysteresis_count": 1,
+          "hysteresis_pending": false,
+          "confidence": 0.9867909550666809
+        },
+        {
+          "frame_id": 18,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.9931959509849548,
+          "pS_legal": 0.9931959509849548,
+          "candidate": "SPEAK",
+          "applied_action": "SPEAK",
+          "hysteresis_count": 1,
+          "hysteresis_pending": false,
+          "confidence": 0.993202269077301
+        },
+        {
+          "frame_id": 19,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.837094783782959,
+          "pS_legal": 0.837094783782959,
+          "candidate": "SPEAK",
+          "applied_action": "SPEAK",
+          "hysteresis_count": 2,
+          "hysteresis_pending": false,
+          "confidence": 0.83743816614151
+        },
+        {
+          "frame_id": 20,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.9999940395355225,
+          "pS_legal": 0.9999940395355225,
+          "candidate": "SPEAK",
+          "applied_action": "SPEAK",
+          "hysteresis_count": 1,
+          "hysteresis_pending": false,
+          "confidence": 0.9999939203262329
+        },
+        {
+          "frame_id": 21,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.9998995661735535,
+          "pS_legal": 0.9998995661735535,
+          "candidate": "SPEAK",
+          "applied_action": "SPEAK",
+          "hysteresis_count": 1,
+          "hysteresis_pending": false,
+          "confidence": 0.9999008178710938
+        },
+        {
+          "frame_id": 23,
+          "legal_actions": [
+            "CONTINUE",
+            "YIELD"
+          ],
+          "speaker_active": true,
+          "peer_turn_active": false,
+          "pS_effective": 0.0,
+          "pS_legal": 0.0,
+          "candidate": "CONTINUE",
+          "applied_action": "CONTINUE",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9531158208847046
+        }
+      ],
+      "peak_f2_21": {
+        "frame_id": 2,
+        "legal_actions": [
+          "LISTEN",
+          "BACKCHANNEL",
+          "SPEAK"
+        ],
+        "speaker_active": false,
+        "peer_turn_active": true,
+        "pS_effective": 0.9999952912330627,
+        "pS_legal": 0.9999952912330627,
+        "candidate": "SPEAK",
+        "applied_action": "SPEAK",
+        "hysteresis_count": 1,
+        "hysteresis_pending": false,
+        "confidence": 0.9999952912330627
+      },
+      "first_candidate_threshold_crossing": {
+        "0.7": 2,
+        "0.85": 2
+      },
+      "selected_ticks": {
+        "12": {
+          "frame_id": 12,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 3.639412989725477e-12,
+          "pS_legal": 3.639412989725477e-12,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9999988675117493
+        },
+        "13": {
+          "frame_id": 13,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 4.523156960090091e-09,
+          "pS_legal": 4.523156960090091e-09,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9997305274009705
+        },
+        "14": {
+          "frame_id": 14,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 1.1265183275099844e-07,
+          "pS_legal": 1.1265183275099844e-07,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9996379613876343
+        },
+        "15": {
+          "frame_id": 15,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 4.421898580631023e-08,
+          "pS_legal": 4.421898580631023e-08,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9999539852142334
+        },
+        "21": {
+          "frame_id": 21,
+          "legal_actions": [
+            "LISTEN",
+            "BACKCHANNEL",
+            "SPEAK"
+          ],
+          "speaker_active": false,
+          "peer_turn_active": true,
+          "pS_effective": 0.9998995661735535,
+          "pS_legal": 0.9998995661735535,
+          "candidate": "SPEAK",
+          "applied_action": "SPEAK",
+          "hysteresis_count": 1,
+          "hysteresis_pending": false,
+          "confidence": 0.9999008178710938
+        },
+        "23": {
+          "frame_id": 23,
+          "legal_actions": [
+            "CONTINUE",
+            "YIELD"
+          ],
+          "speaker_active": true,
+          "peer_turn_active": false,
+          "pS_effective": 0.0,
+          "pS_legal": 0.0,
+          "candidate": "CONTINUE",
+          "applied_action": "CONTINUE",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false,
+          "confidence": 0.9531158208847046
+        }
+      }
+    }
+  }
+}

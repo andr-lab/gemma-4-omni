@@ -31,15 +31,28 @@ from duplex_kernel.server import (
     _CausalUserSpeechTracker,
     _ResponseAudioAdmissionState,
     _SchedulerEventBuffer,
+    _cancel_response_branch_playback,
+    _native_control6_speaker_active,
+    _apply_native_control6_pending_pcm_yield_gate,
     _attach_native_control6_trace_diagnostic,
     _native_control6_event_annotations,
     _native_control6_selection_fields,
+    _pending_pcm_response_branches,
+    _record_client_consumed_pcm,
+    _response_branch_has_pending_pcm,
+    _wait_for_response_playback_drain,
     _yield_admission_rejection,
     create_app,
 )
 from duplex_kernel.session import DuplexSession, SessionManager
 from duplex_kernel.scheduler import VirtualFrameClock
-from duplex_kernel.turn_policy import ControlAction, NoOpPolicy, PolicyDecision, ProvisionalFramePolicy
+from duplex_kernel.turn_policy import (
+    ControlAction,
+    NoOpPolicy,
+    PolicyDecision,
+    ProvisionalFramePolicy,
+    ScriptedPolicy,
+)
 
 FRAME_SAMPLES = 1280
 MAX_REALTIME_PENDING_SAMPLES = server_module.USER_SAMPLE_RATE * 30
@@ -3525,6 +3538,556 @@ def test_yield_requires_emitted_audio_and_post_watermark_user_voice() -> None:
         emitted_audio_frames=2,
         has_post_watermark_voice=True,
     ) is None
+
+
+def _pending_pcm_test_branch(response_id: str, generation_id: int) -> dict[str, object]:
+    return {
+        "response_id": response_id,
+        "session_generation_id": generation_id,
+        "speaker_segment_id": "seg-1",
+        "playback_segments": {
+            "seg-1": {
+                "response_id": response_id,
+                "generation_id": generation_id,
+                "speaker_segment_id": "seg-1",
+                "start_sample": 0,
+                "end_sample": 1920,
+                "emitted_end_sample": 1920,
+                "sample_rate": 24000,
+                "done_emitted": True,
+                "token_packets": (),
+            },
+        },
+        "spoken_prefix_token_ids": (),
+        "spoken_prefix_exclusive_cursor": 20,
+        "spoken_prefix_text": "",
+        "client_consumed_pcm_sequence": -1,
+        "client_consumed_segments": (),
+        "spoken_prefix_lock": threading.Lock(),
+        "playback_ack_event": asyncio.Event(),
+    }
+
+
+def test_pending_pcm_from_prior_generation_drives_yield_until_exact_ack() -> None:
+    previous = _pending_pcm_test_branch("response-gen1", 41)
+    current = {
+        "response_id": "response-gen2",
+        "session_generation_id": 42,
+        "queue_open": True,
+        "playback_segments": {},
+    }
+    branches = {"response-gen1": previous, "response-gen2": current}
+
+    assert _pending_pcm_response_branches(branches) == (previous,)
+    assert _native_control6_speaker_active(
+        active_response=False,
+        control_state=server_module.ControlState.LISTENING,
+        pending_pcm_playback=True,
+    ) is True
+    assert _yield_admission_rejection(
+        active_response=True,
+        emitted_audio_frames=1,
+        has_post_watermark_voice=True,
+    ) is None
+
+    ack = {
+        "type": "client_consumed_pcm",
+        "response_id": "response-gen1",
+        "generation_id": 41,
+        "speaker_segment_id": "seg-1",
+        "start_sample": 0,
+        "end_sample": 1920,
+        "sample_rate": 24000,
+        "sequence": 1,
+        "consumption_semantics": "logical_client_device_buffer",
+    }
+    with previous["spoken_prefix_lock"]:
+        assert _record_client_consumed_pcm(previous, ack) is True
+    assert _response_branch_has_pending_pcm(previous) is False
+    assert _pending_pcm_response_branches(branches) == ()
+    assert _native_control6_speaker_active(
+        active_response=False,
+        control_state=server_module.ControlState.LISTENING,
+        pending_pcm_playback=False,
+    ) is False
+    # An open/pre-audio generation without emitted PCM cannot authorize YIELD.
+    assert _yield_admission_rejection(
+        active_response=True,
+        emitted_audio_frames=0,
+        has_post_watermark_voice=True,
+    ) == "assistant_audio_not_started"
+
+
+def test_native_yield_gate_reconciles_only_matching_pending_pcm_branch() -> None:
+    decision = PolicyDecision(
+        action=ControlAction.YIELD,
+        frame_id=29,
+        confidence=0.9622366,
+        generation_id=41,
+        source="native_control6",
+    )
+
+    def session(state: server_module.ControlState = server_module.ControlState.LISTENING):
+        return SimpleNamespace(
+            _generation_lock=threading.RLock(),
+            session_generation_id=41,
+            speaker_segment_id="seg-1",
+            control_state=state,
+            stop_requested=False,
+            stop_reason=None,
+            request_control_segment_close=lambda: None,
+        )
+
+    pending = _pending_pcm_test_branch("response-gen1", 41)
+    assert _native_control6_speaker_active(
+        active_response=False,
+        control_state=server_module.ControlState.LISTENING,
+        pending_pcm_playback=True,
+    ) is True
+    assert _yield_admission_rejection(
+        active_response=True,
+        emitted_audio_frames=1,
+        has_post_watermark_voice=True,
+    ) is None
+    event = _apply_native_control6_pending_pcm_yield_gate(
+        server_module.SpeakerGate(), decision, session(), (pending,)
+    )
+    assert event.accepted is True
+    assert event.previous_state == server_module.ControlState.SPEAKING
+    assert event.next_state == server_module.ControlState.STOPPING
+
+    no_pcm_session = session()
+    no_pcm = dict(pending, playback_segments={})
+    no_pcm_event = _apply_native_control6_pending_pcm_yield_gate(
+        server_module.SpeakerGate(), decision, no_pcm_session, (no_pcm,)
+    )
+    assert no_pcm_event.accepted is False
+    assert no_pcm_session.control_state == server_module.ControlState.LISTENING
+
+    mismatch_session = session()
+    wrong_identity = dict(pending, speaker_segment_id="stale-segment")
+    mismatch_event = _apply_native_control6_pending_pcm_yield_gate(
+        server_module.SpeakerGate(), decision, mismatch_session, (wrong_identity,)
+    )
+    assert mismatch_event.accepted is False
+    assert mismatch_session.control_state == server_module.ControlState.LISTENING
+
+    stopping_session = session(server_module.ControlState.STOPPING)
+    stopping_event = _apply_native_control6_pending_pcm_yield_gate(
+        server_module.SpeakerGate(), decision, stopping_session, (pending,)
+    )
+    assert stopping_event.accepted is False
+    assert stopping_session.control_state == server_module.ControlState.STOPPING
+
+
+def test_manual_v2_yield_claims_pending_pcm_cancel_at_worker_boundary() -> None:
+    async def exercise() -> None:
+        session = SimpleNamespace(
+            _generation_lock=threading.RLock(),
+            response_id="manual-v2-response",
+            session_generation_id=61,
+            response_cancel_notified=False,
+            stop_reason=ControlAction.YIELD.value,
+        )
+        branch = _pending_pcm_test_branch("manual-v2-response", 61)
+        branch["speaker_segment_id"] = "manual-v2-segment"
+        branch["playback_segments"]["manual-v2-segment"] = branch["playback_segments"].pop("seg-1")
+        branch["playback_segments"]["manual-v2-segment"]["speaker_segment_id"] = "manual-v2-segment"
+        worker_at_safe_boundary = asyncio.Event()
+        finish_worker = asyncio.Event()
+        terminals: list[str] = []
+
+        async def finish_manual_response_worker() -> None:
+            worker_at_safe_boundary.set()
+            await finish_worker.wait()
+            disposition = server_module._claim_pending_yielded_v2_pcm_cancel(
+                session,
+                branch,
+                response_id="manual-v2-response",
+                generation_id=61,
+                speaker_segment_id="manual-v2-segment",
+            )
+            if disposition == "claimed":
+                terminals.append("response.cancelled")
+            elif disposition == "already_notified":
+                return
+            else:
+                terminals.append("response.done")
+
+        worker = asyncio.create_task(finish_manual_response_worker())
+        await asyncio.wait_for(worker_at_safe_boundary.wait(), timeout=0.2)
+        assert not worker.done()
+        # This models the manual-commit path: it is a V2 response with emitted
+        # PCM, but its policy action metadata is absent. One YIELD is enough.
+        finish_worker.set()
+        await asyncio.wait_for(worker, timeout=0.2)
+        assert terminals == ["response.cancelled"]
+        assert branch["playback_cancelled"] is True
+        assert session.response_cancel_notified is True
+
+        duplicate = server_module._claim_pending_yielded_v2_pcm_cancel(
+            session,
+            branch,
+            response_id="manual-v2-response",
+            generation_id=61,
+            speaker_segment_id="manual-v2-segment",
+        )
+        assert duplicate == "already_notified"
+        assert terminals == ["response.cancelled"]
+
+        stale_session = SimpleNamespace(
+            _generation_lock=threading.RLock(),
+            response_id="manual-v2-response",
+            session_generation_id=62,
+            response_cancel_notified=False,
+        )
+        stale_branch = _pending_pcm_test_branch("manual-v2-response", 61)
+        stale = server_module._claim_pending_yielded_v2_pcm_cancel(
+            stale_session,
+            stale_branch,
+            response_id="manual-v2-response",
+            generation_id=61,
+            speaker_segment_id="seg-1",
+        )
+        assert stale == "stale"
+        assert stale_session.response_cancel_notified is False
+        assert stale_branch.get("playback_cancelled") is not True
+
+        acked_session = SimpleNamespace(
+            _generation_lock=threading.RLock(),
+            response_id="acked-v2-response",
+            session_generation_id=63,
+            response_cancel_notified=False,
+        )
+        acked_branch = _pending_pcm_test_branch("acked-v2-response", 63)
+        ack = {
+            "type": "client_consumed_pcm",
+            "response_id": "acked-v2-response",
+            "generation_id": 63,
+            "speaker_segment_id": "seg-1",
+            "start_sample": 0,
+            "end_sample": 1920,
+            "sample_rate": 24000,
+            "sequence": 1,
+            "consumption_semantics": "logical_client_device_buffer",
+        }
+        with acked_branch["spoken_prefix_lock"]:
+            assert _record_client_consumed_pcm(acked_branch, ack) is True
+        acked = server_module._claim_pending_yielded_v2_pcm_cancel(
+            acked_session,
+            acked_branch,
+            response_id="acked-v2-response",
+            generation_id=63,
+            speaker_segment_id="seg-1",
+        )
+        assert acked == "acknowledged"
+        assert acked_session.response_cancel_notified is False
+        assert acked_branch.get("playback_cancelled") is not True
+
+    asyncio.run(exercise())
+
+
+def test_manual_v2_yield_cancels_pending_pcm_before_response_done(monkeypatch) -> None:
+    monkeypatch.setenv("DUPLEX_DIRECT_AUDIO_CANDIDATE", "1")
+    monkeypatch.setenv("DUPLEX_AUDIO_RESPONSE_PROTOCOL", AUDIO_RESPONSE_PROTOCOL_V2)
+    monkeypatch.setenv("DUPLEX_CONTROLLER_GUIDED_SAY_V1", "0")
+    monkeypatch.setattr(
+        server_module,
+        "resolve_voice_conditioning",
+        lambda *_args, **_kwargs: {
+            "mode": "x_vector_only",
+            "speaker_embedding": torch.ones(4),
+        },
+    )
+
+    class _AudioProcessor:
+        audio_token = "<|audio|>"
+
+        def __call__(self, **_kwargs):
+            return {
+                "input_ids": torch.tensor([[1, 2, 3]], dtype=torch.long),
+                "attention_mask": torch.ones((1, 3), dtype=torch.long),
+                "input_features": torch.ones((1, 4, 8)),
+                "input_features_mask": torch.ones((1, 4), dtype=torch.long),
+            }
+
+    engine = _Engine(hidden_size=4, block_talk=True)
+    engine.audio_response_protocol = AUDIO_RESPONSE_PROTOCOL_V2
+    engine.v9_stream = _V9StreamStub()
+    engine.device = "cpu"
+    engine.dtype = torch.float32
+    engine.talker = SimpleNamespace(tcfg=SimpleNamespace(hidden_size=4))
+    engine._thinker_wrapper = SimpleNamespace(processor=_AudioProcessor())
+    engine.tokenizer.audio_token = "<|audio|>"
+    engine.talker_started = threading.Event()
+    engine.release_talker = threading.Event()
+    engine.stop_check_after_yield = None
+    fragments_by_id: dict[int, str] = {}
+
+    def encode_fragment(text, *, add_special_tokens):
+        if add_special_tokens:
+            return []
+        if text == "SPEAK":
+            return [41]
+        token_id = 1000 + len(fragments_by_id)
+        fragments_by_id[token_id] = text
+        return [token_id]
+
+    def decode_fragment(token_ids, *, skip_special_tokens):
+        if skip_special_tokens and len(token_ids) == 1 and token_ids[0] == 41:
+            return "SPEAK"
+        if len(token_ids) == 1:
+            return fragments_by_id.get(token_ids[0], "")
+        return ""
+
+    engine.tokenizer.encode = encode_fragment
+    engine.tokenizer.decode = decode_fragment
+    target = format_audio_response_v2_target(
+        heard="ho detto ciao",
+        action="SPEAK",
+        say="Ciao.",
+    )
+    say_start = target.index('"say":"') + len('"say":"')
+    say_end = target.rfind('"')
+    response_fragments = [target[:say_start], target[say_start:say_end], target[say_end:]]
+
+    def think(_ids, *, on_generated_token=None, **_kwargs):
+        assert callable(on_generated_token)
+        for index, (fragment, hidden_value) in enumerate(
+            zip(response_fragments, (11.0, 22.0, 33.0), strict=True)
+        ):
+            on_generated_token(
+                index,
+                100 + index,
+                fragment,
+                torch.full((1, 1, 1536), hidden_value),
+            )
+        return {
+            "text": target,
+            "protocol_text": target,
+            "hidden": torch.full((1, 1, 1536), -99.0),
+            "prompt_len": 5,
+            "gen_ids": [100, 101, 102],
+            "runtime_metrics": {},
+        }
+
+    def v9_prefix(hidden, prompt_len):
+        assert prompt_len == 0
+        return torch.full((1, 2, 2048), float(hidden[0, 0, 0]))
+
+    def talk_from_say_prefill(_text, _h_pfx, *, on_audio_chunk=None, **kwargs):
+        if on_audio_chunk is not None:
+            # The legacy callback uses the previously generated frame as its
+            # conditioning horizon. A second chunk makes the first chunk
+            # eligible for playout while the worker remains blocked below.
+            for _ in range(4):
+                on_audio_chunk(np.full(1920, 0.1, dtype=np.float32))
+        engine.talker_started.set()
+        if not engine.release_talker.wait(timeout=10.0):
+            raise TimeoutError("manual V2 test talker was not released")
+        engine.stop_check_after_yield = kwargs["stop_check"]()
+        return np.zeros(0, dtype=np.float32)
+
+    engine.think = think
+    engine.v9_prefix = v9_prefix
+    engine.talk = talk_from_say_prefill
+    sessions = SessionManager()
+    client = TestClient(create_app(engine, sessions))
+
+    try:
+        with client.websocket_connect("/v1/realtime?duplex=1") as ws:
+            assert ws.receive_json()["type"] == "session.created"
+            ws.send_json({
+                "type": "session.update",
+                "session": {
+                    "turn_policy": "scripted",
+                    "scripted_actions": ["LISTEN", "YIELD"],
+                    "auto_response": True,
+                    "input_audio_buffer_acknowledgements": True,
+                },
+            })
+            assert ws.receive_json()["type"] == "session.updated"
+            session = sessions.all()[0]
+
+            def receive_with_timeout(timeout: float = 2.0) -> dict[str, object]:
+                async def receive_event():
+                    return await asyncio.wait_for(ws._send_rx.receive(), timeout=timeout)
+
+                message = ws.portal.call(receive_event)
+                if message.get("type") != "websocket.send":
+                    raise AssertionError(f"websocket closed: {message!r}")
+                return json.loads(message["text"])
+
+            def send_frame_and_wait_for_action(
+                action: str,
+                frame_id: int,
+                *,
+                pcm_level: int = 4096,
+            ) -> dict[str, object]:
+                _send_pcm_level(ws, pcm_level)
+                decision = None
+                consumed = False
+                seen_events = []
+                for _ in range(30):
+                    try:
+                        event = receive_with_timeout()
+                    except TimeoutError as exc:
+                        engine.release_talker.set()
+                        raise AssertionError(
+                            f"frame {frame_id} timed out waiting for {action}; events={seen_events!r}"
+                        ) from exc
+                    seen_events.append(event)
+                    if event.get("type") == "error":
+                        engine.release_talker.set()
+                        raise AssertionError(f"frame {frame_id} realtime error: {event!r}")
+                    if (
+                        event.get("type") == "input_audio_buffer.consumed"
+                        and event.get("frame_id") == frame_id
+                    ):
+                        consumed = True
+                    if (
+                        event.get("type") == "duplex_control6.decision"
+                        and event.get("action") == action
+                        and event.get("frame_id") == frame_id
+                    ):
+                        decision = event
+                    if consumed and decision is not None:
+                        return decision
+                raise AssertionError(f"frame {frame_id} did not complete action {action}")
+
+            initial = send_frame_and_wait_for_action("LISTEN", 0)
+            assert initial["accepted"] is True
+            ws.send_json({"type": "input_audio_buffer.commit"})
+            created_events = []
+            for _ in range(30):
+                event = receive_with_timeout()
+                created_events.append(event)
+                if event.get("type") == "error":
+                    raise AssertionError(f"manual response failed: {event!r}")
+                if event.get("type") == "response.created":
+                    break
+            else:
+                raise AssertionError(f"response.created not received: {created_events!r}")
+            created = created_events[-1]
+            assert created.get("action") is None
+            assert created["intent_source"] == "manual_audio_commit"
+            assert engine.talker_started.wait(timeout=2.0)
+            audio = None
+            for _ in range(30):
+                event = receive_with_timeout()
+                if event.get("type") == "error":
+                    raise AssertionError(f"manual response failed: {event!r}")
+                if event.get("type") == "response.audio.delta":
+                    audio = event
+                    break
+            assert audio is not None, "manual V2 response emitted no PCM"
+            response_id = str(created["response_id"])
+            assert audio["response_id"] == response_id
+
+            # This manual V2 response has no policy action metadata. Put its
+            # active playback into the normal SPEAKING gate state, then issue one YIELD.
+            with session._generation_lock:
+                session.control_state = server_module.ControlState.SPEAKING
+            session.set_turn_policy(ScriptedPolicy([ControlAction.LISTEN]))
+            for frame_id in range(1, 13):
+                quiet = send_frame_and_wait_for_action("LISTEN", frame_id, pcm_level=0)
+                assert quiet["accepted"] is True
+                time.sleep(0.085)
+            session.set_turn_policy(ScriptedPolicy([ControlAction.YIELD]))
+            yielded = send_frame_and_wait_for_action("YIELD", 13, pcm_level=4096)
+            if yielded["accepted"] is not True:
+                engine.release_talker.set()
+                raise AssertionError(f"single YIELD was rejected: {yielded!r}")
+            assert session.stop_requested is True
+            assert session.stop_reason == ControlAction.YIELD.value
+            engine.release_talker.set()
+
+            terminal = []
+            for _ in range(30):
+                event = receive_with_timeout()
+                terminal.append(event)
+                if event.get("type") in {"response.cancelled", "response.done"}:
+                    break
+            else:
+                raise AssertionError(f"worker did not terminate: {terminal!r}")
+            assert terminal[-1]["type"] == "response.cancelled", terminal
+            assert terminal[-1]["response_id"] == response_id
+            assert engine.stop_check_after_yield is True
+            assert not any(
+                event.get("type") == "response.done"
+                and event.get("response_id") == response_id
+                for event in terminal
+            )
+            assert sum(
+                event.get("type") == "response.cancelled"
+                and event.get("response_id") == response_id
+                for event in terminal
+            ) == 1
+            assert _wait_for(lambda: not session.active_response)
+            drain_deadline = time.monotonic() + 0.1
+            while time.monotonic() < drain_deadline:
+                try:
+                    terminal.append(
+                        receive_with_timeout(drain_deadline - time.monotonic())
+                    )
+                except TimeoutError:
+                    break
+            assert sum(
+                event.get("type") == "response.cancelled"
+                and event.get("response_id") == response_id
+                for event in terminal
+            ) == 1
+            assert not any(
+                event.get("type") == "response.done"
+                and event.get("response_id") == response_id
+                for event in terminal
+            ), terminal
+            ws.send_json({"type": "session.close"})
+    finally:
+        engine.release_talker.set()
+
+
+def test_playback_finalizer_waits_for_ack_without_blocking_receiver_and_cancel_wakes() -> None:
+    async def exercise() -> None:
+        pending = _pending_pcm_test_branch("response-wait", 51)
+        waiter = asyncio.create_task(_wait_for_response_playback_drain(pending))
+        await asyncio.sleep(0)
+        assert not waiter.done()
+
+        # The receiver remains runnable while the finalizer waits for the exact ACK.
+        ack = {
+            "type": "client_consumed_pcm",
+            "response_id": "response-wait",
+            "generation_id": 51,
+            "speaker_segment_id": "seg-1",
+            "start_sample": 0,
+            "end_sample": 1920,
+            "sample_rate": 24000,
+            "sequence": 1,
+            "consumption_semantics": "logical_client_device_buffer",
+        }
+        with pending["spoken_prefix_lock"]:
+            assert _record_client_consumed_pcm(pending, ack) is True
+        pending["playback_ack_event"].set()
+        await asyncio.wait_for(waiter, timeout=0.2)
+        assert pending["client_consumed_segments"] == ("seg-1",)
+
+        cancelled = _pending_pcm_test_branch("response-cancel", 52)
+        cancel_waiter = asyncio.create_task(_wait_for_response_playback_drain(cancelled))
+        await asyncio.sleep(0)
+        _cancel_response_branch_playback(cancelled)
+        await asyncio.wait_for(cancel_waiter, timeout=0.2)
+        assert cancelled["client_consumed_segments"] == ()
+
+        no_pcm = {
+            "response_id": "response-empty",
+            "playback_segments": {},
+            "playback_ack_event": asyncio.Event(),
+            "spoken_prefix_lock": threading.Lock(),
+        }
+        await asyncio.wait_for(_wait_for_response_playback_drain(no_pcm), timeout=0.05)
+
+    asyncio.run(exercise())
 
 
 def test_response_audio_watermark_and_sent_frames_share_one_causality_snapshot() -> None:

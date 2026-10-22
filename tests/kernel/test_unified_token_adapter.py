@@ -96,6 +96,22 @@ def test_prepare_projects_exact_runtime_token_identity_for_q1_and_q2() -> None:
     assert [name for name, _ in language_model.calls[:2]] == ["identity", "project"]
 
 
+@pytest.mark.parametrize("logical_q", [3, 5, 6, 8])
+def test_prepare_variable_text_q_uses_even_physical_width(logical_q: int) -> None:
+    thinker, _ = _fake_thinker()
+    adapter = UnifiedTokenAdapter(thinker, require_cuda=False)
+    prepared = adapter.prepare(tuple(range(1, logical_q + 1)))
+    physical_q = logical_q + (logical_q & 1)
+    physical_q = max(2, physical_q)
+
+    assert tuple(prepared.inputs_embeds.shape) == (1, physical_q, 1536)
+    assert tuple(prepared.per_layer_inputs.shape) == (1, physical_q, 35, 256)
+    assert prepared.logical_q_lens == (logical_q,)
+    assert prepared.padded_input_ids[0, :logical_q].tolist() == list(range(1, logical_q + 1))
+    if physical_q > logical_q:
+        assert prepared.padded_input_ids[0, logical_q].item() == adapter.pad_token_id
+
+
 def test_prepare_mixed_logical_lengths_overwrites_only_q1_second_slot() -> None:
     thinker, _ = _fake_thinker()
     adapter = UnifiedTokenAdapter(thinker, require_cuda=False)
@@ -107,6 +123,36 @@ def test_prepare_mixed_logical_lengths_overwrites_only_q1_second_slot() -> None:
 
     assert prepared.logical_q_lens == (2, 1)
     assert prepared.padded_input_ids.tolist() == [[1, 2], [3, 17]]
+
+
+def test_stable_protocol_preparation_reuses_exact_cached_tensors() -> None:
+    thinker, language_model = _fake_thinker()
+    adapter = UnifiedTokenAdapter(thinker, require_cuda=False)
+    transition = (41, 42, 43, 44, 45)
+
+    first = adapter.prepare(
+        transition,
+        logical_q_lens=len(transition),
+        protocol="controller_guided_say_v1",
+    )
+    calls_after_first = len(language_model.calls)
+    second = adapter.prepare(
+        transition,
+        logical_q_lens=len(transition),
+        protocol="controller_guided_say_v1",
+    )
+
+    assert second is first
+    assert len(language_model.calls) == calls_after_first
+    assert second.padded_input_ids[0, : len(transition)].tolist() == list(transition)
+    # The protocol is part of the key; another protocol cannot reuse the entry.
+    other_protocol = adapter.prepare(
+        transition,
+        logical_q_lens=len(transition),
+        protocol="heard_action_say_v2",
+    )
+    assert other_protocol is not first
+    assert len(language_model.calls) > calls_after_first
 
 
 def test_prepare_sequence_chunks_chat_template_ids_into_physical_q2_steps() -> None:
@@ -153,8 +199,8 @@ def test_logits_helper_matches_model_forward_final_logit_softcap_dtype_and_order
     assert language_model.norm_calls == 0
 
 
-@pytest.mark.parametrize("input_ids", (torch.empty((0,), dtype=torch.long), torch.ones((1, 3), dtype=torch.long)))
-def test_prepare_rejects_empty_or_non_q2_shapes(input_ids: torch.Tensor) -> None:
+@pytest.mark.parametrize("input_ids", (torch.empty((0,), dtype=torch.long), torch.ones((1, 9), dtype=torch.long)))
+def test_prepare_rejects_empty_or_over_limit_shapes(input_ids: torch.Tensor) -> None:
     thinker, _ = _fake_thinker()
     adapter = UnifiedTokenAdapter(thinker, require_cuda=False)
 

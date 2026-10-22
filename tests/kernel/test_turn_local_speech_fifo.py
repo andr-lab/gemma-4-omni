@@ -81,23 +81,58 @@ def test_gemma_tick_pacer_limits_two_tokens_per_rolling_80ms_tick_without_catchu
     )
 
     async def exercise() -> None:
-        await pacer.acquire()
+        assert await pacer.acquire(vocal_started=True, fifo_pending_packets=2) == 0.0
         now[0] += 0.012
-        await pacer.acquire()
+        assert await pacer.acquire(vocal_started=True, fifo_pending_packets=2) == 0.0
         assert not sleeps
 
-        await pacer.acquire()
+        assert await pacer.acquire(vocal_started=True, fifo_pending_packets=2) == pytest.approx(0.068)
         assert sleeps == [pytest.approx(0.068)]
         assert now[0] == pytest.approx(0.08)
 
         # A delayed callback starts in the current window and cannot borrow
         # unused budget from earlier windows to emit a burst.
         now[0] += 0.24
-        await pacer.acquire()
-        await pacer.acquire()
+        assert await pacer.acquire(vocal_started=True, fifo_pending_packets=2) == 0.0
+        assert await pacer.acquire(vocal_started=True, fifo_pending_packets=2) == 0.0
         before = now[0]
-        await pacer.acquire()
+        assert await pacer.acquire(vocal_started=True, fifo_pending_packets=2) == pytest.approx(0.08)
         assert now[0] == pytest.approx(before + 0.08)
+
+    asyncio.run(exercise())
+
+
+def test_pacer_zero_sleep_when_fifo_starved():
+    now = [0.0]
+    sleeps: list[float] = []
+
+    async def sleep(duration: float) -> None:
+        sleeps.append(duration)
+        now[0] += duration
+
+    pacer = GemmaTokenTickPacer(
+        tick_ms=80,
+        max_tokens_per_tick=2,
+        monotonic=lambda: now[0],
+        sleep=sleep,
+    )
+
+    async def exercise() -> None:
+        assert await pacer.acquire(vocal_started=False, fifo_pending_packets=4) == 0.0
+        assert await pacer.acquire(vocal_started=True, fifo_pending_packets=1) == 0.0
+        assert not sleeps
+
+        # A starved FIFO resets the active tick origin and quota. Recovery at
+        # t=.07 leaves 60 ms in the fresh 80 ms window before token three.
+        now[0] += 0.05
+        assert await pacer.acquire(vocal_started=True, fifo_pending_packets=1) == 0.0
+        now[0] += 0.02
+        assert await pacer.acquire(vocal_started=True, fifo_pending_packets=2) == 0.0
+        assert await pacer.acquire(vocal_started=True, fifo_pending_packets=2) == 0.0
+        assert not sleeps
+        assert await pacer.acquire(vocal_started=True, fifo_pending_packets=2) == pytest.approx(0.06)
+        assert sleeps == [pytest.approx(0.06)]
+        assert now[0] == pytest.approx(0.13)
 
     asyncio.run(exercise())
 

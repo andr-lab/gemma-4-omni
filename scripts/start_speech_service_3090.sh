@@ -3,26 +3,26 @@ set -euo pipefail
 
 # Canonical experimental speech service on gpu3090. This script starts or
 # restarts only this named container; it never removes a container.
-readonly CONTAINER="${DUPLEX_SERVICE_CONTAINER:-gemma4-listener-control6-microbatch-20261014}"
+readonly CONTAINER="${DUPLEX_SERVICE_CONTAINER:-gemma4-listener-control6-h3000-eos-build14-20261021}"
 readonly IMAGE="${DUPLEX_SERVICE_IMAGE:-gemma4-listener-control6-baseline-snapshot-20261014:latest}"
 readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly HEALTH_TIMEOUT_S="${DUPLEX_HEALTH_TIMEOUT_S:-600}"
 readonly PYTHON="/workspace/.venv_e2e_runtime/bin/python"
-readonly UNIFIED_KV="${DUPLEX_UNIFIED_KV:-0}"
+readonly UNIFIED_KV="${DUPLEX_UNIFIED_KV:-1}"
 case "$UNIFIED_KV" in
   0|1) ;;
   *) echo "speech service: DUPLEX_UNIFIED_KV must be 0 or 1" >&2; exit 1 ;;
 esac
 if [[ "$UNIFIED_KV" == "1" ]]; then
-  if [[ ${DUPLEX_AUDIO_RESPONSE_PROTOCOL+x} && "$DUPLEX_AUDIO_RESPONSE_PROTOCOL" != "heard_action_say_v2" ]]; then
-    echo "speech service: unified KV requires DUPLEX_AUDIO_RESPONSE_PROTOCOL=heard_action_say_v2" >&2
-    exit 1
+  if [[ ${DUPLEX_AUDIO_RESPONSE_PROTOCOL+x} ]]; then
+    RESPONSE_PROTOCOL="$DUPLEX_AUDIO_RESPONSE_PROTOCOL"
+  else
+    case "${DUPLEX_CONTROLLER_GUIDED_SAY_V1:-1}" in
+      1) RESPONSE_PROTOCOL="controller_guided_say_v1" ;;
+      0) RESPONSE_PROTOCOL="heard_action_say_v2" ;;
+      *) echo "speech service: DUPLEX_CONTROLLER_GUIDED_SAY_V1 must be 0 or 1" >&2; exit 1 ;;
+    esac
   fi
-  if [[ ${DUPLEX_CONTROLLER_GUIDED_SAY_V1+x} && "$DUPLEX_CONTROLLER_GUIDED_SAY_V1" != "0" ]]; then
-    echo "speech service: unified KV conflicts with DUPLEX_CONTROLLER_GUIDED_SAY_V1; set it to 0 or unset it" >&2
-    exit 1
-  fi
-  RESPONSE_PROTOCOL="heard_action_say_v2"
 elif [[ ${DUPLEX_AUDIO_RESPONSE_PROTOCOL+x} ]]; then
   RESPONSE_PROTOCOL="$DUPLEX_AUDIO_RESPONSE_PROTOCOL"
 else
@@ -49,11 +49,13 @@ if [[ "$UNIFIED_KV" == "1" ]]; then
 fi
 readonly LISTENER_MICROBATCH_SEMANTIC_SHADOW
 readonly LISTENER_MICROBATCH_GEMM_GRAPHS="${DUPLEX_LISTENER_MICROBATCH_GEMM_GRAPHS:-0}"
-readonly LISTENER_SOURCE_ROOT_RELATIVE="${DUPLEX_LISTENER_MICROBATCH_SOURCE_ROOT:-artifacts/runtime/listener_microbatch_source}"
+readonly LISTENER_SOURCE_ROOT_RELATIVE="${DUPLEX_LISTENER_MICROBATCH_SOURCE_ROOT:-artifacts/runtime/control6_runtime_pendingpcm_phaseonly_q2cachemeta_build14_stableturn_q2_context_h3000_eos_20261021}"
 readonly NATIVE_CONTROL6_TRACE="${DUPLEX_NATIVE_CONTROL6_TRACE:-0}"
-readonly NATIVE_LISTENER_CUDA_GRAPH="${GEMMA4_NATIVE_LISTENER_CUDA_GRAPH:-1}"
+readonly NATIVE_CONTROL6_DEBUG_INPUT_DIRECTORY="${DUPLEX_NATIVE_CONTROL6_DEBUG_INPUT_DIRECTORY:-}"
+readonly STABLE_TURN_POLICY_Q2_CONTEXT="${DUPLEX_NATIVE_CONTROL6_STABLE_TURN_POLICY_Q2_CONTEXT:-1}"
+readonly NATIVE_LISTENER_CUDA_GRAPH="${GEMMA4_NATIVE_LISTENER_CUDA_GRAPH:-0}"
 readonly ALLOW_CUSTOM_EAGER_DIAGNOSTIC="${GEMMA4_NATIVE_LISTENER_ALLOW_CUSTOM_EAGER_DIAGNOSTIC:-0}"
-readonly ATTENTION_BACKEND="${GEMMA4_ATTENTION_BACKEND:-CUSTOM}"
+readonly ATTENTION_BACKEND="${GEMMA4_ATTENTION_BACKEND:-NATIVE_SPLITK_GQA}"
 readonly SPLITK_LAYER_MASK="${GEMMA4_SPLITK_LAYER_MASK:-STATE_SAFE_HYBRID}"
 readonly INPUT_STREAM_PRIORITY="${GEMMA4_DUPLEX_INPUT_STREAM_PRIORITY:-default}"
 readonly CUDA_TIMING="${GEMMA4_DUPLEX_CUDA_TIMING:-0}"
@@ -73,6 +75,10 @@ esac
 case "$NATIVE_CONTROL6_TRACE" in
   0|1) ;;
   *) echo "speech service: DUPLEX_NATIVE_CONTROL6_TRACE must be 0 or 1" >&2; exit 1 ;;
+esac
+case "$STABLE_TURN_POLICY_Q2_CONTEXT" in
+  0|1) ;;
+  *) echo "speech service: DUPLEX_NATIVE_CONTROL6_STABLE_TURN_POLICY_Q2_CONTEXT must be 0 or 1" >&2; exit 1 ;;
 esac
 case "$NATIVE_LISTENER_CUDA_GRAPH" in
   0|1) ;;
@@ -101,8 +107,8 @@ esac
 readonly NATIVE_CONTROL6_SEMANTIC_PREFIX="${DUPLEX_NATIVE_CONTROL6_SEMANTIC_PREFIX:-1}"
 case "$NATIVE_CONTROL6_SEMANTIC_PREFIX" in
   1)
-    DEFAULT_LISTENER_LIB_RELATIVE_PATH="artifacts/runtime/libgemma4_listener_microbatch_fullrepeat_20261014.so"
-    DEFAULT_NATIVE_CONTROL6_ADAPTER_RELATIVE_PATH="checkpoints/native_control6_semantic_prefix_mixed_candidate600.pt"
+    DEFAULT_LISTENER_LIB_RELATIVE_PATH="artifacts/runtime/libgemma4_listener_microbatch_prefix512_q2cachemeta_20261021_build11_text_health.so"
+    DEFAULT_NATIVE_CONTROL6_ADAPTER_RELATIVE_PATH="checkpoints/native_control6_gemma_native_rows_rank16_control6_temporal100_candidate_h_3000_20261021.pt"
     DEFAULT_PREFIX_SCHEMA_VERSION="2"
     DEFAULT_PREFIX_CONTRACT="gemma_native_control6_semantic_prefix_boa_v2"
     ;;
@@ -236,6 +242,9 @@ check_env() {
   if [[ "$key" == "DUPLEX_UNIFIED_KV" && "$expected" == "0" && -z "$actual" ]]; then
     return
   fi
+  if [[ "$key" == "DUPLEX_NATIVE_CONTROL6_STABLE_TURN_POLICY_Q2_CONTEXT" && "$expected" == "0" && -z "$actual" ]]; then
+    return
+  fi
   [[ "$actual" == "$expected" ]] || fail "existing $CONTAINER has unexpected $key; refusing to mutate it"
 }
 
@@ -286,6 +295,7 @@ check_existing_container() {
   if [[ "$NATIVE_CONTROL6_TRACE" == "1" ]]; then
     check_env DUPLEX_NATIVE_CONTROL6_TRACE 1
   fi
+  check_env DUPLEX_NATIVE_CONTROL6_STABLE_TURN_POLICY_Q2_CONTEXT "$STABLE_TURN_POLICY_Q2_CONTEXT"
   check_env GEMMA4_OMNI_LISTENER_SILENCE_SKIP "$LISTENER_SILENCE_SKIP"
   check_env GEMMA4_OMNI_FRAME_RESIDUAL_ADAPTER_CKPT "$ADAPTER_CONTAINER"
   check_env GEMMA4_OMNI_DEFAULT_VOICE gemma
@@ -357,6 +367,8 @@ else
     --env GEMMA4_OMNI_SPEAKER_REFERENCE_SHA256=480f55f41c71c3d79c2a9acc48f0bfb3c5a46222e6e9ebf3e2888e93501a6b5c \
     --env DUPLEX_ENABLE_GEMMA_NATIVE_CONTROL6="$ENABLE_NATIVE_CONTROL6" \
     --env DUPLEX_NATIVE_CONTROL6_TRACE="$NATIVE_CONTROL6_TRACE" \
+    --env DUPLEX_NATIVE_CONTROL6_DEBUG_INPUT_DIRECTORY="$NATIVE_CONTROL6_DEBUG_INPUT_DIRECTORY" \
+    --env DUPLEX_NATIVE_CONTROL6_STABLE_TURN_POLICY_Q2_CONTEXT="$STABLE_TURN_POLICY_Q2_CONTEXT" \
     --env GEMMA4_OMNI_LISTENER_SILENCE_SKIP="$LISTENER_SILENCE_SKIP" \
     --env DUPLEX_NATIVE_CONTROL6_SEMANTIC_PREFIX="$NATIVE_CONTROL6_SEMANTIC_PREFIX" \
     --env DUPLEX_NATIVE_CONTROL6_PREFIX_SCHEMA_VERSION="$PREFIX_SCHEMA_VERSION" \

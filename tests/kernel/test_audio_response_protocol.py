@@ -637,6 +637,45 @@ def test_action_constraint_rejects_a_different_action_prefix_before_cache_advanc
     )
 
 
+def test_action_constraint_prunes_actions_incompatible_with_completed_heard() -> None:
+    allowed = ("SPEAK", "BACKCHANNEL")
+    budget = {
+        "max_new_tokens": 128,
+        "heard_token_cap": 48,
+        "action_token_cap": 8,
+        "say_token_cap": 48,
+    }
+
+    def candidate_is_valid(heard: str, action_prefix: str, next_text: str) -> bool:
+        collector = AudioResponseV2Collector(allowed_actions=allowed)
+        collector.parser.feed('{"heard":"' + heard + '","action":"' + action_prefix)
+        constraint = AudioResponseV2ActionConstraint(
+            expected_action=None,
+            allowed_actions=allowed,
+            tokenizer=object(),
+            enforce_json_structure=True,
+        )
+        return constraint.candidate_within_generation_budget(
+            collector,
+            next_text,
+            terminal=False,
+            generated_tokens=8,
+            budget=budget,
+        )
+
+    # Empty HEARD can only lead to BACKCHANNEL; non-empty HEARD can only lead
+    # to SPEAK here. The parser's final semantic check remains authoritative.
+    assert not candidate_is_valid("", "", "SPEAK")
+    assert candidate_is_valid("", "", "BACKCHANNEL")
+    assert not candidate_is_valid("heard words", "", "BACKCHANNEL")
+    assert candidate_is_valid("heard words", "", "SPEAK")
+
+    # The chosen action can still close normally once it is semantically
+    # compatible with the already-completed HEARD value.
+    assert candidate_is_valid("", "BACKCHANNEL", '"')
+    assert candidate_is_valid("heard words", "SPEAK", '"')
+
+
 def test_action_constraint_fails_closed_when_existing_tokenization_does_not_roundtrip() -> None:
     class _Tokenizer:
         def encode(self, _text, *, add_special_tokens):

@@ -1,0 +1,149 @@
+{
+  "schema_version": 1,
+  "generated_utc": "2026-10-21",
+  "artifact_kind": "unified_kv_say_only_live_validation",
+  "benchmark": {
+    "profiled_run_dir": "artifacts/test/unified_kv_say_only_20261020/live_benchmark_q6_m6_profiled_20261021",
+    "raw_report": "artifacts/test/unified_kv_say_only_20261020/live_benchmark_q6_m6_profiled_20261021/report.json",
+    "raw_events": "artifacts/test/unified_kv_say_only_20261020/live_benchmark_q6_m6_profiled_20261021/events.jsonl",
+    "input_wav": "/workspace/artifacts/test/unified_kv_say_only_20261020/input_10s_silence_milano_20261021.wav",
+    "input_duration_s": 13.2,
+    "input_frames": 165,
+    "source_playback_complete": true,
+    "acks": 165,
+    "ack_errors": [],
+    "response_complete": true,
+    "response_action": "SPEAK",
+    "response_text": "Certo, ecco un itinerario di tre giorni.",
+    "output_packets": 27,
+    "output_audio_s": 4.32,
+    "first_audio_ms": 648.8,
+    "response_wall_ms": 3316.7,
+    "response_wav": "/workspace/artifacts/test/unified_kv_say_only_20261020/live_benchmark_q6_m6_profiled_20261021/response_resp_0934468a29b9.wav",
+    "protocol": "controller_guided_say_v1",
+    "input_fixture_assessment": {
+      "source_frame_0_to_124": "exact digital silence; Q0, cache position fixed at 60",
+      "frame_125_rms": 3e-05,
+      "first_logical_q2_frame": 126,
+      "first_logical_q2_cursor": [
+        60,
+        62
+      ],
+      "policy_decision_frame": 149,
+      "policy_decision_at_ms": 12238.416,
+      "last_nonzero_rms_frame": 156,
+      "last_nonzero_rms": 0.00049,
+      "last_nonzero_frame_sent_at_ms": 12724.593,
+      "final_input_frame": 164,
+      "final_input_frame_sent_at_ms": 13369.608,
+      "decision_before_last_nonzero_frame_ms": 486.177,
+      "decision_before_input_complete_ms": 1131.192,
+      "result": "full input and output completed, but SPEAK was selected before the full source audio arrived; this is not a completed-audio decision success"
+    },
+    "silence_cursor": {
+      "frames": 126,
+      "frame_range": [
+        0,
+        125
+      ],
+      "all_logical_q_zero": true,
+      "start_position": 60,
+      "end_position": 60,
+      "unchanged": true
+    },
+    "latency": {
+      "first_logits_after_decision_ms": 54.806599,
+      "first_token_sampled_ms": 58.4321,
+      "first_packet_hidden_ready_ms": 114.635122,
+      "ttft_ms": 114.635122,
+      "targets_ms": {
+        "first_logits_max": 20.0,
+        "packet_hidden_ttft_max": 35.0
+      },
+      "first_logits_pass": false,
+      "packet_hidden_ttft_pass": false
+    },
+    "ack_latency_ms": {
+      "p50": 82.66,
+      "p95": 127.57,
+      "max": 221.58
+    },
+    "listener_queue_ms": {
+      "p50": 76.59,
+      "p95": 122.22,
+      "max": 217.12
+    },
+    "listener_step_ms": {
+      "p50": 34.48,
+      "p95": 60.61,
+      "max": 145.96
+    }
+  },
+  "native_gpu_validation": {
+    "device": "Mondaini RTX 3090, isolated Docker as uid:gid 1000:1000, --ipc=host, bridge network",
+    "source_dso": "/home/administrator/gemma-4-omni/native/gemma4_listener_microbatch/libgemma4_listener_microbatch.so",
+    "runtime_dso": "/home/administrator/gemma-4-omni/artifacts/runtime/libgemma4_listener_microbatch_prefix512_q2cachemeta_20261021_build11_text_health.so",
+    "candidate_dso_sha256": "01a7cfcd40c96ca6a0bdbb0e41bb9c04d922671f2d585d6b4e97144dbf17c912",
+    "q6_vs_3xq2": {
+      "hidden_cosine": 0.99990559,
+      "min_kv_cosine": 0.99982572,
+      "threshold": 0.9995,
+      "pass": true
+    },
+    "q6_graph_replay": {
+      "hidden_cosine": 0.99980837,
+      "min_kv_cosine": 0.99981678,
+      "threshold": 0.9995,
+      "pass": true
+    },
+    "q5": {
+      "hidden_cosine": 0.99982679,
+      "min_kv_cosine": 0.9998526,
+      "threshold": 0.9995,
+      "pass": true
+    },
+    "q5_then_q1": {
+      "hidden_cosine": 0.9998281,
+      "min_kv_cosine": 0.99982101,
+      "threshold": 0.9995,
+      "pass": true
+    },
+    "q6_timing_ms": {
+      "cold": 47.2064,
+      "warm": [
+        18.0336,
+        18.0255,
+        18.1709
+      ],
+      "3x_q2_reference": [
+        11.5875,
+        11.8856,
+        11.8804
+      ]
+    },
+    "q5_warm_timing_ms": [
+      17.7,
+      18.18
+    ],
+    "q5_then_q1_timing_ms": 12.0238,
+    "graph_capture": {
+      "variable_q_graphs_captured": 276,
+      "q2_graphs": 0
+    },
+    "queued_q2_fork": "pass",
+    "q012_bitwise_regression": "previous native comparison passed with Q2 graph opt-in disabled; Q0/Q1/Q2 dispatch and math paths remain unchanged",
+    "pytest_gpu_status": "native parity and capture assertions passed; overall GPU pytest was non-green due preserved baseline DSO cleanup returning code -6 and a known HF fork threshold result 0.999569 below 0.9997; candidate owner cleanup succeeded independently"
+  },
+  "test_status": {
+    "python_unit_suite": "141 passed in 10.43s (final run after architecture doc update)",
+    "py_compile": "passed for changed Python modules",
+    "native_gpu": "see native_gpu_validation; do not report the enclosing pytest as passed"
+  },
+  "service": {
+    "container": "gemma4-listener-control6-h3000-eos-build14-20261021",
+    "health_at_last_check": "ok",
+    "unified_kv_enabled": true,
+    "protocol": "controller_guided_say_v1",
+    "runtime_module_source": "/home/administrator/gemma-4-omni/artifacts/runtime/control6_runtime_pendingpcm_phaseonly_q2cachemeta_build14_stableturn_q2_context_h3000_eos_20261021/duplex_kernel"
+  }
+}

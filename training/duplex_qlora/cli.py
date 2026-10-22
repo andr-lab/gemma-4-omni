@@ -109,16 +109,46 @@ def build_parser() -> argparse.ArgumentParser:
         help="use Gemma4's native DynamicCache KV-sharing semantics during training (required by Gemma4; checkpointing is disabled)",
     )
 
-    extract = commands.add_parser("extract-control", help="merge final LoRA and extract native listener frames")
+    extract = commands.add_parser("extract-control", help="extract native listener frames for a Control6 profile")
     extract.add_argument("--prepared-dir", type=Path, required=True)
-    extract.add_argument("--base-model-path", required=True)
-    extract.add_argument("--adapter-dir", required=True)
+    extract.add_argument("--base-model-path", default=None)
+    extract.add_argument("--adapter-dir", default=None)
+    extract.add_argument(
+        "--runtime-workspace",
+        type=Path,
+        default=Path("/workspace"),
+        help="workspace passed to the exact serving Thinker loader (native1540; default /workspace)",
+    )
+    extract.add_argument(
+        "--native-microbatch-library-path",
+        type=Path,
+        default=None,
+        help="optional explicit path to the same native listener library used by serving; otherwise use serving env",
+    )
+    extract.add_argument(
+        "--native-smoke-frames",
+        type=int,
+        default=8,
+        help="real PCM frames for the short native1540 serving-worker smoke (3-8; used with --benchmark-only)",
+    )
+    extract.add_argument(
+        "--split",
+        choices=("train", "validation", "test"),
+        action="append",
+        default=None,
+        help="split to extract; native1540 defaults to train+validation and reads test only when explicitly requested",
+    )
+    extract.add_argument(
+        "--resume-existing",
+        action="store_true",
+        help="resume verified per-conversation partials in an existing output directory",
+    )
     extract.add_argument("--output-dir", type=Path, default=Path("checkpoints/gemma4_duplex_qlora/features"))
     extract.add_argument("--device", default="cuda")
     extract.add_argument(
         "--benchmark-only",
         action="store_true",
-        help="merge the adapter and measure eight bounded native target clusters without extracting a dataset",
+        help="measure up to eight bounded real target windows through the selected runtime path without extracting features",
     )
     extract.add_argument(
         "--benchmark-then-extract-if-under-hours",
@@ -131,6 +161,35 @@ def build_parser() -> argparse.ArgumentParser:
         "--verify-prefix-cache",
         action="store_true",
         help="compare cold and cached native canonical-prefix restore on the same eight real target windows",
+    )
+    extract.add_argument(
+        "--control6-profile",
+        choices=("historical_q4", "native1540"),
+        default="historical_q4",
+        help="select historical Q4 pooling or the runtime-aligned Q2/W240 gemma_hidden_t Native1540 ABI",
+    )
+
+    augment = commands.add_parser(
+        "augment-control-phase",
+        help="append causal PCM phase values to extracted native listener features",
+    )
+    augment.add_argument("--native-feature-dir", type=Path, required=True)
+    augment.add_argument("--supplemental-native-feature-dir", type=Path, default=None)
+    augment.add_argument("--prepared-dir", type=Path, required=True)
+    augment.add_argument("--additional-prepared-dir", type=Path, default=None)
+    augment.add_argument("--output-dir", type=Path, required=True)
+    augment.add_argument(
+        "--phase-profile",
+        choices=("candidate_c", "native1540"),
+        default="candidate_c",
+    )
+    augment.add_argument("--split", choices=("train", "validation", "test"), action="append", default=None)
+    augment.add_argument("--frozen-head", type=Path, default=None)
+    augment.add_argument(
+        "--mask-train-natural-backchannels-without-overlap",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="keep the historical Candidate C mask; native1540 can disable it to preserve prepared action masks",
     )
 
     head = commands.add_parser("train-control", help="train the separate six-action listener head")
@@ -279,6 +338,28 @@ def main(argv: list[str] | None = None) -> int:
             benchmark_only=args.benchmark_only,
             benchmark_then_extract_if_under_hours=args.benchmark_then_extract_if_under_hours,
             verify_prefix_cache=args.verify_prefix_cache,
+            control6_profile=args.control6_profile,
+            runtime_workspace=args.runtime_workspace,
+            native_microbatch_library_path=args.native_microbatch_library_path,
+            native_smoke_frames=args.native_smoke_frames,
+            splits=tuple(args.split) if args.split is not None else None,
+            resume_existing=args.resume_existing,
+        )
+    elif args.command == "augment-control-phase":
+        from .stage2 import augment_control_features_with_acoustic_phase
+
+        result = augment_control_features_with_acoustic_phase(
+            native_feature_dir=args.native_feature_dir,
+            supplemental_native_feature_dir=args.supplemental_native_feature_dir,
+            prepared_dir=args.prepared_dir,
+            additional_prepared_dir=args.additional_prepared_dir,
+            output_dir=args.output_dir,
+            splits=tuple(args.split or ("train", "validation")),
+            frozen_head_path=args.frozen_head,
+            mask_train_natural_backchannels_without_overlap=(
+                args.mask_train_natural_backchannels_without_overlap
+            ),
+            phase_profile=args.phase_profile,
         )
     else:
         from .stage2 import train_control_head

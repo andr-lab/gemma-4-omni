@@ -10,6 +10,8 @@ import torch.nn.functional as F
 
 from duplex_kernel.engine import PipelineEngine, _estimate_talker_frame_budget
 from duplex_kernel.future_prefix import ConditioningFrameBuffer
+from duplex_kernel.live_say import TurnLocalQwenSayStream
+from duplex_kernel.session import SpokenTokenPacket, TurnLocalSpeechFIFO
 
 
 EOS_ID = 2150
@@ -134,6 +136,12 @@ class _CountingTalkerModel:
     def get_input_embeddings(self):
         return self._embedding
 
+    def get_text_embeddings(self):
+        return self._embedding
+
+    def text_projection(self, hidden: torch.Tensor) -> torch.Tensor:
+        return hidden
+
     def __call__(self, *, inputs_embeds, use_cache, past_key_values=None):
         del use_cache, past_key_values
         self.model_calls += 1
@@ -177,6 +185,43 @@ class _LiveTextCountingTalker(_CountingLegacyTalker):
         assert include_text_eos is False
         zero = torch.zeros((1, 1, HIDDEN_SIZE))
         return zero, zero, zero, zero
+
+
+class _SingleTokenTokenizer:
+    def encode(self, _text: str, *, add_special_tokens: bool) -> list[int]:
+        assert add_special_tokens is False
+        return [77]
+
+    def decode(
+        self,
+        ids: list[int],
+        *,
+        skip_special_tokens: bool,
+        clean_up_tokenization_spaces: bool,
+    ) -> str:
+        assert skip_special_tokens is False
+        assert clean_up_tokenization_spaces is False
+        return "ciao" if ids == [77] else ""
+
+
+def _closed_live_stream() -> tuple[TurnLocalQwenSayStream, int]:
+    fifo = TurnLocalSpeechFIFO()
+    fifo.begin_turn(generation_id=1)
+    stream = TurnLocalQwenSayStream(
+        qwen_tokenizer=_SingleTokenTokenizer(),
+        text_eos_token_id=900,
+        fifo=fifo,
+        generation_id=1,
+    )
+    stream.feed_packet(SpokenTokenPacket(
+        token_id=1,
+        text_piece="ciao",
+        gemma_hidden_1536=torch.zeros((1, 1536)),
+        exclusive_kv_cursor=1,
+    ))
+    stream.finish(final_text="ciao")
+    initial = stream.take_initial_token(timeout_s=0)
+    return stream, int(initial.token_id)
 
 
 class _RolloverStatefulSpeaker:
@@ -385,6 +430,126 @@ def test_pipeline_talker_releases_thinker_priority_lock_before_waiting_for_live_
     assert not engine._thinker_lock.locked()
     assert output.size == 2 * 1920
     assert metrics["generated_cb0_frames"] == 2
+
+
+def test_closed_live_unit_keeps_sampling_until_real_codec_eos_within_frame_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _engine_for_termination(_LiveTextCountingTalker())
+    # Keep this focused fixture short while preserving the production split:
+    # a text-derived initial target below the configured hard frame cap.
+    monkeypatch.setattr(
+        "duplex_kernel.engine._estimate_talker_frame_budget",
+        lambda *_args, **_kwargs: (1, 0, 2),
+    )
+    stream, initial_token_id = _closed_live_stream()
+
+    samples = iter([42, 42, 42, 42, EOS_ID])
+    sampled_allow_eos: list[bool] = []
+
+    def sample(_logits, temperature=0.6, **kwargs):
+        del temperature
+        sampled_allow_eos.append(bool(kwargs["allow_eos"]))
+        return next(samples)
+
+    engine._cb0_sample = sample
+    metrics: dict[str, object] = {}
+    output = engine.talk(
+        "ciao",
+        torch.empty((1, 0, HIDDEN_SIZE)),
+        n_words=1,
+        min_frames=1,
+        max_frames=5,
+        on_audio_chunk=lambda _pcm: None,
+        metrics=metrics,
+        raw_text_token_ids=[initial_token_id],
+        include_text_eos=False,
+        live_qwen_text_stream=stream,
+    )
+
+    assert stream.codec_eos_allowed is True
+    assert sampled_allow_eos[:2] == [False, False]
+    assert sampled_allow_eos[2:] and all(sampled_allow_eos[2:])
+    assert metrics["eos_detected"] is True
+    assert metrics["eos_frame_id"] == 4
+    assert metrics["generated_cb0_frames"] == 4
+    assert metrics["terminated_by"] == "eos"
+    assert metrics["terminal_queries"] == 0
+    assert output.size == 4 * 1920
+
+
+def test_closed_live_unit_without_codec_eos_still_fails_at_hard_frame_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _engine_for_termination(_LiveTextCountingTalker())
+    monkeypatch.setattr(
+        "duplex_kernel.engine._estimate_talker_frame_budget",
+        lambda *_args, **_kwargs: (1, 0, 2),
+    )
+    stream, initial_token_id = _closed_live_stream()
+    engine._cb0_sample = lambda _logits, temperature=0.6, **_kwargs: 42
+    metrics: dict[str, object] = {}
+
+    engine.talk(
+        "ciao",
+        torch.empty((1, 0, HIDDEN_SIZE)),
+        n_words=1,
+        min_frames=1,
+        max_frames=3,
+        on_audio_chunk=lambda _pcm: None,
+        metrics=metrics,
+        raw_text_token_ids=[initial_token_id],
+        include_text_eos=False,
+        live_qwen_text_stream=stream,
+    )
+
+    assert stream.codec_eos_allowed is True
+    assert metrics["live_text_eos_drained_frame_cap"] == 3
+    assert metrics["generated_cb0_frames"] == 3
+    assert metrics["terminal_queries"] == 1
+    assert metrics["eos_detected"] is False
+    assert metrics["terminated_by"] == "budget"
+
+
+def test_closed_live_unit_stop_after_text_eos_drain_skips_codec_continuation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _engine_for_termination(_LiveTextCountingTalker())
+    monkeypatch.setattr(
+        "duplex_kernel.engine._estimate_talker_frame_budget",
+        lambda *_args, **_kwargs: (1, 0, 2),
+    )
+    stream, initial_token_id = _closed_live_stream()
+    original_ack = stream.ack_trailing_token
+
+    def ack_and_stop_after_text_eos() -> None:
+        original_ack()
+        if stream.codec_eos_allowed:
+            engine.stop_generation()
+
+    stream.ack_trailing_token = ack_and_stop_after_text_eos
+    engine._cb0_sample = lambda _logits, temperature=0.6, **_kwargs: 42
+    metrics: dict[str, object] = {}
+
+    output = engine.talk(
+        "ciao",
+        torch.empty((1, 0, HIDDEN_SIZE)),
+        n_words=1,
+        min_frames=1,
+        max_frames=5,
+        on_audio_chunk=lambda _pcm: None,
+        metrics=metrics,
+        raw_text_token_ids=[initial_token_id],
+        include_text_eos=False,
+        live_qwen_text_stream=stream,
+    )
+
+    assert stream.codec_eos_allowed is True
+    assert metrics["live_text_eos_drained_frame_cap"] == 5
+    assert metrics["cancelled"] is True
+    assert metrics["eos_detected"] is False
+    assert metrics["generated_cb0_frames"] < 5
+    assert output.size == 0
 
 
 def test_pipeline_talker_releases_thinker_priority_lock_before_waiting_for_live_text() -> None:

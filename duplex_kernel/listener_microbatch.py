@@ -552,8 +552,8 @@ class ListenerMicrobatchCoordinator:
         forward and output-health check have succeeded. Queued listener frames
         are allowed: they are admitted later from the new cache cursor.
         """
-        if isinstance(token_count, bool) or not isinstance(token_count, int) or token_count not in (1, 2):
-            raise ValueError("text token_count must be one or two")
+        if isinstance(token_count, bool) or not isinstance(token_count, int) or not 1 <= token_count <= 8:
+            raise ValueError("text token_count must be one to eight")
         for name, value in (
             ("expected_generation_id", expected_generation_id),
             ("expected_cache_position", expected_cache_position),
@@ -577,11 +577,12 @@ class ListenerMicrobatchCoordinator:
                 or state.valid_history_tokens != expected_cache_position
             ):
                 raise RuntimeError("text append lost its generation/cache-position compare-and-swap")
-            if state.cache_position > LISTENER_MAX_SEQ_LEN - LISTENER_Q_PER_FRAME:
+            physical_q = max(LISTENER_Q_PER_FRAME, token_count + (token_count & 1))
+            if state.cache_position > LISTENER_MAX_SEQ_LEN - physical_q:
                 raise RuntimeError(
-                    "native listener physical Q2 capacity exhausted before text append; "
+                    "native listener physical text-Q capacity exhausted before text append; "
                     f"session={session_id}, cache_position={state.cache_position}, "
-                    f"max_seq_len={LISTENER_MAX_SEQ_LEN}"
+                    f"physical_q={physical_q}, max_seq_len={LISTENER_MAX_SEQ_LEN}"
                 )
             state.cache_position += token_count
             state.valid_history_tokens = state.cache_position

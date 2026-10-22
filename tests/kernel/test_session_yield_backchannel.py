@@ -138,22 +138,73 @@ def test_handle_bargein_yield_end_to_end() -> None:
     # 2. Speaker aborted
     assert speaker.aborted is True
 
-    # 3. Interrupted turn close embeds forwarded at 19, then prebuffer at 19 + 6 = 25
+    # 3. Interrupted turn close embeds forwarded at the exclusive cursor, then prebuffer
     assert len(engine.embedded_tokens_calls) == 1
     assert engine.embedded_tokens_calls[0] == manager.interrupted_model_to_user_audio_token_ids
     assert len(engine.forward_steps) == 2
-    assert engine.forward_steps[0]["cache_position"] == 19
-    assert engine.forward_steps[1]["cache_position"] == 19 + len(manager.interrupted_model_to_user_audio_token_ids)
+    assert engine.forward_steps[0]["cache_position"] == 18
+    assert engine.forward_steps[1]["cache_position"] == 18 + len(manager.interrupted_model_to_user_audio_token_ids)
     assert engine.forward_steps[1]["shape"] == (1, 4, 1536)
 
-    # 4. Final current_position advanced to 19 + 6 + 4 = 29
-    expected_final_pos = 19 + len(manager.interrupted_model_to_user_audio_token_ids) + 4
+    # 4. Final current_position advanced from the exclusive cursor by close + prebuffer
+    expected_final_pos = 18 + len(manager.interrupted_model_to_user_audio_token_ids) + 4
     assert session.kv_cache.current_position == expected_final_pos
 
     # 5. Prebuffer cleared and speaking state updated
     assert len(session.bargein_prebuffer_embeds) == 0
     assert session.assistant_speaking is False
     assert session.user_speech_active is True
+
+
+def test_handle_bargein_yield_exact_exclusive_cursor_no_off_by_one() -> None:
+    manager = SessionManager()
+    session = manager.create_session()
+    session.speaker = MockSpeaker()
+    session.kv_cache.current_position = 200
+    session.speech_fifo.begin_turn(generation_id=0)
+
+    for index in range(4):
+        session.speech_fifo.put(
+            SpokenTokenPacket(
+                token_id=10 + index,
+                text_piece=f"word{index}",
+                gemma_hidden_1536=torch.zeros((1, 1536), dtype=torch.float32),
+                exclusive_kv_cursor=101 + index,
+            ),
+            qwen_token_ids=(201 + index,),
+            generation_id=0,
+        )
+        if index < 2:
+            token = session.speech_fifo.take_qwen_token(generation_id=0)
+            assert token is not None
+            session.speech_fifo.ack_qwen_token(generation_id=0)
+
+    assert session.speech_fifo.last_vocalized_kv_position == 102
+    manager.handle_bargein_yield(session.session_id)
+
+    assert session.kv_cache.current_position == 102
+    assert len(session.speech_fifo) == 0
+
+
+def test_handle_bargein_yield_no_ack_uses_current_model_turn_boundary() -> None:
+    engine = DummyGemmaEngine()
+    manager = SessionManager(gemma_engine=engine)
+    session = manager.create_session()
+    session.speaker = MockSpeaker()
+
+    session.kv_cache.current_position = 41
+    session.begin_response("first-response")
+    # Talker prefix length belongs to its separate cache and must not become
+    # the model rollback cursor.
+    session.turn_kv.prefix_len = 7
+    session.kv_cache.current_position = 58
+    session.begin_response("second-response")
+    session.kv_cache.current_position = 70
+
+    manager.handle_bargein_yield(session.session_id)
+
+    assert engine.forward_steps[0]["cache_position"] == 58
+    assert session.kv_cache.current_position == 58 + len(manager.interrupted_model_to_user_audio_token_ids)
 
 
 def test_handle_ephemeral_backchannel_preserves_audio_kv_pos() -> None:

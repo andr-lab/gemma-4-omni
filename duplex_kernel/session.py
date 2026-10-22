@@ -67,6 +67,7 @@ class SpokenTokenPacket:
     text_piece: str
     gemma_hidden_1536: Any = field(repr=False, compare=False)
     exclusive_kv_cursor: int
+    producer_event: Any | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if isinstance(self.token_id, bool) or int(self.token_id) < 0:
@@ -79,15 +80,36 @@ class SpokenTokenPacket:
         if shape != (1, 1536):
             raise ValueError(f"gemma_hidden_1536 deve avere shape (1,1536), ricevuto {shape}")
         hidden = self.gemma_hidden_1536
+        producer_event = self.producer_event
         detach = getattr(hidden, "detach", None)
         if callable(detach):
             hidden = detach()
             clone = getattr(hidden, "clone", None)
             if callable(clone):
                 hidden = clone()
+        # Record after the owned packet copy on the stream that actually
+        # enqueued it. Consumers can wait on this event without fencing the
+        # producer thread or synchronizing an unrelated CUDA stream.
+        device = getattr(hidden, "device", None)
+        if (
+            producer_event is not None
+            and device is not None
+            and getattr(device, "type", None) == "cuda"
+            and torch.cuda.is_available()
+        ):
+            torch.cuda.current_stream(device=device).wait_event(producer_event)
+            producer_event = None
+        if (
+            device is not None
+            and getattr(device, "type", None) == "cuda"
+            and torch.cuda.is_available()
+        ):
+            producer_event = torch.cuda.Event(enable_timing=False)
+            producer_event.record(torch.cuda.current_stream(device=device))
         object.__setattr__(self, "token_id", int(self.token_id))
         object.__setattr__(self, "exclusive_kv_cursor", int(self.exclusive_kv_cursor))
         object.__setattr__(self, "gemma_hidden_1536", hidden)
+        object.__setattr__(self, "producer_event", producer_event)
 
 
 @dataclass(frozen=True)
@@ -369,7 +391,30 @@ class GemmaTokenTickPacer:
         self._total_acquired = 0
         self._peak_tokens_in_tick = 0
 
-    async def acquire(self, *, stop_check: Callable[[], bool] | None = None) -> None:
+    async def acquire(
+        self,
+        *,
+        vocal_started: bool,
+        fifo_pending_packets: int,
+        stop_check: Callable[[], bool] | None = None,
+    ) -> float:
+        if isinstance(fifo_pending_packets, bool) or not isinstance(fifo_pending_packets, int):
+            raise TypeError("fifo_pending_packets deve essere un intero")
+        if fifo_pending_packets < 0:
+            raise ValueError("fifo_pending_packets non può essere negativo")
+        if stop_check is not None and stop_check():
+            raise RuntimeError("Gemma speech token pacing cancelled")
+        if not vocal_started or fifo_pending_packets < 2:
+            # A dry voice path or a starved packet queue begins a fresh pacing
+            # window when speech production resumes. Never carry unused quota
+            # or a partial wait across starvation.
+            self._epoch = float(self._monotonic())
+            self._tick_index = 0
+            self._tokens_in_tick = 0
+            self._total_acquired += 1
+            return 0.0
+
+        total_sleep_s = 0.0
         while True:
             now = float(self._monotonic())
             tick = max(0, int((now - self._epoch) // self.tick_s))
@@ -384,13 +429,15 @@ class GemmaTokenTickPacer:
                 self._peak_tokens_in_tick = max(
                     self._peak_tokens_in_tick, self._tokens_in_tick
                 )
-                return
+                return total_sleep_s
             next_boundary = self._epoch + (self._tick_index + 1) * self.tick_s
             if stop_check is not None and stop_check():
                 raise RuntimeError("Gemma speech token pacing cancelled")
-            result = self._sleep(max(0.0, next_boundary - now))
+            duration_s = max(0.0, next_boundary - now)
+            result = self._sleep(duration_s)
             if inspect.isawaitable(result):
                 await result
+            total_sleep_s += duration_s
 
     def snapshot(self) -> dict[str, int]:
         return {
@@ -481,6 +528,9 @@ class DuplexSession:
     created_at: float = field(default_factory=time.time)
     speaker: Any = None
     kv_cache: Any = None
+    turn_start_kv_position: int | None = field(
+        default=None, kw_only=True, repr=False, compare=False
+    )
     bargein_prebuffer_embeds: list[Any] = field(default_factory=list, repr=False, compare=False)
     user_speech_active: bool = False
     # KV ownership
@@ -591,6 +641,11 @@ class DuplexSession:
     policy_audio_min_sample_id: int = 0
     policy_audio_source_cutoff_sample_id: int | None = field(default=None, repr=False, compare=False)
     policy_audio_source_generation_id: int | None = field(default=None, repr=False, compare=False)
+    # One-frame causal user PCM context for the native1540 Control6 profile.
+    _native_control6_current_user_pcm_frame_id: int | None = field(default=None, init=False, repr=False, compare=False)
+    _native_control6_current_user_pcm: np.ndarray | None = field(default=None, init=False, repr=False, compare=False)
+    _native_control6_previous_user_pcm_frame_id: int | None = field(default=None, init=False, repr=False, compare=False)
+    _native_control6_previous_user_pcm: np.ndarray | None = field(default=None, init=False, repr=False, compare=False)
     _completed_utterance_audio_snapshot: CompletedUtteranceAudioSnapshot | None = field(
         default=None, init=False, repr=False, compare=False
     )
@@ -759,6 +814,10 @@ class DuplexSession:
             with self._generation_lock:
                 if self._closed:
                     raise RuntimeError("sessione già chiusa")
+                model_cursor = getattr(self.kv_cache, "current_position", None)
+                self.turn_start_kv_position = (
+                    int(model_cursor) if model_cursor is not None else None
+                )
                 self.policy_response_pending = False
                 newer_pending_owner = (
                     None
@@ -879,6 +938,47 @@ class DuplexSession:
                 self.active_response = False
                 self.policy_response_pending = False
                 self.control_state = ControlState.LISTENING
+
+    def observe_native_control6_user_pcm(
+        self, frame_id: int, pcm: np.ndarray
+    ) -> tuple[np.ndarray | None, int | None]:
+        """Advance the native1540 snapshot once and return causal t-1 PCM."""
+        if isinstance(frame_id, bool) or not isinstance(frame_id, int) or frame_id < 0:
+            raise ValueError("native Control6 frame_id must be a non-negative integer")
+        current = np.asarray(pcm, dtype=np.float32)
+        if current.ndim != 1 or not current.size or not np.isfinite(current).all():
+            raise ValueError("native Control6 user PCM must be a finite non-empty mono frame")
+        with self._generation_lock:
+            if self._closed:
+                raise RuntimeError("native Control6 PCM snapshot belongs to a closed session")
+            last_id = self._native_control6_current_user_pcm_frame_id
+            if last_id == frame_id:
+                if not np.array_equal(self._native_control6_current_user_pcm, current):
+                    raise ValueError("native Control6 PCM changed for an already observed frame")
+                if self._native_control6_previous_user_pcm_frame_id == frame_id - 1:
+                    return self._native_control6_previous_user_pcm.copy(), frame_id - 1
+                return None, None
+            if last_id is not None and frame_id <= last_id:
+                raise ValueError("native Control6 PCM frame IDs must advance monotonically")
+            if last_id is not None and frame_id == last_id + 1:
+                self._native_control6_previous_user_pcm = self._native_control6_current_user_pcm
+                self._native_control6_previous_user_pcm_frame_id = last_id
+            else:
+                self._native_control6_previous_user_pcm = None
+                self._native_control6_previous_user_pcm_frame_id = None
+            self._native_control6_current_user_pcm = current.copy()
+            self._native_control6_current_user_pcm_frame_id = frame_id
+            previous = self._native_control6_previous_user_pcm
+            previous_id = self._native_control6_previous_user_pcm_frame_id
+            return (previous.copy(), previous_id) if previous is not None else (None, None)
+
+    def reset_native_control6_user_pcm(self) -> None:
+        """Clear the one-frame phase snapshot at a stream/session boundary."""
+        with self._generation_lock:
+            self._native_control6_current_user_pcm_frame_id = None
+            self._native_control6_current_user_pcm = None
+            self._native_control6_previous_user_pcm_frame_id = None
+            self._native_control6_previous_user_pcm = None
 
     def append_policy_audio(
         self,
@@ -1602,6 +1702,7 @@ class DuplexSession:
             self.policy_audio_frames.clear()
             self.policy_audio_frame_ids.clear()
             self.policy_audio_samples = 0
+            self.reset_native_control6_user_pcm()
             self.pending_audio_history_archive = None
             self.queued_audio_history_archives.clear()
             self.response_id = None
@@ -1867,9 +1968,10 @@ class SessionManager:
         # 2. Recupera l'esatta posizione KV dell'ultimo token realmente udito dall'utente
         rollback_kv_pos = state.speech_fifo.clear_unspoken_on_bargein()
         if rollback_kv_pos is not None:
-            state.kv_cache.rollback_to(rollback_kv_pos + 1)
-        elif hasattr(state, "turn_kv") and getattr(state.turn_kv, "prefix_len", 0) > 0:
-            state.kv_cache.rollback_to(state.turn_kv.prefix_len)
+            state.kv_cache.rollback_to(rollback_kv_pos)
+        elif state.turn_start_kv_position is not None:
+            state.kv_cache.rollback_to(state.turn_start_kv_position)
+        state.turn_start_kv_position = None
 
         # 3. Chiude il turno parziale del modello e apre il nuovo blocco audio utente
         if self.gemma_engine is not None:

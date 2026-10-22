@@ -1,0 +1,970 @@
+{
+  "event_count": 662,
+  "event_types": {
+    "client_consumed_pcm": 1,
+    "duplex_control6.decision": 148,
+    "error": 2,
+    "first_client_pcm_consumed": 1,
+    "input_audio_buffer.conditioning_available": 149,
+    "input_audio_buffer.consumed": 149,
+    "input_audio_buffer_commit_sent": 2,
+    "input_audio_frame_sent": 157,
+    "input_step_scheduled": 1,
+    "input_step_started": 2,
+    "response.action_selected": 2,
+    "response.audio.delta": 31,
+    "response.audio.segment_done": 1,
+    "response.cancelled": 1,
+    "response.created": 2,
+    "response.done": 1,
+    "response.output_text.delta": 2,
+    "response.thinker_metrics": 6,
+    "server_error": 2,
+    "session.created": 1,
+    "session.updated": 1
+  },
+  "input_frames_sent": 157,
+  "input_frames_sent_by_step": {
+    "continuous_microphone_quiet": 78,
+    "correction_bargein": 55,
+    "pair_seed_it": 24
+  },
+  "last_ingress_frame_id": 156,
+  "correction_frames_sent": 55,
+  "first_voiced_correction_frame": {
+    "frame_index": 1,
+    "ingress_frame_id": 49,
+    "sent_ns": 5358214397627891,
+    "input_rms": 0.0010160591356469307
+  },
+  "last_voiced_correction_frame": {
+    "frame_index": 50,
+    "ingress_frame_id": 98,
+    "sent_ns": 5358218373609172,
+    "input_rms": 0.013873315303250899
+  },
+  "decisions": [
+    {
+      "frame_id": 49,
+      "action": "YIELD",
+      "native_action": "YIELD",
+      "selected_action": "YIELD",
+      "confidence": 0.9984468817710876,
+      "accepted": false,
+      "rejection_reason": "no_new_user_audio",
+      "native_control6_head_scored": true
+    },
+    {
+      "frame_id": 50,
+      "action": "YIELD",
+      "native_action": "YIELD",
+      "selected_action": "YIELD",
+      "confidence": 0.9940060973167419,
+      "accepted": true,
+      "native_control6_head_scored": true
+    },
+    {
+      "frame_id": 51,
+      "action": "YIELD",
+      "native_action": "YIELD",
+      "selected_action": "YIELD",
+      "confidence": 0.7373663187026978,
+      "accepted": false,
+      "rejection_reason": "speaker_gate_rejected",
+      "native_control6_head_scored": true
+    },
+    {
+      "frame_id": 79,
+      "action": "SPEAK",
+      "native_action": "SPEAK",
+      "selected_action": "SPEAK",
+      "confidence": 0.9757792353630066,
+      "accepted": true,
+      "native_control6_head_scored": true
+    },
+    {
+      "frame_id": 80,
+      "action": "YIELD",
+      "native_action": "YIELD",
+      "selected_action": "YIELD",
+      "confidence": 0.9697504639625549,
+      "accepted": false,
+      "rejection_reason": "assistant_audio_not_started",
+      "native_control6_head_scored": true
+    },
+    {
+      "frame_id": 83,
+      "action": "YIELD",
+      "native_action": "YIELD",
+      "selected_action": "YIELD",
+      "confidence": 0.726615846157074,
+      "accepted": false,
+      "rejection_reason": "assistant_audio_not_started",
+      "native_control6_head_scored": true
+    },
+    {
+      "frame_id": 88,
+      "action": "YIELD",
+      "native_action": "YIELD",
+      "selected_action": "YIELD",
+      "confidence": 0.873891294002533,
+      "accepted": false,
+      "rejection_reason": "assistant_audio_not_started",
+      "native_control6_head_scored": true
+    },
+    {
+      "frame_id": 89,
+      "action": "YIELD",
+      "native_action": "YIELD",
+      "selected_action": "YIELD",
+      "confidence": 0.7822933197021484,
+      "accepted": false,
+      "rejection_reason": "assistant_audio_not_started",
+      "native_control6_head_scored": true
+    },
+    {
+      "frame_id": 94,
+      "action": "YIELD",
+      "native_action": "YIELD",
+      "selected_action": "YIELD",
+      "confidence": 0.873930037021637,
+      "accepted": false,
+      "rejection_reason": "assistant_audio_not_started",
+      "native_control6_head_scored": true
+    },
+    {
+      "frame_id": 95,
+      "action": "YIELD",
+      "native_action": "YIELD",
+      "selected_action": "YIELD",
+      "confidence": 0.8460337519645691,
+      "accepted": false,
+      "rejection_reason": "assistant_audio_not_started",
+      "native_control6_head_scored": true
+    },
+    {
+      "frame_id": 99,
+      "action": "YIELD",
+      "native_action": "YIELD",
+      "selected_action": "YIELD",
+      "confidence": 0.9689204692840576,
+      "accepted": false,
+      "rejection_reason": "assistant_audio_not_started",
+      "native_control6_head_scored": true
+    },
+    {
+      "frame_id": 100,
+      "action": "YIELD",
+      "native_action": "YIELD",
+      "selected_action": "YIELD",
+      "confidence": 0.8221933841705322,
+      "accepted": false,
+      "rejection_reason": "assistant_audio_not_started",
+      "native_control6_head_scored": true
+    },
+    {
+      "frame_id": 136,
+      "action": "CONTINUE",
+      "selected_action": "CONTINUE",
+      "confidence": 1.0,
+      "accepted": false,
+      "rejection_reason": "speaker_gate_rejected",
+      "native_control6_head_scored": false
+    },
+    {
+      "frame_id": 137,
+      "action": "CONTINUE",
+      "selected_action": "CONTINUE",
+      "confidence": 1.0,
+      "accepted": false,
+      "rejection_reason": "speaker_gate_rejected",
+      "native_control6_head_scored": false
+    },
+    {
+      "frame_id": 138,
+      "action": "CONTINUE",
+      "selected_action": "CONTINUE",
+      "confidence": 1.0,
+      "accepted": false,
+      "rejection_reason": "speaker_gate_rejected",
+      "native_control6_head_scored": false
+    },
+    {
+      "frame_id": 139,
+      "action": "CONTINUE",
+      "selected_action": "CONTINUE",
+      "confidence": 1.0,
+      "accepted": false,
+      "rejection_reason": "speaker_gate_rejected",
+      "native_control6_head_scored": false
+    },
+    {
+      "frame_id": 140,
+      "action": "CONTINUE",
+      "selected_action": "CONTINUE",
+      "confidence": 1.0,
+      "accepted": false,
+      "rejection_reason": "speaker_gate_rejected",
+      "native_control6_head_scored": false
+    },
+    {
+      "frame_id": 141,
+      "action": "CONTINUE",
+      "selected_action": "CONTINUE",
+      "confidence": 1.0,
+      "accepted": false,
+      "rejection_reason": "speaker_gate_rejected",
+      "native_control6_head_scored": false
+    },
+    {
+      "frame_id": 142,
+      "action": "CONTINUE",
+      "selected_action": "CONTINUE",
+      "confidence": 1.0,
+      "accepted": false,
+      "rejection_reason": "speaker_gate_rejected",
+      "native_control6_head_scored": false
+    },
+    {
+      "frame_id": 143,
+      "action": "CONTINUE",
+      "selected_action": "CONTINUE",
+      "confidence": 1.0,
+      "accepted": false,
+      "rejection_reason": "speaker_gate_rejected",
+      "native_control6_head_scored": false
+    },
+    {
+      "frame_id": 144,
+      "action": "CONTINUE",
+      "selected_action": "CONTINUE",
+      "confidence": 1.0,
+      "accepted": false,
+      "rejection_reason": "speaker_gate_rejected",
+      "native_control6_head_scored": false
+    },
+    {
+      "frame_id": 145,
+      "action": "CONTINUE",
+      "selected_action": "CONTINUE",
+      "confidence": 1.0,
+      "accepted": false,
+      "rejection_reason": "speaker_gate_rejected",
+      "native_control6_head_scored": false
+    },
+    {
+      "frame_id": 146,
+      "action": "CONTINUE",
+      "selected_action": "CONTINUE",
+      "confidence": 1.0,
+      "accepted": false,
+      "rejection_reason": "speaker_gate_rejected",
+      "native_control6_head_scored": false
+    },
+    {
+      "frame_id": 147,
+      "action": "CONTINUE",
+      "selected_action": "CONTINUE",
+      "confidence": 1.0,
+      "accepted": false,
+      "rejection_reason": "speaker_gate_rejected",
+      "native_control6_head_scored": false
+    },
+    {
+      "frame_id": 148,
+      "action": "CONTINUE",
+      "selected_action": "CONTINUE",
+      "confidence": 1.0,
+      "accepted": false,
+      "rejection_reason": "speaker_gate_rejected",
+      "native_control6_head_scored": false
+    }
+  ],
+  "latency_ms": {
+    "listener_batch_frontend_encode_ms": {
+      "count": 297,
+      "p95": 46.787,
+      "max": 48.839
+    },
+    "listener_batch_mel_prepare_ms": {
+      "count": 297,
+      "p95": 4.631,
+      "max": 8.412
+    },
+    "listener_batch_compute_ms": {
+      "count": 297,
+      "p95": 74.325,
+      "max": 333.431
+    },
+    "listener_batch_decision_view_ms": {
+      "count": 50,
+      "p95": 20.976,
+      "max": 24.956
+    },
+    "listener_batch_control6_policy_ms": {
+      "count": 297,
+      "p95": 2.584,
+      "max": 3.41
+    },
+    "listener_batch_native_output_health_ms": {
+      "count": 297,
+      "p95": 7.713,
+      "max": 14.119
+    },
+    "listener_batch_native_submit_ms": {
+      "count": 297,
+      "p95": 22.896,
+      "max": 27.095
+    }
+  },
+  "server_errors": [
+    {
+      "type": "error",
+      "error": {
+        "code": "RESPONSE_ACTIVE",
+        "message": "response già attiva"
+      }
+    },
+    {
+      "type": "server_error",
+      "timestamp_ns": 5358218699845537,
+      "received_ns": 5358218699795236,
+      "error": {
+        "code": "RESPONSE_ACTIVE",
+        "message": "response già attiva"
+      }
+    },
+    {
+      "type": "error",
+      "error": {
+        "code": "INPUT_AUDIO_OVERLOAD",
+        "message": "Microphone ingress exceeded 6 queued frames; the incoming audio was rejected, queued audio will not be replayed, and the session is closing"
+      },
+      "rejected_frames": 1
+    },
+    {
+      "type": "server_error",
+      "timestamp_ns": 5358223072771774,
+      "received_ns": 5358223072718963,
+      "error": {
+        "code": "INPUT_AUDIO_OVERLOAD",
+        "message": "Microphone ingress exceeded 6 queued frames; the incoming audio was rejected, queued audio will not be replayed, and the session is closing"
+      }
+    }
+  ],
+  "response_event_count": 50,
+  "response_events": [
+    {
+      "type": "response.created",
+      "timestamp_ns": 5358212321393452,
+      "response_id": "resp_33701293d82b",
+      "generation_id": null,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": null,
+      "end_sample": null,
+      "output_text": null
+    },
+    {
+      "type": "response.thinker_metrics",
+      "timestamp_ns": 5358212517693644,
+      "response_id": "resp_33701293d82b",
+      "generation_id": null,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": null,
+      "end_sample": null,
+      "output_text": null
+    },
+    {
+      "type": "response.thinker_metrics",
+      "timestamp_ns": 5358212601657692,
+      "response_id": "resp_33701293d82b",
+      "generation_id": null,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": null,
+      "end_sample": null,
+      "output_text": null
+    },
+    {
+      "type": "response.thinker_metrics",
+      "timestamp_ns": 5358213461880252,
+      "response_id": "resp_33701293d82b",
+      "generation_id": null,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": null,
+      "end_sample": null,
+      "output_text": null
+    },
+    {
+      "type": "response.action_selected",
+      "timestamp_ns": 5358213463340055,
+      "response_id": "resp_33701293d82b",
+      "generation_id": null,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": null,
+      "end_sample": null,
+      "output_text": null
+    },
+    {
+      "type": "response.output_text.delta",
+      "timestamp_ns": 5358213467687977,
+      "response_id": "resp_33701293d82b",
+      "generation_id": null,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": null,
+      "end_sample": null,
+      "output_text": null
+    },
+    {
+      "type": "response.audio.delta",
+      "timestamp_ns": 5358213797685133,
+      "response_id": "resp_33701293d82b",
+      "generation_id": 1,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": 0,
+      "end_sample": 3840,
+      "output_text": null
+    },
+    {
+      "type": "response.audio.delta",
+      "timestamp_ns": 5358213883750016,
+      "response_id": "resp_33701293d82b",
+      "generation_id": 1,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": 3840,
+      "end_sample": 7680,
+      "output_text": null
+    },
+    {
+      "type": "response.audio.delta",
+      "timestamp_ns": 5358213967023193,
+      "response_id": "resp_33701293d82b",
+      "generation_id": 1,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": 7680,
+      "end_sample": 11520,
+      "output_text": null
+    },
+    {
+      "type": "response.audio.delta",
+      "timestamp_ns": 5358214049897393,
+      "response_id": "resp_33701293d82b",
+      "generation_id": 1,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": 11520,
+      "end_sample": 15360,
+      "output_text": null
+    },
+    {
+      "type": "response.audio.delta",
+      "timestamp_ns": 5358214132119123,
+      "response_id": "resp_33701293d82b",
+      "generation_id": 1,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": 15360,
+      "end_sample": 19200,
+      "output_text": null
+    },
+    {
+      "type": "response.audio.delta",
+      "timestamp_ns": 5358214214376773,
+      "response_id": "resp_33701293d82b",
+      "generation_id": 1,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": 19200,
+      "end_sample": 23040,
+      "output_text": null
+    },
+    {
+      "type": "response.audio.delta",
+      "timestamp_ns": 5358214311973445,
+      "response_id": "resp_33701293d82b",
+      "generation_id": 1,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": 23040,
+      "end_sample": 26880,
+      "output_text": null
+    },
+    {
+      "type": "response.audio.delta",
+      "timestamp_ns": 5358214398493645,
+      "response_id": "resp_33701293d82b",
+      "generation_id": 1,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": 26880,
+      "end_sample": 30720,
+      "output_text": null
+    },
+    {
+      "type": "response.audio.delta",
+      "timestamp_ns": 5358214495484987,
+      "response_id": "resp_33701293d82b",
+      "generation_id": 1,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": 30720,
+      "end_sample": 34560,
+      "output_text": null
+    },
+    {
+      "type": "response.cancelled",
+      "timestamp_ns": 5358214586876957,
+      "response_id": "resp_33701293d82b",
+      "generation_id": 1,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": null,
+      "end_sample": null,
+      "output_text": null
+    },
+    {
+      "type": "response.created",
+      "timestamp_ns": 5358216940809364,
+      "response_id": "resp_f54f9063d7fd",
+      "generation_id": null,
+      "status": null,
+      "action": "SPEAK",
+      "error": null,
+      "start_sample": null,
+      "end_sample": null,
+      "output_text": null
+    },
+    {
+      "type": "response.thinker_metrics",
+      "timestamp_ns": 5358217043619962,
+      "response_id": "resp_f54f9063d7fd",
+      "generation_id": null,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": null,
+      "end_sample": null,
+      "output_text": null
+    },
+    {
+      "type": "response.thinker_metrics",
+      "timestamp_ns": 5358217064418773,
+      "response_id": "resp_f54f9063d7fd",
+      "generation_id": null,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": null,
+      "end_sample": null,
+      "output_text": null
+    },
+    {
+      "type": "response.thinker_metrics",
+      "timestamp_ns": 5358218584888560,
+      "response_id": "resp_f54f9063d7fd",
+      "generation_id": null,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": null,
+      "end_sample": null,
+      "output_text": null
+    },
+    {
+      "type": "response.action_selected",
+      "timestamp_ns": 5358218588039132,
+      "response_id": "resp_f54f9063d7fd",
+      "generation_id": null,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": null,
+      "end_sample": null,
+      "output_text": null
+    },
+    {
+      "type": "error",
+      "timestamp_ns": 5358218699795236,
+      "response_id": null,
+      "generation_id": null,
+      "status": null,
+      "action": null,
+      "error": {
+        "code": "RESPONSE_ACTIVE",
+        "message": "response già attiva"
+      },
+      "start_sample": null,
+      "end_sample": null,
+      "output_text": null
+    },
+    {
+      "type": "server_error",
+      "timestamp_ns": 5358218699845537,
+      "response_id": null,
+      "generation_id": null,
+      "status": null,
+      "action": null,
+      "error": {
+        "code": "RESPONSE_ACTIVE",
+        "message": "response già attiva"
+      },
+      "start_sample": null,
+      "end_sample": null,
+      "output_text": null
+    },
+    {
+      "type": "response.audio.delta",
+      "timestamp_ns": 5358218982660929,
+      "response_id": "resp_f54f9063d7fd",
+      "generation_id": 2,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": 0,
+      "end_sample": 3840,
+      "output_text": null
+    },
+    {
+      "type": "response.audio.delta",
+      "timestamp_ns": 5358219106303948,
+      "response_id": "resp_f54f9063d7fd",
+      "generation_id": 2,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": 3840,
+      "end_sample": 7680,
+      "output_text": null
+    },
+    {
+      "type": "response.audio.delta",
+      "timestamp_ns": 5358219224854374,
+      "response_id": "resp_f54f9063d7fd",
+      "generation_id": 2,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": 7680,
+      "end_sample": 11520,
+      "output_text": null
+    },
+    {
+      "type": "response.audio.delta",
+      "timestamp_ns": 5358219350751221,
+      "response_id": "resp_f54f9063d7fd",
+      "generation_id": 2,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": 11520,
+      "end_sample": 15360,
+      "output_text": null
+    },
+    {
+      "type": "response.audio.delta",
+      "timestamp_ns": 5358219463542962,
+      "response_id": "resp_f54f9063d7fd",
+      "generation_id": 2,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": 15360,
+      "end_sample": 19200,
+      "output_text": null
+    },
+    {
+      "type": "response.audio.delta",
+      "timestamp_ns": 5358219591839518,
+      "response_id": "resp_f54f9063d7fd",
+      "generation_id": 2,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": 19200,
+      "end_sample": 23040,
+      "output_text": null
+    },
+    {
+      "type": "response.audio.delta",
+      "timestamp_ns": 5358219703406479,
+      "response_id": "resp_f54f9063d7fd",
+      "generation_id": 2,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": 23040,
+      "end_sample": 26880,
+      "output_text": null
+    },
+    {
+      "type": "response.audio.delta",
+      "timestamp_ns": 5358219821412946,
+      "response_id": "resp_f54f9063d7fd",
+      "generation_id": 2,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": 26880,
+      "end_sample": 30720,
+      "output_text": null
+    },
+    {
+      "type": "response.audio.delta",
+      "timestamp_ns": 5358219935894225,
+      "response_id": "resp_f54f9063d7fd",
+      "generation_id": 2,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": 30720,
+      "end_sample": 34560,
+      "output_text": null
+    },
+    {
+      "type": "response.audio.delta",
+      "timestamp_ns": 5358220057892128,
+      "response_id": "resp_f54f9063d7fd",
+      "generation_id": 2,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": 34560,
+      "end_sample": 38400,
+      "output_text": null
+    },
+    {
+      "type": "response.audio.delta",
+      "timestamp_ns": 5358220178147412,
+      "response_id": "resp_f54f9063d7fd",
+      "generation_id": 2,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": 38400,
+      "end_sample": 42240,
+      "output_text": null
+    },
+    {
+      "type": "response.audio.delta",
+      "timestamp_ns": 5358220301342124,
+      "response_id": "resp_f54f9063d7fd",
+      "generation_id": 2,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": 42240,
+      "end_sample": 46080,
+      "output_text": null
+    },
+    {
+      "type": "response.audio.delta",
+      "timestamp_ns": 5358220415096691,
+      "response_id": "resp_f54f9063d7fd",
+      "generation_id": 2,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": 46080,
+      "end_sample": 49920,
+      "output_text": null
+    },
+    {
+      "type": "response.audio.delta",
+      "timestamp_ns": 5358220538792591,
+      "response_id": "resp_f54f9063d7fd",
+      "generation_id": 2,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": 49920,
+      "end_sample": 53760,
+      "output_text": null
+    },
+    {
+      "type": "response.audio.delta",
+      "timestamp_ns": 5358220655841942,
+      "response_id": "resp_f54f9063d7fd",
+      "generation_id": 2,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": 53760,
+      "end_sample": 57600,
+      "output_text": null
+    },
+    {
+      "type": "response.audio.delta",
+      "timestamp_ns": 5358220781532316,
+      "response_id": "resp_f54f9063d7fd",
+      "generation_id": 2,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": 57600,
+      "end_sample": 61440,
+      "output_text": null
+    },
+    {
+      "type": "response.audio.delta",
+      "timestamp_ns": 5358220899715375,
+      "response_id": "resp_f54f9063d7fd",
+      "generation_id": 2,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": 61440,
+      "end_sample": 65280,
+      "output_text": null
+    },
+    {
+      "type": "response.audio.delta",
+      "timestamp_ns": 5358221022639553,
+      "response_id": "resp_f54f9063d7fd",
+      "generation_id": 2,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": 65280,
+      "end_sample": 69120,
+      "output_text": null
+    },
+    {
+      "type": "response.audio.delta",
+      "timestamp_ns": 5358221138108768,
+      "response_id": "resp_f54f9063d7fd",
+      "generation_id": 2,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": 69120,
+      "end_sample": 72960,
+      "output_text": null
+    },
+    {
+      "type": "response.audio.delta",
+      "timestamp_ns": 5358221261192049,
+      "response_id": "resp_f54f9063d7fd",
+      "generation_id": 2,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": 72960,
+      "end_sample": 76800,
+      "output_text": null
+    },
+    {
+      "type": "response.audio.delta",
+      "timestamp_ns": 5358221380143831,
+      "response_id": "resp_f54f9063d7fd",
+      "generation_id": 2,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": 76800,
+      "end_sample": 80640,
+      "output_text": null
+    },
+    {
+      "type": "response.output_text.delta",
+      "timestamp_ns": 5358221409102426,
+      "response_id": "resp_f54f9063d7fd",
+      "generation_id": null,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": null,
+      "end_sample": null,
+      "output_text": null
+    },
+    {
+      "type": "response.audio.delta",
+      "timestamp_ns": 5358221410880586,
+      "response_id": "resp_f54f9063d7fd",
+      "generation_id": 2,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": 80640,
+      "end_sample": 84480,
+      "output_text": null
+    },
+    {
+      "type": "response.audio.segment_done",
+      "timestamp_ns": 5358221416242024,
+      "response_id": "resp_f54f9063d7fd",
+      "generation_id": 2,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": 0,
+      "end_sample": 84480,
+      "output_text": null
+    },
+    {
+      "type": "response.done",
+      "timestamp_ns": 5358221416472037,
+      "response_id": "resp_f54f9063d7fd",
+      "generation_id": null,
+      "status": null,
+      "action": null,
+      "error": null,
+      "start_sample": null,
+      "end_sample": null,
+      "output_text": null
+    },
+    {
+      "type": "error",
+      "timestamp_ns": 5358223072718963,
+      "response_id": null,
+      "generation_id": null,
+      "status": null,
+      "action": null,
+      "error": {
+        "code": "INPUT_AUDIO_OVERLOAD",
+        "message": "Microphone ingress exceeded 6 queued frames; the incoming audio was rejected, queued audio will not be replayed, and the session is closing"
+      },
+      "start_sample": null,
+      "end_sample": null,
+      "output_text": null
+    },
+    {
+      "type": "server_error",
+      "timestamp_ns": 5358223072771774,
+      "response_id": null,
+      "generation_id": null,
+      "status": null,
+      "action": null,
+      "error": {
+        "code": "INPUT_AUDIO_OVERLOAD",
+        "message": "Microphone ingress exceeded 6 queued frames; the incoming audio was rejected, queued audio will not be replayed, and the session is closing"
+      },
+      "start_sample": null,
+      "end_sample": null,
+      "output_text": null
+    }
+  ]
+}

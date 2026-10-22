@@ -1376,6 +1376,30 @@ class AudioResponseV2ActionConstraint:
             return True
 
         phase = collector.parser.phase
+        if phase == "action_value" and self._constrain_action:
+            # Prune enum prefixes that can no longer satisfy the completed
+            # HEARD value. The final parser validation remains authoritative,
+            # but rejecting the dead prefix here prevents it entering the KV
+            # cache before its closing quote is considered.
+            preview = copy.deepcopy(collector.parser)
+            try:
+                preview.feed(text)
+            except AudioResponseProtocolError:
+                return False
+            if preview.phase == "action_value":
+                allowed_actions = self.allowed_actions or AUDIO_RESPONSE_ACTIONS
+                if preview.heard is not None:
+                    if preview.heard.strip():
+                        allowed_actions = tuple(
+                            action for action in allowed_actions if action != "BACKCHANNEL"
+                        )
+                    else:
+                        allowed_actions = tuple(
+                            action for action in allowed_actions if action == "BACKCHANNEL"
+                        )
+                action_prefix = "".join(preview._string_raw)
+                if not any(action.startswith(action_prefix) for action in allowed_actions):
+                    return False
         if phase not in {"heard_value", "action_value", "say_value"}:
             return True
         raw_before = "".join(collector.parser._string_raw)

@@ -210,6 +210,20 @@ def _cuda_tensors_in(value: Any):
             yield from _cuda_tensors_in(item)
 
 
+def _wait_for_cuda_producer_event(tensor: Any, producer_event: Any | None) -> None:
+    """Order a CUDA tensor handoff on the consumer stream without host sync."""
+    if (
+        producer_event is None
+        or not isinstance(tensor, torch.Tensor)
+        or tensor.device.type != "cuda"
+        or not torch.cuda.is_available()
+    ):
+        return
+    consumer_stream = torch.cuda.current_stream(device=tensor.device)
+    consumer_stream.wait_event(producer_event)
+    tensor.record_stream(consumer_stream)
+
+
 def _fence_current_cuda_stage(device: Any) -> None:
     selected = torch.device(device)
     if selected.type != 'cuda' or not torch.cuda.is_available():
@@ -6346,6 +6360,9 @@ class PipelineEngine:
         else:
             configured_max_frames = ARIA_MAX_FRAMES
         live_frame_cap = min(ARIA_MAX_FRAMES, configured_max_frames)
+        live_eos_frame_cap = live_frame_cap
+        if diagnostic_max_frames is not None:
+            live_eos_frame_cap = min(live_eos_frame_cap, int(diagnostic_max_frames))
         if metrics is not None:
             metrics.update({
                 "spoken_text_units": spoken_units,
@@ -6607,17 +6624,20 @@ class PipelineEngine:
         frame_residual_delta_sq_sum: torch.Tensor | None = None
         frame_residual_base_sq_sum: torch.Tensor | None = None
         frame_residual_element_count = 0
-        live_first_packet_exclusive_cursor: int | None = None
         live_first_packet_hidden: torch.Tensor | None = None
-        live_previous_packet_exclusive_cursor: int | None = None
+        live_first_packet_hidden_object: torch.Tensor | None = None
         live_previous_packet_hidden: torch.Tensor | None = None
+        live_previous_packet_hidden_object: torch.Tensor | None = None
+        live_hidden_trace_tensors: list[tuple[dict[str, Any], torch.Tensor, torch.Tensor | None]] = []
 
         def apply_frame_residual(query: torch.Tensor, generation_step: int) -> torch.Tensor:
             nonlocal frame_residual_calls, frame_residual_q1_steps, frame_residual_tail_hold_calls
             nonlocal frame_residual_delta_sq_sum, frame_residual_base_sq_sum
             nonlocal frame_residual_element_count
-            nonlocal live_first_packet_exclusive_cursor, live_first_packet_hidden
-            nonlocal live_previous_packet_exclusive_cursor, live_previous_packet_hidden
+            nonlocal live_first_packet_hidden
+            nonlocal live_first_packet_hidden_object
+            nonlocal live_previous_packet_hidden
+            nonlocal live_previous_packet_hidden_object
             adapter = frame_residual_adapter
             response_states = frame_residual_response_hidden
             residual_step = generation_step
@@ -6630,29 +6650,36 @@ class PipelineEngine:
                 )
                 response_states = live_state.hidden
                 live_tail_hold = bool(live_state.tail_hold)
+                _wait_for_cuda_producer_event(
+                    response_states,
+                    getattr(live_state, "producer_event", None),
+                )
             if adapter is None or response_states is None:
                 return query
-            if live_state is not None and live_state.packet_exclusive_kv_cursor is not None:
-                packet_position = int(live_state.packet_exclusive_kv_cursor)
+            if live_state is not None:
+                packet_position = (
+                    int(live_state.packet_exclusive_kv_cursor)
+                    if live_state.packet_exclusive_kv_cursor is not None else None
+                )
                 source_hidden = response_states.detach().float().reshape(-1)
-                hidden_norm = float(torch.linalg.vector_norm(source_hidden).cpu())
-                hidden_cosine: float | None = None
+                hidden_norm = torch.linalg.vector_norm(source_hidden)
+                hidden_cosine: torch.Tensor | None = None
                 if (
                     live_previous_packet_hidden is not None
-                    and live_previous_packet_exclusive_cursor != packet_position
+                    and response_states is not live_previous_packet_hidden_object
                 ):
-                    hidden_cosine = float(F.cosine_similarity(
+                    hidden_cosine = F.cosine_similarity(
                         source_hidden.unsqueeze(0),
                         live_previous_packet_hidden.unsqueeze(0),
                         dim=-1,
-                    ).cpu().item())
-                if live_previous_packet_exclusive_cursor != packet_position:
+                    ).reshape(())
+                if response_states is not live_previous_packet_hidden_object:
                     if live_first_packet_hidden is None:
-                        live_first_packet_exclusive_cursor = packet_position
                         live_first_packet_hidden = source_hidden.detach().clone()
-                    live_previous_packet_exclusive_cursor = packet_position
+                        live_first_packet_hidden_object = response_states
                     live_previous_packet_hidden = source_hidden.detach().clone()
-                trace_entry = {
+                    live_previous_packet_hidden_object = response_states
+                trace_entry: dict[str, Any] = {
                     "qwen_frame_step": int(generation_step),
                     "gemma_token_id": live_state.gemma_token_id,
                     "gemma_kv_position": packet_position,
@@ -6660,28 +6687,19 @@ class PipelineEngine:
                     "qwen_packet_token_index": live_state.packet_token_index,
                     "qwen_packet_token_count": live_state.packet_token_count,
                     "tail_hold": bool(live_state.tail_hold),
-                    "gemma_hidden_norm": hidden_norm,
-                    "gemma_hidden_cosine_previous_packet": hidden_cosine,
                 }
                 if metrics is not None:
-                    trace = metrics.setdefault("frame_residual_live_hidden_trace", [])
-                    if isinstance(trace, list) and len(trace) < 256:
-                        trace.append(trace_entry)
-                logger.info(
-                    "[turn-local frame residual] qwen_frame=%d gemma_token=%s gemma_kv=%d "
-                    "qwen_token=%s qwen_span=%s/%s tail_hold=%s hidden_norm=%.6f "
-                    "cosine_previous_packet=%s",
-                    int(generation_step),
-                    live_state.gemma_token_id,
-                    packet_position,
-                    live_state.qwen_token_id,
-                    live_state.packet_token_index,
-                    live_state.packet_token_count,
-                    bool(live_state.tail_hold),
-                    hidden_norm,
-                    "n/a" if hidden_cosine is None else f"{hidden_cosine:.6f}",
+                    if len(live_hidden_trace_tensors) < 256:
+                        live_hidden_trace_tensors.append((trace_entry, hidden_norm, hidden_cosine))
+                logger.debug(
+                    "[turn-local frame residual] qwen_frame=%d gemma_token=%s gemma_kv=%s "
+                    "qwen_token=%s qwen_span=%s/%s tail_hold=%s",
+                    int(generation_step), live_state.gemma_token_id, packet_position,
+                    live_state.qwen_token_id, live_state.packet_token_index,
+                    live_state.packet_token_count, bool(live_state.tail_hold),
                 )
             if live_state is not None:
+                base_query = query.detach().clone()
                 conditioned, tail_hold = _apply_live_frame_residual(
                     adapter,
                     response_states,
@@ -6690,11 +6708,12 @@ class PipelineEngine:
                     tail_hold=live_tail_hold,
                 )
             else:
+                base_query = query.detach().clone()
                 conditioned, tail_hold = apply_response_state_residual(
                     adapter, response_states, query, residual_step
                 )
-            delta = conditioned.float() - query.float()
-            base = query.float()
+            delta = conditioned.float() - base_query.float()
+            base = base_query.float()
             delta_sq, base_sq = delta.square().sum(), base.square().sum()
             frame_residual_delta_sq_sum = (
                 delta_sq if frame_residual_delta_sq_sum is None else frame_residual_delta_sq_sum + delta_sq
@@ -6719,19 +6738,63 @@ class PipelineEngine:
             ):
                 return
             denominator = max(1, frame_residual_element_count)
-            delta_rms = float(torch.sqrt(frame_residual_delta_sq_sum / denominator).detach().cpu()) if frame_residual_delta_sq_sum is not None else 0.0
-            base_rms = float(torch.sqrt(frame_residual_base_sq_sum / denominator).detach().cpu()) if frame_residual_base_sq_sum is not None else 0.0
-            first_last_hidden_cosine: float | None = None
+            delta_sq_sum = (
+                frame_residual_delta_sq_sum
+                if frame_residual_delta_sq_sum is not None
+                else torch.zeros((), device=self.device, dtype=torch.float32)
+            )
+            base_sq_sum = (
+                frame_residual_base_sq_sum
+                if frame_residual_base_sq_sum is not None
+                else torch.zeros((), device=self.device, dtype=torch.float32)
+            )
+            summary_values: list[torch.Tensor] = [
+                delta_sq_sum.detach().float(),
+                base_sq_sum.detach().float(),
+                frame_residual_adapter.scale.detach().float().reshape(()),
+            ]
+            first_last_index: int | None = None
             if (
                 live_first_packet_hidden is not None
                 and live_previous_packet_hidden is not None
-                and live_first_packet_exclusive_cursor != live_previous_packet_exclusive_cursor
+                and live_first_packet_hidden_object is not live_previous_packet_hidden_object
             ):
-                first_last_hidden_cosine = float(F.cosine_similarity(
+                first_last_index = len(summary_values)
+                summary_values.append(F.cosine_similarity(
                     live_first_packet_hidden.unsqueeze(0),
                     live_previous_packet_hidden.unsqueeze(0),
                     dim=-1,
-                ).detach().cpu().item())
+                ).reshape(()))
+            trace_scalar_indexes: list[tuple[int, int | None]] = []
+            for _entry, norm, cosine in live_hidden_trace_tensors:
+                norm_index = len(summary_values)
+                summary_values.append(norm.detach().float().reshape(()))
+                cosine_index = None
+                if cosine is not None:
+                    cosine_index = len(summary_values)
+                    summary_values.append(cosine.detach().float().reshape(()))
+                trace_scalar_indexes.append((norm_index, cosine_index))
+            scalar_values = torch.stack(summary_values).detach().to(device="cpu").tolist()
+            delta_sq_value = float(scalar_values[0])
+            base_sq_value = float(scalar_values[1])
+            delta_rms = float((delta_sq_value / denominator) ** 0.5)
+            base_rms = float((base_sq_value / denominator) ** 0.5)
+            first_last_hidden_cosine = (
+                float(scalar_values[first_last_index])
+                if first_last_index is not None else None
+            )
+            trace = []
+            for (entry, _norm, _cosine), (norm_index, cosine_index) in zip(
+                live_hidden_trace_tensors, trace_scalar_indexes
+            ):
+                trace.append({
+                    **entry,
+                    "gemma_hidden_norm": float(scalar_values[norm_index]),
+                    "gemma_hidden_cosine_previous_packet": (
+                        float(scalar_values[cosine_index])
+                        if cosine_index is not None else None
+                    ),
+                })
             metrics.update({
                 "frame_residual_adapter": str(
                     getattr(frame_residual_adapter, "architecture_id", "unknown")
@@ -6742,11 +6805,14 @@ class PipelineEngine:
                 "frame_residual_tail_hold_calls": frame_residual_tail_hold_calls,
                 "frame_residual_qwen_q1_only": True,
                 "frame_residual_prefix_tokens_added": 0,
-                "frame_residual_learned_scale": float(frame_residual_adapter.scale.detach().float().cpu()),
+                "frame_residual_learned_scale": float(scalar_values[2]),
+                "frame_residual_delta_sq_sum": delta_sq_value,
+                "frame_residual_base_sq_sum": base_sq_value,
                 "frame_residual_rms": delta_rms,
                 "frame_residual_base_rms": base_rms,
                 "frame_residual_rms_to_base_ratio": delta_rms / base_rms if base_rms > 0.0 else 0.0,
                 "frame_residual_live_first_last_hidden_cosine": first_last_hidden_cosine,
+                "frame_residual_live_hidden_trace": trace,
             })
         if talk_context is not None:
             talk_context.hook_state = {
@@ -7182,6 +7248,24 @@ class PipelineEngine:
                             "live_qwen_text_token_count": int(
                                 live_qwen_text_stream.observed_qwen_token_count
                             ),
+                        })
+                # The text-derived budget is only an initial estimate. Once
+                # the live text EOS has crossed Q1 and the source FIFO is fully
+                # drained, keep sampling the real codec stream until its EOS
+                # token or the configured hard cap. Otherwise the one final
+                # Q1 could predict an ordinary audio code which this old
+                # budget-exhaustion path would silently discard.
+                if (
+                    self.allow_talker_eos
+                    and live_qwen_text_stream.codec_eos_allowed
+                ):
+                    if T_gen < live_eos_frame_cap:
+                        T_gen = live_eos_frame_cap
+                    if metrics is not None:
+                        metrics.update({
+                            "acoustic_frame_budget": int(T_gen),
+                            "effective_max_frames": int(T_gen),
+                            "live_text_eos_drained_frame_cap": int(live_eos_frame_cap),
                         })
             if frame_id >= T_gen:
                 break

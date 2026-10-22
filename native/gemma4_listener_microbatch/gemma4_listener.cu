@@ -26,6 +26,7 @@
 #include "gemma4_listener_batch_contract.h"
 #include "gemma4_listener_gemv4_contract.h"
 #include "gemma4_listener_microbatch.h"
+#include "runtime_prefix_capacity.h"
 
 /* Internal forward declarations for cache functions */
 typedef struct gemma4_cache gemma4_cache;
@@ -1881,7 +1882,7 @@ static int gemma4_listener_create_impl(
      * are copied during prime so caller-owned tensors may be released safely
      * after the stream-ordered prime has completed. */
     GEMMA4_CREATE_ALLOC(ctx->d_prefix_attention,
-                        GEMMA4_CANONICAL_LM_PREFILL_TARGET_LEN * sizeof(int64_t));
+                        GEMMA4_RUNTIME_PREFIX_MAX_TOKENS * sizeof(int64_t));
     GEMMA4_CREATE_ALLOC(ctx->d_prefix_ple,
                         (size_t)GEMMA4_CANONICAL_LM_PREFILL_TARGET_LEN * GEMMA4_NUM_LAYERS * GEMMA4_PLE_DIM * sizeof(__nv_bfloat16));
 
@@ -2084,7 +2085,7 @@ int gemma4_listener_import_cache_with_prefix_async(
 ) {
     if (!ctx || !imported || !prefix_attention || !prefix_attention_meta) return -1;
     if (prefix_len == 0 ||
-        prefix_len > GEMMA4_CANONICAL_LM_PREFILL_TARGET_LEN ||
+        prefix_len > GEMMA4_RUNTIME_PREFIX_MAX_TOKENS ||
         current_position < prefix_len ||
         current_position > ctx->config.max_seq_len ||
         (current_position - prefix_len) % GEMMA4_STREAM_Q_LEN != 0) return -2;
@@ -3328,7 +3329,7 @@ int gemma4_listener_rebase_async(
     if (!ctx) return -1;
     if (ctx->poisoned) return -9;
     if (!ctx->primed || ctx->prefix_len == 0 ||
-        ctx->prefix_len > GEMMA4_CANONICAL_LM_PREFILL_TARGET_LEN) return -4;
+        ctx->prefix_len > GEMMA4_RUNTIME_PREFIX_MAX_TOKENS) return -4;
     if (retained_audio_tokens == 0 ||
         retained_audio_tokens > GEMMA4_LISTENER_MAX_ROLLOVER_AUDIO_TOKENS ||
         retained_audio_tokens % GEMMA4_STREAM_Q_LEN != 0 ||
@@ -3739,7 +3740,7 @@ uint32_t gemma4_listener_runtime_prefix_len(const gemma4_listener_ctx *ctx) {
 }
 
 uint32_t gemma4_listener_runtime_prefix_capacity(void) {
-    return GEMMA4_CANONICAL_LM_PREFILL_TARGET_LEN;
+    return GEMMA4_RUNTIME_PREFIX_MAX_TOKENS;
 }
 
 uint64_t gemma4_listener_runtime_splitk_layer_mask(const gemma4_listener_ctx *ctx) {

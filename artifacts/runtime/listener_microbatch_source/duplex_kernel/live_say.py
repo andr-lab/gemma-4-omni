@@ -34,10 +34,11 @@ class LiveQwenHidden:
     hidden: torch.Tensor
     tail_hold: bool = False
     gemma_token_id: int | None = None
-    packet_kv_position: int | None = None
+    packet_exclusive_kv_cursor: int | None = None
     qwen_token_id: int | None = None
     packet_token_index: int | None = None
     packet_token_count: int | None = None
+    producer_event: Any | None = None
 
 
 class LiveQwenSayStream:
@@ -87,12 +88,14 @@ class LiveQwenSayStream:
         self._published_ids: list[int] = []
         self._published_offsets: list[tuple[int, int]] = []
         self._published_hidden: list[torch.Tensor] = []
+        self._published_events: list[Any | None] = []
         self._qwen_cursor = 0
         self._last_qwen_ids: list[int] | None = None
         self._last_qwen_offsets: list[tuple[int, int]] | None = None
         self._last_qwen_hidden: list[torch.Tensor] | None = None
         self._last_prefix = ""
         self._added_token_metadata = self._loaded_added_token_metadata()
+        self._added_token_ids = frozenset(item[0] for item in self._added_token_metadata)
         self._error: BaseException | None = None
         self._closed = False
         self._eos_enqueued = False
@@ -161,15 +164,23 @@ class LiveQwenSayStream:
             cursor = end
         return result
 
-    def _loaded_added_token_metadata(self) -> tuple[tuple[str, bool, bool, bool, bool], ...]:
-        """Read active AddedToken content and flags from the loaded tokenizer."""
+    def _loaded_added_token_metadata(
+        self,
+    ) -> tuple[tuple[int, str, bool, bool, bool, bool], ...]:
+        """Read active AddedToken IDs, content, and flags from the tokenizer."""
         decoder = getattr(self.qwen_tokenizer, "added_tokens_decoder", None)
         if not isinstance(decoder, dict):
             getter = getattr(self.qwen_tokenizer, "get_added_tokens_decoder", None)
             decoder = getter() if callable(getter) else {}
-        values = decoder.values() if isinstance(decoder, dict) else ()
-        metadata: set[tuple[str, bool, bool, bool, bool]] = set()
-        for token in values:
+        items = decoder.items() if isinstance(decoder, dict) else ()
+        metadata: set[tuple[int, str, bool, bool, bool, bool]] = set()
+        for token_id, token in items:
+            if isinstance(token_id, bool):
+                continue
+            try:
+                token_id = int(token_id)
+            except (TypeError, ValueError):
+                continue
             content = getattr(token, "content", None)
             lstrip = bool(getattr(token, "lstrip", False))
             if content is None and isinstance(token, dict):
@@ -185,12 +196,12 @@ class LiveQwenSayStream:
                     single_word = bool(token.get("single_word", False))
                 if normalized:
                     content = unicodedata.normalize("NFC", content)
-                metadata.add((content, lstrip, rstrip, normalized, single_word))
-        return tuple(sorted(metadata, key=lambda item: (-len(item[0]), item[0])))
+                metadata.add((token_id, content, lstrip, rstrip, normalized, single_word))
+        return tuple(sorted(metadata, key=lambda item: (-len(item[1]), item[1], item[0])))
 
     def _added_token_suffix_start(self, text: str) -> int | None:
         starts: list[int] = []
-        for content, lstrip, rstrip, _normalized, single_word in self._added_token_metadata:
+        for _token_id, content, lstrip, rstrip, _normalized, single_word in self._added_token_metadata:
             searchable = text.rstrip() if rstrip else text
             for length in range(1, min(len(content), len(searchable)) + 1):
                 if not searchable.endswith(content[:length]):
@@ -343,7 +354,8 @@ class LiveQwenSayStream:
         max_ids = min(self.max_tokens, 4 * length)
         added_token_work = sum(
             (width := min(len(content), length)) * (width + 1) // 2
-            for content, _lstrip, _rstrip, _normalized, _single_word in self._added_token_metadata
+            for _token_id, content, _lstrip, _rstrip, _normalized, _single_word
+            in self._added_token_metadata
         )
         return (
             10 * length
@@ -368,6 +380,11 @@ class LiveQwenSayStream:
         *,
         initial: bool = False,
     ) -> None:
+        owned_hidden = hidden.detach().clone()
+        producer_event = None
+        if owned_hidden.device.type == "cuda" and torch.cuda.is_available():
+            producer_event = torch.cuda.Event(enable_timing=False)
+            producer_event.record(torch.cuda.current_stream(device=owned_hidden.device))
         with self._condition:
             while not initial and self._tail_queue_size_locked() >= self.queue_capacity:
                 self._raise_terminal_locked()
@@ -381,11 +398,29 @@ class LiveQwenSayStream:
                 raise RuntimeError("live Qwen text token capacity exceeded")
             self._published_ids.append(int(token_id))
             self._published_offsets.append((int(offset[0]), int(offset[1])))
-            self._published_hidden.append(hidden.detach().clone())
+            self._published_hidden.append(owned_hidden)
+            self._published_events.append(producer_event)
             self._condition.notify_all()
 
-    def feed_piece(self, text_piece: str, gemma_hidden: Any) -> None:
+    def feed_piece(
+        self,
+        text_piece: str,
+        gemma_hidden: Any,
+        *,
+        producer_event: Any | None = None,
+    ) -> None:
         try:
+            device = getattr(gemma_hidden, "device", None)
+            if (
+                producer_event is not None
+                and device is not None
+                and getattr(device, "type", None) == "cuda"
+                and torch.cuda.is_available()
+            ):
+                stream = torch.cuda.current_stream(device=device)
+                stream.wait_event(producer_event)
+                if isinstance(gemma_hidden, torch.Tensor):
+                    gemma_hidden.record_stream(stream)
             self._feed_piece(text_piece, gemma_hidden)
         except BaseException as exc:
             self.fail(exc)
@@ -434,8 +469,13 @@ class LiveQwenSayStream:
             )
             stable_boundary = self._stable_boundary(prefix, segments)
             stable_count = 0
-            for _token_id, (_start, end) in zip(ids, offsets):
+            for token_id, (_start, end) in zip(ids, offsets):
                 if int(end) > stable_boundary:
+                    break
+                # Equality means this AddedToken touches the open boundary.
+                # Wait for context to move the boundary beyond it; EOS may
+                # release it only after the full prefix is validated.
+                if int(end) == stable_boundary and int(token_id) in self._added_token_ids:
                     break
                 stable_count += 1
             if self._last_qwen_ids is not None and self._last_qwen_offsets is not None:
@@ -600,9 +640,19 @@ class LiveQwenSayStream:
             )
             self._raise_terminal_locked()
             if frame_id < len(self._published_hidden):
-                return LiveQwenHidden(self._published_hidden[frame_id], False)
+                return LiveQwenHidden(
+                    self._published_hidden[frame_id],
+                    False,
+                    qwen_token_id=int(self._published_ids[frame_id]),
+                    producer_event=self._published_events[frame_id],
+                )
             if self._closed and self._published_hidden:
-                return LiveQwenHidden(self._published_hidden[-1], True)
+                return LiveQwenHidden(
+                    self._published_hidden[-1],
+                    True,
+                    qwen_token_id=int(self._published_ids[-1]),
+                    producer_event=self._published_events[-1],
+                )
             raise RuntimeError("live Qwen stream closed before aligned text hidden was available")
 
     def cancel(self) -> None:
@@ -909,10 +959,13 @@ class TurnLocalQwenSayStream:
                     self._last_hidden,
                     tail_hold=self._tail_hold,
                     gemma_token_id=(int(token.packet.token_id) if token is not None else None),
-                    packet_kv_position=(int(token.packet.kv_position) if token is not None else None),
+                    packet_exclusive_kv_cursor=(
+                        int(token.packet.exclusive_kv_cursor) if token is not None else None
+                    ),
                     qwen_token_id=(int(token.token_id) if token is not None else None),
                     packet_token_index=(int(token.packet_token_index) if token is not None else None),
                     packet_token_count=(int(token.packet_token_count) if token is not None else None),
+                    producer_event=(token.packet.producer_event if token is not None else None),
                 )
             if self._closed:
                 raise RuntimeError("turn-local Qwen SAY stream closed before a text hidden was consumed")

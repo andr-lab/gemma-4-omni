@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -uo pipefail
+cd /home/administrator/gemma-4-omni
+export DUPLEX_SERVICE_CONTAINER=gemma4-listener-control6-h3000-eos-build14-20261021
+export DUPLEX_HEALTH_TIMEOUT_S=600
+export DUPLEX_UNIFIED_KV=1
+export DUPLEX_LISTENER_MICROBATCH=1
+export DUPLEX_NATIVE_CONTROL6_SEMANTIC_PREFIX=1
+export DUPLEX_NATIVE_CONTROL6_STABLE_TURN_POLICY_Q2_CONTEXT=1
+export DUPLEX_NATIVE_CONTROL6_ADAPTER_RELATIVE_PATH=checkpoints/native_control6_gemma_native_rows_rank16_control6_temporal100_candidate_h_3000_20261021.pt
+export GEMMA4_NATIVE_LISTENER_LIBRARY_RELATIVE_PATH=artifacts/runtime/libgemma4_listener_microbatch_prefix512_q2cachemeta_20261021_build11_text_health.so
+export DUPLEX_LISTENER_MICROBATCH_SOURCE_ROOT=artifacts/runtime/control6_runtime_pendingpcm_phaseonly_q2cachemeta_build14_stableturn_q2_context_h3000_eos_20261021
+export GEMMA4_NATIVE_LISTENER_CUDA_GRAPH=0
+export GEMMA4_NATIVE_LISTENER_ALLOW_CUSTOM_EAGER_DIAGNOSTIC=0
+export GEMMA4_ATTENTION_BACKEND=NATIVE_SPLITK_GQA
+export GEMMA4_RMSNORM_BACKEND=NATIVE_EXACT
+bash ./scripts/start_speech_service_3090.sh > /home/administrator/gemma-4-omni/artifacts/conversation_quality_20261021/control6_fullab3000_build14_stableturn_q2_context_h3000_eos_20261021/service_start.log 2>&1
+rc=$?
+printf '%s\n' "$rc" > /home/administrator/gemma-4-omni/artifacts/conversation_quality_20261021/control6_fullab3000_build14_stableturn_q2_context_h3000_eos_20261021/service_start.exit
+exit "$rc"

@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from duplex_kernel.server import (
     _controller_guided_say_generation_options,
     _build_unified_audio_response_suffix,
+    _build_unified_backchannel_response_suffix,
     _build_unified_listener_prefix_token_ids,
     _build_unified_next_user_header,
     _consume_unified_native_text_append_result,
@@ -25,8 +26,90 @@ from duplex_kernel.server import (
     _refresh_unified_prefix_for_instruction_update,
     _require_unified_stable_audio_protocol,
     _strict_env_switch,
+    _native_control6_debug_input_row,
+    _write_native_control6_debug_input_sidecar,
     _unified_listener_frame_contract,
+    _unified_response_owns_shared_audio_queue,
+    _shared_listener_response_branch,
+    _shared_listener_frame_queue_contract,
+    _attach_shared_listener_response_branches,
+    _clear_shared_listener_response_branches,
+    _validate_private_transition_chunk,
 )
+
+
+def test_native_control6_debug_input_capture_is_bounded_binary_and_opt_in(tmp_path) -> None:
+    policy_input = SimpleNamespace(
+        native_control_hidden=torch.arange(1536, dtype=torch.float32).reshape(1, 1536),
+        native_control_phase_t=np.asarray([1.0, 2.0, 3.0, 4.0], dtype=np.float32),
+        frame_id=55,
+        generation_id=7,
+        speaker_active=True,
+    )
+    decision = SimpleNamespace(
+        action=SimpleNamespace(value="YIELD"),
+        diagnostics={"native_control6_user_activity_detected": True},
+    )
+    row = _native_control6_debug_input_row(
+        policy_input=policy_input,
+        decision=decision,
+        accepted=True,
+        phase_profile="native1540",
+    )
+    assert row is not None
+    assert _write_native_control6_debug_input_sidecar(None, session_id="s1", rows=[row]) is None
+    path = _write_native_control6_debug_input_sidecar(
+        tmp_path,
+        session_id="s1",
+        rows=[row],
+    )
+    assert path is not None
+    with np.load(path, allow_pickle=False) as saved:
+        assert saved["frame_ids"].tolist() == [55]
+        assert saved["generation_ids"].tolist() == [7]
+        assert saved["hidden"].shape == (1, 1536)
+        assert saved["phase_t"].tolist() == [[1.0, 2.0, 3.0, 4.0]]
+        assert saved["action"].tolist() == ["YIELD"]
+        assert saved["accepted"].tolist() == [True]
+        assert saved["user_activity_detected"].tolist() == [True]
+        assert saved["phase_profile"].tolist() == ["native1540"]
+
+
+def test_native_control6_debug_capture_uses_worker_scored_hidden_not_prehead_snapshot() -> None:
+    policy_input = SimpleNamespace(
+        native_control_hidden=None,
+        native_control_phase_t=np.asarray([0.0, 0.0, 0.0, 0.0], dtype=np.float32),
+        frame_id=12,
+        generation_id=4,
+        speaker_active=False,
+    )
+    hidden = np.linspace(-1.0, 1.0, 1536, dtype=np.float32)
+    phase = np.asarray([0.125, -0.25, 0.5, -0.75], dtype=np.float32)
+    diagnostics = {
+        "native_control6_user_activity_detected": True,
+        "_native_control6_debug_input": {
+            "hidden": hidden,
+            "phase_t": phase,
+            "frame_id": 12,
+            "generation_id": 4,
+            "phase_profile": "native1540",
+        },
+    }
+    decision = SimpleNamespace(action=SimpleNamespace(value="SPEAK"), diagnostics=diagnostics)
+
+    row = _native_control6_debug_input_row(
+        policy_input=policy_input,
+        decision=decision,
+        accepted=True,
+        phase_profile="native1540",
+    )
+
+    assert row is not None
+    assert np.array_equal(row["hidden"], hidden)
+    assert np.array_equal(row["phase_t"], phase)
+    assert row["frame_id"] == 12
+    assert row["user_activity_detected"] is True
+    assert "_native_control6_debug_input" not in diagnostics
 
 
 def _unified_instruction_refresh_fixture(instruction: str = ""):
@@ -320,7 +403,7 @@ def test_unified_frame_logical_q_preserves_pending_user_audio() -> None:
     quiet = np.zeros(1280, dtype=np.float32)
     quiet_pending = _unified_listener_frame_contract(
         quiet,
-        assistant_turn_open=False,
+        assistant_audio_queue_open=False,
         user_input_pending=True,
     )
     assert quiet_pending == (2, None, False)
@@ -328,7 +411,7 @@ def test_unified_frame_logical_q_preserves_pending_user_audio() -> None:
     voiced = np.full(1280, 0.02, dtype=np.float32)
     assert _unified_listener_frame_contract(
         voiced,
-        assistant_turn_open=False,
+        assistant_audio_queue_open=False,
         user_input_pending=False,
     ) == (2, None, False)
 
@@ -337,16 +420,158 @@ def test_unified_frame_logical_q_skips_only_idle_prespeech_and_marks_assistant_q
     quiet = np.zeros(1280, dtype=np.float32)
     assert _unified_listener_frame_contract(
         quiet,
-        assistant_turn_open=False,
+        assistant_audio_queue_open=False,
         user_input_pending=False,
     ) == (0, "prespeech_silence", False)
 
     voiced = np.full(1280, 0.02, dtype=np.float32)
     assert _unified_listener_frame_contract(
         voiced,
-        assistant_turn_open=True,
+        assistant_audio_queue_open=True,
         user_input_pending=False,
     ) == (0, "assistant_turn_open", True)
+
+
+def test_unified_listener_q0_requires_owner_queue_and_backchannel_keeps_causal_q2() -> None:
+    voiced = np.full(1280, 0.02, dtype=np.float32)
+    backchannel_branch = {"queue_open": False, "ephemeral_private": True}
+    assistant_branch = {"queue_open": True, "ephemeral_private": False}
+
+    assert not _unified_response_owns_shared_audio_queue(backchannel_branch)
+    backchannel_frame = _unified_listener_frame_contract(
+        voiced,
+        assistant_audio_queue_open=_unified_response_owns_shared_audio_queue(
+            backchannel_branch
+        ),
+        user_input_pending=True,
+    )
+    assert backchannel_frame == (2, None, False)
+
+    assert _unified_response_owns_shared_audio_queue(assistant_branch)
+    assistant_frame = _unified_listener_frame_contract(
+        voiced,
+        assistant_audio_queue_open=_unified_response_owns_shared_audio_queue(
+            assistant_branch
+        ),
+        user_input_pending=False,
+    )
+    assert assistant_frame == (0, "assistant_turn_open", True)
+
+    assert _unified_response_owns_shared_audio_queue(assistant_branch)
+
+
+def test_shared_listener_response_branch_uses_session_binding_registry() -> None:
+    branch = {"queue_open": True, "response_id": "r1"}
+    binding = {"playback_ack_branches": {"r1": branch}}
+
+    assert _shared_listener_response_branch(binding, "r1") is branch
+    assert _shared_listener_response_branch(binding, "missing") is None
+    assert _shared_listener_response_branch({}, "r1") is None
+
+
+def test_response_branch_registry_attaches_after_session_registration() -> None:
+    branches = {"r1": {"queue_open": True, "response_id": "r1"}}
+    # The websocket creates its registry before shared-listener registration;
+    # attach it only after registration produces the binding dictionary.
+    binding = {"session": object()}
+
+    attached = _attach_shared_listener_response_branches(binding, branches)
+
+    assert attached is binding
+    assert binding["playback_ack_branches"] is branches
+    assert _shared_listener_response_branch(binding, "r1") is branches["r1"]
+
+
+def test_shared_listener_frame_callback_keeps_private_backchannel_q2_and_cleans_up() -> None:
+    voiced = np.full(1280, 0.02, dtype=np.float32)
+    branches = {"bc1": {"queue_open": False, "ephemeral_private": True}}
+    binding = {"playback_ack_branches": branches}
+
+    assert _shared_listener_frame_queue_contract(
+        binding,
+        voiced,
+        response_id="bc1",
+        user_input_pending=True,
+    ) == (2, None, False)
+    assert _shared_listener_frame_queue_contract(
+        binding,
+        voiced,
+        response_id="missing",
+        user_input_pending=False,
+    ) == (2, None, False)
+
+    _clear_shared_listener_response_branches(binding, branches)
+    assert "playback_ack_branches" not in binding
+
+
+def test_shared_queue_ownership_is_independent_of_active_response_flag() -> None:
+    voiced = np.full(1280, 0.02, dtype=np.float32)
+    branches = {
+        "shared": {"queue_open": True, "ephemeral_private": False},
+        "private_bc": {"queue_open": True, "ephemeral_private": True},
+        "closed": {"queue_open": False, "ephemeral_private": False},
+    }
+    binding = {"playback_ack_branches": branches}
+
+    # A shared response owns canonical KV as soon as its queue is open, including prefill.
+    assert _shared_listener_frame_queue_contract(
+        binding,
+        voiced,
+        response_id="shared",
+        user_input_pending=True,
+    ) == (0, "assistant_turn_open", True)
+    # A private BACKCHANNEL never owns canonical Q0, regardless of its queue flag.
+    assert _shared_listener_frame_queue_contract(
+        binding,
+        voiced,
+        response_id="private_bc",
+        user_input_pending=True,
+    ) == (2, None, False)
+    # A stale or closed shared branch cannot suppress causal Q2.
+    assert _shared_listener_frame_queue_contract(
+        binding,
+        voiced,
+        response_id="closed",
+        user_input_pending=True,
+    ) == (2, None, False)
+
+
+def test_private_transition_chunks_match_original_prompt_and_private_cursor() -> None:
+    prompt = tuple(range(11, 21))
+    offset = 0
+    for chunk in (prompt[:5], prompt[5:8], prompt[8:]):
+        offset = _validate_private_transition_chunk(
+            prompt,
+            offset,
+            chunk,
+            source_cache_position=190,
+            current_cache_position=190 + offset,
+        )
+    assert offset == len(prompt)
+    with pytest.raises(RuntimeError, match="original Thinker transition"):
+        _validate_private_transition_chunk(
+            prompt,
+            5,
+            (prompt[5], 99),
+            source_cache_position=190,
+            current_cache_position=195,
+        )
+    with pytest.raises(RuntimeError, match="original Thinker transition"):
+        _validate_private_transition_chunk(
+            prompt,
+            0,
+            tuple(range(11, 20)),
+            source_cache_position=190,
+            current_cache_position=190,
+        )
+    with pytest.raises(RuntimeError, match="private transition cursor"):
+        _validate_private_transition_chunk(
+            prompt,
+            5,
+            prompt[5:8],
+            source_cache_position=190,
+            current_cache_position=196,
+        )
 
 
 def test_unified_prefix_uses_text_template_and_replaces_only_final_audio_marker(
@@ -403,10 +628,69 @@ def test_unified_prefix_uses_text_template_and_replaces_only_final_audio_marker(
     ]
 
 
-def test_unified_mode_rejects_turn_varying_controller_guided_system_prompt() -> None:
+def test_unified_mode_accepts_stable_controller_guided_say_and_v2_protocols() -> None:
     assert _require_unified_stable_audio_protocol("heard_action_say_v2") == "heard_action_say_v2"
-    with pytest.raises(RuntimeError, match="controller_guided_say_v1 has a turn-varying system prompt"):
-        _require_unified_stable_audio_protocol("controller_guided_say_v1")
+    assert _require_unified_stable_audio_protocol("controller_guided_say_v1") == "controller_guided_say_v1"
+
+
+def test_unified_v1_prefix_is_stable_say_only_and_has_no_late_action_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tokenizer, session, _worker, _dispatcher = _unified_instruction_refresh_fixture(
+        "Parla di Torino."
+    )
+    session.language = "Italian"
+    monkeypatch.setenv("DUPLEX_AUDIO_RESPONSE_PROTOCOL", "controller_guided_say_v1")
+    engine = SimpleNamespace(
+        tokenizer=tokenizer,
+        _thinker_wrapper=SimpleNamespace(
+            processor=SimpleNamespace(audio_token="<|audio|>")
+        ),
+    )
+
+    prefix = _build_unified_listener_prefix_token_ids(engine, session)
+
+    system = tokenizer.messages[0]["content"]
+    assert "Parla di Torino." in system
+    assert "soltanto il testo da pronunciare" in system
+    assert "JSON" in system
+    assert "SPEAK" not in system and "BACKCHANNEL" not in system
+    assert prefix[-1] == session.listener.backend.boa_token_id
+
+
+def test_unified_v1_backchannel_suffix_reuses_generic_say_suffix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Tokenizer:
+        audio_token = "<|audio|>"
+        eot_token_id = 102
+
+        def apply_chat_template(self, messages, *, tokenize, add_generation_prompt):
+            assert tokenize is False
+            assert messages == [{"role": "user", "content": "<|audio|>"}]
+            return "template with marker and turn end" + (" assistant prefix" if add_generation_prompt else "")
+
+        def encode(self, text, *, add_special_tokens):
+            assert add_special_tokens is False
+            if text == self.audio_token:
+                return [900]
+            return [100, 101, 900, 102, 103] if text.endswith(" assistant prefix") else [100, 101, 900, 102]
+
+    class Backend:
+        boa_token_id = 901
+        eoa_token_id = 902
+        bos_token_id = 100
+
+    engine = SimpleNamespace(
+        tokenizer=Tokenizer(),
+        _thinker_wrapper=SimpleNamespace(processor=SimpleNamespace(audio_token="<|audio|>")),
+    )
+    session = SimpleNamespace(listener=SimpleNamespace(backend=Backend()))
+    monkeypatch.setenv("DUPLEX_AUDIO_RESPONSE_PROTOCOL", "controller_guided_say_v1")
+
+    assert _build_unified_backchannel_response_suffix(engine, session) == (
+        _build_unified_audio_response_suffix(engine, session)
+    )
 
 
 def test_unified_suffix_closes_audio_user_turn_and_starts_assistant_without_processor() -> None:
@@ -524,36 +808,50 @@ def test_unified_template_rejects_duplicate_eot_and_incompatible_audio_marker() 
         _unified_end_of_turn_token_id(engine_for(Tokenizer(incompatible_marker=True)), session)
 
 
-def test_unified_thinker_uses_only_same_native_owner_and_never_audio_prefills() -> None:
+def test_unified_thinker_uses_owner_rebased_cursor_only_for_first_append() -> None:
     owner_calls = []
 
     class Worker:
         def __init__(self) -> None:
             self.cursor = 20
             self.cache_identity = object()
-            self.watermark_failures = 1
             self.append_attempts = []
+            self.append_positions = []
+            self.append_rebase_flags = []
+            self.append_scope_ids = []
+            self.committed_tokens = []
 
         def session_state(self, _session_id):
             future = Future()
-            future.set_result(SimpleNamespace(generation_id=12, cache_position=self.cursor))
+            future.set_result(SimpleNamespace(
+                generation_id=12,
+                cache_position=self.cursor,
+                valid_history_tokens=self.cursor,
+            ))
             owner_calls.append(("state", self.cache_identity))
             return future
 
         def append_text_tokens(
-            self, session_id, token_ids, *, expected_generation_id, expected_cache_position
+            self, session_id, token_ids, *, expected_generation_id,
+            expected_cache_position, allow_initial_cursor_rebase=False,
+            append_scope_id=None, response_cancel_event=None,
         ):
             assert session_id == "session"
             assert expected_generation_id == 12
-            assert expected_cache_position == self.cursor
             self.append_attempts.append(tuple(token_ids))
-            if self.watermark_failures:
-                self.watermark_failures -= 1
-                future = Future()
-                future.set_exception(RuntimeError(
-                    "text append requires completed listener frame watermark"
-                ))
-                return future
+            self.append_positions.append(expected_cache_position)
+            self.append_rebase_flags.append(allow_initial_cursor_rebase)
+            self.append_scope_ids.append(append_scope_id)
+            assert response_cancel_event is None
+            if len(self.append_attempts) == 1:
+                assert allow_initial_cursor_rebase is True
+                assert expected_cache_position == 20
+                self.cursor += 2  # A listener Q2 append wins the race before text commit.
+            else:
+                assert allow_initial_cursor_rebase is False
+                assert expected_cache_position == self.cursor
+            assert expected_cache_position <= self.cursor
+            self.committed_tokens.extend(token_ids)
             owner_calls.append(("append", self.cache_identity, tuple(token_ids)))
             self.cursor += len(token_ids)
             future = Future()
@@ -563,6 +861,7 @@ def test_unified_thinker_uses_only_same_native_owner_and_never_audio_prefills() 
                     (1, 1, 4), float(token_ids[-1]), dtype=torch.float32
                 ),
                 ready_event=None,
+                cache_position=self.cursor,
             ))
             return future
 
@@ -607,39 +906,45 @@ def test_unified_thinker_uses_only_same_native_owner_and_never_audio_prefills() 
     session = SimpleNamespace(session_id="session")
     branch = {
         "listener_generation_id": 12,
+        "response_id": "resp-test",
         "cache_position": 20,
         "turn_start_cache_position": 20,
         "native_token_append_count": 0,
     }
 
-    think = _run_unified_native_thinker(
-        engine,
-        session,
-        {
-            "_on_thinker_metrics": lambda metrics: captured_metrics.append(dict(metrics)),
-            "_on_thinker_token_id": recorded_tokens.append,
-        },
-        worker=worker,
-        transition_token_ids=(3, 4, 5),
-        think_kwargs={
-            "temperature": 0.0,
-            "top_p": 1.0,
-            "min_new_tokens": 0,
-            "max_new_tokens": 4,
-        },
-        generation_id=4,
-        branch=branch,
-    )
+    def run():
+        return _run_unified_native_thinker(
+            engine,
+            session,
+            {
+                "_on_thinker_metrics": lambda metrics: captured_metrics.append(dict(metrics)),
+                "_on_thinker_token_id": recorded_tokens.append,
+            },
+            worker=worker,
+            transition_token_ids=(3, 4, 5),
+            think_kwargs={
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "min_new_tokens": 0,
+                "max_new_tokens": 4,
+            },
+            generation_id=4,
+            branch=branch,
+        )
+    think = run()
+    assert worker.append_attempts == [(3, 4, 5), (7,)]
+    assert worker.append_positions == [20, 25]
+    assert worker.append_rebase_flags == [True, False]
+    assert worker.append_scope_ids == ["resp-test", "resp-test"]
+    assert worker.committed_tokens == [3, 4, 5, 7]
+    assert worker.cursor == branch["cache_position"] == 26
+    assert branch["turn_start_cache_position"] == 22
+    assert branch["spoken_prefix_base_cursor"] == 25
+    assert branch["spoken_prefix_exclusive_cursor"] == 25
 
-    assert [call[0] for call in owner_calls] == [
-        "state", "state", "append", "append", "append"
-    ]
     assert all(call[1] is worker.cache_identity for call in owner_calls)
     successful_appends = [call for call in owner_calls if call[0] == "append"]
-    assert [call[2] for call in successful_appends] == [(3, 4), (5,), (7,)]
-    assert worker.append_attempts == [(3, 4), (3, 4), (5,), (7,)]
-    assert worker.cursor == branch["cache_position"] == 24
-    assert branch["turn_start_cache_position"] == 20
+    assert [call[2] for call in successful_appends] == [(3, 4, 5), (7,)]
     assert recorded_tokens == [7, 99]
     assert think["gen_ids"] == [7]
     assert think["hidden"].shape == (1, 1, 4)

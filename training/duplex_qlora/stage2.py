@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import math
 import os
 import random
 import time
@@ -11,15 +12,29 @@ from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping, Sequence
+from urllib.parse import quote
 
 import numpy as np
 import torch
 from torch.nn import functional as F
 
+from duplex_kernel.native_control6_phase import (
+    NATIVE_CONTROL6_NATIVE1540_PHASE_T_SCHEMA,
+    NATIVE_CONTROL6_NATIVE1540_PHASE_T_NAMES,
+    native_control6_native1540_phase_t,
+)
+from duplex_kernel.acoustic_phase_features import EPSILON as _PCM_RMS_EPSILON
+
 from .control import ControlHead, load_control_head
-from .features import FEATURE_CONTRACT, last_audio_query, listener_feature_contract
+from .features import (
+    FEATURE_CONTRACT,
+    last_audio_query,
+    listener_feature_contract,
+    native_control6_feature_contract,
+)
 from .prepare import read_jsonl
 from .schema import ACTIONS
+from .native_control6 import NATIVE_CONTROL6_TRAINING_STATE_CONTEXT
 
 
 def load_merged_base(
@@ -56,7 +71,7 @@ def load_merged_base(
             "BF16 base + PEFT merge fallito prima del binding nativo: "
             f"{type(exc).__name__}: {exc}"
         ) from exc
-    base_checkpoint_path = _attest_merged_model_source(model, base_model_path)
+    _attest_merged_model_source(model, base_model_path)
     floating = [parameter for parameter in model.parameters() if parameter.is_floating_point()]
     if not floating or any(parameter.dtype != torch.bfloat16 for parameter in floating):
         raise RuntimeError("Gemma merged runtime richiede tutti i parametri floating BF16")
@@ -69,6 +84,338 @@ def load_merged_base(
     thinker = ThinkerModel(model, tokenizer, processor, device=device)
     setattr(model, "_duplex_qlora_merged_adapter_dir", str(Path(adapter_dir).resolve()))
     return thinker, processor, model
+
+
+def load_serving_base(
+    *,
+    workspace: str | Path,
+    base_model_path: str | None = None,
+    device: str = "cuda",
+) -> tuple[Any, Any, Any, dict[str, Any]]:
+    """Load the same BF16, base-only Thinker selected by the serving loader."""
+    import importlib
+
+    thinker_module = importlib.import_module("duplex_kernel.models.thinker")
+    load_thinker = thinker_module.load_thinker
+    resolve_thinker_path = thinker_module.resolve_thinker_path
+
+    workspace_path = Path(workspace).resolve()
+    resolved_base = Path(resolve_thinker_path(str(workspace_path))).resolve()
+    if base_model_path is not None and Path(base_model_path).resolve() != resolved_base:
+        raise ValueError(
+            "native1540 base path must match the serving resolve_thinker_path result: "
+            f"requested={Path(base_model_path).resolve()} serving={resolved_base}"
+        )
+    thinker = load_thinker(
+        str(workspace_path),
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    model = getattr(thinker, "model", None)
+    if model is None or getattr(thinker, "processor", None) is None:
+        raise RuntimeError("serving Thinker loader did not return its Gemma model and audio processor")
+    model_path = Path(str(getattr(model, "_gemma4_checkpoint_path", ""))).resolve()
+    if model_path != resolved_base:
+        raise RuntimeError(
+            "serving Thinker model provenance differs from resolve_thinker_path: "
+            f"model={model_path} loader={resolved_base}"
+        )
+    floating = [parameter for parameter in model.parameters() if parameter.is_floating_point()]
+    if not floating or any(parameter.dtype != torch.bfloat16 for parameter in floating):
+        raise RuntimeError("serving native1540 extraction requires the BF16 base-only Thinker")
+    if any("lora_" in name.lower() for name, _ in model.named_parameters()):
+        raise RuntimeError("serving native1540 extraction refuses a PEFT/LoRA model")
+    return thinker, thinker.processor, model, {
+        "loader": "duplex_kernel.models.thinker.load_thinker",
+        "loader_source": str(Path(thinker_module.__file__).resolve()),
+        "workspace": str(workspace_path),
+        "base_model_path": str(resolved_base),
+        "model_dtype": "bfloat16",
+        "response_lora_applied": False,
+        "stage1_adapter_applied": False,
+    }
+
+
+class _ServingNativeControl6Worker:
+    """Use the serving shared native Q2 worker and unified prefix for Stage2 PCM."""
+
+    def __init__(
+        self,
+        thinker: Any,
+        listener: Any,
+        *,
+        workspace: str | Path,
+        native_library_path: str | Path | None = None,
+    ) -> None:
+        import importlib
+        import sys
+
+        self._workspace = Path(workspace).resolve()
+        source_root_value = os.environ.get("DUPLEX_LISTENER_MICROBATCH_SOURCE_ROOT")
+        source_root: Path | None = None
+        if not source_root_value:
+            raise RuntimeError("native1540 requires DUPLEX_LISTENER_MICROBATCH_SOURCE_ROOT from serving")
+        source_root = Path(source_root_value)
+        if not source_root.is_absolute():
+            source_root = self._workspace / source_root
+        source_root = source_root.resolve()
+        overlay_package = source_root / "duplex_kernel"
+        if not overlay_package.is_dir():
+            raise FileNotFoundError(f"serving runtime source overlay missing: {overlay_package}")
+        package = importlib.import_module("duplex_kernel")
+        package_path = getattr(package, "__path__", None)
+        if package_path is None:
+            raise RuntimeError("duplex_kernel import is not a package; cannot select the serving mirror")
+        overlay_value = str(overlay_package)
+        if overlay_value in package_path:
+            package_path.remove(overlay_value)
+        package_path.insert(0, overlay_value)
+        existing_server = sys.modules.get("duplex_kernel.server")
+        if existing_server is not None and not Path(str(existing_server.__file__)).resolve().is_relative_to(source_root):
+            raise RuntimeError(
+                "duplex_kernel.server was imported before activating the serving source mirror: "
+                f"{existing_server.__file__}"
+            )
+        serving_server = importlib.import_module("duplex_kernel.server")
+        from duplex_kernel.gemma_representation import AUDIO_FEATURES_PER_FRAME
+        from duplex_kernel.listener_microbatch_frontend import MEL_WINDOW_ROWS
+        from duplex_kernel.listener_microbatch_serving import (
+            initial_listener_session_state,
+            make_listener_microbatch_worker,
+            make_unified_prefix_import,
+        )
+
+        configured_library = (
+            native_library_path
+            or os.environ.get("DUPLEX_LISTENER_MICROBATCH_LIBRARY_PATH")
+            or os.environ.get("GEMMA4_NATIVE_LISTENER_LIBRARY_PATH")
+        )
+        if not configured_library:
+            raise RuntimeError(
+                "native1540 requires the serving native listener library via "
+                "DUPLEX_LISTENER_MICROBATCH_LIBRARY_PATH"
+            )
+        resolved_library = Path(configured_library).resolve()
+        if not resolved_library.is_file():
+            raise FileNotFoundError(f"serving native listener library missing: {resolved_library}")
+
+        self.thinker = thinker
+        self.listener = listener
+        self.listener_backend = getattr(listener, "backend", None)
+        if getattr(listener, "runtime_profile", None) != "production":
+            raise RuntimeError("serving native1540 worker requires GemmaListener production profile")
+        if self.listener_backend is None or not bool(getattr(self.listener_backend, "_use_native_lm", False)):
+            raise RuntimeError("serving native1540 worker requires the production native LM backend")
+        effective_rows = int(getattr(self.listener_backend, "mel_window_rows", -1))
+        if AUDIO_FEATURES_PER_FRAME != 2 or MEL_WINDOW_ROWS != 240 or effective_rows != 240:
+            raise RuntimeError(
+                "serving native1540 worker requires effective Q2/W240; "
+                f"constants={AUDIO_FEATURES_PER_FRAME}/{MEL_WINDOW_ROWS}, backend={effective_rows}"
+            )
+
+        self._initial_listener_session_state = initial_listener_session_state
+        self._make_unified_prefix_import = make_unified_prefix_import
+        self._prefix_builder = serving_server._build_unified_listener_prefix_token_ids
+        self._engine_adapter = SimpleNamespace(
+            tokenizer=getattr(thinker, "tokenizer", None),
+            _thinker_wrapper=thinker,
+        )
+        if self._engine_adapter.tokenizer is None:
+            raise RuntimeError("serving unified prefix requires the loaded Thinker tokenizer")
+        self._native_library_path = resolved_library
+        self._prefix_builder_source = str(Path(serving_server.__file__).resolve())
+        self._worker_factory_source = str(
+            Path(__import__("duplex_kernel.listener_microbatch_serving", fromlist=["make_listener_microbatch_worker"]).__file__).resolve()
+        )
+        self._expected_runtime_source_root = None
+        if source_root is not None:
+            self._expected_runtime_source_root = str(source_root)
+            try:
+                Path(self._prefix_builder_source).relative_to(source_root)
+            except ValueError as exc:
+                raise RuntimeError(
+                    "native1540 prefix builder did not load from the configured serving mirror; "
+                    f"source={self._prefix_builder_source} mirror={source_root}"
+                ) from exc
+            worker_source = Path(self._worker_factory_source).resolve()
+            allowed_worker_roots = (source_root, self._workspace / "duplex_kernel")
+            if not any(worker_source.is_relative_to(root.resolve()) for root in allowed_worker_roots):
+                raise RuntimeError(
+                    "native1540 shared worker factory came from outside the serving mirror/workspace; "
+                    f"source={worker_source} mirror={source_root}"
+                )
+
+        self._worker = make_listener_microbatch_worker(
+            listener,
+            library_path=resolved_library,
+            semantic_prefix_enabled=False,
+            unified_kv_enabled=True,
+        )
+        self._session_index = 0
+        self._native_context_index = 0
+        self._active_session: dict[str, Any] | None = None
+        self._prefix_token_ids: tuple[int, ...] | None = None
+        self._closed = False
+        try:
+            self._worker.start().result()
+            self._runtime_signature = self._worker.runtime_signature
+            runtime_info = getattr(self.listener_backend, "_listener_microbatch_runtime_info", {})
+            if not isinstance(runtime_info, dict) or int(runtime_info.get("stream_q_len", -1)) != 2:
+                raise RuntimeError("serving native worker did not attest effective stream_q_len=2")
+            effective_library = Path(str(runtime_info.get("library_path", ""))).resolve()
+            if effective_library != resolved_library:
+                raise RuntimeError(
+                    "serving native worker loaded a different listener library: "
+                    f"configured={resolved_library} effective={effective_library}"
+                )
+            self._runtime_info = dict(runtime_info)
+        except BaseException:
+            try:
+                self._worker.stop(drain=True).result()
+            except BaseException:
+                pass
+            self._closed = True
+            raise
+
+    def _make_prefix(self, session: Any) -> tuple[int, ...]:
+        values = tuple(int(value) for value in self._prefix_builder(self._engine_adapter, session))
+        if not values:
+            raise RuntimeError("serving unified prefix builder returned no token IDs")
+        if self._prefix_token_ids is None:
+            self._prefix_token_ids = values
+        elif values != self._prefix_token_ids:
+            raise RuntimeError("native1540 first-session prefix changed between prepared conversations")
+        return values
+
+    def begin_conversation(self, conversation_id: str) -> dict[str, Any]:
+        if self._active_session is not None:
+            raise RuntimeError("previous native1540 conversation session has not been closed")
+        from duplex_kernel.listener import DEFAULT_CONTEXT_FRAMES, GemmaListenerState
+
+        self._session_index += 1
+        self._native_context_index += 1
+        session_id = f"stage2-native1540-{self._session_index}-{hashlib.sha256(str(conversation_id).encode()).hexdigest()[:12]}"
+        state = GemmaListenerState(
+            sample_rate=16000,
+            frame_duration_ms=80,
+            context_frames=DEFAULT_CONTEXT_FRAMES,
+        )
+        session = SimpleNamespace(
+            session_id=session_id,
+            listener=self.listener,
+            listener_state=state,
+            history=[],
+            instructions="",
+        )
+        prefix_ids = self._make_prefix(session)
+        row_state = self._initial_listener_session_state(
+            session,
+            self._runtime_signature,
+            native_context_id=self._native_context_index,
+            generation_id=1,
+            cache_position=len(prefix_ids),
+        )
+        importer = self._make_unified_prefix_import(self.listener_backend, prefix_ids)
+        self._worker.register_session(row_state, prefix_import=importer).result()
+        self._active_session = {
+            "session_id": session_id,
+            "generation_id": 1,
+            "state_epoch_id": str(state.state_epoch_id),
+            "listener_state": state,
+            "prefix_len": len(prefix_ids),
+            "prefix_token_ids": prefix_ids,
+        }
+        return dict(self._active_session)
+
+    def step(
+        self,
+        frame_id: int,
+        user_pcm: np.ndarray,
+        assistant_reference_pcm: np.ndarray | None,
+        assistant_reference_frame_id: int | None,
+    ) -> Any:
+        if self._active_session is None:
+            raise RuntimeError("native1540 worker session is not open")
+        from duplex_kernel.microbatch_contract import ListenerFrame
+
+        active = self._active_session
+        frame = ListenerFrame(
+            session_id=str(active["session_id"]),
+            generation_id=int(active["generation_id"]),
+            state_epoch_id=str(active["state_epoch_id"]),
+            frame_id=int(frame_id),
+            ready_at_ns=time.monotonic_ns(),
+            pcm=np.asarray(user_pcm, dtype=np.float32),
+            logical_q_len=2,
+            reference_pcm=(
+                None
+                if assistant_reference_frame_id is None
+                else np.asarray(assistant_reference_pcm, dtype=np.float32)
+            ),
+            reference_frame_id=assistant_reference_frame_id,
+        )
+        result = self._worker.submit_tick((frame,)).result()
+        output = result[str(active["session_id"])]
+        if int(output.frame_id) != int(frame_id):
+            raise RuntimeError(
+                f"serving native worker frame misalignment: expected={frame_id}, got={output.frame_id}"
+            )
+        return output
+
+    def end_conversation(self) -> None:
+        active = self._active_session
+        if active is None:
+            return
+        try:
+            self._worker.close_session(str(active["session_id"])).result()
+        finally:
+            state = active.get("listener_state")
+            if callable(getattr(state, "close", None)):
+                state.close()
+            self._active_session = None
+
+    def report(self) -> dict[str, Any]:
+        return {
+            "worker": "duplex_kernel.listener_microbatch_serving.make_listener_microbatch_worker",
+            "worker_factory_source": self._worker_factory_source,
+            "prefix_builder": "duplex_kernel.server._build_unified_listener_prefix_token_ids",
+            "prefix_builder_source": self._prefix_builder_source,
+            "runtime_source_root": self._expected_runtime_source_root,
+            "native_library_path": str(self._native_library_path),
+            "runtime_signature": {
+                "model_id": self._runtime_signature.model_id,
+                "native_abi_version": self._runtime_signature.native_abi_version,
+                "batch_api_version": self._runtime_signature.batch_api_version,
+                "attention_backend_id": self._runtime_signature.attention_backend_id,
+                "rmsnorm_backend_id": self._runtime_signature.rmsnorm_backend_id,
+                "max_seq_len": self._runtime_signature.max_seq_len,
+                "stream_q_len": self._runtime_signature.stream_q_len,
+            },
+            "runtime_info": self._runtime_info,
+            "prefix": {
+                "contract": "serving_unified_chat_prefix_v2",
+                "history_messages": 0,
+                "session_instructions": "empty_session_default",
+                "audio_marker": "final_user_audio_marker_then_boa",
+                "token_ids": list(self._prefix_token_ids or ()),
+                "length": len(self._prefix_token_ids or ()),
+            },
+            "conversation_history_policy": (
+                "first-session parity: prepared speech history is not appended; "
+                "each recording starts with the serving default empty history/instructions"
+            ),
+        }
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self.end_conversation()
+        finally:
+            worker = getattr(self, "_worker", None)
+            if worker is not None:
+                worker.stop(drain=True).result()
 
 
 def _attest_merged_model_source(model: Any, base_model_path: str) -> str:
@@ -97,8 +444,330 @@ def _is_synthetic_source(row: Mapping[str, Any]) -> bool:
     )
 
 
+def _native1540_pre_action_speaker_state(
+    conversation: Mapping[str, Any],
+    frame: Mapping[str, Any],
+    *,
+    frame_id: int,
+) -> tuple[bool | None, str]:
+    """Resolve the synthetic assistant state before the decision at input frame t.
+
+    V5 stores post-action audio on the row whose input is t and target is t+1.
+    Therefore a contiguous row for t-1 is the only implicit state source for t.
+    Explicit, time-bounded action spans are the fallback when the trace has a gap.
+    """
+    for key, source in (
+        ("own_active", "frame_target_own_active"),
+        ("active_response", "frame_target_active_response"),
+    ):
+        value = frame.get(key)
+        if type(value) is bool:
+            return value, source
+    if frame_id == 0:
+        return False, "synthetic_stream_initial_idle"
+
+    target_rows = conversation.get("frame_targets")
+    if isinstance(target_rows, (list, tuple)):
+        previous_rows = [
+            row for row in target_rows
+            if isinstance(row, Mapping)
+            and row.get("input_frame_id") == frame_id - 1
+            and row.get("target_frame_id") == frame_id
+        ]
+        if len(previous_rows) == 1 and type(previous_rows[0].get("assistant_audible")) is bool:
+            return previous_rows[0]["assistant_audible"], "prior_target_assistant_audible_t_minus_1"
+
+    explicit_states: set[bool] = set()
+    for segment in conversation.get("action_segments", ()) or ():
+        if not isinstance(segment, Mapping):
+            continue
+        start, end = segment.get("target_frame_id_start"), segment.get("target_frame_id_end")
+        if (
+            isinstance(start, bool) or not isinstance(start, int)
+            or isinstance(end, bool) or not isinstance(end, int)
+            or not start <= frame_id < end
+            or segment.get("target_action_mask", True) is not True
+        ):
+            continue
+        action = segment.get("action")
+        if action in {"SPEAK", "CONTINUE", "YIELD", "BACKCHANNEL"}:
+            explicit_states.add(True)
+        elif action == "LISTEN":
+            explicit_states.add(False)
+    if len(explicit_states) == 1:
+        return explicit_states.pop(), "verified_action_segment_covering_current_audio_frame"
+    return None, "synthetic_pre_action_state_unavailable"
+
+
+def _native1540_runtime_target_action(
+    conversation: Mapping[str, Any],
+    frame: Mapping[str, Any],
+    *,
+    frame_id: int,
+    speaker_active: bool | None,
+) -> dict[str, Any]:
+    """Map persisted event labels to the action still legal at this runtime tick.
+
+    Raw labels and their evidence remain untouched. The derived runtime target
+    for synthetic SPEAK/BACKCHANNEL spans requires one explicit action segment
+    to cover the current and next target frame. A qualified natural YIELD onset
+    also carries through its next three observed overlap ticks while both
+    channels remain active; direct/reviewed labels retain precedence.
+    """
+    raw_action = frame.get("target_action", frame.get("action"))
+    result: dict[str, Any] = {
+        "action": raw_action,
+        "derived": False,
+        "reason": None,
+        "segment_index": None,
+        "event_id": None,
+        "yield_onset_frame_id": None,
+        "yield_local_stop_ms": None,
+        "yield_local_segment_id": None,
+        "yield_peer_segment_id": None,
+    }
+    if (
+        not _is_synthetic_source(conversation)
+        and raw_action == "CONTINUE"
+        and frame.get("target_action_source") == "timestamp_derived_local_speech_active"
+        and frame.get("target_action_mask", frame.get("action_mask")) is True
+        and speaker_active is True
+        and frame.get("peer_active_during_frame") is True
+    ):
+        current_evidence = frame.get("target_action_evidence")
+        local_segment_id = (
+            current_evidence.get("local_segment_id")
+            if isinstance(current_evidence, Mapping)
+            else None
+        )
+        current_frame_id = frame.get("input_frame_id", frame.get("frame_id"))
+        if (
+            isinstance(local_segment_id, str)
+            and local_segment_id
+            and isinstance(current_frame_id, int)
+            and not isinstance(current_frame_id, bool)
+            and current_frame_id == frame_id
+        ):
+            yield_events: list[tuple[int, str, str, float]] = []
+            for candidate in conversation.get("frame_targets", ()) or ():
+                if not isinstance(candidate, Mapping):
+                    continue
+                onset_frame_id = candidate.get("input_frame_id")
+                if (
+                    isinstance(onset_frame_id, bool)
+                    or not isinstance(onset_frame_id, int)
+                    or not 1 <= frame_id - onset_frame_id <= 3
+                    or candidate.get("action") != "YIELD"
+                    or candidate.get("target_action_source")
+                    != "timestamp_derived_peer_onset_confirmed_local_stop"
+                    or candidate.get("target_action_mask") is not True
+                ):
+                    continue
+                evidence = candidate.get("target_action_evidence")
+                if not isinstance(evidence, Mapping) or evidence.get("local_segment_id") != local_segment_id:
+                    continue
+                peer_segment_id = evidence.get("peer_segment_id")
+                local_stop_ms = evidence.get("local_stop_ms")
+                if (
+                    not isinstance(peer_segment_id, str)
+                    or not peer_segment_id
+                    or isinstance(local_stop_ms, bool)
+                    or not isinstance(local_stop_ms, (int, float))
+                    or not math.isfinite(float(local_stop_ms))
+                    or float(local_stop_ms) <= 0.0
+                ):
+                    continue
+                yield_events.append((onset_frame_id, local_segment_id, peer_segment_id, float(local_stop_ms)))
+            unique_events = list(dict.fromkeys(yield_events))
+            if len(unique_events) == 1:
+                onset_frame_id, local_segment_id, peer_segment_id, local_stop_ms = unique_events[0]
+                result.update({
+                    "action": "YIELD",
+                    "derived": True,
+                    "reason": "qualified_yield_overlap_persistence_until_local_stop",
+                    "event_id": peer_segment_id,
+                    "yield_onset_frame_id": onset_frame_id,
+                    "yield_local_stop_ms": local_stop_ms,
+                    "yield_local_segment_id": local_segment_id,
+                    "yield_peer_segment_id": peer_segment_id,
+                })
+                return result
+    if (
+        not _is_synthetic_source(conversation)
+        or raw_action not in {"SPEAK", "BACKCHANNEL"}
+        or speaker_active is not True
+        or frame.get("assistant_audible") is not True
+    ):
+        return result
+
+    segments = conversation.get("action_segments", ()) or ()
+    covering_current: list[tuple[int, Mapping[str, Any]]] = []
+    covering_target: list[tuple[int, Mapping[str, Any]]] = []
+    for index, segment in enumerate(segments):
+        if not isinstance(segment, Mapping) or segment.get("action") != raw_action:
+            continue
+        start, end = segment.get("target_frame_id_start"), segment.get("target_frame_id_end")
+        if (
+            isinstance(start, bool) or not isinstance(start, int)
+            or isinstance(end, bool) or not isinstance(end, int)
+            or segment.get("target_action_mask", True) is not True
+        ):
+            continue
+        if start <= frame_id < end:
+            covering_current.append((index, segment))
+        if start <= frame_id + 1 < end:
+            covering_target.append((index, segment))
+    shared = [(index, current) for index, current in covering_current
+              for target_index, target in covering_target
+              if index == target_index and target is current]
+    if len(shared) != 1:
+        return result
+
+    previous_rows = [
+        row for row in conversation.get("frame_targets", ()) or ()
+        if isinstance(row, Mapping)
+        and row.get("input_frame_id") == frame_id - 1
+        and row.get("target_frame_id") == frame_id
+    ]
+    if len(previous_rows) != 1:
+        return result
+    previous = previous_rows[0]
+    if previous.get("action") != raw_action:
+        return result
+    previous_evidence = previous.get("target_action_evidence")
+    current_evidence = frame.get("target_action_evidence")
+    segment_index, segment = shared[0]
+    def event_ids(value: Any) -> set[str]:
+        if not isinstance(value, Mapping):
+            return set()
+        return {
+            str(value[key])
+            for key in ("event_id", "segment_id", "source_event_id")
+            if value.get(key) not in (None, "")
+        }
+
+    segment_ids = event_ids(segment)
+    previous_ids = event_ids(previous_evidence)
+    current_ids = event_ids(current_evidence)
+    if segment_ids and ((previous_ids and not segment_ids.intersection(previous_ids))
+                        or (current_ids and not segment_ids.intersection(current_ids))):
+        return result
+    if not segment_ids and previous_ids and current_ids and previous_ids != current_ids:
+        return result
+
+    result.update({
+        "action": "CONTINUE",
+        "derived": True,
+        "reason": f"same_active_{raw_action.lower()}_event_continues",
+        "segment_index": segment_index,
+        "event_id": next(iter(segment_ids), next(iter(current_ids), None)),
+    })
+    return result
+
+
+def _native1540_supervision_context(
+    conversation: Mapping[str, Any],
+    frame: Mapping[str, Any],
+    *,
+    frame_id: int,
+    user_pcm_current: np.ndarray,
+    assistant_pcm_prior: np.ndarray | None,
+    assistant_prior_frame_id: int | None,
+) -> dict[str, Any]:
+    """Decode runtime speaker/user context from source state and causal PCM."""
+    tick_start_ms = frame_id * 80.0
+    tick_end_ms = tick_start_ms + 80.0
+    if _is_synthetic_source(conversation):
+        own_active, own_active_source = _native1540_pre_action_speaker_state(
+            conversation, frame, frame_id=frame_id
+        )
+        peer_active = frame.get("peer_active_during_frame")
+        peer_source = "frame_target_peer_active_during_frame"
+        if type(peer_active) is not bool:
+            acoustic_state = frame.get("acoustic_state")
+            if acoustic_state not in {"user_active", "quiet"}:
+                raise ValueError(
+                    f"{conversation.get('conversation_id')}:{frame_id}: synthetic target lacks "
+                    "peer_active_during_frame or acoustic_state"
+                )
+            peer_active = acoustic_state == "user_active"
+            peer_source = "frame_target_acoustic_state"
+        context_provenance = {
+            "schema": "native_control6_runtime_context_v1",
+            "source_kind": "synthetic_trace",
+            "training_state_context": NATIVE_CONTROL6_TRAINING_STATE_CONTEXT,
+            "speaker_state_source": own_active_source,
+            "peer_state_source": peer_source,
+            "assistant_audible_proxy_used": False,
+            "pre_action_speaker_state_valid": own_active is not None,
+        }
+    else:
+        local_channel = _channel_index(conversation, "assistant")
+        remote_channel = _channel_index(conversation, "user")
+        if local_channel is None or remote_channel is None:
+            raise ValueError(
+                f"{conversation.get('conversation_id')}:{frame_id}: natural runtime context requires "
+                "explicit assistant/user channel mapping"
+            )
+        verified_segments = []
+        for segment in conversation.get("segments", ()) or ():
+            if not isinstance(segment, Mapping):
+                continue
+            if (
+                segment.get("audio_channel_verified") is not True
+                or segment.get("time_mask") is not True
+                or segment.get("channel_index") not in {local_channel, remote_channel}
+            ):
+                continue
+            try:
+                start_ms, end_ms = float(segment["start_ms"]), float(segment["end_ms"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if np.isfinite(start_ms) and np.isfinite(end_ms) and start_ms < end_ms:
+                verified_segments.append((int(segment["channel_index"]), start_ms, end_ms))
+        own_active = any(channel == local_channel and start <= tick_start_ms < end for channel, start, end in verified_segments)
+        peer_active = any(channel == remote_channel and start < tick_end_ms and end > tick_start_ms for channel, start, end in verified_segments)
+        context_provenance = {
+            "schema": "native_control6_runtime_context_v1",
+            "source_kind": "verified_role_intervals",
+            "training_state_context": NATIVE_CONTROL6_TRAINING_STATE_CONTEXT,
+            "speaker_state_source": "assistant_interval_active_at_frame_start",
+            "peer_state_source": "user_interval_intersects_current_frame",
+            "assistant_audible_proxy_used": False,
+        }
+
+    user_values = np.asarray(user_pcm_current, dtype=np.float64)
+    if user_values.ndim != 1 or not np.isfinite(user_values).all():
+        raise ValueError(f"{conversation.get('conversation_id')}:{frame_id}: invalid current user PCM")
+    user_rms = float(np.sqrt(np.mean(user_values * user_values)))
+    assistant_rms = 0.0
+    ratio_valid = False
+    if assistant_pcm_prior is not None and assistant_prior_frame_id == frame_id - 1:
+        assistant_values = np.asarray(assistant_pcm_prior, dtype=np.float64)
+        if assistant_values.ndim == 1 and np.isfinite(assistant_values).all():
+            assistant_rms = float(np.sqrt(np.mean(assistant_values * assistant_values)))
+            ratio_valid = user_rms > _PCM_RMS_EPSILON and assistant_rms >= 0.001
+    user_rms_active = user_rms >= 0.001
+    user_log = float(np.clip(np.log10(max(user_rms, _PCM_RMS_EPSILON)), -6.0, 0.0))
+    assistant_log = float(np.clip(np.log10(max(assistant_rms, _PCM_RMS_EPSILON)), -6.0, 0.0))
+    ratio = float(np.clip(user_log - assistant_log, -6.0, 6.0)) if ratio_valid else 0.0
+    user_activity = bool(peer_active or user_rms_active or (ratio_valid and ratio > -0.15))
+    return {
+        "native_control6_context": context_provenance,
+        "training_state_context": NATIVE_CONTROL6_TRAINING_STATE_CONTEXT,
+        "speaker_active_at_frame_start": own_active,
+        "peer_active_during_frame": bool(peer_active),
+        "native_control6_user_rms_activity": user_rms_active,
+        "native_control6_user_assistant_ratio_valid": ratio_valid,
+        "native_control6_user_assistant_log_ratio": ratio,
+        "native_control6_user_activity_detected": user_activity,
+    }
+
+
 def _causal_action_targets(
     conversation: Mapping[str, Any],
+    *,
+    include_masked: bool = False,
 ) -> tuple[list[dict[str, Any]], bool]:
     """Normalize v4 frame labels and v5 input-t/target-t+1 frame targets.
 
@@ -186,6 +855,9 @@ def _causal_action_targets(
         if is_v5 and action not in ACTIONS:
             raise ValueError(f"frame_targets[{index}] has an action outside the six-class ABI")
         if mask is not True or action not in ACTIONS:
+            if include_masked:
+                frame["_stage2_is_v5_target"] = is_v5
+                result.append(frame)
             continue
         frame["_stage2_is_v5_target"] = is_v5
         result.append(frame)
@@ -287,6 +959,8 @@ def extract_conversation_features(
     session_id: str | None = None,
     pcm_cache: dict[str, tuple[np.ndarray, int]] | None = None,
     timing: dict[str, Any] | None = None,
+    control6_profile: str = "historical_q4",
+    serving_native_worker: _ServingNativeControl6Worker | Any | None = None,
 ) -> tuple[np.ndarray, list[dict[str, Any]]]:
     """Replay one causal conversation stream and keep only supervised frames."""
     from duplex_kernel.listener import DEFAULT_CONTEXT_FRAMES, GemmaListenerState
@@ -296,6 +970,12 @@ def extract_conversation_features(
         raise RuntimeError("stage2 usa solo GemmaListener runtime_profile=production")
     if not bool(getattr(listener.backend, "_use_native_lm", False)):
         raise RuntimeError("stage2 richiede il listener LM nativo del kernel")
+    if control6_profile not in {"historical_q4", "native1540"}:
+        raise ValueError("control6_profile must be 'historical_q4' or 'native1540'")
+    if control6_profile == "native1540" and int(getattr(listener.backend, "mel_window_rows", -1)) != 240:
+        raise RuntimeError("native1540 extraction requires the production Q2/W240 listener")
+    if control6_profile == "native1540" and serving_native_worker is None:
+        raise RuntimeError("native1540 extraction requires the serving shared native listener worker")
     tick_ms = int(conversation.get("tick_ms", 80))
     if tick_ms != 80:
         raise ValueError(f"stage2 richiede frame Gemma da 80 ms, ricevuto {tick_ms}")
@@ -337,23 +1017,33 @@ def extract_conversation_features(
     for cluster_index, (cluster_start, cluster_targets) in enumerate(clusters):
         target_by_id = {int(frame["frame_id"]): frame for frame in cluster_targets}
         last_target_id = int(cluster_targets[-1]["frame_id"])
-        state_create_start = time.perf_counter()
-        state = GemmaListenerState(
-            sample_rate=16000,
-            frame_duration_ms=80,
-            context_frames=DEFAULT_CONTEXT_FRAMES,
-        )
-        if timing is not None:
-            timing["state_create_host_seconds"] = float(
-                timing.get("state_create_host_seconds", 0.0)
-            ) + (time.perf_counter() - state_create_start)
-        try:
-            prime_start = time.perf_counter()
-            listener.prime_steady_state(state)
+        state = None
+        native_session: dict[str, Any] | None = None
+        if control6_profile == "native1540":
+            if cluster_start != 0 or len(clusters) != 1:
+                raise RuntimeError("native1540 worker advances one conversation continuously from frame zero")
+            native_session = serving_native_worker.begin_conversation(
+                str(conversation.get("conversation_id", session_id or "unknown"))
+            )
+        else:
+            state_create_start = time.perf_counter()
+            state = GemmaListenerState(
+                sample_rate=16000,
+                frame_duration_ms=80,
+                context_frames=DEFAULT_CONTEXT_FRAMES,
+            )
             if timing is not None:
-                timing["prime_host_seconds"] = float(timing.get("prime_host_seconds", 0.0)) + (
-                    time.perf_counter() - prime_start
-                )
+                timing["state_create_host_seconds"] = float(
+                    timing.get("state_create_host_seconds", 0.0)
+                ) + (time.perf_counter() - state_create_start)
+        try:
+            if state is not None:
+                prime_start = time.perf_counter()
+                listener.prime_steady_state(state)
+                if timing is not None:
+                    timing["prime_host_seconds"] = float(timing.get("prime_host_seconds", 0.0)) + (
+                        time.perf_counter() - prime_start
+                    )
             for source_frame_id in range(cluster_start, last_target_id + 1):
                 local_frame_id = source_frame_id - cluster_start
                 user_pcm = user_frames[source_frame_id]
@@ -376,26 +1066,69 @@ def extract_conversation_features(
                 if assistant_reference_frame_id is not None and assistant_reference_frame_id > source_frame_id - 1:
                     raise RuntimeError("assistant reference frame is newer than input_frame_id - 1")
                 step_start = time.perf_counter()
-                output = listener.step(user_pcm, reference, state)
+                if control6_profile == "native1540":
+                    output = serving_native_worker.step(
+                        source_frame_id,
+                        user_pcm,
+                        None if assistant_reference_frame_id is None else assistant_frames[assistant_reference_frame_id],
+                        assistant_reference_frame_id,
+                    )
+                else:
+                    output = listener.step(user_pcm, reference, state)
                 if timing is not None:
                     timing["listener_step_host_seconds"] = float(
                         timing.get("listener_step_host_seconds", 0.0)
                     ) + (time.perf_counter() - step_start)
-                if int(output.frame_id) != local_frame_id:
+                expected_listener_frame = source_frame_id if control6_profile == "native1540" else local_frame_id
+                if int(output.frame_id) != expected_listener_frame:
                     raise RuntimeError(
-                        f"listener_frame_id disallineato: window={local_frame_id}, output={output.frame_id}"
+                        "listener_frame_id disallineato: "
+                        f"window={expected_listener_frame}, output={output.frame_id}"
                     )
                 frame = target_by_id.get(source_frame_id)
                 if frame is None:
                     continue
-                queries = getattr(output, "gemma_audio_queries_t", None)
-                if queries is None:
-                    raise RuntimeError(
-                        "listener installato non espone le quattro query Gemma per tick; "
-                        "estrazione control6 rifiutata invece di usare la feature V9"
-                    )
                 feature_copy_start = time.perf_counter()
-                vector = last_audio_query(queries).detach().float().cpu().numpy()
+                if control6_profile == "native1540":
+                    hidden = getattr(output, "gemma_hidden_t", None)
+                    queries = getattr(output, "gemma_audio_queries_t", None)
+                    tower = getattr(output, "audio_tower_hidden", None)
+                    hidden_shape = tuple(getattr(hidden, "shape", ()))
+                    query_shape = tuple(getattr(queries, "shape", ()))
+                    tower_shape = tuple(getattr(tower, "shape", ()))
+                    if hidden_shape != (1, 1536):
+                        raise RuntimeError(
+                            f"native1540 expects runtime gemma_hidden_t [1,1536], got {hidden_shape}"
+                        )
+                    if query_shape != (2, 1536) or tower_shape != (2, 1536):
+                        raise RuntimeError(
+                            "native1540 extraction requires effective Q2 tensors "
+                            f"gemma_audio_queries_t/audio_tower_hidden [2,1536], got {query_shape}/{tower_shape}"
+                        )
+                    if hasattr(hidden, "detach"):
+                        import torch
+
+                        if not torch.equal(hidden, queries[0:1]):
+                            raise RuntimeError(
+                                "runtime gemma_hidden_t must equal the first current-frame Q2 LM hidden"
+                            )
+                        vector = hidden[0].detach().float().cpu().numpy()
+                    else:
+                        hidden_array = np.asarray(hidden)
+                        query_array = np.asarray(queries)
+                        if not np.array_equal(hidden_array, query_array[0:1]):
+                            raise RuntimeError(
+                                "runtime gemma_hidden_t must equal the first current-frame Q2 LM hidden"
+                            )
+                        vector = hidden_array[0].astype(np.float32, copy=False)
+                else:
+                    queries = getattr(output, "gemma_audio_queries_t", None)
+                    if queries is None:
+                        raise RuntimeError(
+                            "listener installato non espone le quattro query Gemma per tick; "
+                            "estrazione control6 rifiutata invece di usare la feature V9"
+                        )
+                    vector = last_audio_query(queries).detach().float().cpu().numpy()
                 if vector.shape != (1536,) or not np.isfinite(vector).all():
                     raise RuntimeError("native Gemma listener ABI must yield a finite 1536-vector")
                 if timing is not None:
@@ -404,12 +1137,43 @@ def extract_conversation_features(
                     ) + (time.perf_counter() - feature_copy_start)
                 action = frame.get("target_action") if frame.get("action_mask") else None
                 context_start = max(cluster_start, source_frame_id - (DEFAULT_CONTEXT_FRAMES - 1))
+                runtime_context = (
+                    _native1540_supervision_context(
+                        conversation,
+                        frame,
+                        frame_id=source_frame_id,
+                        user_pcm_current=user_pcm,
+                        assistant_pcm_prior=(
+                            assistant_frames[assistant_reference_frame_id]
+                            if assistant_frames is not None and assistant_reference_frame_id is not None
+                            else None
+                        ),
+                        assistant_prior_frame_id=assistant_reference_frame_id,
+                    )
+                    if control6_profile == "native1540"
+                    else {}
+                )
                 features.append(vector)
                 metadata.append(
                     {
+                        **{
+                            key: value
+                            for key, value in conversation.items()
+                            if key.startswith("source_")
+                            or key in {
+                                "annotation_path",
+                                "control_supervision",
+                                "pairing_manifest_path",
+                                "duplexconv_provenance",
+                            }
+                        },
                         "conversation_id": str(frame.get("origin_conversation_id") or conversation["conversation_id"]),
                         "source_group_id": str(conversation.get("source_group_id", conversation["conversation_id"])),
-                        "session_id": f"{session_id or conversation['conversation_id']}:conversation-{cluster_index}",
+                        "session_id": (
+                            str(native_session["session_id"])
+                            if native_session is not None
+                            else f"{session_id or conversation['conversation_id']}:conversation-{cluster_index}"
+                        ),
                         "frame_id": int(source_frame_id),
                         "input_frame_id": int(source_frame_id),
                         "target_frame_id": int(frame.get("target_frame_id", source_frame_id)),
@@ -439,10 +1203,27 @@ def extract_conversation_features(
                         "input_text_visible": frame.get("input_text_visible"),
                         "future_audio_excluded": frame.get("future_audio_excluded"),
                         "action_masked_reason": frame.get("action_masked_reason"),
+                        "target_action_source": frame.get("target_action_source"),
+                        "target_action_evidence": frame.get("target_action_evidence"),
+                        "native_control6_hidden_source": (
+                            "ListenerOutput.gemma_hidden_t"
+                            if control6_profile == "native1540"
+                            else None
+                        ),
+                        "native_control6_audio_queries_per_tick": (
+                            2 if control6_profile == "native1540" else None
+                        ),
+                        "native_control6_mel_window_rows": (
+                            240 if control6_profile == "native1540" else None
+                        ),
+                        **runtime_context,
                     }
                 )
         finally:
-            state.close()
+            if native_session is not None:
+                serving_native_worker.end_conversation()
+            elif state is not None:
+                state.close()
     return np.asarray(features, dtype=np.float32), metadata
 
 
@@ -613,6 +1394,8 @@ def benchmark_native_listener_windows(
     windows: int = 8,
     pcm_cache: dict[str, tuple[np.ndarray, int]] | None = None,
     include_feature_vectors: bool = False,
+    control6_profile: str = "historical_q4",
+    serving_native_worker: _ServingNativeControl6Worker | Any | None = None,
 ) -> dict[str, Any]:
     """Measure real merged-model cost while replaying selected conversations from frame zero."""
     if windows <= 0:
@@ -690,6 +1473,8 @@ def benchmark_native_listener_windows(
                 session_id=f"benchmark:{row.get('conversation_id', 'unknown')}",
                 pcm_cache=cache,
                 timing=phase_timings,
+                control6_profile=control6_profile,
+                serving_native_worker=serving_native_worker,
             )
             feature_rows.append(row_features)
             metadata.extend(row_metadata)
@@ -764,6 +1549,109 @@ def benchmark_native_listener_windows(
     return report
 
 
+def benchmark_serving_native_worker_frames(
+    serving_native_worker: _ServingNativeControl6Worker,
+    conversation: Mapping[str, Any],
+    *,
+    frames: int = 8,
+    pcm_cache: dict[str, tuple[np.ndarray, int]] | None = None,
+) -> dict[str, Any]:
+    """Warm the actual serving worker on a short real-PCM prefix and measure it."""
+    if frames < 3 or frames > 8:
+        raise ValueError("native worker smoke must cover between three and eight input frames")
+    user_frames, assistant_frames, valid_samples = _audio_frames(
+        conversation,
+        frame_samples=1280,
+        pcm_cache=pcm_cache,
+    )
+    frame_count = min(int(frames), len(user_frames))
+    if frame_count < 3:
+        raise ValueError("native worker smoke conversation has fewer than three real PCM frames")
+    cuda_active = torch.cuda.is_available()
+    if cuda_active:
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+        allocated_before = int(torch.cuda.memory_allocated())
+    else:
+        allocated_before = 0
+    step_ms: list[float] = []
+    reference_frame_ids: list[int | None] = []
+    shapes: list[dict[str, list[int]]] = []
+    session_id: str | None = None
+    started = time.perf_counter()
+    try:
+        session = serving_native_worker.begin_conversation(
+            str(conversation.get("conversation_id", "native1540-smoke"))
+        )
+        session_id = str(session["session_id"])
+        for frame_id in range(frame_count):
+            reference_id = frame_id - 1 if assistant_frames is not None and frame_id > 0 else None
+            reference_frame_ids.append(reference_id)
+            frame_started = time.perf_counter()
+            output = serving_native_worker.step(
+                frame_id,
+                user_frames[frame_id],
+                None if reference_id is None else assistant_frames[reference_id],
+                reference_id,
+            )
+            if int(output.frame_id) != frame_id:
+                raise RuntimeError(
+                    f"native smoke frame mismatch: expected={frame_id}, got={output.frame_id}"
+                )
+            hidden = getattr(output, "gemma_hidden_t", None)
+            queries = getattr(output, "gemma_audio_queries_t", None)
+            tower = getattr(output, "audio_tower_hidden", None)
+            hidden_shape = tuple(getattr(hidden, "shape", ()))
+            query_shape = tuple(getattr(queries, "shape", ()))
+            tower_shape = tuple(getattr(tower, "shape", ()))
+            if hidden_shape != (1, 1536) or query_shape != (2, 1536) or tower_shape != (2, 1536):
+                raise RuntimeError(
+                    "native smoke requires runtime hidden [1,1536] and effective Q2 [2,1536]; "
+                    f"got {hidden_shape}/{query_shape}/{tower_shape}"
+                )
+            if not torch.equal(hidden, queries[0:1]):
+                raise RuntimeError("native smoke gemma_hidden_t differs from Q2 output position zero")
+            vector = hidden[0].detach().float().cpu().numpy()
+            if vector.shape != (1536,) or not np.isfinite(vector).all():
+                raise RuntimeError("native smoke produced a non-finite runtime hidden")
+            step_ms.append((time.perf_counter() - frame_started) * 1000.0)
+            shapes.append({
+                "gemma_hidden_t": list(hidden_shape),
+                "gemma_audio_queries_t": list(query_shape),
+                "audio_tower_hidden": list(tower_shape),
+            })
+    finally:
+        if session_id is not None:
+            serving_native_worker.end_conversation()
+    if cuda_active:
+        torch.cuda.synchronize()
+    elapsed = time.perf_counter() - started
+    peak = int(torch.cuda.max_memory_allocated()) if cuda_active else 0
+    worker_report = serving_native_worker.report()
+    return {
+        "status": "passed",
+        "conversation_id": str(conversation.get("conversation_id", "")),
+        "source": str(conversation.get("source", "unknown")),
+        "input_frames": frame_count,
+        "first_frame_includes_prefix_import": True,
+        "first_frame_wall_ms": round(step_ms[0], 3),
+        "steady_frame_count": max(0, len(step_ms) - 1),
+        "steady_frame_mean_wall_ms": round(float(np.mean(step_ms[1:])), 3) if len(step_ms) > 1 else None,
+        "steady_frame_median_wall_ms": round(float(np.median(step_ms[1:])), 3) if len(step_ms) > 1 else None,
+        "total_elapsed_seconds": round(elapsed, 6),
+        "input_frames_per_second": round(frame_count / elapsed, 3) if elapsed > 0 else None,
+        "frame_step_wall_ms": [round(value, 3) for value in step_ms],
+        "assistant_reference_frame_ids": reference_frame_ids,
+        "valid_samples_per_frame": [int(value) for value in valid_samples[:frame_count]],
+        "output_shapes": shapes,
+        "queries_finite": True,
+        "cuda_allocated_before_bytes": allocated_before,
+        "cuda_peak_allocated_bytes": peak,
+        "cuda_peak_delta_bytes": max(0, peak - allocated_before),
+        "serving_worker": worker_report,
+    }
+
+
 def _write_features(
     path: Path,
     features: np.ndarray,
@@ -795,33 +1683,109 @@ def _write_features(
             listener_frame_ids=listener_ids,
         )
     temporary.replace(path)
-    path.with_suffix(".json").write_text(
+    metadata_path = path.with_suffix(".json")
+    temporary_metadata_path = metadata_path.with_suffix(metadata_path.suffix + ".tmp")
+    temporary_metadata_path.write_text(
         json.dumps(list(metadata), ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
+    temporary_metadata_path.replace(metadata_path)
+
+
+def _conversation_partial_path(output_dir: Path, split: str, conversation_id: str) -> Path:
+    safe_id = quote(str(conversation_id), safe="-_.")
+    return output_dir / "conversation_partials" / split / f"{safe_id}.npz"
+
+
+def _load_conversation_partial(
+    path: Path,
+    *,
+    conversation: Mapping[str, Any],
+    targets: Sequence[Mapping[str, Any]],
+    control6_profile: str,
+) -> tuple[np.ndarray, list[dict[str, Any]]] | None:
+    metadata_path = path.with_suffix(".json")
+    if not path.exists() and not metadata_path.exists():
+        return None
+    if not path.is_file() or not metadata_path.is_file():
+        return None
+    try:
+        with np.load(path, allow_pickle=False) as values:
+            features = np.asarray(values["features"], dtype=np.float32).copy()
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, KeyError, json.JSONDecodeError):
+        return None
+    if not isinstance(metadata, list) or features.shape != (len(targets), 1536) or len(metadata) != len(targets):
+        return None
+    expected_frame_ids = [int(row["frame_id"]) for row in targets]
+    observed_frame_ids = [int(row.get("frame_id", -1)) for row in metadata]
+    if observed_frame_ids != expected_frame_ids:
+        return None
+    for expected, observed in zip(targets, metadata):
+        expected_action = expected.get("target_action") if expected.get("action_mask") else None
+        if (
+            bool(observed.get("target_action_mask")) != bool(expected.get("action_mask"))
+            or observed.get("action") != expected_action
+            or observed.get("target_action_source") != expected.get("target_action_source")
+            or observed.get("target_action_evidence") != expected.get("target_action_evidence")
+        ):
+            return None
+    expected_group = str(conversation.get("source_group_id") or conversation["conversation_id"])
+    if any(str(row.get("source_group_id")) != expected_group for row in metadata):
+        return None
+    for row in metadata:
+        for key, value in conversation.items():
+            if key.startswith("source_") or key in {
+                "annotation_path",
+                "control_supervision",
+                "pairing_manifest_path",
+                "duplexconv_provenance",
+            }:
+                if row.get(key) != value:
+                    return None
+    if control6_profile == "native1540" and any(
+        row.get("native_control6_hidden_source") != "ListenerOutput.gemma_hidden_t"
+        or row.get("native_control6_audio_queries_per_tick") != 2
+        or row.get("native_control6_mel_window_rows") != 240
+        for row in metadata
+    ):
+        return None
+    if not np.isfinite(features).all():
+        return None
+    return features, [dict(row) for row in metadata]
 
 
 def augment_control_features_with_acoustic_phase(
     *,
     native_feature_dir: str | Path,
+    supplemental_native_feature_dir: str | Path | None = None,
     prepared_dir: str | Path,
     output_dir: str | Path,
     additional_prepared_dir: str | Path | None = None,
     splits: Sequence[str] = ("train", "validation"),
     mask_train_natural_backchannels_without_overlap: bool = True,
     frozen_head_path: str | Path | None = None,
+    phase_profile: str = "candidate_c",
 ) -> dict[str, Any]:
     """Append four causal PCM features to saved native hidden vectors.
 
-    Only the requested train/validation splits are read. The native hidden
-    vectors must already have been extracted from the final merged adapter;
-    this function never loads a model or recomputes those vectors.
+    Only the requested splits are read. This function never loads a model or
+    recomputes native hidden vectors: Candidate C consumes its post-merge
+    extraction, while native1540 consumes the serving base-only extraction.
+    The historical ``candidate_c`` phase ABI remains the default; ``native1540``
+    uses the shared runtime/training phase helper and carries its exact schema.
     """
     from duplex_kernel.acoustic_phase_features import (
         ACOUSTIC_PHASE_FEATURE_CONTRACT,
         acoustic_phase_features,
     )
 
+    if phase_profile not in {"candidate_c", "native1540"}:
+        raise ValueError("phase_profile must be 'candidate_c' or 'native1540'")
+
     native_dir = Path(native_feature_dir)
+    supplemental_native_dir = (
+        Path(supplemental_native_feature_dir) if supplemental_native_feature_dir else None
+    )
     prepared_root = Path(prepared_dir)
     additional_root = Path(additional_prepared_dir) if additional_prepared_dir else None
     output = Path(output_dir)
@@ -831,15 +1795,18 @@ def augment_control_features_with_acoustic_phase(
     if len(set(requested_splits)) != len(requested_splits):
         raise ValueError("acoustic phase split list contains duplicates")
     if "test" in requested_splits:
-        if requested_splits != ("test",) or frozen_head_path is None:
-            raise ValueError("test augmentation is held-out evaluation only and requires a frozen Candidate C head")
-        frozen_path = Path(frozen_head_path)
-        if not frozen_path.is_file():
-            raise FileNotFoundError(f"frozen Candidate C head is required before test access: {frozen_path}")
-        frozen_head = load_control_head(frozen_path, device="cpu")
-        if frozen_head.input_dim != 1540:
-            raise ValueError("held-out Candidate C evaluation requires the frozen 1540-feature head")
-        del frozen_head
+        if requested_splits != ("test",):
+            raise ValueError("held-out test augmentation must be requested by itself")
+        if phase_profile == "candidate_c":
+            if frozen_head_path is None:
+                raise ValueError("Candidate C test augmentation requires a frozen Candidate C head")
+            frozen_path = Path(frozen_head_path)
+            if not frozen_path.is_file():
+                raise FileNotFoundError(f"frozen Candidate C head is required before test access: {frozen_path}")
+            frozen_head = load_control_head(frozen_path, device="cpu")
+            if frozen_head.input_dim != 1540:
+                raise ValueError("held-out Candidate C evaluation requires the frozen 1540-feature head")
+            del frozen_head
     elif frozen_head_path is not None:
         raise ValueError("frozen_head_path is accepted only for held-out test evaluation")
     if output.exists():
@@ -849,11 +1816,138 @@ def augment_control_features_with_acoustic_phase(
     if not source_manifest_path.is_file():
         raise FileNotFoundError(f"native feature manifest missing: {source_manifest_path}")
     source_manifest = json.loads(source_manifest_path.read_text(encoding="utf-8"))
-    if source_manifest.get("merged_before_native_listener") is not True:
-        raise ValueError("acoustic augmentation requires post-merge native listener features")
+    if phase_profile == "candidate_c" and source_manifest.get("merged_before_native_listener") is not True:
+        raise ValueError("Candidate C acoustic augmentation requires post-merge native listener features")
     source_contract = source_manifest.get("feature_contract")
-    if source_contract != listener_feature_contract(1536):
-        raise ValueError("acoustic augmentation accepts only the saved native 1536 feature ABI")
+    if phase_profile == "native1540":
+        if source_manifest.get("serving_base_only") is not True:
+            raise ValueError("native1540 augmentation requires exact serving base-only model features")
+        native_extract = source_manifest.get("native_control6_extraction")
+        if not isinstance(native_extract, Mapping) or native_extract.get("profile") != "native1540":
+            raise ValueError("native1540 augmentation requires a fresh runtime-hidden Q2/W240 PCM extraction")
+        if source_contract != native_control6_feature_contract(1536):
+            raise ValueError("native1540 augmentation requires the exact current-frame gemma_hidden_t ABI")
+        if (
+            native_extract.get("hidden_source") != "ListenerOutput.gemma_hidden_t"
+            or native_extract.get("gemma_audio_queries_per_tick") != 2
+            or native_extract.get("audio_tower_queries_per_tick") != 2
+            or native_extract.get("mel_window_rows_effective") != 240
+        ):
+            raise ValueError("native1540 source manifest does not attest effective Q2/W240 runtime extraction")
+    elif source_contract != listener_feature_contract(1536):
+        raise ValueError("Candidate C augmentation accepts only the saved historical native 1536 feature ABI")
+
+    supplemental_manifest_path: Path | None = None
+    supplemental_runtime_provenance: dict[str, Any] | None = None
+    if supplemental_native_dir is not None:
+        if phase_profile != "native1540":
+            raise ValueError("supplemental runtime features are accepted only for native1540")
+        supplemental_manifest_path = supplemental_native_dir / "feature_manifest.json"
+        if not supplemental_manifest_path.is_file():
+            raise FileNotFoundError(f"supplemental native feature manifest missing: {supplemental_manifest_path}")
+        supplemental_manifest = json.loads(supplemental_manifest_path.read_text(encoding="utf-8"))
+        if supplemental_manifest.get("feature_contract") != source_contract:
+            raise ValueError("supplemental native features use a different feature schema")
+        if (
+            supplemental_manifest.get("serving_base_only") is not True
+            or supplemental_manifest.get("merged_before_native_listener") is not False
+            or supplemental_manifest.get("adapter_dir") is not None
+        ):
+            raise ValueError("supplemental native features do not use the serving base-only hidden ABI")
+        supplemental_extract = supplemental_manifest.get("native_control6_extraction")
+        if not isinstance(supplemental_extract, Mapping) or supplemental_extract.get("profile") != "native1540":
+            raise ValueError("supplemental native features require the native1540 extraction profile")
+        for label, manifest, extraction in (
+            ("base", source_manifest, native_extract),
+            ("supplement", supplemental_manifest, supplemental_extract),
+        ):
+            loader = manifest.get("serving_base_loader")
+            if (
+                manifest.get("serving_base_only") is not True
+                or manifest.get("merged_before_native_listener") is not False
+                or manifest.get("adapter_dir") is not None
+                or not isinstance(loader, Mapping)
+                or loader.get("model_dtype") != "bfloat16"
+                or loader.get("stage1_adapter_applied") is not False
+                or loader.get("base_model_path") != manifest.get("base_model_path")
+                or extraction.get("base_model_path") != manifest.get("base_model_path")
+                or extraction.get("stage1_adapter_applied") is not False
+            ):
+                raise ValueError(f"native1540 {label} features must use the same BF16 serving base without Stage1 adapter")
+            if (
+                extraction.get("hidden_source") != "ListenerOutput.gemma_hidden_t"
+                or extraction.get("gemma_audio_queries_per_tick") != 2
+                or extraction.get("audio_tower_queries_per_tick") != 2
+                or extraction.get("mel_window_rows_effective") != 240
+            ):
+                raise ValueError(f"native1540 {label} features do not attest the Q2/W240 hidden ABI")
+        if source_manifest.get("base_model_path") != supplemental_manifest.get("base_model_path"):
+            raise ValueError("supplemental native features use a different serving base model")
+        main_worker = (source_manifest.get("native_control6_extraction") or {}).get("serving_worker")
+        extra_worker = (supplemental_manifest.get("native_control6_extraction") or {}).get("serving_worker")
+        if not isinstance(main_worker, Mapping) or not isinstance(extra_worker, Mapping):
+            raise ValueError("both feature manifests must identify the serving native worker")
+        for key in ("worker", "prefix_builder", "native_library_path"):
+            if main_worker.get(key) != extra_worker.get(key):
+                raise ValueError(f"supplemental extraction differs from base runtime at {key}")
+        if (
+            main_worker.get("worker") != "duplex_kernel.listener_microbatch_serving.make_listener_microbatch_worker"
+            or main_worker.get("prefix_builder") != "duplex_kernel.server._build_unified_listener_prefix_token_ids"
+        ):
+            raise ValueError("native1540 extraction did not use the serving worker and unified prefix builder")
+        main_signature = main_worker.get("runtime_signature")
+        extra_signature = extra_worker.get("runtime_signature")
+        if not isinstance(main_signature, Mapping) or main_signature != extra_signature:
+            raise ValueError("supplemental extraction has a different native runtime signature")
+        main_runtime = main_worker.get("runtime_info")
+        extra_runtime = extra_worker.get("runtime_info")
+        if not isinstance(main_runtime, Mapping) or not isinstance(extra_runtime, Mapping):
+            raise ValueError("both feature manifests must identify native worker runtime settings")
+        for runtime in (main_runtime, extra_runtime):
+            if (
+                runtime.get("library_path") != main_worker.get("native_library_path")
+                or runtime.get("stream_q_len") != 2
+                or runtime.get("unified_kv_enabled") is not True
+            ):
+                raise ValueError("native1540 extraction must use the same unified-KV Q2 native library")
+        if (
+            main_runtime.get("library_path") != extra_runtime.get("library_path")
+            or main_runtime.get("stream_q_len") != extra_runtime.get("stream_q_len")
+            or main_runtime.get("unified_kv_enabled") != extra_runtime.get("unified_kv_enabled")
+        ):
+            raise ValueError("supplemental extraction has different native runtime settings")
+        if main_worker.get("prefix") != extra_worker.get("prefix"):
+            raise ValueError("supplemental extraction used different serving prefix token IDs")
+        prefix = main_worker.get("prefix")
+        if (
+            not isinstance(prefix, Mapping)
+            or prefix.get("contract") != "serving_unified_chat_prefix_v2"
+            or prefix.get("length") != 190
+            or len(prefix.get("token_ids", ())) != 190
+            or prefix.get("history_messages") != 0
+            or prefix.get("session_instructions") != "empty_session_default"
+        ):
+            raise ValueError("native1540 extraction requires the shared empty-history 190-token serving prefix")
+        supplemental_runtime_provenance = {
+            "base": {
+                key: main_worker.get(key)
+                for key in (
+                    "runtime_source_root",
+                    "worker_factory_source",
+                    "prefix_builder_source",
+                    "native_library_path",
+                )
+            },
+            "supplement": {
+                key: extra_worker.get(key)
+                for key in (
+                    "runtime_source_root",
+                    "worker_factory_source",
+                    "prefix_builder_source",
+                    "native_library_path",
+                )
+            },
+        }
 
     def file_sha256(path: Path) -> str:
         digest = hashlib.sha256()
@@ -868,15 +1962,29 @@ def augment_control_features_with_acoustic_phase(
 
     report: dict[str, Any] = {
         "status": "completed",
-        "feature_contract": listener_feature_contract(1540),
+        "feature_contract": (
+            native_control6_feature_contract(1540)
+            if phase_profile == "native1540"
+            else listener_feature_contract(1540)
+        ),
         "source_feature_dir": str(native_dir.resolve()),
-        "source_feature_manifest_sha256": file_sha256(source_manifest_path),
         "base_model_path": source_manifest.get("base_model_path"),
         "adapter_dir": source_manifest.get("adapter_dir"),
-        "merged_before_native_listener": True,
+        "merged_before_native_listener": source_manifest.get("merged_before_native_listener") is True,
+        "serving_base_only": source_manifest.get("serving_base_only") is True,
+        "serving_base_loader": source_manifest.get("serving_base_loader"),
         "prepared_sources": [str(prepared_root.resolve())]
         + ([str(additional_root.resolve())] if additional_root else []),
-        "acoustic_phase_contract": ACOUSTIC_PHASE_FEATURE_CONTRACT,
+        "supplemental_native_feature_dir": (
+            str(supplemental_native_dir.resolve()) if supplemental_native_dir else None
+        ),
+        "supplemental_feature_rows_by_split": {},
+        "prepared_target_refresh_by_split": {},
+        **(
+            {"acoustic_phase_contract": ACOUSTIC_PHASE_FEATURE_CONTRACT}
+            if phase_profile == "candidate_c"
+            else {}
+        ),
         "causality": {
             "native_hidden_frame": "input_frame_id t",
             "user_pcm_history": "observed user PCM ending at input frame t; at most 400 ms; left-zero-padded at stream start",
@@ -888,6 +1996,26 @@ def augment_control_features_with_acoustic_phase(
         "frozen_head_path": str(Path(frozen_head_path).resolve()) if frozen_head_path else None,
         "splits": {},
     }
+    if phase_profile == "native1540":
+        report["phase_profile"] = phase_profile
+        report["training_state_context"] = NATIVE_CONTROL6_TRAINING_STATE_CONTEXT
+        report["phase_schema"] = {
+            "profile": phase_profile,
+            "width": len(NATIVE_CONTROL6_NATIVE1540_PHASE_T_NAMES),
+            "names": list(NATIVE_CONTROL6_NATIVE1540_PHASE_T_NAMES),
+        }
+        report["phase_definition"] = dict(NATIVE_CONTROL6_NATIVE1540_PHASE_T_SCHEMA)
+        report["native_control6_extraction"] = dict(source_manifest["native_control6_extraction"])
+        if supplemental_runtime_provenance is not None:
+            report["serving_runtime_provenance"] = supplemental_runtime_provenance
+        report["causality"] = {
+            "native_hidden_frame": "input_frame_id t",
+            "user_pcm_current": "observed user PCM frame t",
+            "user_pcm_delta_reference": "only user PCM frame t-1; absent at stream start",
+            "assistant_pcm": "only already-emitted assistant reference frame t-1; absent at stream start",
+            "future_audio_or_supervision_used": False,
+            "model_reextraction": False,
+        }
 
     output.parent.mkdir(parents=True, exist_ok=True)
     staging_output = output.with_name(output.name + ".staging")
@@ -920,6 +2048,7 @@ def augment_control_features_with_acoustic_phase(
             raise ValueError(f"native {split} feature arrays/metadata are not aligned at width 1536")
         if not np.isfinite(native_features).all():
             raise ValueError(f"native {split} hidden vectors contain NaN/Inf")
+        base_metadata_count = len(metadata)
 
         prepared_by_id: dict[str, dict[str, Any]] = {}
         for root in (prepared_root, additional_root):
@@ -945,6 +2074,109 @@ def augment_control_features_with_acoustic_phase(
                     continue
                 prepared_by_id[conversation_id] = conversation
 
+        temporal_view_flags = [
+            isinstance(row.get("native1540_temporal_supervision_view"), Mapping)
+            for row in prepared_by_id.values()
+        ]
+        temporal_supervision_view = bool(temporal_view_flags) and any(temporal_view_flags)
+        if temporal_supervision_view and not all(temporal_view_flags):
+            raise ValueError(f"{split} mixes temporal-view and legacy prepared rows")
+        temporal_target_keys: list[tuple[str, int]] = []
+        if temporal_supervision_view:
+            for conversation_id, conversation in prepared_by_id.items():
+                view = conversation.get("native1540_temporal_supervision_view")
+                if not isinstance(view, Mapping) or view.get("schema") != "native1540_pcm_temporal_supervision_v1":
+                    raise ValueError(f"{conversation_id}: unsupported native1540 temporal supervision view")
+                targets, _ = _causal_action_targets(conversation, include_masked=True)
+                temporal_target_keys.extend(
+                    (conversation_id, int(target["frame_id"]))
+                    for target in targets
+                    if target.get("action_mask") is True and target.get("target_action") in ACTIONS
+                )
+            if len(temporal_target_keys) != len(set(temporal_target_keys)):
+                raise ValueError(f"{split} temporal supervision view contains duplicate current target keys")
+
+        if supplemental_native_dir is not None:
+            supplement_npz = supplemental_native_dir / f"{split}.npz"
+            supplement_json = supplemental_native_dir / f"{split}.json"
+            if not supplement_npz.is_file() or not supplement_json.is_file():
+                raise FileNotFoundError(f"supplemental native {split} split is incomplete")
+            with np.load(supplement_npz, allow_pickle=False) as values:
+                extra_features = np.asarray(values["features"], dtype=np.float32)
+                extra_labels = np.asarray(values["labels"], dtype=np.int64)
+                extra_frame_ids = np.asarray(values["frame_ids"], dtype=np.int64)
+                extra_listener_ids = np.asarray(values["listener_frame_ids"], dtype=np.int64)
+            extra_metadata = json.loads(supplement_json.read_text(encoding="utf-8"))
+            if (
+                extra_features.ndim != 2
+                or extra_features.shape[1] != 1536
+                or extra_labels.shape != (len(extra_features),)
+                or extra_frame_ids.shape != extra_labels.shape
+                or extra_listener_ids.shape != extra_labels.shape
+                or len(extra_metadata) != len(extra_features)
+                or not np.isfinite(extra_features).all()
+            ):
+                raise ValueError(f"supplemental native {split} arrays/metadata are malformed")
+            seen_keys = {
+                (str(row.get("conversation_id", "")), int(row.get("frame_id", -1)))
+                for row in metadata
+            }
+            for index, row in enumerate(extra_metadata):
+                key = (str(row.get("conversation_id", "")), int(row.get("frame_id", -1)))
+                if not key[0] or key[1] < 0 or key in seen_keys:
+                    raise ValueError(f"supplemental feature key is missing or already cached: {key}")
+                if int(extra_frame_ids[index]) != key[1] or int(extra_listener_ids[index]) != int(row.get("listener_frame_id", -1)):
+                    raise ValueError(f"supplemental feature frame arrays disagree at {key}")
+                if row.get("action_mask") is not True or row.get("action") not in ACTIONS:
+                    raise ValueError(f"supplemental feature must contain a supervised endpoint target at {key}")
+                if int(extra_labels[index]) != ACTIONS.index(row["action"]):
+                    raise ValueError(f"supplemental feature label array disagrees at {key}")
+                seen_keys.add(key)
+            native_features = np.concatenate((native_features, extra_features), axis=0)
+            native_labels = np.concatenate((native_labels, extra_labels), axis=0)
+            frame_ids = np.concatenate((frame_ids, extra_frame_ids), axis=0)
+            listener_ids = np.concatenate((listener_ids, extra_listener_ids), axis=0)
+            metadata = [*metadata, *extra_metadata]
+            report["supplemental_feature_rows_by_split"][split] = len(extra_metadata)
+        if temporal_supervision_view:
+            current_keys = set(temporal_target_keys)
+            indexed_keys: dict[tuple[str, int], int] = {}
+            for index, row in enumerate(metadata):
+                key = (str(row.get("conversation_id", "")), int(row.get("frame_id", -1)))
+                if not key[0] or key[1] < 0 or key in indexed_keys:
+                    raise ValueError(f"{split} native features contain an invalid or duplicate exact key: {key}")
+                indexed_keys[key] = index
+            base_keys = {
+                (str(row.get("conversation_id", "")), int(row.get("frame_id", -1)))
+                for row in metadata[:base_metadata_count]
+            }
+            supplement_keys = {
+                (str(row.get("conversation_id", "")), int(row.get("frame_id", -1)))
+                for row in metadata[base_metadata_count:]
+            }
+            expected_missing = current_keys - base_keys
+            if supplement_keys != expected_missing:
+                raise ValueError(
+                    f"{split} supplement keys must equal missing current temporal targets "
+                    f"(missing={len(expected_missing)}, supplement={len(supplement_keys)})"
+                )
+            if not current_keys.issubset(indexed_keys):
+                missing = current_keys - set(indexed_keys)
+                raise ValueError(f"{split} merged features are missing current temporal target keys: {len(missing)}")
+            ordered_indices = [indexed_keys[key] for key in temporal_target_keys]
+            native_features = native_features[ordered_indices]
+            native_labels = native_labels[ordered_indices]
+            frame_ids = frame_ids[ordered_indices]
+            listener_ids = listener_ids[ordered_indices]
+            metadata = [metadata[index] for index in ordered_indices]
+        target_refresh: Counter[str] = Counter()
+        source_supervised_rows = int(sum(bool(row.get("action_mask")) for row in metadata))
+        source_per_action_support = {
+            action: int(
+                sum(bool(row.get("action_mask")) and row.get("action") == action for row in metadata)
+            )
+            for action in ACTIONS
+        }
         by_conversation: dict[str, list[int]] = {}
         for index, row in enumerate(metadata):
             conversation_id = str(row.get("conversation_id", ""))
@@ -978,18 +2210,40 @@ def augment_control_features_with_acoustic_phase(
                 or assistant_reference_id != input_frame_id - 1
             ):
                 raise ValueError(f"assistant reference is not the causal t-1 frame at {conversation_id}:{input_frame_id}")
-            targets, is_v5 = _causal_action_targets(conversation)
+            targets, is_v5 = _causal_action_targets(conversation, include_masked=True)
             target_by_input = {int(target["frame_id"]): target for target in targets}
             source_target = target_by_input.get(input_frame_id)
             if source_target is None:
-                raise ValueError(f"no supervised source target at {conversation_id}:{input_frame_id}")
+                raise ValueError(f"no source frame target at {conversation_id}:{input_frame_id}")
+            expected_action_mask = bool(
+                source_target.get("action_mask") is True
+                and source_target.get("target_action") in ACTIONS
+            )
+            expected_action = source_target.get("target_action") if expected_action_mask else None
+            expected_label = ACTIONS.index(expected_action) if expected_action_mask else -100
             if (
-                row.get("action") != source_target.get("target_action")
-                or bool(row.get("action_mask")) != bool(source_target.get("action_mask"))
-                or int(native_labels[index])
-                != (ACTIONS.index(source_target["target_action"]) if source_target.get("action_mask") else -100)
+                row.get("action") != expected_action
+                or bool(row.get("action_mask")) != expected_action_mask
+                or int(native_labels[index]) != expected_label
+                or row.get("target_action_source") != source_target.get("target_action_source")
+                or row.get("target_action_evidence") != source_target.get("target_action_evidence")
             ):
-                raise ValueError(f"feature action disagrees with prepared source at {conversation_id}:{input_frame_id}")
+                if "native_control6_cached_action_before_target_view" not in row:
+                    row["native_control6_cached_action_before_target_view"] = row.get("action")
+                    row["native_control6_cached_action_mask_before_target_view"] = bool(row.get("action_mask"))
+                    row["native_control6_cached_action_source_before_target_view"] = row.get("target_action_source")
+                row["action"] = expected_action
+                row["action_mask"] = expected_action_mask
+                row["target_action_mask"] = expected_action_mask
+                row["target_action_source"] = source_target.get("target_action_source")
+                row["target_action_evidence"] = source_target.get("target_action_evidence")
+                row["action_masked_reason"] = source_target.get("action_masked_reason")
+                target_refresh["source_target_rows_refreshed"] += 1
+                if expected_action_mask:
+                    target_refresh[f"new_{expected_action}_targets"] += 1
+                else:
+                    target_refresh["targets_masked_by_current_prepared_view"] += 1
+                native_labels[index] = expected_label
             if is_v5:
                 if (
                     int(row.get("target_frame_id", -1)) != input_frame_id + 1
@@ -1009,6 +2263,8 @@ def augment_control_features_with_acoustic_phase(
         pcm_cache: dict[str, tuple[np.ndarray, int]] = {}
         verified_overlap_rows = 0
         masked_rows = 0
+        runtime_target_derivations: Counter[str] = Counter()
+        unknown_runtime_context_rows: Counter[str] = Counter()
         audio_hashes: dict[str, str] = {}
         cached_source_group: str | None = None
         for conversation_id, indices in by_conversation.items():
@@ -1052,16 +2308,79 @@ def augment_control_features_with_acoustic_phase(
                     if assistant_frames is not None and input_frame_id > 0
                     else None
                 )
-                phase = acoustic_phase_features(
-                    user_history,
-                    assistant_previous,
-                    sample_rate_hz=16000,
-                    tick_ms=80,
-                )
+                if phase_profile == "native1540":
+                    user_previous = user_frames[input_frame_id - 1] if input_frame_id > 0 else None
+                    phase = native_control6_native1540_phase_t(
+                        listener_frame_id=input_frame_id,
+                        user_pcm_current=user_frames[input_frame_id],
+                        user_pcm_previous=user_previous,
+                        user_previous_frame_id=input_frame_id - 1 if user_previous is not None else None,
+                        assistant_pcm_prior=assistant_previous,
+                        assistant_prior_frame_id=input_frame_id - 1 if assistant_previous is not None else None,
+                    )
+                    row["native_control6_phase_profile"] = phase_profile
+                    row["native_control6_phase_schema"] = report["phase_schema"]
+                    row["training_state_context"] = NATIVE_CONTROL6_TRAINING_STATE_CONTEXT
+                else:
+                    phase = acoustic_phase_features(
+                        user_history,
+                        assistant_previous,
+                        sample_rate_hz=16000,
+                        tick_ms=80,
+                    )
                 augmented[index, 1536:] = phase
 
+                if phase_profile == "native1540":
+                    source_targets, _ = _causal_action_targets(conversation, include_masked=True)
+                    source_target = next(
+                        (target for target in source_targets if int(target["frame_id"]) == input_frame_id),
+                        None,
+                    )
+                    if source_target is None:
+                        raise ValueError(
+                            f"no source target available for native runtime context at "
+                            f"{conversation_id}:{input_frame_id}"
+                        )
+                    runtime_context = _native1540_supervision_context(
+                        conversation,
+                        source_target,
+                        frame_id=input_frame_id,
+                        user_pcm_current=user_frames[input_frame_id],
+                        assistant_pcm_prior=(
+                            assistant_previous
+                            if input_frame_id > 0 and assistant_previous is not None
+                            else None
+                        ),
+                        assistant_prior_frame_id=(input_frame_id - 1 if input_frame_id > 0 and assistant_previous is not None else None),
+                    )
+                    row.update(runtime_context)
+                    speaker_active = runtime_context.get("speaker_active_at_frame_start")
+                    context_valid = type(speaker_active) is bool
+                    row["native_control6_context_valid"] = context_valid
+                    if not context_valid:
+                        unknown_runtime_context_rows[str(row.get("source", "unknown"))] += 1
+                    runtime_target = _native1540_runtime_target_action(
+                        conversation,
+                        source_target,
+                        frame_id=input_frame_id,
+                        speaker_active=speaker_active,
+                    )
+                    row["native_control6_runtime_target_action"] = runtime_target["action"]
+                    row["native_control6_runtime_target_derived"] = runtime_target["derived"]
+                    row["native_control6_runtime_target_reason"] = runtime_target["reason"]
+                    row["native_control6_runtime_target_segment_index"] = runtime_target["segment_index"]
+                    row["native_control6_runtime_target_event_id"] = runtime_target["event_id"]
+                    if runtime_target["yield_onset_frame_id"] is not None:
+                        row["native_control6_runtime_target_yield_onset_frame_id"] = runtime_target["yield_onset_frame_id"]
+                        row["native_control6_runtime_target_yield_local_stop_ms"] = runtime_target["yield_local_stop_ms"]
+                        row["native_control6_runtime_target_yield_local_segment_id"] = runtime_target["yield_local_segment_id"]
+                        row["native_control6_runtime_target_yield_peer_segment_id"] = runtime_target["yield_peer_segment_id"]
+                    if runtime_target["derived"]:
+                        runtime_target_derivations[str(runtime_target["reason"])] += 1
+
                 if (
-                    split == "train"
+                    phase_profile == "candidate_c"
+                    and split == "train"
                     and mask_train_natural_backchannels_without_overlap
                     and not _is_synthetic_source(row)
                     and row.get("action") == "BACKCHANNEL"
@@ -1142,18 +2461,52 @@ def augment_control_features_with_acoustic_phase(
                         masked_groups.add(source_group)
         if not np.isfinite(augmented).all():
             raise ValueError(f"augmented {split} feature matrix contains NaN/Inf")
+        report["prepared_target_refresh_by_split"][split] = dict(target_refresh)
+        if phase_profile == "native1540":
+            if not all(
+                row.get("native_control6_context", {}).get("schema") == "native_control6_runtime_context_v1"
+                and row.get("training_state_context") == NATIVE_CONTROL6_TRAINING_STATE_CONTEXT
+                for row in result_metadata
+            ):
+                raise RuntimeError(f"native1540 context metadata is incomplete in {split}")
+            expected_labels = np.asarray(
+                [ACTIONS.index(row["action"]) if row.get("action_mask") else -100 for row in result_metadata],
+                dtype=np.int64,
+            )
+            if not np.array_equal(native_labels, expected_labels):
+                raise RuntimeError(f"native1540 refreshed labels do not match the current prepared view in {split}")
+            report.setdefault("runtime_target_derivations_by_split", {})[split] = {
+                "derived_rows_by_reason": dict(sorted(runtime_target_derivations.items())),
+                "unknown_pre_action_context_rows_by_source": dict(sorted(unknown_runtime_context_rows.items())),
+                "raw_action_labels_preserved": True,
+            }
         _write_features(staging_output / f"{split}.npz", augmented, result_metadata, input_dim=1540)
         report["splits"][split] = {
             "rows": int(len(augmented)),
+            "cached_metadata_supervised_rows_before_prepared_refresh": source_supervised_rows,
+            "cached_metadata_action_support_before_prepared_refresh": source_per_action_support,
+            "prepared_supervised_rows": int(sum(bool(row.get("action_mask")) for row in result_metadata)),
             "supervised_rows": int(sum(bool(row.get("action_mask")) for row in result_metadata)),
-            "per_action_support": {
+            "prepared_action_support": {
                 action: int(sum(bool(row.get("action_mask")) and row.get("action") == action for row in result_metadata))
                 for action in ACTIONS
             },
+            "prepared_supervision_aligned": (
+                phase_profile == "native1540"
+                and int(sum(bool(row.get("action_mask")) for row in result_metadata))
+                == int(sum(label >= 0 for label in expected_labels))
+            ),
             "audio_source_files": len(audio_hashes),
             "audio_source_sha256": audio_hashes,
         }
-        if split == "train":
+        if phase_profile == "candidate_c":
+            # Preserve the Candidate C report keys for historical comparisons.
+            report["splits"][split]["source_supervised_rows"] = source_supervised_rows
+            report["splits"][split]["source_per_action_support"] = source_per_action_support
+            report["splits"][split]["per_action_support"] = dict(
+                report["splits"][split]["prepared_action_support"]
+            )
+        if split == "train" and phase_profile == "candidate_c":
             total_masked_rows += masked_rows
             total_verified_overlap_rows += verified_overlap_rows
             report["natural_train_backchannel_masking"] = {
@@ -1180,18 +2533,222 @@ def augment_control_features_with_acoustic_phase(
     report["split_scope"] = list(requested_splits)
     report["test_data_read"] = "test" in requested_splits
     report["test_used_for_training_or_calibration"] = False
-    report["source_feature_sha256"] = {
-        split: {
-            "npz": file_sha256(native_dir / f"{split}.npz"),
-            "metadata": file_sha256(native_dir / f"{split}.json"),
-        }
-        for split in requested_splits
-    }
     manifest_path = staging_output / "feature_manifest.json"
     manifest_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     os.replace(staging_output, output)
     return report
 
+
+def merge_native1540_feature_dirs(
+    *,
+    base_feature_dir: str | Path,
+    supplemental_feature_dir: str | Path,
+    output_dir: str | Path,
+) -> dict[str, Any]:
+    """Append a disjoint native1540 train split and preserve base validation bytes."""
+    import shutil
+
+    base = Path(base_feature_dir)
+    supplement = Path(supplemental_feature_dir)
+    output = Path(output_dir)
+    if output.exists():
+        raise FileExistsError(f"native1540 merged output must be fresh: {output}")
+    staging = output.with_name(output.name + ".staging")
+    if staging.exists():
+        raise FileExistsError(f"stale native1540 merge staging directory exists: {staging}")
+
+    def read_manifest(root: Path) -> dict[str, Any]:
+        path = root / "feature_manifest.json"
+        if not path.is_file():
+            raise FileNotFoundError(f"native1540 feature manifest missing: {path}")
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        if manifest.get("test_data_read") is True or manifest.get("test_used_for_training_or_calibration") is True:
+            raise ValueError(f"native1540 merge refuses test-accessed features: {root}")
+        if (
+            manifest.get("feature_contract") != native_control6_feature_contract(1540)
+            or manifest.get("phase_profile") != "native1540"
+            or manifest.get("phase_schema") != {
+                "profile": "native1540",
+                "width": len(NATIVE_CONTROL6_NATIVE1540_PHASE_T_NAMES),
+                "names": list(NATIVE_CONTROL6_NATIVE1540_PHASE_T_NAMES),
+            }
+            or manifest.get("serving_base_only") is not True
+            or manifest.get("merged_before_native_listener") is not False
+        ):
+            raise ValueError(f"native1540 merge requires exact serving-base 1540 features: {root}")
+        return manifest
+
+    base_manifest = read_manifest(base)
+    supplement_manifest = read_manifest(supplement)
+    for key in ("feature_contract", "phase_profile", "phase_schema", "phase_definition", "base_model_path"):
+        if base_manifest.get(key) != supplement_manifest.get(key):
+            raise ValueError(f"native1540 feature ABI mismatch at manifest field {key}")
+    if base_manifest.get("serving_base_loader") != supplement_manifest.get("serving_base_loader"):
+        raise ValueError("native1540 serving base loader differs between merge inputs")
+
+    def extraction_signature(manifest: Mapping[str, Any]) -> tuple[Any, ...]:
+        extract = manifest.get("native_control6_extraction")
+        if not isinstance(extract, Mapping):
+            raise ValueError("native1540 merge input lacks runtime extraction provenance")
+        worker = extract.get("serving_worker")
+        if not isinstance(worker, Mapping):
+            raise ValueError("native1540 merge input lacks serving worker provenance")
+        prefix = worker.get("prefix")
+        signature = worker.get("runtime_signature")
+        if not isinstance(prefix, Mapping) or not isinstance(signature, Mapping):
+            raise ValueError("native1540 merge input lacks exact runtime prefix/signature")
+        return (
+            extract.get("profile"),
+            extract.get("hidden_source"),
+            extract.get("hidden_contract"),
+            extract.get("gemma_audio_queries_per_tick"),
+            extract.get("audio_tower_queries_per_tick"),
+            extract.get("mel_window_rows_effective"),
+            extract.get("base_model_path"),
+            extract.get("response_lora_applied"),
+            extract.get("stage1_adapter_applied"),
+            worker.get("worker"),
+            worker.get("worker_factory_source"),
+            worker.get("prefix_builder"),
+            worker.get("prefix_builder_source"),
+            worker.get("runtime_source_root"),
+            worker.get("native_library_path"),
+            dict(signature),
+            prefix.get("contract"),
+            prefix.get("token_ids"),
+            prefix.get("length"),
+        )
+
+    if extraction_signature(base_manifest) != extraction_signature(supplement_manifest):
+        raise ValueError("native1540 serving worker, DSO, prefix, or runtime signature differs")
+
+    def load_split(root: Path, split: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[dict[str, Any]]]:
+        npz_path = root / f"{split}.npz"
+        json_path = root / f"{split}.json"
+        if not npz_path.is_file() or not json_path.is_file():
+            raise FileNotFoundError(f"native1540 {split} split incomplete in {root}")
+        with np.load(npz_path, allow_pickle=False) as values:
+            features = np.asarray(values["features"], dtype=np.float32)
+            labels = np.asarray(values["labels"], dtype=np.int64)
+            frame_ids = np.asarray(values["frame_ids"], dtype=np.int64)
+            listener_ids = np.asarray(values["listener_frame_ids"], dtype=np.int64)
+        metadata = json.loads(json_path.read_text(encoding="utf-8"))
+        n = len(features)
+        if (
+            features.ndim != 2 or features.shape[1] != 1540
+            or labels.shape != (n,) or frame_ids.shape != (n,) or listener_ids.shape != (n,)
+            or not isinstance(metadata, list) or len(metadata) != n
+            or not np.isfinite(features).all()
+        ):
+            raise ValueError(f"native1540 {split} arrays/metadata are not aligned at width 1540: {root}")
+        expected_labels: list[int] = []
+        seen: set[tuple[str, int]] = set()
+        group_by_conversation: dict[str, str] = {}
+        last_frame_by_conversation: dict[str, int] = {}
+        for index, row in enumerate(metadata):
+            if not isinstance(row, dict):
+                raise ValueError(f"native1540 {split} metadata row {index} is not an object")
+            conversation_id = row.get("conversation_id")
+            group_id = row.get("source_group_id")
+            frame = row.get("frame_id")
+            listener_frame = row.get("listener_frame_id")
+            if (
+                not isinstance(conversation_id, str) or not conversation_id
+                or not isinstance(group_id, str) or not group_id
+                or isinstance(frame, bool) or not isinstance(frame, int)
+                or isinstance(listener_frame, bool) or not isinstance(listener_frame, int)
+                or int(frame_ids[index]) != frame or int(listener_ids[index]) != listener_frame
+                or row.get("split", split) != split
+                or type(row.get("action_mask")) is not bool
+            ):
+                raise ValueError(f"native1540 {split} metadata provenance/IDs invalid at row {index}")
+            key = (conversation_id, frame)
+            if key in seen:
+                raise ValueError(f"duplicate native1540 {split} feature key {key}")
+            seen.add(key)
+            previous_group = group_by_conversation.setdefault(conversation_id, group_id)
+            if previous_group != group_id:
+                raise ValueError(f"mixed source groups within {conversation_id}")
+            previous_frame = last_frame_by_conversation.get(conversation_id, -1)
+            if frame <= previous_frame:
+                raise ValueError(f"native1540 frames are not source/frame ordered in {conversation_id}")
+            last_frame_by_conversation[conversation_id] = frame
+            action = row.get("action")
+            if row["action_mask"]:
+                if action not in ACTIONS:
+                    raise ValueError(f"native1540 supervised row has invalid action at {key}")
+                expected_labels.append(ACTIONS.index(action))
+            else:
+                expected_labels.append(-100)
+        if not np.array_equal(labels, np.asarray(expected_labels, dtype=np.int64)):
+            raise ValueError(f"native1540 {split} labels disagree with metadata in {root}")
+        return features, labels, frame_ids, listener_ids, metadata
+
+    base_train = load_split(base, "train")
+    extra_train = load_split(supplement, "train")
+    base_validation = load_split(base, "validation")
+    base_keys = {(r["conversation_id"], int(r["frame_id"])) for r in base_train[4]}
+    extra_keys = {(r["conversation_id"], int(r["frame_id"])) for r in extra_train[4]}
+    duplicate_keys = base_keys & extra_keys
+    if duplicate_keys:
+        raise ValueError(f"native1540 supplemental train repeats {len(duplicate_keys)} conversation/frame keys")
+    base_groups = {r["source_group_id"] for r in base_train[4]}
+    validation_groups = {r["source_group_id"] for r in base_validation[4]}
+    extra_groups = {r["source_group_id"] for r in extra_train[4]}
+    if base_groups & extra_groups or validation_groups & extra_groups:
+        raise ValueError("native1540 supplemental train source groups overlap existing train/validation")
+
+    staging.mkdir(parents=True, exist_ok=False)
+    merged_features = np.concatenate((base_train[0], extra_train[0]), axis=0)
+    merged_metadata = base_train[4] + extra_train[4]
+    _write_features(staging / "train.npz", merged_features, merged_metadata, input_dim=1540)
+    for name in ("validation.npz", "validation.json"):
+        shutil.copyfile(base / name, staging / name)
+
+    manifest = dict(base_manifest)
+    manifest["source_feature_dir"] = str(base.resolve())
+    manifest["supplemental_native_feature_dir"] = str(supplement.resolve())
+    manifest["supplemental_feature_rows_by_split"] = {"train": len(extra_train[4]), "validation": 0}
+    manifest["merged_feature_rows_by_split"] = {
+        "train": len(merged_metadata),
+        "validation": len(base_validation[4]),
+    }
+    manifest["feature_merge"] = {
+        "status": "completed",
+        "format": "stage2_native1540",
+        "train_base_rows": len(base_train[4]),
+        "train_supplement_rows": len(extra_train[4]),
+        "train_rows": len(merged_metadata),
+        "validation_rows": len(base_validation[4]),
+        "validation_source": str(base.resolve()),
+        "validation_copied_unchanged": True,
+        "source_group_sets_disjoint": True,
+        "test_data_read": False,
+    }
+    manifest["test_data_read"] = False
+    manifest["test_used_for_training_or_calibration"] = False
+    splits = dict(manifest.get("splits") or {})
+    train_summary = dict(splits.get("train") or {})
+    action_counts = Counter(
+        str(row["action"]) for row in merged_metadata if row.get("action_mask") is True
+    )
+    source_rows = Counter(str(row.get("source", "unknown")) for row in merged_metadata)
+    train_summary.update({
+        "rows": len(merged_metadata),
+        "supervised_rows": int(sum(action_counts.values())),
+        "prepared_supervised_rows": int(sum(action_counts.values())),
+        "prepared_action_support": {action: int(action_counts[action]) for action in ACTIONS},
+        "source_rows": dict(sorted(source_rows.items())),
+        "source_groups": len(base_groups | extra_groups),
+    })
+    splits["train"] = train_summary
+    manifest["splits"] = splits
+    (staging / "feature_manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(staging, output)
+    return manifest["feature_merge"]
 
 def _clustered_target_context_workload(conversations: Sequence[Mapping[str, Any]]) -> dict[str, int]:
     """Count full causal conversation replay steps before native extraction."""
@@ -1214,6 +2771,26 @@ def _clustered_target_context_workload(conversations: Sequence[Mapping[str, Any]
         "conversation_replays": conversation_replays,
         "max_conversation_replay_input_frames": max_conversation_frames,
     }
+
+
+def _stage2_extraction_splits(
+    control6_profile: str,
+    splits: Sequence[str] | None,
+) -> tuple[str, ...]:
+    if control6_profile not in {"historical_q4", "native1540"}:
+        raise ValueError("control6_profile must be 'historical_q4' or 'native1540'")
+    requested = tuple(
+        splits
+        if splits is not None
+        else ("train", "validation")
+        if control6_profile == "native1540"
+        else ("train", "validation", "test")
+    )
+    if not requested or any(split not in {"train", "validation", "test"} for split in requested):
+        raise ValueError("Stage2 extraction splits must be train, validation, or test")
+    if len(set(requested)) != len(requested):
+        raise ValueError("Stage2 extraction split list contains duplicates")
+    return requested
 
 
 def _v5_event_onset_selection_metrics(
@@ -1455,272 +3032,452 @@ def _natural_validation_macro_f1(
 def extract_stage2_features(
     *,
     prepared_dir: str | Path,
-    base_model_path: str,
-    adapter_dir: str,
+    base_model_path: str | None = None,
+    adapter_dir: str | None = None,
     output_dir: str | Path,
     device: str = "cuda",
     benchmark_only: bool = False,
     benchmark_then_extract_if_under_hours: float | None = None,
     verify_prefix_cache: bool = False,
+    control6_profile: str = "historical_q4",
+    runtime_workspace: str | Path = "/workspace",
+    native_microbatch_library_path: str | Path | None = None,
+    native_smoke_frames: int = 8,
+    splits: Sequence[str] | None = None,
+    resume_existing: bool = False,
 ) -> dict[str, Any]:
-    """Merge final LoRA, benchmark bounded extraction, then extract all splits."""
-    if not Path(adapter_dir).is_dir():
-        raise FileNotFoundError(f"adapter LoRA finale mancante: {adapter_dir}")
+    """Extract historical merged features or serving-aligned native1540 features."""
+    if control6_profile not in {"historical_q4", "native1540"}:
+        raise ValueError("control6_profile must be 'historical_q4' or 'native1540'")
+    requested_splits = _stage2_extraction_splits(control6_profile, splits)
+    if control6_profile == "historical_q4":
+        if base_model_path is None or adapter_dir is None:
+            raise ValueError("historical_q4 extraction requires --base-model-path and --adapter-dir")
+        if not Path(adapter_dir).is_dir():
+            raise FileNotFoundError(f"adapter LoRA finale mancante: {adapter_dir}")
+    else:
+        if adapter_dir is not None:
+            raise ValueError("native1540 extraction is serving base-only; omit --adapter-dir")
+        if verify_prefix_cache:
+            raise ValueError("native1540 uses the serving unified chat prefix, not canonical prefix-cache verification")
     if benchmark_then_extract_if_under_hours is not None and benchmark_then_extract_if_under_hours <= 0:
         raise ValueError("la soglia auto-extract deve essere positiva")
-    thinker, processor, model = load_merged_base(base_model_path, adapter_dir, device=device)
+    serving_base_report: dict[str, Any] | None = None
+    serving_native_worker: _ServingNativeControl6Worker | None = None
+    if control6_profile == "native1540":
+        thinker, processor, model, serving_base_report = load_serving_base(
+            workspace=runtime_workspace,
+            base_model_path=base_model_path,
+            device=device,
+        )
+    else:
+        assert base_model_path is not None and adapter_dir is not None
+        thinker, processor, model = load_merged_base(base_model_path, adapter_dir, device=device)
     from duplex_kernel.listener import GemmaListener
 
     listener = GemmaListener.from_thinker(thinker, runtime_profile="production")
     listener_backend = getattr(listener, "backend", None)
-    configure_prefix_cache = getattr(listener_backend, "configure_canonical_prefix_cache", None)
-    prefix_cache_stats = getattr(listener_backend, "canonical_prefix_cache_stats", None)
-    if verify_prefix_cache and not callable(configure_prefix_cache):
-        raise RuntimeError("verifica cache prefisso richiede il backend Gemma nativo cache-aware")
-    if callable(configure_prefix_cache):
-        configure_prefix_cache(enabled=False, clear=True)
-    output = Path(output_dir)
-    report: dict[str, Any] = {
-        "feature_contract": dict(FEATURE_CONTRACT),
-        "base_model_path": str(Path(base_model_path).resolve()),
-        "adapter_dir": str(Path(adapter_dir).resolve()),
-        "merged_before_native_listener": True,
-        "extractor": "GemmaListener.production",
-        "state_reset": "one GemmaListenerState per conversation; reset only at conversation boundary, replay from absolute frame 0 through the last supervised input",
-        "cluster_contract": {
-            "state_resets_per_conversation": 1,
-            "replay_start_frame_id": 0,
-            "advance_continuously_through_last_target": True,
-            "reset_between_target_groups": False,
-            "rolling_frontend_pcm_mel_context_frames": 64,
-            "native_lm_cache_capacity_and_rollover": "listener production defaults; derived from the loaded native backend",
-        },
-        "audio_resampling": {
-            "method": "scipy.signal.resample_poly",
-            "source_rates_supported": "any positive PCM rate",
-            "target_rate_hz": 16000,
-            "tick_ms": 80,
-            "partial_frame": "zero padded; valid_sample_count is a compact prefix mask",
-        },
-        "sparse_frame_extraction": "store explicitly supervised targets; for each conversation replay input from absolute frame zero through its last selected target",
-        "counts": {},
-    }
-    split_conversations: dict[str, list[dict[str, Any]]] = {}
-    for split in ("train", "validation", "test"):
-        input_path = Path(prepared_dir) / f"{split}.jsonl"
-        if input_path.is_file():
-            split_conversations[split] = read_jsonl(input_path)
-    workload = {
-        split: _clustered_target_context_workload(rows)
-        for split, rows in split_conversations.items()
-    }
-    report["planned_target_context_workload"] = workload
+    if control6_profile == "native1540":
+        from duplex_kernel.gemma_representation import AUDIO_FEATURES_PER_FRAME
+        from duplex_kernel.listener_microbatch_frontend import MEL_WINDOW_ROWS
 
-    training_conversations = split_conversations.get("train", [])
-    benchmark_real = next(
-        (
-            row for row in training_conversations
-            if not _is_synthetic_source(row)
-            and row.get("audio_path")
-            and Path(str(row["audio_path"])).is_file()
-            and bool(_causal_action_targets(row)[0])
-        ),
-        None,
-    )
-    benchmark_synthetic = next(
-        (
-            row for row in training_conversations
-            if _is_synthetic_source(row)
-            and row.get("audio_path")
-            and Path(str(row["audio_path"])).is_file()
-            and bool(_causal_action_targets(row)[0])
-        ),
-        None,
-    )
-    benchmark_conversations = [
-        row for row in (benchmark_real, benchmark_synthetic) if row is not None
-    ]
-    benchmark_groups = {
-        str(row.get("source_group_id") or row["conversation_id"])
-        for row in benchmark_conversations
-    }
-    benchmark_pcm_cache: dict[str, tuple[np.ndarray, int]] = {}
-    if benchmark_real is not None:
-        if verify_prefix_cache:
-            cold = benchmark_native_listener_windows(
-                listener,
-                benchmark_conversations,
-                windows=8,
-                pcm_cache=benchmark_pcm_cache,
-                include_feature_vectors=True,
+        effective_rows = int(getattr(listener_backend, "mel_window_rows", -1))
+        if AUDIO_FEATURES_PER_FRAME != 2 or MEL_WINDOW_ROWS != 240 or effective_rows != 240:
+            raise RuntimeError(
+                "native1540 extraction requires effective production Q2/W240; "
+                f"constants={AUDIO_FEATURES_PER_FRAME}/{MEL_WINDOW_ROWS}, backend={effective_rows}"
             )
-            configure_prefix_cache(enabled=True, clear=True)
-            benchmark = benchmark_native_listener_windows(
-                listener,
-                benchmark_conversations,
-                windows=8,
-                pcm_cache=benchmark_pcm_cache,
-                include_feature_vectors=True,
+        serving_native_worker = _ServingNativeControl6Worker(
+            thinker,
+            listener,
+            workspace=runtime_workspace,
+            native_library_path=native_microbatch_library_path,
+        )
+    try:
+        configure_prefix_cache = getattr(listener_backend, "configure_canonical_prefix_cache", None)
+        prefix_cache_stats = getattr(listener_backend, "canonical_prefix_cache_stats", None)
+        if verify_prefix_cache and not callable(configure_prefix_cache):
+            raise RuntimeError("verifica cache prefisso richiede il backend Gemma nativo cache-aware")
+        if control6_profile != "native1540" and callable(configure_prefix_cache):
+            configure_prefix_cache(enabled=False, clear=True)
+        output = Path(output_dir)
+        if output.exists() and any(output.iterdir()) and not (resume_existing or benchmark_only):
+            raise FileExistsError(
+                f"Stage2 output is non-empty; pass resume_existing=True to reuse conversation partials: {output}"
             )
-            cold_features = cold.pop("_feature_vectors")
-            cold_metadata = cold.pop("_feature_metadata")
-            cached_features = benchmark.pop("_feature_vectors")
-            cached_metadata = benchmark.pop("_feature_metadata")
-            if len(cold_metadata) != len(cached_metadata) or any(
-                any(
-                    cold_row.get(key) != cached_row.get(key)
-                    for key in (
-                        "conversation_id", "source_group_id", "frame_id", "listener_frame_id",
-                        "cluster_start_frame_id", "cluster_frame_count", "context_start_frame_id",
-                        "context_frame_count", "valid_sample_count", "action",
-                    )
-                )
-                for cold_row, cached_row in zip(cold_metadata, cached_metadata)
-            ):
-                raise RuntimeError("cache prefisso ha alterato target, causal context o confini stream")
-            if cold_features.shape != cached_features.shape:
-                raise RuntimeError("shape query cached/cold prefisso non coincide")
-            max_abs_difference = float(np.max(np.abs(cold_features - cached_features)))
-            backend_stats = prefix_cache_stats()
-            expected_clusters = int(benchmark["conversation_replays"])
-            if (
-                not np.isfinite(cached_features).all()
-                or max_abs_difference > 1e-3
-                or int(backend_stats["prefix_compute_count"]) != 1
-                or int(backend_stats["prefix_reuse_count"]) != expected_clusters - 1
-            ):
-                raise RuntimeError(
-                    "parità/cache prefisso non valida: "
-                    f"max_abs_diff={max_abs_difference}, stats={backend_stats}, clusters={expected_clusters}"
-                )
-            benchmark["canonical_prefix_cache_verification"] = {
-                "status": "passed",
-                "cold_target_windows": len(cold_features),
-                "cached_target_windows": len(cached_features),
-                "cold_and_cached_metadata_identical": True,
-                "query_shape": list(cached_features.shape),
-                "queries_finite": True,
-                "max_abs_query_difference": max_abs_difference,
-                "absolute_tolerance": 1e-3,
-                "conversation_replays": expected_clusters,
-                "canonical_prefix_backend_stats": backend_stats,
-                "native_state_reset_between_conversations": True,
-                "causal_targets_and_context_bounds_preserved": True,
+        report: dict[str, Any] = {
+            "feature_contract": (
+                native_control6_feature_contract(1536)
+                if control6_profile == "native1540"
+                else dict(FEATURE_CONTRACT)
+            ),
+            "base_model_path": str(
+                Path(base_model_path).resolve()
+                if base_model_path is not None
+                else Path(str(serving_base_report["base_model_path"])).resolve()
+            ),
+            "adapter_dir": str(Path(adapter_dir).resolve()) if adapter_dir is not None else None,
+            "merged_before_native_listener": control6_profile != "native1540",
+            "serving_base_only": control6_profile == "native1540",
+            "serving_base_loader": serving_base_report,
+            "extractor": (
+                "GemmaListener.production + serving shared native listener worker"
+                if control6_profile == "native1540"
+                else "GemmaListener.production"
+            ),
+            "state_reset": (
+                "one serving session per conversation; default empty history/instructions; replay continuously from absolute frame 0"
+                if control6_profile == "native1540"
+                else "one GemmaListenerState per conversation; reset only at conversation boundary, replay from absolute frame 0 through the last supervised input"
+            ),
+            "cluster_contract": {
+                "state_resets_per_conversation": 1,
+                "replay_start_frame_id": 0,
+                "advance_continuously_through_last_target": True,
+                "reset_between_target_groups": False,
+                "rolling_frontend_pcm_mel_context_frames": 64,
+                "native_lm_cache_capacity_and_rollover": "listener production defaults; derived from the loaded native backend",
+            },
+            "audio_resampling": {
+                "method": "scipy.signal.resample_poly",
+                "source_rates_supported": "any positive PCM rate",
+                "target_rate_hz": 16000,
+                "tick_ms": 80,
+                "partial_frame": "zero padded; valid_sample_count is a compact prefix mask",
+            },
+            "sparse_frame_extraction": "store explicitly supervised targets; for each conversation replay input from absolute frame zero through its last selected target",
+            "counts": {},
+            "extracted_splits": list(requested_splits),
+            "test_data_read": "test" in requested_splits,
+            "test_used_for_training_or_calibration": False,
+        }
+        if control6_profile == "native1540":
+            report["training_state_context"] = NATIVE_CONTROL6_TRAINING_STATE_CONTEXT
+            report["native_control6_extraction"] = {
+                "profile": control6_profile,
+                "hidden_source": "ListenerOutput.gemma_hidden_t",
+                "hidden_contract": "gemma4_listener_final_norm_frame_v1",
+                "hidden_norm": "gemma_model.language_model.norm",
+                "feature_vector": "runtime current-frame hidden at Q2 LM output position 0; exactly equal to gemma_audio_queries_t[0]",
+                "gemma_audio_queries_per_tick": 2,
+                "audio_tower_queries_per_tick": 2,
+                "mel_window_rows_effective": int(listener_backend.mel_window_rows),
+                "tick_ms": 80,
+                "assistant_reference": "only emitted PCM frame t-1",
+                "base_model_path": str(Path(str(serving_base_report["base_model_path"])).resolve()),
+                "response_lora_applied": False,
+                "stage1_adapter_applied": False,
+                "hidden_frame_contract": "ListenerOutput.gemma_hidden_t for input audio frame t",
             }
-        else:
-            if callable(configure_prefix_cache):
+        split_conversations: dict[str, list[dict[str, Any]]] = {}
+        for split in requested_splits:
+            input_path = Path(prepared_dir) / f"{split}.jsonl"
+            if input_path.is_file():
+                split_conversations[split] = read_jsonl(input_path)
+            elif (
+                split == "test"
+                and control6_profile == "native1540"
+                and splits is not None
+                and "test" in splits
+            ):
+                raise FileNotFoundError(f"explicitly requested held-out test split is missing: {input_path}")
+        report["test_data_read"] = "test" in split_conversations
+        workload = {
+            split: _clustered_target_context_workload(rows)
+            for split, rows in split_conversations.items()
+        }
+        report["planned_target_context_workload"] = workload
+
+        training_conversations = split_conversations.get("train", [])
+        benchmark_real = next(
+            (
+                row for row in training_conversations
+                if not _is_synthetic_source(row)
+                and row.get("audio_path")
+                and Path(str(row["audio_path"])).is_file()
+                and (
+                    control6_profile == "native1540" and benchmark_only
+                    or bool(_causal_action_targets(row)[0])
+                )
+            ),
+            None,
+        )
+        benchmark_synthetic = next(
+            (
+                row for row in training_conversations
+                if _is_synthetic_source(row)
+                and row.get("audio_path")
+                and Path(str(row["audio_path"])).is_file()
+                and bool(_causal_action_targets(row)[0])
+            ),
+            None,
+        )
+        benchmark_conversations = [
+            row for row in (benchmark_real, benchmark_synthetic) if row is not None
+        ]
+        benchmark_groups = {
+            str(row.get("source_group_id") or row["conversation_id"])
+            for row in benchmark_conversations
+        }
+        benchmark_pcm_cache: dict[str, tuple[np.ndarray, int]] = {}
+        if benchmark_real is not None:
+            if control6_profile == "native1540" and benchmark_only:
+                benchmark = benchmark_serving_native_worker_frames(
+                    serving_native_worker,
+                    benchmark_real,
+                    frames=native_smoke_frames,
+                    pcm_cache=benchmark_pcm_cache,
+                )
+            elif verify_prefix_cache:
+                cold = benchmark_native_listener_windows(
+                    listener,
+                    benchmark_conversations,
+                    windows=8,
+                    pcm_cache=benchmark_pcm_cache,
+                    include_feature_vectors=True,
+                    control6_profile=control6_profile,
+                    serving_native_worker=serving_native_worker,
+                )
                 configure_prefix_cache(enabled=True, clear=True)
-            benchmark = benchmark_native_listener_windows(
-                listener,
-                benchmark_conversations,
-                windows=8,
-                pcm_cache=benchmark_pcm_cache,
+                benchmark = benchmark_native_listener_windows(
+                    listener,
+                    benchmark_conversations,
+                    windows=8,
+                    pcm_cache=benchmark_pcm_cache,
+                    include_feature_vectors=True,
+                    control6_profile=control6_profile,
+                    serving_native_worker=serving_native_worker,
+                )
+                cold_features = cold.pop("_feature_vectors")
+                cold_metadata = cold.pop("_feature_metadata")
+                cached_features = benchmark.pop("_feature_vectors")
+                cached_metadata = benchmark.pop("_feature_metadata")
+                if len(cold_metadata) != len(cached_metadata) or any(
+                    any(
+                        cold_row.get(key) != cached_row.get(key)
+                        for key in (
+                            "conversation_id", "source_group_id", "frame_id", "listener_frame_id",
+                            "cluster_start_frame_id", "cluster_frame_count", "context_start_frame_id",
+                            "context_frame_count", "valid_sample_count", "action",
+                        )
+                    )
+                    for cold_row, cached_row in zip(cold_metadata, cached_metadata)
+                ):
+                    raise RuntimeError("cache prefisso ha alterato target, causal context o confini stream")
+                if cold_features.shape != cached_features.shape:
+                    raise RuntimeError("shape query cached/cold prefisso non coincide")
+                max_abs_difference = float(np.max(np.abs(cold_features - cached_features)))
+                backend_stats = prefix_cache_stats()
+                expected_clusters = int(benchmark["conversation_replays"])
+                if (
+                    not np.isfinite(cached_features).all()
+                    or max_abs_difference > 1e-3
+                    or int(backend_stats["prefix_compute_count"]) != 1
+                    or int(backend_stats["prefix_reuse_count"]) != expected_clusters - 1
+                ):
+                    raise RuntimeError(
+                        "parità/cache prefisso non valida: "
+                        f"max_abs_diff={max_abs_difference}, stats={backend_stats}, clusters={expected_clusters}"
+                    )
+                benchmark["canonical_prefix_cache_verification"] = {
+                    "status": "passed",
+                    "cold_target_windows": len(cold_features),
+                    "cached_target_windows": len(cached_features),
+                    "cold_and_cached_metadata_identical": True,
+                    "query_shape": list(cached_features.shape),
+                    "queries_finite": True,
+                    "max_abs_query_difference": max_abs_difference,
+                    "absolute_tolerance": 1e-3,
+                    "conversation_replays": expected_clusters,
+                    "canonical_prefix_backend_stats": backend_stats,
+                    "native_state_reset_between_conversations": True,
+                    "causal_targets_and_context_bounds_preserved": True,
+                }
+            else:
+                if control6_profile != "native1540" and callable(configure_prefix_cache):
+                    configure_prefix_cache(enabled=True, clear=True)
+                benchmark = benchmark_native_listener_windows(
+                    listener,
+                    benchmark_conversations,
+                    windows=8,
+                    pcm_cache=benchmark_pcm_cache,
+                    control6_profile=control6_profile,
+                    serving_native_worker=serving_native_worker,
+                )
+            if callable(prefix_cache_stats) and control6_profile != "native1540":
+                benchmark["canonical_prefix_cache_after_benchmark"] = prefix_cache_stats()
+            if not (control6_profile == "native1540" and benchmark_only):
+                benchmark_steps_per_second = float(benchmark["seconds_per_causal_input_frame_step"])
+                benchmark["projected_seconds_by_split_at_measured_context_rate"] = {
+                    split: round(
+                        benchmark_steps_per_second * float(split_workload["causal_input_frame_steps"]),
+                        3,
+                    )
+                    for split, split_workload in workload.items()
+                }
+                benchmark["projected_total_seconds_at_measured_context_rate"] = round(
+                    sum(benchmark["projected_seconds_by_split_at_measured_context_rate"].values()),
+                    3,
+                )
+                benchmark["projection_basis"] = (
+                    "elapsed benchmark time divided by the exact causal context advances for sampled targets; "
+                    + (
+                        "uses the serving worker and unified first-session prefix; "
+                        if control6_profile == "native1540"
+                        else "includes per-target steady-state priming; "
+                    )
+                    + "includes one PCM decode/resample per sampled conversation"
+                )
+            report["native_listener_benchmark"] = benchmark
+            if serving_native_worker is not None:
+                report["native_control6_extraction"]["serving_worker"] = serving_native_worker.report()
+        else:
+            if control6_profile == "native1540" and benchmark_only:
+                raise RuntimeError("native1540 smoke requires a real train conversation with an audio file")
+            report["native_listener_benchmark"] = {"status": "no_real_train_conversation_available"}
+        if benchmark_only:
+            report["status"] = (
+                "serving_native_worker_smoke_only"
+                if control6_profile == "native1540"
+                else "native_listener_benchmark_only"
             )
-        if callable(prefix_cache_stats):
-            benchmark["canonical_prefix_cache_after_benchmark"] = prefix_cache_stats()
-        benchmark_steps_per_second = float(benchmark["seconds_per_causal_input_frame_step"])
-        benchmark["projected_seconds_by_split_at_measured_context_rate"] = {
-            split: round(
-                benchmark_steps_per_second * float(split_workload["causal_input_frame_steps"]),
-                3,
-            )
-            for split, split_workload in workload.items()
-        }
-        benchmark["projected_total_seconds_at_measured_context_rate"] = round(
-            sum(benchmark["projected_seconds_by_split_at_measured_context_rate"].values()),
-            3,
-        )
-        benchmark["projection_basis"] = (
-            "elapsed benchmark time divided by the exact causal context advances for eight sampled targets; "
-            "includes per-target steady-state priming and one PCM decode/resample per sampled conversation"
-        )
-        report["native_listener_benchmark"] = benchmark
-    else:
-        report["native_listener_benchmark"] = {"status": "no_real_train_conversation_available"}
-    if benchmark_only:
-        report["status"] = "native_listener_benchmark_only"
-        output.mkdir(parents=True, exist_ok=True)
-        report_path = output / "benchmark_manifest.json"
-        report["benchmark_manifest_path"] = str(report_path.resolve())
-        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        del processor, model
-        return report
-    if benchmark_then_extract_if_under_hours is not None:
-        benchmark = report["native_listener_benchmark"]
-        projected_seconds = benchmark.get("projected_total_seconds_at_measured_context_rate")
-        if projected_seconds is None:
-            raise RuntimeError("auto-extract richiede un benchmark cluster nativo reale")
-        threshold_seconds = float(benchmark_then_extract_if_under_hours) * 3600.0
-        report["benchmark_auto_extract_gate"] = {
-            "projected_seconds": float(projected_seconds),
-            "threshold_seconds": threshold_seconds,
-            "proceed": float(projected_seconds) <= threshold_seconds,
-            "same_merged_model_reused_for_extraction": True,
-        }
-        output.mkdir(parents=True, exist_ok=True)
-        benchmark_path = output / "benchmark_manifest.json"
-        report["benchmark_manifest_path"] = str(benchmark_path.resolve())
-        benchmark_snapshot = dict(report)
-        benchmark_snapshot["status"] = "native_listener_benchmark_auto_gate"
-        benchmark_path.write_text(
-            json.dumps(benchmark_snapshot, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        if float(projected_seconds) > threshold_seconds:
-            report["status"] = "benchmark_projection_over_auto_extract_limit"
+            output.mkdir(parents=True, exist_ok=True)
+            report_path = output / "benchmark_manifest.json"
+            report["benchmark_manifest_path"] = str(report_path.resolve())
+            report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            if serving_native_worker is not None:
+                serving_native_worker.close()
             del processor, model
             return report
-        report["benchmark_auto_extract_gate"]["proceeded_in_same_process"] = True
-    for split in ("train", "validation", "test"):
-        conversations = split_conversations.get(split)
-        if conversations is None:
-            continue
-        split_features: list[np.ndarray] = []
-        split_metadata: list[dict[str, Any]] = []
-        grouped: dict[str, list[Mapping[str, Any]]] = {}
-        for conversation in conversations:
-            group = str(conversation.get("source_group_id") or conversation["conversation_id"])
-            grouped.setdefault(group, []).append(conversation)
-        for group_conversations in grouped.values():
-            # Retain decoded/resampled PCM only while paired role views of one
-            # physical recording are advanced through the causal listener.
-            group_key = str(
-                group_conversations[0].get("source_group_id")
-                or group_conversations[0]["conversation_id"]
+        if benchmark_then_extract_if_under_hours is not None:
+            benchmark = report["native_listener_benchmark"]
+            projected_seconds = benchmark.get("projected_total_seconds_at_measured_context_rate")
+            if projected_seconds is None:
+                raise RuntimeError("auto-extract richiede un benchmark cluster nativo reale")
+            threshold_seconds = float(benchmark_then_extract_if_under_hours) * 3600.0
+            report["benchmark_auto_extract_gate"] = {
+                "projected_seconds": float(projected_seconds),
+                "threshold_seconds": threshold_seconds,
+                "proceed": float(projected_seconds) <= threshold_seconds,
+                "same_merged_model_reused_for_extraction": True,
+            }
+            output.mkdir(parents=True, exist_ok=True)
+            benchmark_path = output / "benchmark_manifest.json"
+            report["benchmark_manifest_path"] = str(benchmark_path.resolve())
+            benchmark_snapshot = dict(report)
+            benchmark_snapshot["status"] = "native_listener_benchmark_auto_gate"
+            benchmark_path.write_text(
+                json.dumps(benchmark_snapshot, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
             )
-            pcm_cache = benchmark_pcm_cache if split == "train" and group_key in benchmark_groups else {}
-            for conversation in group_conversations:
-                if not _causal_action_targets(conversation)[0]:
-                    continue
-                values, metadata = extract_conversation_features(
-                    listener,
-                    conversation,
-                    session_id=f"{split}:{conversation['conversation_id']}",
-                    pcm_cache=pcm_cache,
+            if float(projected_seconds) > threshold_seconds:
+                report["status"] = "benchmark_projection_over_auto_extract_limit"
+                if serving_native_worker is not None:
+                    serving_native_worker.close()
+                del processor, model
+                return report
+            report["benchmark_auto_extract_gate"]["proceeded_in_same_process"] = True
+        for split in requested_splits:
+            conversations = split_conversations.get(split)
+            if conversations is None:
+                continue
+            output.mkdir(parents=True, exist_ok=True)
+            processed: dict[int, tuple[np.ndarray, list[dict[str, Any]]]] = {}
+            grouped: dict[str, list[tuple[int, Mapping[str, Any]]]] = {}
+            eligible_rows = 0
+            skipped_unlabeled_rows = 0
+            for conversation_index, conversation in enumerate(conversations):
+                group = str(conversation.get("source_group_id") or conversation["conversation_id"])
+                grouped.setdefault(group, []).append((conversation_index, conversation))
+            for group_conversations in grouped.values():
+                # Retain decoded/resampled PCM only while paired role views of one
+                # physical recording are advanced through the causal listener.
+                group_key = str(
+                    group_conversations[0][1].get("source_group_id")
+                    or group_conversations[0][1]["conversation_id"]
                 )
-                split_features.append(values)
-                split_metadata.extend(metadata)
-        features = np.concatenate(split_features, axis=0) if split_features else np.empty((0, 1536), dtype=np.float32)
-        _write_features(output / f"{split}.npz", features, split_metadata)
-        report["counts"][split] = {
-            "conversations": len(conversations),
-            "frames": len(split_metadata),
-            "labeled_frames": sum(bool(row["action_mask"]) for row in split_metadata),
-            "causal_input_frame_steps": int(
-                workload.get(split, {}).get("causal_input_frame_steps", 0)
-            ),
-            "conversation_replays": int(workload.get(split, {}).get("conversation_replays", 0)),
-            "per_target_context_frame_sum": sum(
-                int(row["context_frame_count"]) for row in split_metadata
-            ),
-        }
-    if callable(prefix_cache_stats):
-        report["canonical_prefix_cache_after_extraction"] = prefix_cache_stats()
-    report_path = output / "feature_manifest.json"
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    del processor, model
-    return report
+                pcm_cache = benchmark_pcm_cache if split == "train" and group_key in benchmark_groups else {}
+                for conversation_index, conversation in group_conversations:
+                    targets = _causal_action_targets(conversation)[0]
+                    if not any(frame.get("action_mask") is True for frame in targets):
+                        skipped_unlabeled_rows += 1
+                        continue
+                    eligible_rows += 1
+                    conversation_id = str(conversation["conversation_id"])
+                    partial_path = _conversation_partial_path(output, split, conversation_id)
+                    if resume_existing:
+                        cached = _load_conversation_partial(
+                            partial_path,
+                            conversation=conversation,
+                            targets=targets,
+                            control6_profile=control6_profile,
+                        )
+                        if cached is not None:
+                            processed[conversation_index] = cached
+                            print(
+                                f"[stage2] resume split={split} conversation={conversation_index + 1}/{len(conversations)} "
+                                f"id={conversation_id} targets={len(cached[1])}",
+                                flush=True,
+                            )
+                            continue
+                    values, metadata = extract_conversation_features(
+                        listener,
+                        conversation,
+                        session_id=f"{split}:{conversation['conversation_id']}",
+                        pcm_cache=pcm_cache,
+                        control6_profile=control6_profile,
+                        serving_native_worker=serving_native_worker,
+                    )
+                    if len(metadata) != len(targets):
+                        raise RuntimeError(
+                            f"Stage2 conversation target count changed during extraction: {conversation_id}"
+                        )
+                    _write_features(partial_path, values, metadata)
+                    processed[conversation_index] = (values, metadata)
+                    causal_steps = int(metadata[-1]["frame_id"]) + 1 if metadata else 0
+                    print(
+                        f"[stage2] saved split={split} conversation={conversation_index + 1}/{len(conversations)} "
+                        f"id={conversation_id} targets={len(metadata)} causal_steps={causal_steps}",
+                        flush=True,
+                    )
+            ordered_indices = sorted(processed)
+            split_features = [processed[index][0] for index in ordered_indices]
+            split_metadata = [
+                row
+                for index in ordered_indices
+                for row in processed[index][1]
+            ]
+            features = np.concatenate(split_features, axis=0) if split_features else np.empty((0, 1536), dtype=np.float32)
+            _write_features(output / f"{split}.npz", features, split_metadata)
+            report["counts"][split] = {
+                "conversations": len(conversations),
+                "conversation_partials_saved": len(processed),
+                "conversations_with_masked_targets": eligible_rows,
+                "conversations_without_masked_targets_skipped": skipped_unlabeled_rows,
+                "conversation_partials_dir": str((output / "conversation_partials" / split).resolve()),
+                "frames": len(split_metadata),
+                "labeled_frames": sum(bool(row["action_mask"]) for row in split_metadata),
+                "causal_input_frame_steps": int(
+                    workload.get(split, {}).get("causal_input_frame_steps", 0)
+                ),
+                "conversation_replays": int(workload.get(split, {}).get("conversation_replays", 0)),
+                "per_target_context_frame_sum": sum(
+                    int(row["context_frame_count"]) for row in split_metadata
+                ),
+            }
+        if callable(prefix_cache_stats):
+            report["canonical_prefix_cache_after_extraction"] = prefix_cache_stats()
+        report_path = output / "feature_manifest.json"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        if serving_native_worker is not None:
+            serving_native_worker.close()
+        del processor, model
+        return report
+
+    finally:
+        if serving_native_worker is not None:
+            serving_native_worker.close()
 
 
 def train_control_head(
@@ -2346,10 +4103,6 @@ def train_control_head(
         }
         sampling_description = "uniform_over_all_supervised_training_rows"
     if selection_metric == "validation_v5_event_onset_macro_f1":
-        diagnostic_history = next(
-            (row for row in selection_history if row["step"] == best_diagnostic_step),
-            None,
-        )
         selected_history = next(
             (row for row in selection_history if row["step"] == best_selection_step),
             None,

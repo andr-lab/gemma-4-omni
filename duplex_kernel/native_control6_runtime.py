@@ -11,6 +11,7 @@ from duplex_kernel.gemma_representation import AUDIO_FEATURES_PER_FRAME
 from duplex_kernel.native_control6_prompt import (
     build_native_control6_prefix_ids,
     select_native_control6_replay_suffix,
+    validate_native_control6_prefix_ids,
 )
 
 
@@ -139,12 +140,12 @@ def build_native_control6_semantic_prefix_request(
             audio_marker=str(marker),
             boa_token_id=int(boa_token_id),
         )
-        if (
-            prefix_len != len(prefix_ids)
-            or prefix_ids[-1] != int(boa_token_id)
-            or not 1 <= prefix_len <= 291
-        ):
+        validated_prefix_ids = validate_native_control6_prefix_ids(
+            prefix_ids, boa_token_id=int(boa_token_id)
+        )
+        if prefix_len != len(validated_prefix_ids):
             raise RuntimeError("semantic prefix must end in the real BOA within capacity")
+        prefix_ids = list(validated_prefix_ids)
         with state._lock:
             observed = tuple(state.semantic_audio_soft_history)
             listener_state_version = int(state.listener_state_version)

@@ -1,0 +1,1139 @@
+{
+  "head_source": "/workspace/artifacts/runtime/control6_runtime_pendingpcm_phaseonly_q2cachemeta_build6_20261020/training/duplex_qlora/native_control6.py",
+  "policy_source": "/workspace/artifacts/runtime/control6_runtime_pendingpcm_phaseonly_q2cachemeta_build6_20261020/duplex_kernel/gemma_native_control6_policy.py",
+  "results": {
+    "prefix190_full3000": {
+      "prefix": "prefix190",
+      "head": "full3000",
+      "scores": [
+        {
+          "frame_id": 0,
+          "pS_effective": 0.6999122500419617,
+          "pS_legal": 0.0,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 1,
+          "pS_effective": 0.0886128768324852,
+          "pS_legal": 0.0,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 2,
+          "pS_effective": 0.0006188349798321724,
+          "pS_legal": 0.0006188349798321724,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 3,
+          "pS_effective": 0.021986857056617737,
+          "pS_legal": 0.021986857056617737,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 4,
+          "pS_effective": 0.0004009238036815077,
+          "pS_legal": 0.0004009238036815077,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 5,
+          "pS_effective": 0.0027103519532829523,
+          "pS_legal": 0.0027103519532829523,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 6,
+          "pS_effective": 0.0019701975397765636,
+          "pS_legal": 0.0019701975397765636,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 7,
+          "pS_effective": 1.2574276979648857e-06,
+          "pS_legal": 1.2574276979648857e-06,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 8,
+          "pS_effective": 0.002274925820529461,
+          "pS_legal": 0.002274925820529461,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 9,
+          "pS_effective": 0.002092566341161728,
+          "pS_legal": 0.002092566341161728,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 10,
+          "pS_effective": 0.02598937414586544,
+          "pS_legal": 0.02598937414586544,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 11,
+          "pS_effective": 0.009248274378478527,
+          "pS_legal": 0.009248274378478527,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 12,
+          "pS_effective": 2.0790850612684153e-05,
+          "pS_legal": 2.0790850612684153e-05,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 13,
+          "pS_effective": 0.1627897024154663,
+          "pS_legal": 0.1627897024154663,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 14,
+          "pS_effective": 0.033480286598205566,
+          "pS_legal": 0.033480286598205566,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 15,
+          "pS_effective": 0.008782509714365005,
+          "pS_legal": 0.008782509714365005,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 16,
+          "pS_effective": 0.0009939464507624507,
+          "pS_legal": 0.0009939464507624507,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 17,
+          "pS_effective": 1.5913453808025224e-06,
+          "pS_legal": 1.5913453808025224e-06,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 18,
+          "pS_effective": 0.23221909999847412,
+          "pS_legal": 0.23221909999847412,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 19,
+          "pS_effective": 1.4328828683574102e-06,
+          "pS_legal": 1.4328828683574102e-06,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 20,
+          "pS_effective": 0.001618573092855513,
+          "pS_legal": 0.001618573092855513,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 21,
+          "pS_effective": 0.0007766460184939206,
+          "pS_legal": 0.0007766460184939206,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 23,
+          "pS_effective": 0.0,
+          "pS_legal": 0.0,
+          "candidate": "CONTINUE",
+          "applied_action": "CONTINUE",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        }
+      ],
+      "peak_f2_21": {
+        "frame_id": 18,
+        "pS_effective": 0.23221909999847412,
+        "pS_legal": 0.23221909999847412,
+        "candidate": "LISTEN",
+        "applied_action": "LISTEN",
+        "hysteresis_count": 0,
+        "hysteresis_pending": false
+      },
+      "first_candidate_threshold_crossing": {
+        "0.7": null,
+        "0.85": null
+      },
+      "focus": {
+        "12": {
+          "frame_id": 12,
+          "pS_effective": 2.0790850612684153e-05,
+          "pS_legal": 2.0790850612684153e-05,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        "13": {
+          "frame_id": 13,
+          "pS_effective": 0.1627897024154663,
+          "pS_legal": 0.1627897024154663,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        "14": {
+          "frame_id": 14,
+          "pS_effective": 0.033480286598205566,
+          "pS_legal": 0.033480286598205566,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        "15": {
+          "frame_id": 15,
+          "pS_effective": 0.008782509714365005,
+          "pS_legal": 0.008782509714365005,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        "21": {
+          "frame_id": 21,
+          "pS_effective": 0.0007766460184939206,
+          "pS_legal": 0.0007766460184939206,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        "23": {
+          "frame_id": 23,
+          "pS_effective": 0.0,
+          "pS_legal": 0.0,
+          "candidate": "CONTINUE",
+          "applied_action": "CONTINUE",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        }
+      }
+    },
+    "prefix190_warm": {
+      "prefix": "prefix190",
+      "head": "warm",
+      "scores": [
+        {
+          "frame_id": 0,
+          "pS_effective": 0.796220600605011,
+          "pS_legal": 0.0,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 1,
+          "pS_effective": 0.6018069386482239,
+          "pS_legal": 0.0,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 2,
+          "pS_effective": 0.9999889135360718,
+          "pS_legal": 0.9999889135360718,
+          "candidate": "SPEAK",
+          "applied_action": "SPEAK",
+          "hysteresis_count": 1,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 3,
+          "pS_effective": 0.9987248182296753,
+          "pS_legal": 0.9987248182296753,
+          "candidate": "SPEAK",
+          "applied_action": "SPEAK",
+          "hysteresis_count": 1,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 4,
+          "pS_effective": 0.6642690300941467,
+          "pS_legal": 0.6642690300941467,
+          "candidate": "SPEAK",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 5,
+          "pS_effective": 0.7924928665161133,
+          "pS_legal": 0.7924928665161133,
+          "candidate": "SPEAK",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 1,
+          "hysteresis_pending": true
+        },
+        {
+          "frame_id": 6,
+          "pS_effective": 0.10962630063295364,
+          "pS_legal": 0.10962630063295364,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 7,
+          "pS_effective": 5.324339144863188e-05,
+          "pS_legal": 5.324339144863188e-05,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 8,
+          "pS_effective": 0.0005902197444811463,
+          "pS_legal": 0.0005902197444811463,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 9,
+          "pS_effective": 3.4484426691960834e-07,
+          "pS_legal": 3.4484426691960834e-07,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 10,
+          "pS_effective": 2.6904844574460185e-08,
+          "pS_legal": 2.6904844574460185e-08,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 11,
+          "pS_effective": 2.376322214558968e-07,
+          "pS_legal": 2.376322214558968e-07,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 12,
+          "pS_effective": 9.61219437378702e-10,
+          "pS_legal": 9.61219437378702e-10,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 13,
+          "pS_effective": 2.1138565386991104e-07,
+          "pS_legal": 2.1138565386991104e-07,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 14,
+          "pS_effective": 5.5019999223304694e-08,
+          "pS_legal": 5.5019999223304694e-08,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 15,
+          "pS_effective": 5.768023569885372e-08,
+          "pS_legal": 5.768023569885372e-08,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 16,
+          "pS_effective": 0.00034886086359620094,
+          "pS_legal": 0.00034886086359620094,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 17,
+          "pS_effective": 0.9426546096801758,
+          "pS_legal": 0.9426546096801758,
+          "candidate": "SPEAK",
+          "applied_action": "SPEAK",
+          "hysteresis_count": 1,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 18,
+          "pS_effective": 0.969022274017334,
+          "pS_legal": 0.969022274017334,
+          "candidate": "SPEAK",
+          "applied_action": "SPEAK",
+          "hysteresis_count": 1,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 19,
+          "pS_effective": 0.6247549653053284,
+          "pS_legal": 0.6247549653053284,
+          "candidate": "SPEAK",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 20,
+          "pS_effective": 0.9906610250473022,
+          "pS_legal": 0.9906610250473022,
+          "candidate": "SPEAK",
+          "applied_action": "SPEAK",
+          "hysteresis_count": 1,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 21,
+          "pS_effective": 0.9985695481300354,
+          "pS_legal": 0.9985695481300354,
+          "candidate": "SPEAK",
+          "applied_action": "SPEAK",
+          "hysteresis_count": 1,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 23,
+          "pS_effective": 0.0,
+          "pS_legal": 0.0,
+          "candidate": "CONTINUE",
+          "applied_action": "CONTINUE",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        }
+      ],
+      "peak_f2_21": {
+        "frame_id": 2,
+        "pS_effective": 0.9999889135360718,
+        "pS_legal": 0.9999889135360718,
+        "candidate": "SPEAK",
+        "applied_action": "SPEAK",
+        "hysteresis_count": 1,
+        "hysteresis_pending": false
+      },
+      "first_candidate_threshold_crossing": {
+        "0.7": 2,
+        "0.85": 2
+      },
+      "focus": {
+        "12": {
+          "frame_id": 12,
+          "pS_effective": 9.61219437378702e-10,
+          "pS_legal": 9.61219437378702e-10,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        "13": {
+          "frame_id": 13,
+          "pS_effective": 2.1138565386991104e-07,
+          "pS_legal": 2.1138565386991104e-07,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        "14": {
+          "frame_id": 14,
+          "pS_effective": 5.5019999223304694e-08,
+          "pS_legal": 5.5019999223304694e-08,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        "15": {
+          "frame_id": 15,
+          "pS_effective": 5.768023569885372e-08,
+          "pS_legal": 5.768023569885372e-08,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        "21": {
+          "frame_id": 21,
+          "pS_effective": 0.9985695481300354,
+          "pS_legal": 0.9985695481300354,
+          "candidate": "SPEAK",
+          "applied_action": "SPEAK",
+          "hysteresis_count": 1,
+          "hysteresis_pending": false
+        },
+        "23": {
+          "frame_id": 23,
+          "pS_effective": 0.0,
+          "pS_legal": 0.0,
+          "candidate": "CONTINUE",
+          "applied_action": "CONTINUE",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        }
+      }
+    },
+    "prefix265_full3000": {
+      "prefix": "prefix265",
+      "head": "full3000",
+      "scores": [
+        {
+          "frame_id": 0,
+          "pS_effective": 0.977473258972168,
+          "pS_legal": 0.0,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 1,
+          "pS_effective": 0.054151006042957306,
+          "pS_legal": 0.0,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 2,
+          "pS_effective": 0.0031006205826997757,
+          "pS_legal": 0.0031006205826997757,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 3,
+          "pS_effective": 0.007823063060641289,
+          "pS_legal": 0.007823063060641289,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 4,
+          "pS_effective": 2.546487909427242e-09,
+          "pS_legal": 2.546487909427242e-09,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 5,
+          "pS_effective": 0.0014919827226549387,
+          "pS_legal": 0.0014919827226549387,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 6,
+          "pS_effective": 0.0007521139341406524,
+          "pS_legal": 0.0007521139341406524,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 7,
+          "pS_effective": 4.8593265091767535e-05,
+          "pS_legal": 4.8593265091767535e-05,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 8,
+          "pS_effective": 3.2053540053311735e-05,
+          "pS_legal": 3.2053540053311735e-05,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 9,
+          "pS_effective": 0.0017772127175703645,
+          "pS_legal": 0.0017772127175703645,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 10,
+          "pS_effective": 0.027055753394961357,
+          "pS_legal": 0.027055753394961357,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 11,
+          "pS_effective": 0.0006246751872822642,
+          "pS_legal": 0.0006246751872822642,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 12,
+          "pS_effective": 6.124416245256725e-07,
+          "pS_legal": 6.124416245256725e-07,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 13,
+          "pS_effective": 0.10097382217645645,
+          "pS_legal": 0.10097382217645645,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 14,
+          "pS_effective": 0.028723346069455147,
+          "pS_legal": 0.028723346069455147,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 15,
+          "pS_effective": 0.0027029397897422314,
+          "pS_legal": 0.0027029397897422314,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 16,
+          "pS_effective": 0.00010536074114497751,
+          "pS_legal": 0.00010536074114497751,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 17,
+          "pS_effective": 0.00025492251734249294,
+          "pS_legal": 0.00025492251734249294,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 18,
+          "pS_effective": 0.0007864278159104288,
+          "pS_legal": 0.0007864278159104288,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 19,
+          "pS_effective": 0.0025575170293450356,
+          "pS_legal": 0.0025575170293450356,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 20,
+          "pS_effective": 0.00023354530276264995,
+          "pS_legal": 0.00023354530276264995,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 21,
+          "pS_effective": 0.0026230914518237114,
+          "pS_legal": 0.0026230914518237114,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 23,
+          "pS_effective": 0.0,
+          "pS_legal": 0.0,
+          "candidate": "CONTINUE",
+          "applied_action": "CONTINUE",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        }
+      ],
+      "peak_f2_21": {
+        "frame_id": 13,
+        "pS_effective": 0.10097382217645645,
+        "pS_legal": 0.10097382217645645,
+        "candidate": "LISTEN",
+        "applied_action": "LISTEN",
+        "hysteresis_count": 0,
+        "hysteresis_pending": false
+      },
+      "first_candidate_threshold_crossing": {
+        "0.7": null,
+        "0.85": null
+      },
+      "focus": {
+        "12": {
+          "frame_id": 12,
+          "pS_effective": 6.124416245256725e-07,
+          "pS_legal": 6.124416245256725e-07,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        "13": {
+          "frame_id": 13,
+          "pS_effective": 0.10097382217645645,
+          "pS_legal": 0.10097382217645645,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        "14": {
+          "frame_id": 14,
+          "pS_effective": 0.028723346069455147,
+          "pS_legal": 0.028723346069455147,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        "15": {
+          "frame_id": 15,
+          "pS_effective": 0.0027029397897422314,
+          "pS_legal": 0.0027029397897422314,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        "21": {
+          "frame_id": 21,
+          "pS_effective": 0.0026230914518237114,
+          "pS_legal": 0.0026230914518237114,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        "23": {
+          "frame_id": 23,
+          "pS_effective": 0.0,
+          "pS_legal": 0.0,
+          "candidate": "CONTINUE",
+          "applied_action": "CONTINUE",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        }
+      },
+      "live_pS_match": {
+        "n": 22,
+        "max_abs_delta": 0.08379750698804855,
+        "worst_frame": 13
+      }
+    },
+    "prefix265_warm": {
+      "prefix": "prefix265",
+      "head": "warm",
+      "scores": [
+        {
+          "frame_id": 0,
+          "pS_effective": 1.0,
+          "pS_legal": 0.0,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 1,
+          "pS_effective": 0.35690388083457947,
+          "pS_legal": 0.0,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 2,
+          "pS_effective": 0.9999952912330627,
+          "pS_legal": 0.9999952912330627,
+          "candidate": "SPEAK",
+          "applied_action": "SPEAK",
+          "hysteresis_count": 1,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 3,
+          "pS_effective": 0.9972356557846069,
+          "pS_legal": 0.9972356557846069,
+          "candidate": "SPEAK",
+          "applied_action": "SPEAK",
+          "hysteresis_count": 1,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 4,
+          "pS_effective": 0.9778215885162354,
+          "pS_legal": 0.9778215885162354,
+          "candidate": "SPEAK",
+          "applied_action": "SPEAK",
+          "hysteresis_count": 1,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 5,
+          "pS_effective": 0.091035395860672,
+          "pS_legal": 0.091035395860672,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 6,
+          "pS_effective": 0.9436938166618347,
+          "pS_legal": 0.9436938166618347,
+          "candidate": "SPEAK",
+          "applied_action": "SPEAK",
+          "hysteresis_count": 1,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 7,
+          "pS_effective": 0.005468764808028936,
+          "pS_legal": 0.005468764808028936,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 8,
+          "pS_effective": 3.410921635804698e-06,
+          "pS_legal": 3.410921635804698e-06,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 9,
+          "pS_effective": 7.299945536942687e-08,
+          "pS_legal": 7.299945536942687e-08,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 10,
+          "pS_effective": 7.703379623080764e-08,
+          "pS_legal": 7.703379623080764e-08,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 11,
+          "pS_effective": 8.198559164895869e-09,
+          "pS_legal": 8.198559164895869e-09,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 12,
+          "pS_effective": 3.639412989725477e-12,
+          "pS_legal": 3.639412989725477e-12,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 13,
+          "pS_effective": 4.523156960090091e-09,
+          "pS_legal": 4.523156960090091e-09,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 14,
+          "pS_effective": 1.1265183275099844e-07,
+          "pS_legal": 1.1265183275099844e-07,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 15,
+          "pS_effective": 4.421898580631023e-08,
+          "pS_legal": 4.421898580631023e-08,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 16,
+          "pS_effective": 1.698099367786199e-05,
+          "pS_legal": 1.698099367786199e-05,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 17,
+          "pS_effective": 0.9867908954620361,
+          "pS_legal": 0.9867908954620361,
+          "candidate": "SPEAK",
+          "applied_action": "SPEAK",
+          "hysteresis_count": 1,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 18,
+          "pS_effective": 0.9931959509849548,
+          "pS_legal": 0.9931959509849548,
+          "candidate": "SPEAK",
+          "applied_action": "SPEAK",
+          "hysteresis_count": 1,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 19,
+          "pS_effective": 0.837094783782959,
+          "pS_legal": 0.837094783782959,
+          "candidate": "SPEAK",
+          "applied_action": "SPEAK",
+          "hysteresis_count": 2,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 20,
+          "pS_effective": 0.9999940395355225,
+          "pS_legal": 0.9999940395355225,
+          "candidate": "SPEAK",
+          "applied_action": "SPEAK",
+          "hysteresis_count": 1,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 21,
+          "pS_effective": 0.9998995661735535,
+          "pS_legal": 0.9998995661735535,
+          "candidate": "SPEAK",
+          "applied_action": "SPEAK",
+          "hysteresis_count": 1,
+          "hysteresis_pending": false
+        },
+        {
+          "frame_id": 23,
+          "pS_effective": 0.0,
+          "pS_legal": 0.0,
+          "candidate": "CONTINUE",
+          "applied_action": "CONTINUE",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        }
+      ],
+      "peak_f2_21": {
+        "frame_id": 2,
+        "pS_effective": 0.9999952912330627,
+        "pS_legal": 0.9999952912330627,
+        "candidate": "SPEAK",
+        "applied_action": "SPEAK",
+        "hysteresis_count": 1,
+        "hysteresis_pending": false
+      },
+      "first_candidate_threshold_crossing": {
+        "0.7": 2,
+        "0.85": 2
+      },
+      "focus": {
+        "12": {
+          "frame_id": 12,
+          "pS_effective": 3.639412989725477e-12,
+          "pS_legal": 3.639412989725477e-12,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        "13": {
+          "frame_id": 13,
+          "pS_effective": 4.523156960090091e-09,
+          "pS_legal": 4.523156960090091e-09,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        "14": {
+          "frame_id": 14,
+          "pS_effective": 1.1265183275099844e-07,
+          "pS_legal": 1.1265183275099844e-07,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        "15": {
+          "frame_id": 15,
+          "pS_effective": 4.421898580631023e-08,
+          "pS_legal": 4.421898580631023e-08,
+          "candidate": "LISTEN",
+          "applied_action": "LISTEN",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        },
+        "21": {
+          "frame_id": 21,
+          "pS_effective": 0.9998995661735535,
+          "pS_legal": 0.9998995661735535,
+          "candidate": "SPEAK",
+          "applied_action": "SPEAK",
+          "hysteresis_count": 1,
+          "hysteresis_pending": false
+        },
+        "23": {
+          "frame_id": 23,
+          "pS_effective": 0.0,
+          "pS_legal": 0.0,
+          "candidate": "CONTINUE",
+          "applied_action": "CONTINUE",
+          "hysteresis_count": 0,
+          "hysteresis_pending": false
+        }
+      }
+    }
+  }
+}

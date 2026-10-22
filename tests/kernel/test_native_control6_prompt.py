@@ -6,7 +6,9 @@ from duplex_kernel.native_control6_prompt import (
     NATIVE_CONTROL6_PREFIX_MAX_TOKENS,
     build_native_control6_prefix_ids,
     build_native_control6_prefix_messages,
+    native_control6_semantic_prefix_metadata_is_supported,
     select_native_control6_replay_suffix,
+    validate_native_control6_prefix_ids,
     validate_native_control6_semantic_prefix_metadata,
 )
 
@@ -112,6 +114,26 @@ def test_native_control6_prefix_fails_closed_without_single_boa_token():
         raise AssertionError("multi-token audio marker must fail closed")
 
 
+def test_native_control6_prefix_capacity_accepts_actual_lengths_and_rejects_overflow():
+    boa_token_id = 256000
+    for length in (291, 349, 512):
+        prefix_ids = [1] * (length - 1) + [boa_token_id]
+        validated = validate_native_control6_prefix_ids(
+            prefix_ids, boa_token_id=boa_token_id
+        )
+        assert len(validated) == length
+        assert validated[-1] == boa_token_id
+
+    try:
+        validate_native_control6_prefix_ids(
+            [1] * 512 + [boa_token_id], boa_token_id=boa_token_id
+        )
+    except ValueError as exc:
+        assert "512" in str(exc)
+    else:
+        raise AssertionError("a 513-token prefix must be rejected")
+
+
 def test_replay_suffix_requires_observed_endpoint_and_keeps_only_contiguous_tail():
     observed = [(10, "a"), (11, "b"), (14, "c"), (15, "d")]
     assert select_native_control6_replay_suffix(
@@ -161,3 +183,24 @@ def test_semantic_prefix_checkpoint_metadata_matches_runtime_schema_v2():
         assert "semantic_prefix_schema_version" in str(exc)
     else:
         raise AssertionError("a mismatched prefix checkpoint schema must fail closed")
+
+
+def test_old_291_checkpoint_metadata_remains_supported_under_512_runtime_cap():
+    assert native_control6_semantic_prefix_metadata_is_supported({
+        "semantic_prefix_schema_version": 2,
+        "semantic_prefix_contract": "gemma_native_control6_semantic_prefix_boa_v2",
+        "semantic_prefix_capacity": 291,
+        "semantic_prefix_max_tokens": 291,
+    })
+    assert native_control6_semantic_prefix_metadata_is_supported({
+        "semantic_prefix_schema_version": 2,
+        "semantic_prefix_contract": "gemma_native_control6_semantic_prefix_boa_v2",
+        "semantic_prefix_capacity": 512,
+        "semantic_prefix_max_tokens": 512,
+    })
+    assert not native_control6_semantic_prefix_metadata_is_supported({
+        "semantic_prefix_schema_version": 2,
+        "semantic_prefix_contract": "gemma_native_control6_semantic_prefix_boa_v2",
+        "semantic_prefix_capacity": 1,
+        "semantic_prefix_max_tokens": True,
+    })

@@ -38,6 +38,7 @@ class LiveQwenHidden:
     qwen_token_id: int | None = None
     packet_token_index: int | None = None
     packet_token_count: int | None = None
+    producer_event: Any | None = None
 
 
 class LiveQwenSayStream:
@@ -87,6 +88,7 @@ class LiveQwenSayStream:
         self._published_ids: list[int] = []
         self._published_offsets: list[tuple[int, int]] = []
         self._published_hidden: list[torch.Tensor] = []
+        self._published_events: list[Any | None] = []
         self._qwen_cursor = 0
         self._last_qwen_ids: list[int] | None = None
         self._last_qwen_offsets: list[tuple[int, int]] | None = None
@@ -378,6 +380,11 @@ class LiveQwenSayStream:
         *,
         initial: bool = False,
     ) -> None:
+        owned_hidden = hidden.detach().clone()
+        producer_event = None
+        if owned_hidden.device.type == "cuda" and torch.cuda.is_available():
+            producer_event = torch.cuda.Event(enable_timing=False)
+            producer_event.record(torch.cuda.current_stream(device=owned_hidden.device))
         with self._condition:
             while not initial and self._tail_queue_size_locked() >= self.queue_capacity:
                 self._raise_terminal_locked()
@@ -391,11 +398,29 @@ class LiveQwenSayStream:
                 raise RuntimeError("live Qwen text token capacity exceeded")
             self._published_ids.append(int(token_id))
             self._published_offsets.append((int(offset[0]), int(offset[1])))
-            self._published_hidden.append(hidden.detach().clone())
+            self._published_hidden.append(owned_hidden)
+            self._published_events.append(producer_event)
             self._condition.notify_all()
 
-    def feed_piece(self, text_piece: str, gemma_hidden: Any) -> None:
+    def feed_piece(
+        self,
+        text_piece: str,
+        gemma_hidden: Any,
+        *,
+        producer_event: Any | None = None,
+    ) -> None:
         try:
+            device = getattr(gemma_hidden, "device", None)
+            if (
+                producer_event is not None
+                and device is not None
+                and getattr(device, "type", None) == "cuda"
+                and torch.cuda.is_available()
+            ):
+                stream = torch.cuda.current_stream(device=device)
+                stream.wait_event(producer_event)
+                if isinstance(gemma_hidden, torch.Tensor):
+                    gemma_hidden.record_stream(stream)
             self._feed_piece(text_piece, gemma_hidden)
         except BaseException as exc:
             self.fail(exc)
@@ -615,9 +640,19 @@ class LiveQwenSayStream:
             )
             self._raise_terminal_locked()
             if frame_id < len(self._published_hidden):
-                return LiveQwenHidden(self._published_hidden[frame_id], False)
+                return LiveQwenHidden(
+                    self._published_hidden[frame_id],
+                    False,
+                    qwen_token_id=int(self._published_ids[frame_id]),
+                    producer_event=self._published_events[frame_id],
+                )
             if self._closed and self._published_hidden:
-                return LiveQwenHidden(self._published_hidden[-1], True)
+                return LiveQwenHidden(
+                    self._published_hidden[-1],
+                    True,
+                    qwen_token_id=int(self._published_ids[-1]),
+                    producer_event=self._published_events[-1],
+                )
             raise RuntimeError("live Qwen stream closed before aligned text hidden was available")
 
     def cancel(self) -> None:
@@ -930,6 +965,7 @@ class TurnLocalQwenSayStream:
                     qwen_token_id=(int(token.token_id) if token is not None else None),
                     packet_token_index=(int(token.packet_token_index) if token is not None else None),
                     packet_token_count=(int(token.packet_token_count) if token is not None else None),
+                    producer_event=(token.packet.producer_event if token is not None else None),
                 )
             if self._closed:
                 raise RuntimeError("turn-local Qwen SAY stream closed before a text hidden was consumed")

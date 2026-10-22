@@ -1,14 +1,14 @@
-"""Prepare exact Gemma 4 text embeddings for the native Q2 listener.
+"""Prepare exact Gemma 4 text embeddings for native listener steps.
 
 The active Transformers 5.5.0 ``Gemma4TextModel.forward`` builds text inputs
 with ``embed_tokens``, ``get_per_layer_inputs`` and
 ``project_per_layer_inputs`` in that order. This module calls those same model
-methods and only adds the native kernel's physical Q2 padding contract.
+methods and applies the native kernel's even-width physical padding contract.
 """
 
 from __future__ import annotations
 
-from collections import deque
+from collections import OrderedDict, deque
 from dataclasses import dataclass
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
@@ -19,16 +19,18 @@ _EXPECTED_LAYERS = 35
 _EXPECTED_HIDDEN_SIZE = 1536
 _EXPECTED_PLE_SIZE = 256
 _PHYSICAL_Q = 2
+_MAX_LOGICAL_Q = 8
+_PREPARED_TRANSITION_CACHE_MAX_ENTRIES = 8
 
 
 @dataclass(frozen=True)
 class PreparedTokenInputs:
-    """Native-ready input for one physical Q2 call.
+    """Native-ready input for one physical listener call.
 
     ``per_layer_inputs`` is the *projected* PLE tensor returned by the
     Thinker's ``project_per_layer_inputs`` method, not the token-identity
-    intermediate. ``logical_q_lens`` has one 1-or-2 value per batch row and
-    tells native code whether the padded second slot may be committed.
+    intermediate. ``logical_q_lens`` records each row's valid prefix. Q1/Q2
+    retain physical Q2; Q3..Q8 use the next even physical width.
     """
 
     inputs_embeds: torch.Tensor
@@ -125,9 +127,9 @@ def _normalize_ids(input_ids: Any) -> torch.Tensor:
         ids = ids.unsqueeze(0)
     if ids.ndim != 2:
         raise ValueError(f"input_ids deve avere rank 1 o 2, ricevuto rank {ids.ndim}")
-    if ids.shape[0] <= 0 or ids.shape[1] not in (1, _PHYSICAL_Q):
+    if ids.shape[0] <= 0 or not 1 <= ids.shape[1] <= _MAX_LOGICAL_Q:
         raise ValueError(
-            "input_ids deve avere almeno una riga e una o due colonne Q; "
+            "input_ids deve avere almeno una riga e da una a otto colonne Q; "
             f"ricevuta shape {tuple(ids.shape)}"
         )
     return ids
@@ -186,8 +188,8 @@ def _normalize_logical_lengths(
         )
     normalized: list[int] = []
     for value in values:
-        if isinstance(value, bool) or not isinstance(value, int) or value not in (1, 2):
-            raise ValueError("ogni logical_q_len deve essere 1 o 2")
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= _MAX_LOGICAL_Q:
+            raise ValueError("ogni logical_q_len deve essere tra 1 e 8")
         if value > provided_q:
             raise ValueError("logical_q_len supera il numero di token forniti per riga")
         normalized.append(int(value))
@@ -197,7 +199,8 @@ def _normalize_logical_lengths(
 class UnifiedTokenAdapter:
     """Convert Thinker chat-template token IDs to exact Gemma text inputs.
 
-    The native listener accepts physical Q2 tensors. By default this adapter
+    Audio listener ticks remain physical Q2. Text appends may use Q3..Q8 and
+    are padded internally to the next even width. By default this adapter
     validates the production ABI requirements (CUDA BF16); ``require_cuda``
     can be disabled for small CPU contract tests using a fake text model.
     """
@@ -240,6 +243,11 @@ class UnifiedTokenAdapter:
             raise ValueError("pad_token_id fuori dal vocabolario Gemma")
 
         self._embedding_weight = _resolve_embedding_weight(self.language_model)
+        self._prepared_transition_cache: OrderedDict[
+            tuple[Any, ...], PreparedTokenInputs
+        ] = OrderedDict()
+        self._prepared_transition_cache_hits = 0
+        self._prepared_transition_cache_misses = 0
         if self.require_cuda and self._embedding_weight.device.type != "cuda":
             raise ValueError("adapter nativo richiede pesi Gemma su CUDA")
         if self.require_cuda and self._embedding_weight.dtype != torch.bfloat16:
@@ -249,6 +257,8 @@ class UnifiedTokenAdapter:
         self,
         input_ids: Any,
         logical_q_lens: int | Sequence[int] | torch.Tensor | None = None,
+        *,
+        protocol: str | None = None,
     ) -> PreparedTokenInputs:
         """Return exact model embeddings and fully projected PLE for physical Q2.
 
@@ -263,6 +273,30 @@ class UnifiedTokenAdapter:
             batch_size=batch_size,
             provided_q=provided_q,
         )
+        cache_key: tuple[Any, ...] | None = None
+        if protocol is not None:
+            if not isinstance(protocol, str) or not protocol.strip():
+                raise ValueError("protocol must be a non-empty string when caching a transition")
+            if batch_size == 1:
+                cache_key = (
+                    protocol.strip(),
+                    tuple(int(value) for value in ids[0].detach().cpu().tolist()),
+                    logical_lengths,
+                    str(self._embedding_weight.device),
+                    str(self._embedding_weight.dtype),
+                    id(self.language_model),
+                    id(self._embedding_weight),
+                )
+                cached = self._prepared_transition_cache.get(cache_key)
+                if cached is not None:
+                    self._prepared_transition_cache.move_to_end(cache_key)
+                    self._prepared_transition_cache_hits += 1
+                    return cached
+                self._prepared_transition_cache_misses += 1
+        physical_q = max(
+            _PHYSICAL_Q,
+            max(value + (value & 1) for value in logical_lengths),
+        )
 
         active_mask = torch.arange(provided_q, device=ids.device).unsqueeze(0) < torch.tensor(
             logical_lengths, device=ids.device
@@ -275,25 +309,25 @@ class UnifiedTokenAdapter:
 
         device = self._embedding_weight.device
         physical_ids = torch.full(
-            (batch_size, _PHYSICAL_Q),
+            (batch_size, physical_q),
             int(self.pad_token_id),
             dtype=torch.long,
             device=device,
         )
         ids = ids.to(device=device)
-        physical_ids[:, :provided_q] = ids
-        if provided_q == _PHYSICAL_Q:
-            for row, logical_q in enumerate(logical_lengths):
-                if logical_q == 1:
-                    physical_ids[row, 1] = int(self.pad_token_id)
+        copy_q = min(provided_q, physical_q)
+        physical_ids[:, :copy_q] = ids[:, :copy_q]
+        for row, logical_q in enumerate(logical_lengths):
+            if logical_q < physical_q:
+                physical_ids[row, logical_q:] = int(self.pad_token_id)
 
         with torch.inference_mode():
             inputs_embeds = self.language_model.embed_tokens(physical_ids)
             token_identity = self.language_model.get_per_layer_inputs(physical_ids, inputs_embeds)
             per_layer_inputs = self.language_model.project_per_layer_inputs(inputs_embeds, token_identity)
 
-        expected_embeds = (batch_size, _PHYSICAL_Q, _EXPECTED_HIDDEN_SIZE)
-        expected_ple = (batch_size, _PHYSICAL_Q, _EXPECTED_LAYERS, _EXPECTED_PLE_SIZE)
+        expected_embeds = (batch_size, physical_q, _EXPECTED_HIDDEN_SIZE)
+        expected_ple = (batch_size, physical_q, _EXPECTED_LAYERS, _EXPECTED_PLE_SIZE)
         if not isinstance(inputs_embeds, torch.Tensor) or tuple(inputs_embeds.shape) != expected_embeds:
             raise ValueError(
                 f"inputs_embeds Gemma inattesi: atteso {expected_embeds}, "
@@ -318,12 +352,27 @@ class UnifiedTokenAdapter:
         if self.require_cuda and (inputs_embeds.device.type != "cuda" or inputs_embeds.dtype != torch.bfloat16):
             raise ValueError("ABI listener richiede inputs_embeds e PLE CUDA BF16")
 
-        return PreparedTokenInputs(
+        prepared = PreparedTokenInputs(
             inputs_embeds=inputs_embeds.contiguous(),
             per_layer_inputs=per_layer_inputs.contiguous(),
             logical_q_lens=logical_lengths,
             padded_input_ids=physical_ids.contiguous(),
         )
+        if cache_key is not None:
+            self._prepared_transition_cache[cache_key] = prepared
+            self._prepared_transition_cache.move_to_end(cache_key)
+            while len(self._prepared_transition_cache) > _PREPARED_TRANSITION_CACHE_MAX_ENTRIES:
+                self._prepared_transition_cache.popitem(last=False)
+        return prepared
+
+    @property
+    def prepared_transition_cache_info(self) -> dict[str, int]:
+        return {
+            "size": len(self._prepared_transition_cache),
+            "hits": self._prepared_transition_cache_hits,
+            "misses": self._prepared_transition_cache_misses,
+            "max_entries": _PREPARED_TRANSITION_CACHE_MAX_ENTRIES,
+        }
 
     def prepare_sequence(self, input_ids: Any) -> Iterator[PreparedTokenInputs]:
         """Yield physical Q2 calls for a single arbitrary-length token sequence."""

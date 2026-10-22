@@ -149,11 +149,11 @@ def test_scenario_a_bargein_replan_criteria() -> None:
     assert latency_ms < 160.0, f"Barge-in latency {latency_ms} ms exceeds 160 ms"
     assert speaker.aborted is True
 
-    # Criterion 2: KV cache rolled back to unspoken position (rollback_kv_pos + 1 = 23),
-    # then sequentially advanced by turn close (6 tokens) and prebuffer (4 tokens) to 33
-    assert engine.forwarded_embeds[0]["cache_position"] == 23
-    assert engine.forwarded_embeds[1]["cache_position"] == 23 + len(manager.interrupted_model_to_user_audio_token_ids)
-    assert session.kv_cache.current_position == 33
+    # Criterion 2: the acknowledged cursor is exclusive and is used directly,
+    # then advanced by turn close (6 tokens) and prebuffer (4 tokens) to 32.
+    assert engine.forwarded_embeds[0]["cache_position"] == 22
+    assert engine.forwarded_embeds[1]["cache_position"] == 22 + len(manager.interrupted_model_to_user_audio_token_ids)
+    assert session.kv_cache.current_position == 32
 
     # Criterion 3: Unspoken lookahead tokens ("Duomo") were discarded
     assert len(session.speech_fifo) == 0

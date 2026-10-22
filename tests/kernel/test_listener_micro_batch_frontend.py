@@ -714,3 +714,178 @@ def test_reference_must_match_pinned_prior_frame_and_fail_without_state_mutation
     )
     with pytest.raises(ValueError, match="reference frame must be the immediate prior frame"):
         frontend.encode_batch(batch, states)
+
+
+def test_streaming_conformer_is_committed_only_with_the_frontend_transaction(
+    runtime_signature: RuntimeSignature,
+    capability: NativeBatchCapability,
+) -> None:
+    from transformers.models.gemma4 import modeling_gemma4
+    from transformers.models.gemma4.configuration_gemma4 import (
+        Gemma4AudioConfig,
+        Gemma4TextConfig,
+    )
+
+    from duplex_kernel.streaming_conformer import StreamingConformerAudioTower
+    from duplex_kernel.native_listener_microbatch import NativeGemmaListenerMicrobatch
+
+    torch.manual_seed(211)
+    audio_config = Gemma4AudioConfig(
+        hidden_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        subsampling_conv_channels=(128, 4),
+        conv_kernel_size=5,
+        attention_chunk_size=12,
+        attention_context_left=13,
+        attention_context_right=0,
+        output_proj_dims=1536,
+    )
+    text_config = Gemma4TextConfig(
+        hidden_size=1536,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        layer_types=["full_attention"],
+        rope_parameters={
+            "rope_type": "proportional",
+            "partial_rotary_factor": 0.25,
+            "rope_theta": 1_000_000.0,
+        },
+    )
+    audio_tower = modeling_gemma4.Gemma4AudioModel(audio_config).eval()
+    embed_audio = modeling_gemma4.Gemma4MultimodalEmbedder(audio_config, text_config).eval()
+    audio_tower = audio_tower.to(dtype=torch.bfloat16)
+    embed_audio = embed_audio.to(dtype=torch.bfloat16)
+    streaming = StreamingConformerAudioTower(
+        audio_tower,
+        embed_audio,
+        device="cpu",
+        dtype=torch.bfloat16,
+        max_sessions=4,
+    )
+
+    _, batch, states = _runtime_states_and_batch(
+        1, runtime_signature, capability, mel_frames=0, frame_id=0, include_reference=False
+    )
+    frontend = ListenerMicrobatchAudioFrontend(
+        _AudioTower(),
+        _production_extractor(),
+        device="cpu",
+        dtype=torch.bfloat16,
+        streaming_audio_tower=streaming,
+    )
+    prepared = frontend.encode_batch(batch, states)
+    assert streaming.committed_positions == ()
+    assert len(prepared.audio_tower_raw_tokens) == 1
+    assert prepared.streaming_audio_input_shape == (1, 8, 128)
+    assert prepared.audio_stream_cursors[0].session_id == batch.manifest.rows[0].session_id
+    validator = type("NativeValidator", (), {})()
+    validator.max_batch_size = 4
+    validator.capability = capability
+    validator._model_device = torch.device("cpu")
+    NativeGemmaListenerMicrobatch.validate_audio_frontend_metadata(
+        validator, batch.manifest, prepared
+    )
+    torch.testing.assert_close(
+        prepared.audio_soft_tokens[0],
+        embed_audio(prepared.audio_tower_raw_tokens[0].unsqueeze(0))[0],
+        rtol=0,
+        atol=0,
+    )
+    prepared.commit()
+    assert streaming.committed_positions == (("sid-0", 3, "epoch-sid-0", 1, 1),)
+
+    stale_streaming = StreamingConformerAudioTower(
+        audio_tower,
+        embed_audio,
+        device="cpu",
+        dtype=torch.bfloat16,
+        max_sessions=4,
+    )
+    _, batch, states = _runtime_states_and_batch(
+        2, runtime_signature, capability, mel_frames=0, frame_id=0, include_reference=False
+    )
+    frontend = ListenerMicrobatchAudioFrontend(
+        _AudioTower(),
+        _production_extractor(),
+        device="cpu",
+        dtype=torch.bfloat16,
+        streaming_audio_tower=stale_streaming,
+    )
+    prepared = frontend.encode_batch(batch, states)
+    states[1].sequence_position += 1
+    with pytest.raises(RuntimeError, match="session cursor changed before frontend commit"):
+        prepared.commit()
+    assert stale_streaming.committed_positions == ()
+
+
+def test_frontend_close_session_resets_only_when_idle():
+    class ResetRecorder:
+        def __init__(self):
+            self.closed = []
+
+        def prepare_batch(self, *_args, **_kwargs):
+            raise AssertionError("close_session must not prepare audio")
+
+        def reset(self, session_id):
+            self.closed.append(session_id)
+
+    streaming = ResetRecorder()
+    frontend = ListenerMicrobatchAudioFrontend(
+        _AudioTower(),
+        _production_extractor(),
+        device="cpu",
+        dtype=torch.float32,
+        streaming_audio_tower=streaming,
+    )
+    frontend.close_session("owned-session")
+    assert streaming.closed == ["owned-session"]
+
+    frontend._active_manifest_id = "pending-manifest"
+    with pytest.raises(RuntimeError, match="batch is prepared"):
+        frontend.close_session("other-session")
+    frontend._active_manifest_id = None
+    assert streaming.closed == ["owned-session"]
+
+    assert frontend._call_lock.acquire(blocking=False)
+    try:
+        with pytest.raises(RuntimeError, match="frontend is active"):
+            frontend.close_session("busy-session")
+    finally:
+        frontend._call_lock.release()
+    assert streaming.closed == ["owned-session"]
+
+
+def test_frontend_close_releases_streaming_tower_and_rejects_later_work():
+    class CloseRecorder:
+        def __init__(self):
+            self.close_count = 0
+
+        def prepare_batch(self, *_args, **_kwargs):
+            raise AssertionError("close must not prepare audio")
+
+        def close(self):
+            self.close_count += 1
+
+    streaming = CloseRecorder()
+    frontend = ListenerMicrobatchAudioFrontend(
+        _AudioTower(),
+        _production_extractor(),
+        device="cpu",
+        dtype=torch.float32,
+        streaming_audio_tower=streaming,
+    )
+    frontend.close()
+    frontend.close()
+    assert streaming.close_count == 1
+    assert frontend._workspace_buffer is None
+    assert frontend.streaming_audio_tower is None
+    with pytest.raises(RuntimeError, match="frontend is closed"):
+        frontend.close_session("closed-session")
+
+    active = ListenerMicrobatchAudioFrontend(
+        _AudioTower(), _production_extractor(), device="cpu", dtype=torch.float32
+    )
+    active._active_manifest_id = "pending-manifest"
+    with pytest.raises(RuntimeError, match="prepared batch"):
+        active.close()

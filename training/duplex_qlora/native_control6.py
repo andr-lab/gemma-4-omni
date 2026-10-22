@@ -13,6 +13,8 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from duplex_kernel.native_control6_phase import NATIVE_CONTROL6_NATIVE1540_PHASE_T_NAMES
+
 from .schema import ACTIONS
 
 SCHEMA_VERSION = 1
@@ -23,6 +25,12 @@ HIDDEN_NORM = "gemma_model.language_model.norm"
 HIDDEN_WIDTH = 1536
 PHASE_T_WIDTH = 4
 DELTA_INPUT_WIDTH = HIDDEN_WIDTH + PHASE_T_WIDTH
+NATIVE1540_PHASE_SCHEMA = {
+    "profile": "native1540",
+    "width": PHASE_T_WIDTH,
+    "names": list(NATIVE_CONTROL6_NATIVE1540_PHASE_T_NAMES),
+}
+NATIVE_CONTROL6_TRAINING_STATE_CONTEXT = "user_stream_q2_only"
 TICK_MS = 80
 VOCAB_SIZE = 262144
 BASE_WEIGHT_SOURCE = "lm_head.weight (tied to model.language_model.embed_tokens.weight)"
@@ -272,15 +280,38 @@ def load_native_control6_adapter(
     adapter_state = payload.get("adapter_state_dict")
     if not isinstance(adapter_state, dict):
         raise ValueError("native Control6 adapter has no adapter_state_dict")
+    adapter_a = adapter_state.get("lora_A")
+    if not isinstance(adapter_a, torch.Tensor) or adapter_a.ndim != 2:
+        raise ValueError("native Control6 adapter has no two-dimensional lora_A")
+    native1540_shape = (rank, DELTA_INPUT_WIDTH)
+    legacy_shape = (rank, HIDDEN_WIDTH)
+    if tuple(adapter_a.shape) == native1540_shape:
+        if payload.get("phase_schema") != NATIVE1540_PHASE_SCHEMA:
+            raise ValueError("native 1540-column Control6 adapter requires the exact native1540 phase schema")
+    elif tuple(adapter_a.shape) == legacy_shape:
+        if payload.get("phase_schema") not in (None, {}):
+            raise ValueError("legacy 1536-column Control6 adapter cannot claim a phase schema")
+    else:
+        raise ValueError(
+            f"native Control6 lora_A shape must be {legacy_shape} (legacy) or {native1540_shape} (native1540), "
+            f"got {tuple(adapter_a.shape)}"
+        )
     migrated_legacy_phase = model.load_adapter_state_dict(adapter_state)
     model.to(device=device)
     model.eval()
     report = payload.get("report")
     load_report = dict(report) if isinstance(report, dict) else {}
+    load_report["native_control6_phase_profile"] = "legacy" if migrated_legacy_phase else "native1540"
     if migrated_legacy_phase:
         load_report["phase_t_checkpoint_migration"] = (
             "legacy 1536-column LoRA A zero-extended in memory; phase columns are untrained"
         )
+        load_report["phase_t_checkpoint_migration_details"] = {
+            "phase_columns_initialized_zero": True,
+            "phase_columns_trained": False,
+            "source_input_width": HIDDEN_WIDTH,
+            "loaded_input_width": DELTA_INPUT_WIDTH,
+        }
     return model, load_report
 
 
@@ -293,7 +324,9 @@ __all__ = [
     "HIDDEN_SOURCE",
     "HIDDEN_WIDTH",
     "MODEL_ID",
+    "NATIVE1540_PHASE_SCHEMA",
     "NativeControl6LoRA",
+    "PHASE_T_WIDTH",
     "TICK_MS",
     "TOKEN_ID_TO_STRING",
     "VOCAB_SIZE",

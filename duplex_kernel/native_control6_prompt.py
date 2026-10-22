@@ -5,7 +5,11 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 
-NATIVE_CONTROL6_PREFIX_MAX_TOKENS = 291
+# The old semantic checkpoint was trained with a 291-token prefix bound.  The
+# runtime now accepts longer actual prefixes while retaining the canonical
+# prime shape at 291; metadata validation below keeps older v2 checkpoints
+# compatible.
+NATIVE_CONTROL6_PREFIX_MAX_TOKENS = 512
 NATIVE_CONTROL6_PREFIX_SCHEMA_VERSION = 2
 NATIVE_CONTROL6_PREFIX_CONTRACT = "gemma_native_control6_semantic_prefix_boa_v2"
 NATIVE_CONTROL6_MESSAGE_MAX_TOKENS = 80
@@ -34,6 +38,23 @@ def _as_token_ids(value: Any) -> list[int]:
             raise ValueError("native Control6 prefix builder accepts exactly one conversation")
         value = value[0]
     return [int(item) for item in value]
+
+
+def validate_native_control6_prefix_ids(
+    prefix_ids: Any, *, boa_token_id: int
+) -> tuple[int, ...]:
+    """Validate the actual token-only prefix against the runtime import bound."""
+    if isinstance(boa_token_id, bool) or not isinstance(boa_token_id, int) or boa_token_id < 0:
+        raise ValueError("boa_token_id must be a non-negative integer")
+    ids = _as_token_ids(prefix_ids)
+    if not 1 <= len(ids) <= NATIVE_CONTROL6_PREFIX_MAX_TOKENS:
+        raise ValueError(
+            "native Control6 semantic prefix length must be in [1,"
+            f"{NATIVE_CONTROL6_PREFIX_MAX_TOKENS}], got {len(ids)}"
+        )
+    if ids[-1] != boa_token_id:
+        raise ValueError("native Control6 semantic prefix must end with the real BOA token")
+    return tuple(ids)
 
 
 def _encode(tokenizer: Any, text: str) -> list[int]:
@@ -112,7 +133,7 @@ def build_native_control6_prefix_ids(
     audio_marker: str,
     boa_token_id: int,
 ) -> tuple[list[int], int]:
-    """Return chat-template IDs ending at the real BOA token, bounded to 291.
+    """Return chat-template IDs ending at the real BOA token, bounded to 512.
 
     Oldest completed messages are removed first when the full role/template
     overhead would exceed the native listener's fixed semantic-prefix capacity.
@@ -150,11 +171,9 @@ def build_native_control6_prefix_ids(
     while len(prefix_ids) > NATIVE_CONTROL6_PREFIX_MAX_TOKENS and len(messages) > 2:
         messages.pop(1)
         prefix_ids = serialize(messages)
-    if len(prefix_ids) > NATIVE_CONTROL6_PREFIX_MAX_TOKENS:
-        raise ValueError(
-            "native Control6 system+audio prefix exceeds fixed capacity: "
-            f"{len(prefix_ids)}>{NATIVE_CONTROL6_PREFIX_MAX_TOKENS}"
-        )
+    prefix_ids = list(validate_native_control6_prefix_ids(
+        prefix_ids, boa_token_id=boa_id
+    ))
     return prefix_ids, len(prefix_ids)
 
 
@@ -200,8 +219,6 @@ def validate_native_control6_semantic_prefix_metadata(payload: Mapping[str, Any]
     expected = {
         "semantic_prefix_schema_version": NATIVE_CONTROL6_PREFIX_SCHEMA_VERSION,
         "semantic_prefix_contract": NATIVE_CONTROL6_PREFIX_CONTRACT,
-        "semantic_prefix_capacity": NATIVE_CONTROL6_PREFIX_MAX_TOKENS,
-        "semantic_prefix_max_tokens": NATIVE_CONTROL6_PREFIX_MAX_TOKENS,
         "semantic_prefix_context_conditioned": True,
     }
     result: dict[str, Any] = {}
@@ -214,6 +231,23 @@ def validate_native_control6_semantic_prefix_metadata(payload: Mapping[str, Any]
                 f"checkpoint={top_value!r}, report={report_value!r}, expected={wanted!r}"
             )
         result[key] = top_value
+    for key in ("semantic_prefix_capacity", "semantic_prefix_max_tokens"):
+        top_value = payload.get(key)
+        report_value = report.get(key)
+        if (
+            isinstance(top_value, bool)
+            or not isinstance(top_value, int)
+            or not 1 <= top_value <= NATIVE_CONTROL6_PREFIX_MAX_TOKENS
+            or report_value != top_value
+        ):
+            raise ValueError(
+                f"native Control6 semantic-prefix metadata mismatch for {key}: "
+                f"checkpoint={top_value!r}, report={report_value!r}, runtime_max="
+                f"{NATIVE_CONTROL6_PREFIX_MAX_TOKENS}"
+            )
+        result[key] = top_value
+    if result["semantic_prefix_capacity"] != result["semantic_prefix_max_tokens"]:
+        raise ValueError("native Control6 semantic-prefix capacity/max_tokens differ")
     top_boa = payload.get("semantic_prefix_boa_token_id")
     report_boa = report.get("semantic_prefix_boa_token_id")
     if not isinstance(top_boa, int) or isinstance(top_boa, bool) or top_boa < 0 or report_boa != top_boa:
@@ -230,6 +264,26 @@ def validate_native_control6_semantic_prefix_metadata(payload: Mapping[str, Any]
     return result
 
 
+def native_control6_semantic_prefix_metadata_is_supported(
+    payload: Any,
+) -> bool:
+    """Whether validated v2 training bounds fit the current runtime capacity."""
+    if not isinstance(payload, Mapping):
+        return False
+    capacity = payload.get("semantic_prefix_capacity")
+    max_tokens = payload.get("semantic_prefix_max_tokens")
+    return bool(
+        payload.get("semantic_prefix_schema_version") == NATIVE_CONTROL6_PREFIX_SCHEMA_VERSION
+        and payload.get("semantic_prefix_contract") == NATIVE_CONTROL6_PREFIX_CONTRACT
+        and isinstance(capacity, int)
+        and not isinstance(capacity, bool)
+        and 1 <= capacity <= NATIVE_CONTROL6_PREFIX_MAX_TOKENS
+        and isinstance(max_tokens, int)
+        and not isinstance(max_tokens, bool)
+        and max_tokens == capacity
+    )
+
+
 __all__ = [
     "NATIVE_CONTROL6_INSTRUCTIONS_MAX_TOKENS",
     "NATIVE_CONTROL6_MESSAGE_MAX_TOKENS",
@@ -240,5 +294,7 @@ __all__ = [
     "build_native_control6_prefix_ids",
     "build_native_control6_prefix_messages",
     "select_native_control6_replay_suffix",
+    "validate_native_control6_prefix_ids",
+    "native_control6_semantic_prefix_metadata_is_supported",
     "validate_native_control6_semantic_prefix_metadata",
 ]

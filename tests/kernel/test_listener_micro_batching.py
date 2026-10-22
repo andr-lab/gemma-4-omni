@@ -906,7 +906,7 @@ def test_mixed_native_output_views_apply_one_head_forward_to_per_session_turn_co
             speaker_active=False,
             generation_id=turn_generations[index],
             legal_actions=("LISTEN", "SPEAK"),
-            native_control_phase_t=(0.0, 0.0, 0.0, 0.0),
+            native_control_phase_t=(0.1 + index, 0.2, 0.3, 0.4),
             native_listener_generation=7,
         )
         context = PolicyPreHeadContext(
@@ -940,7 +940,9 @@ def test_mixed_native_output_views_apply_one_head_forward_to_per_session_turn_co
         for index, row in enumerate(batch.manifest.rows)
     )
     contexts = tuple(frame.policy_context for frame in batch.frames)
-    batch_policy = GemmaNativeControl6BatchPolicy(adapter, checkpoint_path="cpu-test.pt")
+    batch_policy = GemmaNativeControl6BatchPolicy(
+        adapter, checkpoint_path="cpu-test.pt", capture_debug_inputs=True,
+    )
 
     decisions = batch_policy.step_native_output_views(sources, contexts)
 
@@ -953,6 +955,16 @@ def test_mixed_native_output_views_apply_one_head_forward_to_per_session_turn_co
         assert provenance["listener_generation_id"] == 7
         assert provenance["turn_generation_id"] == context.tick_id[1]
         assert decision.session == context.policy_input.session_id
+        debug_input = decision.diagnostics["_native_control6_debug_input"]
+        index = int(context.policy_input.session_id[-1])
+        assert np.array_equal(
+            debug_input["hidden"], output.tensor[index, 0, :].float().cpu().numpy()
+        )
+        assert np.array_equal(
+            debug_input["phase_t"], np.asarray((0.1 + index, 0.2, 0.3, 0.4), dtype=np.float32)
+        )
+        assert debug_input["frame_id"] == context.policy_input.frame_id
+        assert debug_input["generation_id"] == context.policy_input.generation_id
     for index, context in enumerate(contexts):
         next_turn_generation = context.tick_id[1] + 1
         next_state = replace(

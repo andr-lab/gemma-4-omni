@@ -333,8 +333,8 @@ class UnifiedNativeDecoder:
         return bool(await _resolve(stop_check())) if stop_check is not None else False
 
     async def _forward(self, token_ids: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
-        if not token_ids or len(token_ids) > 2:
-            raise ValueError("forward_tokens accetta gruppi da uno o due token")
+        if not token_ids or len(token_ids) > 8:
+            raise ValueError("forward_tokens accetta gruppi da uno a otto token")
         result = await _resolve(self.forward_tokens(list(token_ids)))
         if not isinstance(result, (tuple, list)) or len(result) != 2:
             raise TypeError("forward_tokens deve restituire (logits, final_hidden)")
@@ -397,7 +397,7 @@ class UnifiedNativeDecoder:
         hidden: torch.Tensor | None = None
         source_forward_started_ns = decode_started_ns
         source_logits_ready_ns = decode_started_ns
-        for start in range(0, len(transition_ids), 2):
+        for start in range(0, len(transition_ids), 8):
             if await self._should_stop(stop_check):
                 termination_reason = "cancelled"
                 return self._result(
@@ -409,7 +409,7 @@ class UnifiedNativeDecoder:
                     len(transition_ids),
                     first_logits_event,
                 )
-            group = transition_ids[start : start + 2]
+            group = transition_ids[start : start + 8]
             source_forward_started_ns = int(self.monotonic_ns())
             logits, hidden = await self._forward(group)
             source_logits_ready_ns = int(self.monotonic_ns())

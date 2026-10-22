@@ -27,6 +27,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 import numpy as np
+import torch
 
 from duplex_kernel.config import (
     DEFAULT_VOICE,
@@ -60,33 +61,55 @@ GEMMA_SPEECH_TOKENS_PER_TICK = 2
 
 @dataclass(frozen=True)
 class SpokenTokenPacket:
-    """One visible SAY delta with its exact post-token Gemma state and KV cursor."""
+    """One visible SAY delta and its exclusive committed Gemma KV cursor."""
 
     token_id: int
     text_piece: str
     gemma_hidden_1536: Any = field(repr=False, compare=False)
-    kv_position: int
+    exclusive_kv_cursor: int
+    producer_event: Any | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if isinstance(self.token_id, bool) or int(self.token_id) < 0:
             raise ValueError("Gemma token_id deve essere non negativo")
         if not isinstance(self.text_piece, str):
             raise TypeError("text_piece deve essere string")
-        if isinstance(self.kv_position, bool) or int(self.kv_position) < 0:
-            raise ValueError("kv_position deve essere non negativo")
+        if isinstance(self.exclusive_kv_cursor, bool) or int(self.exclusive_kv_cursor) < 0:
+            raise ValueError("exclusive_kv_cursor deve essere non negativo")
         shape = tuple(getattr(self.gemma_hidden_1536, "shape", ()))
         if shape != (1, 1536):
             raise ValueError(f"gemma_hidden_1536 deve avere shape (1,1536), ricevuto {shape}")
         hidden = self.gemma_hidden_1536
+        producer_event = self.producer_event
         detach = getattr(hidden, "detach", None)
         if callable(detach):
             hidden = detach()
             clone = getattr(hidden, "clone", None)
             if callable(clone):
                 hidden = clone()
+        # Record after the owned packet copy on the stream that actually
+        # enqueued it. Consumers can wait on this event without fencing the
+        # producer thread or synchronizing an unrelated CUDA stream.
+        device = getattr(hidden, "device", None)
+        if (
+            producer_event is not None
+            and device is not None
+            and getattr(device, "type", None) == "cuda"
+            and torch.cuda.is_available()
+        ):
+            torch.cuda.current_stream(device=device).wait_event(producer_event)
+            producer_event = None
+        if (
+            device is not None
+            and getattr(device, "type", None) == "cuda"
+            and torch.cuda.is_available()
+        ):
+            producer_event = torch.cuda.Event(enable_timing=False)
+            producer_event.record(torch.cuda.current_stream(device=device))
         object.__setattr__(self, "token_id", int(self.token_id))
-        object.__setattr__(self, "kv_position", int(self.kv_position))
+        object.__setattr__(self, "exclusive_kv_cursor", int(self.exclusive_kv_cursor))
         object.__setattr__(self, "gemma_hidden_1536", hidden)
+        object.__setattr__(self, "producer_event", producer_event)
 
 
 @dataclass(frozen=True)
@@ -164,6 +187,28 @@ class TurnLocalSpeechFIFO:
             self._last_vocalized_kv_position = None
             self._vocalized_text_parts.clear()
             self._peak_depth = 0
+            self._condition.notify_all()
+
+    def begin_segment(self, *, generation_id: int) -> None:
+        """Reopen the same generation FIFO for the next fully drained TTS unit.
+
+        The cumulative Qwen-forward cursor and text remain intact across units;
+        only the per-unit EOS/initial-token state is reset. This is deliberately
+        stricter than ``begin_turn`` so a late token from one TTS unit cannot be
+        consumed as the next unit's prefix.
+        """
+        if isinstance(generation_id, bool) or int(generation_id) < 0:
+            raise ValueError("generation_id deve essere non negativo")
+        with self._condition:
+            self._raise_generation(generation_id)
+            if self._frozen:
+                raise RuntimeError("turn-local speech FIFO snapshot is frozen")
+            if not self._closed:
+                raise RuntimeError("turn-local speech FIFO segment must be closed before reopening")
+            if self._entries or self._inflight is not None:
+                raise RuntimeError("previous turn-local speech FIFO segment is not fully drained")
+            self._closed = False
+            self._initial_token_taken = False
             self._condition.notify_all()
 
     def put(
@@ -279,9 +324,9 @@ class TurnLocalSpeechFIFO:
             cursor = None
             if head.next_token_index == len(head.qwen_token_ids):
                 self._entries.popleft()
-                self._last_vocalized_kv_position = head.packet.kv_position
+                self._last_vocalized_kv_position = head.packet.exclusive_kv_cursor
                 self._vocalized_text_parts.append(head.packet.text_piece)
-                cursor = head.packet.kv_position
+                cursor = head.packet.exclusive_kv_cursor
             self._inflight = None
             self._condition.notify_all()
             return cursor
@@ -316,6 +361,10 @@ class TurnLocalSpeechFIFO:
             self._condition.notify_all()
             return cursor
 
+    def clear_unspoken_on_bargein(self) -> int | None:
+        """Alias per clear() per conformità con il protocollo nativo di barge-in."""
+        return self.clear()
+
 
 class GemmaTokenTickPacer:
     """Hard per-80ms-window token budget with no catch-up burst after delays."""
@@ -342,7 +391,30 @@ class GemmaTokenTickPacer:
         self._total_acquired = 0
         self._peak_tokens_in_tick = 0
 
-    async def acquire(self, *, stop_check: Callable[[], bool] | None = None) -> None:
+    async def acquire(
+        self,
+        *,
+        vocal_started: bool,
+        fifo_pending_packets: int,
+        stop_check: Callable[[], bool] | None = None,
+    ) -> float:
+        if isinstance(fifo_pending_packets, bool) or not isinstance(fifo_pending_packets, int):
+            raise TypeError("fifo_pending_packets deve essere un intero")
+        if fifo_pending_packets < 0:
+            raise ValueError("fifo_pending_packets non può essere negativo")
+        if stop_check is not None and stop_check():
+            raise RuntimeError("Gemma speech token pacing cancelled")
+        if not vocal_started or fifo_pending_packets < 2:
+            # A dry voice path or a starved packet queue begins a fresh pacing
+            # window when speech production resumes. Never carry unused quota
+            # or a partial wait across starvation.
+            self._epoch = float(self._monotonic())
+            self._tick_index = 0
+            self._tokens_in_tick = 0
+            self._total_acquired += 1
+            return 0.0
+
+        total_sleep_s = 0.0
         while True:
             now = float(self._monotonic())
             tick = max(0, int((now - self._epoch) // self.tick_s))
@@ -357,13 +429,15 @@ class GemmaTokenTickPacer:
                 self._peak_tokens_in_tick = max(
                     self._peak_tokens_in_tick, self._tokens_in_tick
                 )
-                return
+                return total_sleep_s
             next_boundary = self._epoch + (self._tick_index + 1) * self.tick_s
             if stop_check is not None and stop_check():
                 raise RuntimeError("Gemma speech token pacing cancelled")
-            result = self._sleep(max(0.0, next_boundary - now))
+            duration_s = max(0.0, next_boundary - now)
+            result = self._sleep(duration_s)
             if inspect.isawaitable(result):
                 await result
+            total_sleep_s += duration_s
 
     def snapshot(self) -> dict[str, int]:
         return {
@@ -408,12 +482,57 @@ class CompletedUtteranceAudioSnapshot:
     pcm_bytes: bytes = field(repr=False)
 
 
+class DuplexSpeakerProxy:
+    """Proxy per il controllo del playout e backchannel TTS."""
+
+    def __init__(self, session: "DuplexSession") -> None:
+        self._session = session
+
+    def abort_playback(self) -> None:
+        self._session.stop_requested = True
+        self._session.active_response = False
+
+    def enqueue_backchannel_tts(self, bc_tokens: Any = None, bc_hiddens: Any = None) -> None:
+        pass
+
+
+class DuplexKVCacheProxy:
+    """Proxy per la vista unificata e rollabile della KV cache."""
+
+    def __init__(self, session: "DuplexSession") -> None:
+        self._session = session
+        self._current_position: int = 0
+
+    @property
+    def current_position(self) -> int:
+        return self._current_position
+
+    @current_position.setter
+    def current_position(self, pos: int) -> None:
+        self._current_position = int(pos)
+
+    def rollback_to(self, target_pos: int) -> None:
+        self._current_position = int(target_pos)
+        if hasattr(self._session, "turn_kv") and self._session.turn_kv.kv is not None:
+            if hasattr(self._session.turn_kv, "truncate_to_position"):
+                self._session.turn_kv.truncate_to_position(target_pos)
+            elif target_pos <= getattr(self._session.turn_kv, "prefix_len", 0):
+                self._session.turn_kv.truncate_to_prefix()
+
+
 @dataclass
 class DuplexSession:
     """Stato di una sessione duplex (KV ownership + turnhead + history)."""
 
     session_id: str
     created_at: float = field(default_factory=time.time)
+    speaker: Any = None
+    kv_cache: Any = None
+    turn_start_kv_position: int | None = field(
+        default=None, kw_only=True, repr=False, compare=False
+    )
+    bargein_prebuffer_embeds: list[Any] = field(default_factory=list, repr=False, compare=False)
+    user_speech_active: bool = False
     # KV ownership
     thinker_ctx: ThinkerContext = field(default_factory=ThinkerContext)
     talker_prefix: TalkerPrefixKV = field(default_factory=TalkerPrefixKV)
@@ -522,6 +641,11 @@ class DuplexSession:
     policy_audio_min_sample_id: int = 0
     policy_audio_source_cutoff_sample_id: int | None = field(default=None, repr=False, compare=False)
     policy_audio_source_generation_id: int | None = field(default=None, repr=False, compare=False)
+    # One-frame causal user PCM context for the native1540 Control6 profile.
+    _native_control6_current_user_pcm_frame_id: int | None = field(default=None, init=False, repr=False, compare=False)
+    _native_control6_current_user_pcm: np.ndarray | None = field(default=None, init=False, repr=False, compare=False)
+    _native_control6_previous_user_pcm_frame_id: int | None = field(default=None, init=False, repr=False, compare=False)
+    _native_control6_previous_user_pcm: np.ndarray | None = field(default=None, init=False, repr=False, compare=False)
     _completed_utterance_audio_snapshot: CompletedUtteranceAudioSnapshot | None = field(
         default=None, init=False, repr=False, compare=False
     )
@@ -567,6 +691,18 @@ class DuplexSession:
             anchor_first_input=FIRST_INPUT_SCHEDULER_ANCHOR_ENABLED,
             ready_frame_dispatch=READY_FRAME_SCHEDULER_DISPATCH_ENABLED,
         )
+        if self.speaker is None:
+            self.speaker = DuplexSpeakerProxy(self)
+        if self.kv_cache is None:
+            self.kv_cache = DuplexKVCacheProxy(self)
+
+    @property
+    def assistant_speaking(self) -> bool:
+        return bool(self.active_response)
+
+    @assistant_speaking.setter
+    def assistant_speaking(self, value: bool) -> None:
+        self.active_response = bool(value)
 
     def touch(self) -> None:
         self.last_activity = time.time()
@@ -678,6 +814,10 @@ class DuplexSession:
             with self._generation_lock:
                 if self._closed:
                     raise RuntimeError("sessione già chiusa")
+                model_cursor = getattr(self.kv_cache, "current_position", None)
+                self.turn_start_kv_position = (
+                    int(model_cursor) if model_cursor is not None else None
+                )
                 self.policy_response_pending = False
                 newer_pending_owner = (
                     None
@@ -798,6 +938,47 @@ class DuplexSession:
                 self.active_response = False
                 self.policy_response_pending = False
                 self.control_state = ControlState.LISTENING
+
+    def observe_native_control6_user_pcm(
+        self, frame_id: int, pcm: np.ndarray
+    ) -> tuple[np.ndarray | None, int | None]:
+        """Advance the native1540 snapshot once and return causal t-1 PCM."""
+        if isinstance(frame_id, bool) or not isinstance(frame_id, int) or frame_id < 0:
+            raise ValueError("native Control6 frame_id must be a non-negative integer")
+        current = np.asarray(pcm, dtype=np.float32)
+        if current.ndim != 1 or not current.size or not np.isfinite(current).all():
+            raise ValueError("native Control6 user PCM must be a finite non-empty mono frame")
+        with self._generation_lock:
+            if self._closed:
+                raise RuntimeError("native Control6 PCM snapshot belongs to a closed session")
+            last_id = self._native_control6_current_user_pcm_frame_id
+            if last_id == frame_id:
+                if not np.array_equal(self._native_control6_current_user_pcm, current):
+                    raise ValueError("native Control6 PCM changed for an already observed frame")
+                if self._native_control6_previous_user_pcm_frame_id == frame_id - 1:
+                    return self._native_control6_previous_user_pcm.copy(), frame_id - 1
+                return None, None
+            if last_id is not None and frame_id <= last_id:
+                raise ValueError("native Control6 PCM frame IDs must advance monotonically")
+            if last_id is not None and frame_id == last_id + 1:
+                self._native_control6_previous_user_pcm = self._native_control6_current_user_pcm
+                self._native_control6_previous_user_pcm_frame_id = last_id
+            else:
+                self._native_control6_previous_user_pcm = None
+                self._native_control6_previous_user_pcm_frame_id = None
+            self._native_control6_current_user_pcm = current.copy()
+            self._native_control6_current_user_pcm_frame_id = frame_id
+            previous = self._native_control6_previous_user_pcm
+            previous_id = self._native_control6_previous_user_pcm_frame_id
+            return (previous.copy(), previous_id) if previous is not None else (None, None)
+
+    def reset_native_control6_user_pcm(self) -> None:
+        """Clear the one-frame phase snapshot at a stream/session boundary."""
+        with self._generation_lock:
+            self._native_control6_current_user_pcm_frame_id = None
+            self._native_control6_current_user_pcm = None
+            self._native_control6_previous_user_pcm_frame_id = None
+            self._native_control6_previous_user_pcm = None
 
     def append_policy_audio(
         self,
@@ -1521,6 +1702,7 @@ class DuplexSession:
             self.policy_audio_frames.clear()
             self.policy_audio_frame_ids.clear()
             self.policy_audio_samples = 0
+            self.reset_native_control6_user_pcm()
             self.pending_audio_history_archive = None
             self.queued_audio_history_archives.clear()
             self.response_id = None
@@ -1650,6 +1832,8 @@ class SessionManager:
         max_sessions: int | None = None,
         session_idle_timeout_s: float = 600.0,
         session_id_factory: Callable[[], str] | None = None,
+        gemma_engine: Any = None,
+        interrupted_model_to_user_audio_token_ids: tuple[int, ...] | None = None,
     ) -> None:
         if max_sessions is not None:
             if isinstance(max_sessions, bool) or not isinstance(max_sessions, int):
@@ -1660,6 +1844,11 @@ class SessionManager:
         self.max_sessions = max_sessions
         self.idle_timeout_s = session_idle_timeout_s
         self._session_id_factory = session_id_factory or (lambda: uuid.uuid4().hex)
+        self.gemma_engine = gemma_engine
+        self.interrupted_model_to_user_audio_token_ids = (
+            interrupted_model_to_user_audio_token_ids
+            or (107, 108, 106, 1645, 108, 256000)
+        )
         self._lock = threading.Lock()
 
     def create_session(
@@ -1756,5 +1945,92 @@ class SessionManager:
         with self._lock:
             return list(self.sessions.values())
 
+    def _lookup_session(self, session_id: Any) -> DuplexSession:
+        state = self.sessions.get(session_id)
+        if state is None:
+            state = self.sessions.get(str(session_id))
+        if state is None:
+            try:
+                state = self.sessions.get(int(session_id))
+            except (ValueError, TypeError):
+                pass
+        if state is None:
+            raise KeyError(f"Session {session_id} not found")
+        return state
 
-__all__ = ["DuplexSession", "GenerationToken", "SessionManager", "SpeakerSegmentState"]
+    def handle_bargein_yield(self, session_id: Any) -> None:
+        """Eseguito istantaneamente quando la policy predice YIELD durante il parlato dell'assistente."""
+        state = self._lookup_session(session_id)
+
+        # 1. Ferma il playout audio di Qwen3-TTS
+        state.speaker.abort_playback()
+
+        # 2. Recupera l'esatta posizione KV dell'ultimo token realmente udito dall'utente
+        rollback_kv_pos = state.speech_fifo.clear_unspoken_on_bargein()
+        if rollback_kv_pos is not None:
+            state.kv_cache.rollback_to(rollback_kv_pos)
+        elif state.turn_start_kv_position is not None:
+            state.kv_cache.rollback_to(state.turn_start_kv_position)
+        state.turn_start_kv_position = None
+
+        # 3. Chiude il turno parziale del modello e apre il nuovo blocco audio utente
+        if self.gemma_engine is not None:
+            interrupted_turn_close_embeds = self.gemma_engine.embed_tokens(
+                self.interrupted_model_to_user_audio_token_ids  # [<end_of_turn>, \n, <start_of_turn>, user, \n, <|audio_boa|>]
+            )
+            close_len = (
+                int(interrupted_turn_close_embeds.shape[1])
+                if hasattr(interrupted_turn_close_embeds, "shape")
+                else len(self.interrupted_model_to_user_audio_token_ids)
+            )
+            self.gemma_engine.forward_embeds_step(
+                session_id=session_id,
+                inputs_embeds=interrupted_turn_close_embeds,
+                cache_position=state.kv_cache.current_position,
+            )
+            state.kv_cache.current_position += close_len
+
+            # 4. Inietta i frame Q=2 di inizio barge-in già catturati negli ultimi 1-2 tick (160ms)
+            if state.bargein_prebuffer_embeds:
+                prebuffer = torch.cat(state.bargein_prebuffer_embeds, dim=1)
+                prebuffer_len = int(prebuffer.shape[1]) if hasattr(prebuffer, "shape") else 0
+                self.gemma_engine.forward_embeds_step(
+                    session_id=session_id,
+                    inputs_embeds=prebuffer,
+                    cache_position=state.kv_cache.current_position,
+                )
+                state.kv_cache.current_position += prebuffer_len
+                state.bargein_prebuffer_embeds.clear()
+
+        state.assistant_speaking = False
+        state.user_speech_active = True
+
+    def handle_ephemeral_backchannel(self, session_id: Any) -> tuple[Any, Any] | None:
+        """Genera un backchannel di 1-2 token senza spezzare la sequenza audio utente in KV cache."""
+        state = self._lookup_session(session_id)
+        saved_audio_kv_pos = state.kv_cache.current_position
+
+        # Fork temporaneo: chiude virtualmente l'audio, genera 2 token (es. "Capisco.") e li manda a Qwen3-TTS
+        bc_tokens, bc_hiddens = None, None
+        if self.gemma_engine is not None:
+            bc_tokens, bc_hiddens = self.gemma_engine.generate_ephemeral_backchannel(
+                session_id=session_id,
+                start_kv_pos=saved_audio_kv_pos,
+                max_tokens=2,
+            )
+        state.speaker.enqueue_backchannel_tts(bc_tokens, bc_hiddens)
+
+        # Rollback immediato della KV cache alla posizione dell'audio utente!
+        state.kv_cache.rollback_to(saved_audio_kv_pos)
+        return bc_tokens, bc_hiddens
+
+
+__all__ = [
+    "DuplexKVCacheProxy",
+    "DuplexSession",
+    "DuplexSpeakerProxy",
+    "GenerationToken",
+    "SessionManager",
+    "SpeakerSegmentState",
+    "TurnLocalSpeechFIFO",
+]

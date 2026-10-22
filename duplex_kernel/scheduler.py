@@ -87,6 +87,11 @@ class DuplexTick:
     microbatch_native_submit_ms: float | None = None
     microbatch_native_cuda_ms: float | None = None
     microbatch_native_control6_raw_score_ms: float | None = None
+    microbatch_decision_view_fork_count: int | None = None
+    microbatch_decision_view_replayed_q2_count: int | None = None
+    microbatch_decision_view_cache_hit: bool | None = None
+    microbatch_decision_view_ms: float | None = None
+    microbatch_decision_view_context_mode: str | None = None
     microbatch_native_output_health_ms: float | None = None
     microbatch_native_output_health_checked: bool | None = None
     microbatch_native_output_health_status: str | None = None

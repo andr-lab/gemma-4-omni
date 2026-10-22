@@ -1,0 +1,9 @@
+Promoted H3000 live runtime with sampled codec-EOS continuation fix.
+Checkpoint: checkpoints/native_control6_gemma_native_rows_rank16_control6_temporal100_candidate_h_3000_20261021.pt
+Checkpoint phase profile: native1540 (1536 listener hidden + 4 causal phase values).
+Runtime source: artifacts/runtime/control6_runtime_pendingpcm_phaseonly_q2cachemeta_build14_stableturn_q2_context_h3000_eos_20261021
+Native provider and wrapper DSO: artifacts/runtime/libgemma4_listener_microbatch_prefix512_q2cachemeta_20261021_build11_text_health.so
+Stable-turn policy Q2 context: enabled for this production profile; implementation default remains off elsewhere.
+Attention/RMS: NATIVE_SPLITK_GQA / NATIVE_EXACT.
+Live Talker contract: text-derived T_gen is an estimate; after text EOS is consumed and FIFO drained, decode real codec codes up to sampled EOS or the configured hard cap. No EOS is synthesized.
+Validation: focused CPU tests plus source/env/checkpoint preflight, then a one-turn real TTS smoke and one continuous replay.

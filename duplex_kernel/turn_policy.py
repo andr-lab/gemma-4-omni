@@ -43,6 +43,7 @@ class PolicyInput:
     user_pcm: np.ndarray | None
     speaker_active: bool
     generation_id: int
+    peer_turn_active: bool = False
     listener_hidden: Any | None = None
     speaker_segment_id: str | None = None
     listener_audio_queries: Any | None = None
@@ -64,6 +65,10 @@ class PolicyInput:
     # Native Control6 phase_t is constructed from causal assistant t-1/t-2
     # references plus the current user 80 ms frame. It feeds only the LoRA delta.
     native_control_phase_t: Any | None = None
+    # Exact assistant reference used by the native1540 phase helper. The policy
+    # uses it only to validate whether the already-built log-ratio is usable.
+    native_control_assistant_pcm_prior: Any | None = None
+    native_control_assistant_prior_frame_id: int | None = None
     # Optional immutable six-logit snapshot scored once for a native listener
     # microbatch. Native Control6 still applies this row's live legal mask.
     native_control6_raw_scores: Any | None = None
@@ -72,6 +77,10 @@ class PolicyInput:
     native_listener_generation: int | None = None
     # True only after the scheduler verifies exact-zero user and self-reference PCM.
     native_control_no_input_tick: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.peer_turn_active, bool):
+            raise TypeError("peer_turn_active must be bool")
 
 
 @dataclass(frozen=True)

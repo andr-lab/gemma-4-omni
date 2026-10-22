@@ -29,6 +29,7 @@ from duplex_kernel.gemma_representation import (
     build_audio_placeholder_inputs,
     interleave_duplex_mel,
 )
+from duplex_kernel.native_control6_prompt import validate_native_control6_prefix_ids
 from duplex_kernel.conditioning_provenance import state_lineage_digest
 from duplex_kernel.scheduler import DEFAULT_SAMPLE_RATE
 
@@ -2131,10 +2132,10 @@ class GemmaAudioTowerBackend:
 
         if self._shape_stable_lm is None:
             raise RuntimeError("semantic prefix requires ShapeStableGemmaListenerLM")
-        token_ids = tuple(int(value) for value in prefix_token_ids)
+        token_ids = validate_native_control6_prefix_ids(
+            prefix_token_ids, boa_token_id=self.boa_token_id
+        )
         prefix_len = len(token_ids)
-        if not 1 <= prefix_len <= 291:
-            raise ValueError(f"semantic prefix length must be in [1,291], got {prefix_len}")
         replay_frame_ids = tuple(int(value) for value in replay_frame_ids)
         replay_q2 = tuple(replay_q2)
         if len(replay_q2) != len(replay_frame_ids):
@@ -2147,29 +2148,64 @@ class GemmaAudioTowerBackend:
         prefix_started_ns = time.perf_counter_ns()
         prefix_ids = torch.tensor(token_ids, dtype=torch.long, device=device).view(1, prefix_len)
         prefix_attention = torch.ones((1, prefix_len), dtype=torch.long, device=device)
-        prefix_positions = torch.arange(prefix_len, dtype=torch.long, device=device).view(1, -1)
-        prefix_embeds = lm.embed_tokens(prefix_ids)
-        prefix_ple = lm.get_per_layer_inputs(prefix_ids, prefix_embeds)
-        prefix_masks = create_masks_for_generate(
-            lm.config,
-            prefix_embeds,
-            prefix_attention,
-            past_key_values=None,
-            position_ids=prefix_positions,
-        )
         # Native prefix import consumes full logical K/V tensors, while the
         # default config-backed cache physically truncates sliding layers.
+        # Keep each query within the canonical prefill shape; a longer prompt
+        # is causally equivalent when prefetched in chunks with absolute
+        # positions and the accumulated attention mask.
         prefix_cache = DynamicCache()
-        with torch.inference_mode():
-            output = self._shape_stable_lm.forward(
-                inputs_embeds=prefix_embeds,
-                per_layer_inputs=prefix_ple,
-                attention_mask=prefix_masks,
-                position_ids=prefix_positions,
-                past_key_values=prefix_cache,
-                shared_kv_states=None,
+        prefill_limit = int(
+            getattr(self._shape_stable_lm, "target_length", CANONICAL_LM_PREFILL_TARGET_LEN)
+        )
+        if prefill_limit <= 0:
+            raise RuntimeError("semantic prefix prefill limit must be positive")
+        cache = prefix_cache
+        for chunk_start in range(0, prefix_len, prefill_limit):
+            chunk_end = min(prefix_len, chunk_start + prefill_limit)
+            chunk_ids = prefix_ids[:, chunk_start:chunk_end]
+            chunk_positions = torch.arange(
+                chunk_start, chunk_end, dtype=torch.long, device=device
+            ).view(1, -1)
+            chunk_embeds = lm.embed_tokens(chunk_ids)
+            chunk_ple = lm.get_per_layer_inputs(chunk_ids, chunk_embeds)
+            chunk_attention = prefix_attention[:, :chunk_end]
+            chunk_masks = create_masks_for_generate(
+                lm.config,
+                chunk_embeds,
+                chunk_attention,
+                past_key_values=cache,
+                position_ids=chunk_positions,
             )
-        cache = output.past_key_values
+            with torch.inference_mode():
+                output = self._shape_stable_lm.forward(
+                    inputs_embeds=chunk_embeds,
+                    per_layer_inputs=chunk_ple,
+                    attention_mask=chunk_masks,
+                    position_ids=chunk_positions,
+                    past_key_values=cache,
+                    shared_kv_states=getattr(cache, "shared_layers", None),
+                )
+            cache = output.past_key_values
+            # Some shape-stable backends may retain their padded query tail in
+            # the cache. Keep only real prompt positions after every chunk so
+            # the next chunk's absolute positions and mask remain causal.
+            crop = getattr(cache, "crop", None)
+            if callable(crop):
+                crop(chunk_end)
+            shared_layers = getattr(cache, "shared_layers", None)
+            if isinstance(shared_layers, dict):
+                for layer_idx, (keys, values) in tuple(shared_layers.items()):
+                    if int(keys.shape[-2]) > chunk_end:
+                        shared_layers[layer_idx] = (
+                            keys[..., :chunk_end, :],
+                            values[..., :chunk_end, :],
+                        )
+            get_seq_length = getattr(cache, "get_seq_length", None)
+            if callable(get_seq_length) and int(get_seq_length(0)) != chunk_end:
+                raise RuntimeError(
+                    "semantic prefix KV cursor differs from actual prompt after causal chunk "
+                    f"{chunk_start}:{chunk_end}"
+                )
         prefix_build_ms = max(0, time.perf_counter_ns() - prefix_started_ns) / 1_000_000.0
         position = prefix_len
         pad_ple = self._frame_pad_per_layer_inputs(lm)
@@ -2235,7 +2271,9 @@ class GemmaAudioTowerBackend:
         replay_frame_ids: tuple[int, ...] | None = None,
     ) -> Any:
         """Prime exact variable-length context and strictly prior Q2 history."""
-        token_ids = tuple(int(value) for value in prefix_token_ids)
+        token_ids = validate_native_control6_prefix_ids(
+            prefix_token_ids, boa_token_id=self.boa_token_id
+        )
         actual_prefix_len = len(token_ids)
         if prefix_len is not None:
             if isinstance(prefix_len, bool) or not isinstance(prefix_len, int):
@@ -2245,8 +2283,6 @@ class GemmaAudioTowerBackend:
                     "semantic prefix request length does not match its token IDs: "
                     f"{prefix_len} != {actual_prefix_len}"
                 )
-        if not 1 <= actual_prefix_len <= 291:
-            raise ValueError(f"semantic prefix length must be in [1,291], got {actual_prefix_len}")
         replay_ids = tuple(int(value) for value in (replay_frame_ids or ()))
         replay_rows: tuple[Any, ...] = ()
         if replay_audio_soft is not None:

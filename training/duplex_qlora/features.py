@@ -5,6 +5,9 @@ from copy import deepcopy
 from typing import Any
 
 from duplex_kernel.acoustic_phase_features import ACOUSTIC_PHASE_FEATURE_CONTRACT
+from duplex_kernel.gemma_representation import AUDIO_FEATURES_PER_FRAME
+from duplex_kernel.listener_microbatch_frontend import MEL_WINDOW_ROWS
+from duplex_kernel.native_control6_phase import NATIVE_CONTROL6_NATIVE1540_PHASE_T_NAMES
 
 FEATURE_CONTRACT = {
     "queries_per_tick": 4,
@@ -24,6 +27,39 @@ def listener_feature_contract(input_dim: int = 1536) -> dict[str, Any]:
         return contract
     contract["input_dim"] = 1540
     contract["acoustic_phase"] = deepcopy(ACOUSTIC_PHASE_FEATURE_CONTRACT)
+    return contract
+
+
+def native_control6_feature_contract(input_dim: int = 1536) -> dict[str, Any]:
+    """Return the Control6 ABI consumed by the current production listener.
+
+    This is deliberately distinct from the historical Q4 pooled-query feature
+    contract above. Runtime Control6 consumes ``ListenerOutput.gemma_hidden_t``;
+    the production listener generates two Gemma audio rows per 80 ms tick from
+    a W240 Mel window and returns the first current-frame LM hidden as that
+    canonical tensor.
+    """
+    if isinstance(input_dim, bool) or input_dim not in {1536, 1540}:
+        raise ValueError(f"native Control6 feature input_dim must be 1536 or 1540, got {input_dim!r}")
+    contract: dict[str, Any] = {
+        "queries_per_tick": AUDIO_FEATURES_PER_FRAME,
+        "input_dim": int(input_dim),
+        "pooling": "ListenerOutput.gemma_hidden_t[0]",
+        "tick_ms": 80,
+        "source": "native_gemma_listener",
+        "hidden_contract": "gemma4_listener_final_norm_frame_v1",
+        "hidden_source": "ListenerOutput.gemma_hidden_t",
+        "hidden_norm": "gemma_model.language_model.norm",
+        "audio_tower_queries_per_tick": AUDIO_FEATURES_PER_FRAME,
+        "mel_window_rows": MEL_WINDOW_ROWS,
+    }
+    if input_dim == 1540:
+        contract["phase_profile"] = "native1540"
+        contract["phase_schema"] = {
+            "profile": "native1540",
+            "width": 4,
+            "names": list(NATIVE_CONTROL6_NATIVE1540_PHASE_T_NAMES),
+        }
     return contract
 
 
@@ -52,4 +88,9 @@ def last_audio_query(hidden: Any):
     return hidden[3]
 
 
-__all__ = ["FEATURE_CONTRACT", "last_audio_query", "listener_feature_contract"]
+__all__ = [
+    "FEATURE_CONTRACT",
+    "last_audio_query",
+    "listener_feature_contract",
+    "native_control6_feature_contract",
+]

@@ -1,0 +1,768 @@
+{
+  "diagnostic_only": true,
+  "profiler_overhead_invalidates_acceptance_latency": true,
+  "torch_cuda_cupti_version": 130001,
+  "trace_events": 265539,
+  "trace_bytes": 120162098,
+  "profiled_listener_frames": [
+    24,
+    25,
+    26
+  ],
+  "frames": [
+    {
+      "listener_frame_id": 24,
+      "frontend_cpu_ms": 99.889,
+      "frontend_gpu_annotation_ms": 94.728,
+      "q2_view_cpu_ms": 28.401,
+      "q2_view_gpu_annotation_ms": 24.086,
+      "native_step_cpu_ms": 23.96,
+      "native_step_gpu_annotation_ms": 23.726,
+      "completion_wait_cpu_ms": 0.424,
+      "cuda_graph_launch_count": 9,
+      "cuda_graph_launch_cpu_sum_ms": 7.725,
+      "cuda_sync_calls_in_frontend": 9,
+      "cuda_sync_cpu_sum_ms": 9.642,
+      "gpu_kernel_count_in_frontend": 7085,
+      "gpu_kernel_active_sum_ms_all_streams": 30.86,
+      "gpu_kernel_active_sum_ms_by_stream": {
+        "18": 7.32,
+        "25": 23.54
+      }
+    },
+    {
+      "listener_frame_id": 25,
+      "frontend_cpu_ms": 98.742,
+      "frontend_gpu_annotation_ms": 96.632,
+      "q2_view_cpu_ms": 25.971,
+      "q2_view_gpu_annotation_ms": 25.102,
+      "native_step_cpu_ms": 23.414,
+      "native_step_gpu_annotation_ms": 23.163,
+      "completion_wait_cpu_ms": 0.444,
+      "cuda_graph_launch_count": 6,
+      "cuda_graph_launch_cpu_sum_ms": 6.961,
+      "cuda_sync_calls_in_frontend": 9,
+      "cuda_sync_cpu_sum_ms": 9.904,
+      "gpu_kernel_count_in_frontend": 5782,
+      "gpu_kernel_active_sum_ms_all_streams": 28.219,
+      "gpu_kernel_active_sum_ms_by_stream": {
+        "18": 7.377,
+        "25": 20.842
+      }
+    },
+    {
+      "listener_frame_id": 26,
+      "frontend_cpu_ms": 100.717,
+      "frontend_gpu_annotation_ms": 97.794,
+      "q2_view_cpu_ms": 24.551,
+      "q2_view_gpu_annotation_ms": 23.672,
+      "native_step_cpu_ms": 28.307,
+      "native_step_gpu_annotation_ms": 28.081,
+      "completion_wait_cpu_ms": 0.137,
+      "cuda_graph_launch_count": 7,
+      "cuda_graph_launch_cpu_sum_ms": 10.259,
+      "cuda_sync_calls_in_frontend": 8,
+      "cuda_sync_cpu_sum_ms": 0.04,
+      "gpu_kernel_count_in_frontend": 5855,
+      "gpu_kernel_active_sum_ms_all_streams": 28.084,
+      "gpu_kernel_active_sum_ms_by_stream": {
+        "18": 7.594,
+        "25": 20.49
+      }
+    }
+  ],
+  "runtime_overlap": {
+    "frame24_listener_start_ns": 5310180397355788,
+    "frame24_listener_end_ns": 5310180600608153,
+    "response_audio_deltas_received_during_frame24_processing": [
+      {
+        "time_ns": 5310180538445244,
+        "response_id": "resp_340c80460554",
+        "sample_range": [
+          23040,
+          26880
+        ]
+      }
+    ],
+    "qwen_cuda_stream_attribution": "not tagged by the profiler trace; these output event overlaps do not identify a CUDA stream owner"
+  },
+  "frontend_cpu_trace_analysis": {
+    "method": "CPU-only post-processing of saved Chrome trace. CPU op self time subtracts union of directly nested cpu_op children. Coverage is union of cpu_op intervals on the frontend worker thread; uninstrumented remainder is not attributed.",
+    "worker_thread_id": 241,
+    "frames": [
+      {
+        "listener_frame_id": 24,
+        "frontend_cpu_ms": 99.889,
+        "worker_tid": 241,
+        "cpu_op_count": 7417,
+        "cpu_op_union_coverage_ms": 62.625,
+        "cpu_range_uncovered_ms": 37.264,
+        "top5_cpu_op_self_ms": [
+          {
+            "name": "aten::copy_",
+            "duration_ms": 8.57
+          },
+          {
+            "name": "aten::clamp",
+            "duration_ms": 7.127
+          },
+          {
+            "name": "aten::cudnn_convolution",
+            "duration_ms": 5.179
+          },
+          {
+            "name": "aten::mul",
+            "duration_ms": 4.816
+          },
+          {
+            "name": "aten::pow",
+            "duration_ms": 4.729
+          }
+        ],
+        "selected_cpu_op_self_ms": {
+          "aten::clone": 0.2245,
+          "aten::empty": 1.2414,
+          "aten::copy_": 8.5703,
+          "aten::empty_strided": 2.3053,
+          "aten::to": 0.8387,
+          "aten::_to_copy": 1.4419,
+          "aten::contiguous": 0.0358,
+          "aten::cat": 0.0377,
+          "aten::stack": 0.0
+        },
+        "cuda_apis": {
+          "worker_thread_top_api_duration_ms": [
+            {
+              "name": "cudaLaunchKernel",
+              "calls": 1935,
+              "duration_ms": 14.9123
+            },
+            {
+              "name": "cuLaunchKernel",
+              "calls": 86,
+              "duration_ms": 0.6956
+            },
+            {
+              "name": "cudaMemcpyAsync",
+              "calls": 51,
+              "duration_ms": 0.6681
+            },
+            {
+              "name": "cudaFuncGetAttributes",
+              "calls": 175,
+              "duration_ms": 0.6507
+            },
+            {
+              "name": "cudaLaunchKernelExC",
+              "calls": 26,
+              "duration_ms": 0.2049
+            }
+          ],
+          "worker_thread_api_selected": [
+            {
+              "name": "cudaEventRecordWithFlags",
+              "calls": 6,
+              "duration_ms": 0.042
+            },
+            {
+              "name": "cudaMemcpyAsync",
+              "calls": 51,
+              "duration_ms": 0.6681
+            }
+          ],
+          "cuda_backend_thread_id": 461284928,
+          "cuda_backend_selected": [
+            {
+              "name": "cudaEventRecordWithFlags",
+              "calls": 1,
+              "duration_ms": 0.0045
+            },
+            {
+              "name": "cudaGraphLaunch",
+              "calls": 9,
+              "duration_ms": 7.725
+            },
+            {
+              "name": "cudaMalloc",
+              "calls": 1,
+              "duration_ms": 0.3356
+            },
+            {
+              "name": "cudaMemcpyAsync",
+              "calls": 48,
+              "duration_ms": 0.718
+            },
+            {
+              "name": "cudaStreamSynchronize",
+              "calls": 9,
+              "duration_ms": 9.6423
+            }
+          ]
+        },
+        "graph_launch_correlations": [
+          {
+            "correlation": 348,
+            "offset_from_frontend_start_ms": 1.753,
+            "api_duration_ms": 0.6256,
+            "streams": [
+              25
+            ],
+            "graph_ids": [
+              26
+            ],
+            "kernel_events_total": 359,
+            "kernel_active_ms_inside_frontend_range": 0.8263,
+            "first_kernel": "void at::native::(anonymous namespace)::indexSelectSmallIndex<c10::BFloat16, long, unsigned int, 2, 2, -2>(at::cuda::det"
+          },
+          {
+            "correlation": 697,
+            "offset_from_frontend_start_ms": 2.959,
+            "api_duration_ms": 0.6268,
+            "streams": [
+              25
+            ],
+            "graph_ids": [
+              29
+            ],
+            "kernel_events_total": 359,
+            "kernel_active_ms_inside_frontend_range": 0.8256,
+            "first_kernel": "void at::native::(anonymous namespace)::indexSelectSmallIndex<c10::BFloat16, long, unsigned int, 2, 2, -2>(at::cuda::det"
+          },
+          {
+            "correlation": 1040,
+            "offset_from_frontend_start_ms": 4.116,
+            "api_duration_ms": 0.5865,
+            "streams": [
+              25
+            ],
+            "graph_ids": [
+              32
+            ],
+            "kernel_events_total": 359,
+            "kernel_active_ms_inside_frontend_range": 0.8309,
+            "first_kernel": "void at::native::(anonymous namespace)::indexSelectSmallIndex<c10::BFloat16, long, unsigned int, 2, 2, -2>(at::cuda::det"
+          },
+          {
+            "correlation": 1478,
+            "offset_from_frontend_start_ms": 5.89,
+            "api_duration_ms": 0.5995,
+            "streams": [
+              25
+            ],
+            "graph_ids": [
+              35
+            ],
+            "kernel_events_total": 359,
+            "kernel_active_ms_inside_frontend_range": 0.8261,
+            "first_kernel": "void at::native::(anonymous namespace)::indexSelectSmallIndex<c10::BFloat16, long, unsigned int, 2, 2, -2>(at::cuda::det"
+          },
+          {
+            "correlation": 1875,
+            "offset_from_frontend_start_ms": 7.045,
+            "api_duration_ms": 0.5942,
+            "streams": [
+              25
+            ],
+            "graph_ids": [
+              38
+            ],
+            "kernel_events_total": 359,
+            "kernel_active_ms_inside_frontend_range": 0.8248,
+            "first_kernel": "void at::native::(anonymous namespace)::indexSelectSmallIndex<c10::BFloat16, long, unsigned int, 2, 2, -2>(at::cuda::det"
+          },
+          {
+            "correlation": 2306,
+            "offset_from_frontend_start_ms": 8.121,
+            "api_duration_ms": 0.4746,
+            "streams": [
+              25
+            ],
+            "graph_ids": [
+              41
+            ],
+            "kernel_events_total": 359,
+            "kernel_active_ms_inside_frontend_range": 0.846,
+            "first_kernel": "void at::native::(anonymous namespace)::indexSelectSmallIndex<c10::BFloat16, long, unsigned int, 2, 2, -2>(at::cuda::det"
+          },
+          {
+            "correlation": 2810,
+            "offset_from_frontend_start_ms": 9.24,
+            "api_duration_ms": 0.5202,
+            "streams": [
+              25
+            ],
+            "graph_ids": [
+              44
+            ],
+            "kernel_events_total": 359,
+            "kernel_active_ms_inside_frontend_range": 0.8265,
+            "first_kernel": "void at::native::(anonymous namespace)::indexSelectSmallIndex<c10::BFloat16, long, unsigned int, 2, 2, -2>(at::cuda::det"
+          },
+          {
+            "correlation": 3227,
+            "offset_from_frontend_start_ms": 10.237,
+            "api_duration_ms": 0.5379,
+            "streams": [
+              25
+            ],
+            "graph_ids": [
+              47
+            ],
+            "kernel_events_total": 359,
+            "kernel_active_ms_inside_frontend_range": 0.828,
+            "first_kernel": "void at::native::(anonymous namespace)::indexSelectSmallIndex<c10::BFloat16, long, unsigned int, 2, 2, -2>(at::cuda::det"
+          },
+          {
+            "correlation": 42582,
+            "offset_from_frontend_start_ms": 93.228,
+            "api_duration_ms": 3.1598,
+            "streams": [
+              25
+            ],
+            "graph_ids": [
+              107
+            ],
+            "kernel_events_total": 1860,
+            "kernel_active_ms_inside_frontend_range": 6.5042,
+            "first_kernel": "(anonymous namespace)::copy_audio_input_kernel(__nv_bfloat16 const*, __nv_bfloat16*)"
+          }
+        ]
+      },
+      {
+        "listener_frame_id": 25,
+        "frontend_cpu_ms": 98.742,
+        "worker_tid": 241,
+        "cpu_op_count": 7417,
+        "cpu_op_union_coverage_ms": 64.502,
+        "cpu_range_uncovered_ms": 34.239,
+        "top5_cpu_op_self_ms": [
+          {
+            "name": "aten::copy_",
+            "duration_ms": 8.497
+          },
+          {
+            "name": "aten::clamp",
+            "duration_ms": 7.042
+          },
+          {
+            "name": "aten::cudnn_convolution",
+            "duration_ms": 5.068
+          },
+          {
+            "name": "aten::mul",
+            "duration_ms": 4.898
+          },
+          {
+            "name": "aten::pow",
+            "duration_ms": 4.797
+          }
+        ],
+        "selected_cpu_op_self_ms": {
+          "aten::clone": 0.293,
+          "aten::empty": 1.2274,
+          "aten::copy_": 8.4969,
+          "aten::empty_strided": 2.297,
+          "aten::to": 0.7362,
+          "aten::_to_copy": 1.3188,
+          "aten::contiguous": 0.0343,
+          "aten::cat": 0.0263,
+          "aten::stack": 0.0
+        },
+        "cuda_apis": {
+          "worker_thread_top_api_duration_ms": [
+            {
+              "name": "cudaLaunchKernel",
+              "calls": 1935,
+              "duration_ms": 14.8764
+            },
+            {
+              "name": "cuLaunchKernel",
+              "calls": 86,
+              "duration_ms": 0.6904
+            },
+            {
+              "name": "cudaFuncGetAttributes",
+              "calls": 175,
+              "duration_ms": 0.6602
+            },
+            {
+              "name": "cudaMemcpyAsync",
+              "calls": 51,
+              "duration_ms": 0.6074
+            },
+            {
+              "name": "cudaLaunchKernelExC",
+              "calls": 26,
+              "duration_ms": 0.168
+            }
+          ],
+          "worker_thread_api_selected": [
+            {
+              "name": "cudaEventRecordWithFlags",
+              "calls": 6,
+              "duration_ms": 0.0418
+            },
+            {
+              "name": "cudaMemcpyAsync",
+              "calls": 51,
+              "duration_ms": 0.6074
+            }
+          ],
+          "cuda_backend_thread_id": 461284928,
+          "cuda_backend_selected": [
+            {
+              "name": "cudaEventRecordWithFlags",
+              "calls": 1,
+              "duration_ms": 0.0044
+            },
+            {
+              "name": "cudaGraphLaunch",
+              "calls": 6,
+              "duration_ms": 6.961
+            },
+            {
+              "name": "cudaMalloc",
+              "calls": 2,
+              "duration_ms": 0.5588
+            },
+            {
+              "name": "cudaMemcpyAsync",
+              "calls": 41,
+              "duration_ms": 0.6679
+            },
+            {
+              "name": "cudaStreamSynchronize",
+              "calls": 9,
+              "duration_ms": 9.9036
+            }
+          ]
+        },
+        "graph_launch_correlations": [
+          {
+            "correlation": 79217,
+            "offset_from_frontend_start_ms": 0.371,
+            "api_duration_ms": 1.3965,
+            "streams": [
+              25
+            ],
+            "graph_ids": [
+              35
+            ],
+            "kernel_events_total": 359,
+            "kernel_active_ms_inside_frontend_range": 0.8302,
+            "first_kernel": "void at::native::(anonymous namespace)::indexSelectSmallIndex<c10::BFloat16, long, unsigned int, 2, 2, -2>(at::cuda::det"
+          },
+          {
+            "correlation": 79682,
+            "offset_from_frontend_start_ms": 2.522,
+            "api_duration_ms": 0.6168,
+            "streams": [
+              25
+            ],
+            "graph_ids": [
+              38
+            ],
+            "kernel_events_total": 359,
+            "kernel_active_ms_inside_frontend_range": 0.8259,
+            "first_kernel": "void at::native::(anonymous namespace)::indexSelectSmallIndex<c10::BFloat16, long, unsigned int, 2, 2, -2>(at::cuda::det"
+          },
+          {
+            "correlation": 80089,
+            "offset_from_frontend_start_ms": 3.691,
+            "api_duration_ms": 0.6119,
+            "streams": [
+              25
+            ],
+            "graph_ids": [
+              41
+            ],
+            "kernel_events_total": 359,
+            "kernel_active_ms_inside_frontend_range": 0.8284,
+            "first_kernel": "void at::native::(anonymous namespace)::indexSelectSmallIndex<c10::BFloat16, long, unsigned int, 2, 2, -2>(at::cuda::det"
+          },
+          {
+            "correlation": 80529,
+            "offset_from_frontend_start_ms": 4.838,
+            "api_duration_ms": 0.6676,
+            "streams": [
+              25
+            ],
+            "graph_ids": [
+              44
+            ],
+            "kernel_events_total": 359,
+            "kernel_active_ms_inside_frontend_range": 0.8283,
+            "first_kernel": "void at::native::(anonymous namespace)::indexSelectSmallIndex<c10::BFloat16, long, unsigned int, 2, 2, -2>(at::cuda::det"
+          },
+          {
+            "correlation": 81030,
+            "offset_from_frontend_start_ms": 6.041,
+            "api_duration_ms": 0.5972,
+            "streams": [
+              25
+            ],
+            "graph_ids": [
+              47
+            ],
+            "kernel_events_total": 359,
+            "kernel_active_ms_inside_frontend_range": 0.8274,
+            "first_kernel": "void at::native::(anonymous namespace)::indexSelectSmallIndex<c10::BFloat16, long, unsigned int, 2, 2, -2>(at::cuda::det"
+          },
+          {
+            "correlation": 120888,
+            "offset_from_frontend_start_ms": 93.083,
+            "api_duration_ms": 3.0709,
+            "streams": [
+              25
+            ],
+            "graph_ids": [
+              107
+            ],
+            "kernel_events_total": 1860,
+            "kernel_active_ms_inside_frontend_range": 5.4363,
+            "first_kernel": "(anonymous namespace)::copy_audio_input_kernel(__nv_bfloat16 const*, __nv_bfloat16*)"
+          }
+        ]
+      },
+      {
+        "listener_frame_id": 26,
+        "frontend_cpu_ms": 100.717,
+        "worker_tid": 241,
+        "cpu_op_count": 7417,
+        "cpu_op_union_coverage_ms": 64.891,
+        "cpu_range_uncovered_ms": 35.827,
+        "top5_cpu_op_self_ms": [
+          {
+            "name": "aten::copy_",
+            "duration_ms": 8.86
+          },
+          {
+            "name": "aten::clamp",
+            "duration_ms": 7.129
+          },
+          {
+            "name": "aten::mul",
+            "duration_ms": 5.222
+          },
+          {
+            "name": "aten::cudnn_convolution",
+            "duration_ms": 5.086
+          },
+          {
+            "name": "aten::pow",
+            "duration_ms": 4.528
+          }
+        ],
+        "selected_cpu_op_self_ms": {
+          "aten::clone": 0.2979,
+          "aten::empty": 1.245,
+          "aten::copy_": 8.8603,
+          "aten::empty_strided": 2.2857,
+          "aten::to": 1.2722,
+          "aten::_to_copy": 1.2665,
+          "aten::contiguous": 0.035,
+          "aten::cat": 0.0243,
+          "aten::stack": 0.0
+        },
+        "cuda_apis": {
+          "worker_thread_top_api_duration_ms": [
+            {
+              "name": "cudaLaunchKernel",
+              "calls": 1935,
+              "duration_ms": 15.8653
+            },
+            {
+              "name": "cuLaunchKernel",
+              "calls": 86,
+              "duration_ms": 0.6872
+            },
+            {
+              "name": "cudaFuncGetAttributes",
+              "calls": 175,
+              "duration_ms": 0.6566
+            },
+            {
+              "name": "cudaMemcpyAsync",
+              "calls": 51,
+              "duration_ms": 0.6244
+            },
+            {
+              "name": "cudaLaunchKernelExC",
+              "calls": 26,
+              "duration_ms": 0.1799
+            }
+          ],
+          "worker_thread_api_selected": [
+            {
+              "name": "cudaEventRecordWithFlags",
+              "calls": 6,
+              "duration_ms": 0.0277
+            },
+            {
+              "name": "cudaMemcpyAsync",
+              "calls": 51,
+              "duration_ms": 0.6244
+            }
+          ],
+          "cuda_backend_thread_id": 461284928,
+          "cuda_backend_selected": [
+            {
+              "name": "cudaEventRecordWithFlags",
+              "calls": 1,
+              "duration_ms": 0.0045
+            },
+            {
+              "name": "cudaGraphLaunch",
+              "calls": 7,
+              "duration_ms": 10.2591
+            },
+            {
+              "name": "cudaMalloc",
+              "calls": 2,
+              "duration_ms": 0.3686
+            },
+            {
+              "name": "cudaMemcpyAsync",
+              "calls": 42,
+              "duration_ms": 0.6293
+            },
+            {
+              "name": "cudaStreamSynchronize",
+              "calls": 8,
+              "duration_ms": 0.0396
+            }
+          ]
+        },
+        "graph_launch_correlations": [
+          {
+            "correlation": 157095,
+            "offset_from_frontend_start_ms": 0.434,
+            "api_duration_ms": 0.5495,
+            "streams": [
+              25
+            ],
+            "graph_ids": [
+              32
+            ],
+            "kernel_events_total": 359,
+            "kernel_active_ms_inside_frontend_range": 0.8278,
+            "first_kernel": "void at::native::(anonymous namespace)::indexSelectSmallIndex<c10::BFloat16, long, unsigned int, 2, 2, -2>(at::cuda::det"
+          },
+          {
+            "correlation": 157438,
+            "offset_from_frontend_start_ms": 1.695,
+            "api_duration_ms": 0.6893,
+            "streams": [
+              25
+            ],
+            "graph_ids": [
+              35
+            ],
+            "kernel_events_total": 359,
+            "kernel_active_ms_inside_frontend_range": 0.8283,
+            "first_kernel": "void at::native::(anonymous namespace)::indexSelectSmallIndex<c10::BFloat16, long, unsigned int, 2, 2, -2>(at::cuda::det"
+          },
+          {
+            "correlation": 157907,
+            "offset_from_frontend_start_ms": 3.109,
+            "api_duration_ms": 0.6588,
+            "streams": [
+              25
+            ],
+            "graph_ids": [
+              38
+            ],
+            "kernel_events_total": 359,
+            "kernel_active_ms_inside_frontend_range": 0.8262,
+            "first_kernel": "void at::native::(anonymous namespace)::indexSelectSmallIndex<c10::BFloat16, long, unsigned int, 2, 2, -2>(at::cuda::det"
+          },
+          {
+            "correlation": 158317,
+            "offset_from_frontend_start_ms": 4.322,
+            "api_duration_ms": 3.1068,
+            "streams": [
+              25
+            ],
+            "graph_ids": [
+              41
+            ],
+            "kernel_events_total": 359,
+            "kernel_active_ms_inside_frontend_range": 0.8277,
+            "first_kernel": "void at::native::(anonymous namespace)::indexSelectSmallIndex<c10::BFloat16, long, unsigned int, 2, 2, -2>(at::cuda::det"
+          },
+          {
+            "correlation": 159041,
+            "offset_from_frontend_start_ms": 7.987,
+            "api_duration_ms": 1.1056,
+            "streams": [
+              25
+            ],
+            "graph_ids": [
+              44
+            ],
+            "kernel_events_total": 359,
+            "kernel_active_ms_inside_frontend_range": 0.8292,
+            "first_kernel": "void at::native::(anonymous namespace)::indexSelectSmallIndex<c10::BFloat16, long, unsigned int, 2, 2, -2>(at::cuda::det"
+          },
+          {
+            "correlation": 159772,
+            "offset_from_frontend_start_ms": 10.72,
+            "api_duration_ms": 1.0411,
+            "streams": [
+              25
+            ],
+            "graph_ids": [
+              47
+            ],
+            "kernel_events_total": 359,
+            "kernel_active_ms_inside_frontend_range": 0.8262,
+            "first_kernel": "void at::native::(anonymous namespace)::indexSelectSmallIndex<c10::BFloat16, long, unsigned int, 2, 2, -2>(at::cuda::det"
+          },
+          {
+            "correlation": 200276,
+            "offset_from_frontend_start_ms": 97.074,
+            "api_duration_ms": 3.108,
+            "streams": [
+              25
+            ],
+            "graph_ids": [
+              107
+            ],
+            "kernel_events_total": 1860,
+            "kernel_active_ms_inside_frontend_range": 3.4566,
+            "first_kernel": "(anonymous namespace)::copy_audio_input_kernel(__nv_bfloat16 const*, __nv_bfloat16*)"
+          }
+        ]
+      }
+    ],
+    "top5_cpu_op_self_ms_aggregated_frames_24_26": [
+      {
+        "name": "aten::copy_",
+        "duration_ms": 25.928
+      },
+      {
+        "name": "aten::clamp",
+        "duration_ms": 21.298
+      },
+      {
+        "name": "aten::cudnn_convolution",
+        "duration_ms": 15.334
+      },
+      {
+        "name": "aten::mul",
+        "duration_ms": 14.936
+      },
+      {
+        "name": "aten::pow",
+        "duration_ms": 14.054
+      }
+    ],
+    "cuda_stream_mapping": {
+      "stream_18": "gpu_user_annotation listener.frontend_encode_batch, External id 1; 7.320/7.377/7.594 ms summed active kernel time in frames 24/25/26. The trace does not tag this as Qwen.",
+      "stream_25": "All matched cudaGraphLaunch correlations in these frontend windows execute on stream 25. The late recurring graph id 107 starts with copy_audio_input_kernel and source path is listener.py run_audio_tower_q2 -> _replay_shared_audio_tower -> self._cuda_graph.replay() on _graph_stream; this ties the Gemma audio-tower graph to stream 25 (not a Qwen attribution).",
+      "limit": "Other graph IDs also execute on stream 25 during the same windows; no named Qwen CUDA stream/correlation tag exists, so attribution of stream 18 to Qwen or exclusivity of stream 25 is not established."
+    },
+    "interpretation": "The profiled frontend range is about 99-101 ms; torch cpu_op spans cover 62.6-64.9 ms and leave 34.2-37.3 ms uninstrumented. The worker launches 1,935 cudaLaunchKernel calls (about 14.9-15.9 ms summed API time per frame); a separate CUDA runtime thread shows graph launches and stream synchronization. The residual cannot be assigned to Python/GIL, scheduler delay, or wait from this trace alone.",
+    "profile_overhead_note": "Instrumented run only; not an acceptance-latency measurement."
+  }
+}

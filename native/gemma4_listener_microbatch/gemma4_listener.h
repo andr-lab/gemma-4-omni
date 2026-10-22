@@ -139,7 +139,8 @@ int gemma4_listener_import_cache_async(
 );
 
 /* Import a ShapeStable cache with its actual semantic-prefix boundary and
- * attention mask. The legacy import above keeps the canonical 34-token mask. */
+ * attention mask (bounded by gemma4_listener_runtime_prefix_capacity()). The
+ * legacy import above keeps the canonical 34-token mask. */
 int gemma4_listener_import_cache_with_prefix_async(
     gemma4_listener_ctx *ctx,
     const gemma4_imported_cache *cache,
@@ -406,6 +407,8 @@ uint32_t gemma4_listener_runtime_rmsnorm_backend(const gemma4_listener_ctx *ctx)
 uint32_t gemma4_listener_runtime_max_seq_len(const gemma4_listener_ctx *ctx);
 uint32_t gemma4_listener_runtime_current_position(const gemma4_listener_ctx *ctx);
 uint32_t gemma4_listener_runtime_prefix_len(const gemma4_listener_ctx *ctx);
+/* Capacity for actual imported semantic-prefix masks; independent of the
+ * canonical 291-token prime M-shape. */
 uint32_t gemma4_listener_runtime_prefix_capacity(void);
 uint64_t gemma4_listener_runtime_splitk_layer_mask(const gemma4_listener_ctx *ctx);
 uint64_t gemma4_listener_runtime_ordered_calls_by_layer(

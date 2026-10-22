@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import time
 import math
+import numbers
 from typing import Any
 
+import numpy as np
 import torch
 
+from duplex_kernel.acoustic_phase_features import EPSILON, TICK_SAMPLES
 from training.duplex_qlora.native_control6 import (
     ACTIONS,
     ACTION_TO_TOKEN_ID,
@@ -16,7 +19,35 @@ from training.duplex_qlora.native_control6 import (
 )
 from duplex_kernel.duplex_control6 import DuplexControl6Policy
 from duplex_kernel.gemma_native_control6_batch_policy import NativeControl6RawScoreSnapshot
+from duplex_kernel.native_control6_phase import NATIVE_CONTROL6_PHASE_T_WIDTH
 from duplex_kernel.turn_policy import ControlAction, PolicyDecision, PolicyInput
+
+
+def native_control6_effective_members(
+    speaker_active: bool,
+    user_activity_detected: bool,
+) -> dict[str, tuple[str, ...]]:
+    """Map each raw Control6 row into the physical action buckets for this context."""
+    if speaker_active:
+        if user_activity_detected:
+            return {
+                "HOLD": ("CONTINUE",),
+                "SPEAK": (),
+                "YIELD": ("LISTEN", "YIELD", "REPLAN"),
+                "BACKCHANNEL": (),
+            }
+        return {
+            "HOLD": ("LISTEN", "CONTINUE"),
+            "SPEAK": (),
+            "YIELD": ("YIELD", "REPLAN"),
+            "BACKCHANNEL": (),
+        }
+    return {
+        "HOLD": ("LISTEN", "CONTINUE"),
+        "SPEAK": ("SPEAK", "REPLAN"),
+        "YIELD": (),
+        "BACKCHANNEL": ("BACKCHANNEL",),
+    }
 
 
 class GemmaNativeControl6Policy:
@@ -36,24 +67,134 @@ class GemmaNativeControl6Policy:
         checkpoint_path: str,
         trace_scores: bool = False,
         fused_readback: bool = False,
+        high_confidence_single_tick_threshold: float = 0.85,
+        minimum_transition_confidence: float = 0.70,
+        hysteresis_required_ticks: int = 2,
+        speech_rms_floor: float = 0.001,
+        phase_profile: str = "legacy",
     ) -> None:
         if not isinstance(adapter, NativeControl6LoRA):
             raise TypeError("gemma_native_control6 requires NativeControl6LoRA")
         if not checkpoint_path:
             raise ValueError("gemma_native_control6 requires a loaded adapter checkpoint")
+        if (
+            isinstance(high_confidence_single_tick_threshold, bool)
+            or not isinstance(high_confidence_single_tick_threshold, numbers.Real)
+            or not math.isfinite(float(high_confidence_single_tick_threshold))
+            or not 0.0 <= float(high_confidence_single_tick_threshold) <= 1.0
+        ):
+            raise ValueError("high_confidence_single_tick_threshold must be finite in [0, 1]")
+        if (
+            isinstance(minimum_transition_confidence, bool)
+            or not isinstance(minimum_transition_confidence, numbers.Real)
+            or not math.isfinite(float(minimum_transition_confidence))
+            or not 0.0 <= float(minimum_transition_confidence)
+            or float(minimum_transition_confidence)
+            > float(high_confidence_single_tick_threshold)
+        ):
+            raise ValueError(
+                "minimum_transition_confidence must be finite and between 0 and "
+                "high_confidence_single_tick_threshold"
+            )
+        if (
+            isinstance(hysteresis_required_ticks, bool)
+            or not isinstance(hysteresis_required_ticks, int)
+            or hysteresis_required_ticks < 1
+        ):
+            raise ValueError("hysteresis_required_ticks must be a positive integer")
+        if (
+            isinstance(speech_rms_floor, bool)
+            or not isinstance(speech_rms_floor, numbers.Real)
+            or not math.isfinite(float(speech_rms_floor))
+            or not 0.0 < float(speech_rms_floor) <= 1.0
+        ):
+            raise ValueError("speech_rms_floor must be finite in (0, 1]")
+        if phase_profile not in {"legacy", "native1540"}:
+            raise ValueError("phase_profile must be 'legacy' or 'native1540'")
         self.adapter = adapter.eval()
         for parameter in self.adapter.parameters():
             parameter.requires_grad_(False)
         self.checkpoint_path = str(checkpoint_path)
         self.trace_scores = bool(trace_scores)
         self.fused_readback = bool(fused_readback)
+        self.high_confidence_single_tick_threshold = float(
+            high_confidence_single_tick_threshold
+        )
+        self.minimum_transition_confidence = float(minimum_transition_confidence)
+        self.hysteresis_required_ticks = hysteresis_required_ticks
+        self.speech_rms_floor = float(speech_rms_floor)
+        self.phase_profile = phase_profile
         self._hysteresis_session_id: str | None = None
         self._hysteresis_speaker_active: bool | None = None
         self._hysteresis_frame_id: int | None = None
         self._hysteresis_candidate: str | None = None
         self._hysteresis_count = 0
+        self._last_microbatch_tick_id: tuple[str, int, int] | None = None
+        self._last_microbatch_listener_tick: tuple[str, int, int] | None = None
 
     def step(self, state: PolicyInput) -> PolicyDecision:
+        return self._step_impl(state, precomputed_logits=None)
+
+    def step_with_logits(
+        self,
+        state: PolicyInput,
+        logits: torch.Tensor | None,
+        *,
+        tick_id: tuple[str, int, int],
+    ) -> PolicyDecision:
+        """Apply this session's normal mask/hysteresis to one batched row.
+
+        ``logits=None`` is reserved for the existing exact-zero no-input safety
+        path, which does not run the learned head. A provided tensor must be
+        the result of the shared adapter forward for this tick.
+        """
+        if not isinstance(tick_id, tuple) or len(tick_id) != 3:
+            raise ValueError("microbatch policy tick ID must be (session_id, generation_id, frame_id)")
+        expected = (state.session_id, state.generation_id, state.frame_id)
+        if tick_id != expected:
+            raise RuntimeError("microbatch policy tick ID differs from its state")
+        last = self._last_microbatch_tick_id
+        if last == tick_id:
+            raise RuntimeError("duplicate microbatch policy tick would apply hysteresis twice")
+        if (
+            last is not None
+            and last[0] == tick_id[0]
+            and last[1] == tick_id[1]
+            and tick_id[2] <= last[2]
+        ):
+            raise RuntimeError("stale microbatch policy tick cannot update hysteresis")
+        listener_generation = state.native_listener_generation
+        if listener_generation is None:
+            listener_generation = state.generation_id
+        if (
+            isinstance(listener_generation, bool)
+            or not isinstance(listener_generation, int)
+            or listener_generation < 0
+        ):
+            raise ValueError("microbatch policy listener generation is invalid")
+        listener_tick = (state.session_id, listener_generation, state.frame_id)
+        last_listener_tick = self._last_microbatch_listener_tick
+        if (
+            last_listener_tick is not None
+            and last_listener_tick[:2] == listener_tick[:2]
+            and listener_tick[2] <= last_listener_tick[2]
+        ):
+            raise RuntimeError("stale listener frame cannot update a newer policy turn")
+        if logits is None and not state.native_control_no_input_tick:
+            raise ValueError("precomputed Control6 logits are required for an input tick")
+        if logits is not None and state.native_control_no_input_tick:
+            raise ValueError("exact-zero no-input safety tick must not score listener logits")
+        decision = self._step_impl(state, precomputed_logits=logits)
+        self._last_microbatch_tick_id = tick_id
+        self._last_microbatch_listener_tick = listener_tick
+        return decision
+
+    def _step_impl(
+        self,
+        state: PolicyInput,
+        *,
+        precomputed_logits: torch.Tensor | None,
+    ) -> PolicyDecision:
         hidden = state.native_control_hidden
         source_frame = state.native_control_hidden_frame_id
         available_at_ns = state.native_control_hidden_at_ns
@@ -77,6 +218,7 @@ class GemmaNativeControl6Policy:
                     action=action, frame_id=int(state.frame_id), confidence=1.0,
                     reason="native_control_exact_zero_no_input_tick",
                     generation_id=int(state.generation_id),
+                    listener_frame_id=int(state.frame_id),
                     source="scheduler_verified_exact_zero_user_and_self_pcm",
                     session=str(state.session_id),
                     diagnostics={"policy_id": self.policy_id, "selected_action": action.value,
@@ -135,15 +277,54 @@ class GemmaNativeControl6Policy:
                 self.reset()
                 raise RuntimeError("native Control6 raw score provenance does not match policy row")
         with torch.inference_mode():
-            logits = (
-                torch.tensor(
+            current_user_rms = self._current_user_rms(state.user_pcm)
+            phase_t = state.native_control_phase_t
+            ratio_activity_valid, user_assistant_log_ratio = (
+                self._native1540_user_ratio_activity(
+                    state,
+                    current_user_rms=current_user_rms,
+                    phase_t=phase_t,
+                )
+            )
+            ratio_activity_detected = bool(
+                ratio_activity_valid and user_assistant_log_ratio > -0.15
+            )
+            user_activity_detected = bool(
+                state.peer_turn_active
+                or current_user_rms >= self.speech_rms_floor
+                or ratio_activity_detected
+            )
+            phase_tensor = (
+                torch.zeros((1, NATIVE_CONTROL6_PHASE_T_WIDTH), device=parameter.device)
+                if phase_t is None
+                else torch.as_tensor(
+                    phase_t, device=parameter.device, dtype=torch.float32
+                ).reshape(1, -1)
+            )
+            if tuple(phase_tensor.shape) != (1, NATIVE_CONTROL6_PHASE_T_WIDTH):
+                raise RuntimeError("native Control6 requires exactly four phase_t values")
+            # The raw batch snapshot was scored without phase_t. Keep it for
+            # diagnostics and legacy phase-less callers, but never let it
+            # override the current phase-conditioned policy score. The
+            # microbatch path supplies logits from its sole mixed-source
+            # adapter forward and continues through this same policy logic.
+            use_phase_less_snapshot = (
+                precomputed_logits is None
+                and raw_score_snapshot is not None
+                and phase_t is None
+            )
+            if precomputed_logits is not None:
+                logits = precomputed_logits.detach().to(
+                    device=parameter.device, dtype=torch.float32
+                ).reshape(-1)
+            elif use_phase_less_snapshot:
+                logits = torch.tensor(
                     raw_score_snapshot.raw_logits,
                     dtype=torch.float32,
                     device=parameter.device,
                 )
-                if raw_score_snapshot is not None
-                else self.adapter(native_hidden).reshape(-1).float()
-            )
+            else:
+                logits = self.adapter(native_hidden, phase_t=phase_tensor).reshape(-1).float()
             if tuple(logits.shape) != (len(ACTIONS),):
                 raise RuntimeError("native Control6 produced invalid six-way logits")
             if not self.fused_readback and not bool(torch.isfinite(logits).all()):
@@ -151,13 +332,11 @@ class GemmaNativeControl6Policy:
             finite_flag = torch.isfinite(logits).all() if self.fused_readback else None
             raw_index_tensor = logits.argmax()
             raw_probabilities = torch.softmax(logits, dim=0)
+            effective_members = native_control6_effective_members(
+                speaker_active=bool(state.speaker_active),
+                user_activity_detected=user_activity_detected,
+            )
             if state.speaker_active:
-                effective_members = {
-                    "HOLD": ("LISTEN", "CONTINUE"),
-                    "SPEAK": (),
-                    "YIELD": ("YIELD", "REPLAN"),
-                    "BACKCHANNEL": (),
-                }
                 effective_actions = (
                     ControlAction.CONTINUE.value,
                     ControlAction.SPEAK.value,
@@ -165,12 +344,6 @@ class GemmaNativeControl6Policy:
                     ControlAction.BACKCHANNEL.value,
                 )
             else:
-                effective_members = {
-                    "HOLD": ("LISTEN", "CONTINUE"),
-                    "SPEAK": ("SPEAK", "REPLAN"),
-                    "YIELD": (),
-                    "BACKCHANNEL": ("BACKCHANNEL",),
-                }
                 effective_actions = (
                     ControlAction.LISTEN.value,
                     ControlAction.SPEAK.value,
@@ -180,11 +353,13 @@ class GemmaNativeControl6Policy:
             effective_order = ("HOLD", "SPEAK", "YIELD", "BACKCHANNEL")
             action_indices = {action: index for index, action in enumerate(ACTIONS)}
             zero_probability = torch.zeros((), dtype=raw_probabilities.dtype, device=logits.device)
-            effective_probabilities = torch.stack(tuple(
+            # Concatenate the four bucket scalars without using ``stack``;
+            # stack is reserved for the fused host readback packet below.
+            effective_probabilities = torch.cat(tuple(
                 sum(
                     (raw_probabilities[action_indices[action]] for action in effective_members[name]),
                     zero_probability,
-                )
+                ).reshape(1)
                 for name in effective_order
             ))
             effective_legal_mask = torch.tensor(
@@ -269,7 +444,7 @@ class GemmaNativeControl6Policy:
             else:
                 raw_index = int(raw_index_tensor.item())
                 selected_effective_index = int(effective_index_tensor.item())
-                retained_effective_mass = float(legal_effective_mass_tensor.item())
+                retained_effective_mass = legal_mass_value
                 confidence = float(confidence_tensor.item())
                 selected_effective_probability = float(selected_effective_probability_tensor.item())
 
@@ -288,11 +463,21 @@ class GemmaNativeControl6Policy:
             action_value, hysteresis_count, hysteresis_pending = self._apply_hysteresis(
                 state,
                 candidate_action_value,
+                selected_effective_probability,
+            )
+            transition_below_minimum = (
+                candidate_action_value in {
+                    ControlAction.SPEAK.value,
+                    ControlAction.YIELD.value,
+                }
+                and selected_effective_probability < self.minimum_transition_confidence
             )
             action = ControlAction(action_value)
             selected_index = action_indices[candidate_action_value]
             fallback_reason = (
-                "two_distinct_consecutive_fresh_ticks_required"
+                "native_control6_transition_confidence_below_minimum"
+                if transition_below_minimum
+                else "two_distinct_consecutive_fresh_ticks_required"
                 if hysteresis_pending
                 else "zero_legal_physical_mass_safe_hold" if zero_legal_mass_hold else None
             )
@@ -324,6 +509,34 @@ class GemmaNativeControl6Policy:
             "native_control6_hysteresis_count": hysteresis_count,
             "native_control6_hysteresis_pending": hysteresis_pending,
             "native_control6_hysteresis_applied_action": action.value,
+            "native_control6_hysteresis_required_ticks": (
+                1
+                if candidate_action_value in {
+                    ControlAction.SPEAK.value,
+                    ControlAction.YIELD.value,
+                }
+                and selected_effective_probability >= self.high_confidence_single_tick_threshold
+                else self.hysteresis_required_ticks
+            ),
+            "native_control6_high_confidence_single_tick_threshold": self.high_confidence_single_tick_threshold,
+            "native_control6_minimum_transition_confidence": self.minimum_transition_confidence,
+            "native_control6_transition_confidence_eligible": not (
+                candidate_action_value in {
+                    ControlAction.SPEAK.value,
+                    ControlAction.YIELD.value,
+                }
+                and selected_effective_probability < self.minimum_transition_confidence
+            ),
+            "native_control6_user_rms": current_user_rms,
+            "native_control6_ratio_activity_valid": ratio_activity_valid,
+            "native_control6_user_assistant_log_ratio": (
+                user_assistant_log_ratio if ratio_activity_valid else None
+            ),
+            "native_control6_ratio_activity_detected": ratio_activity_detected,
+            "native_control6_peer_turn_active": state.peer_turn_active,
+            "native_control6_user_activity_detected": user_activity_detected,
+            "native_control6_speech_rms_floor": self.speech_rms_floor,
+            "native_control6_zero_legal_mass_safe_hold": zero_legal_mass_hold,
             "policy_fallback_reason": fallback_reason,
             "legal_actions": list(legal),
             "listener_hidden_frame_id": int(source_frame),
@@ -334,8 +547,8 @@ class GemmaNativeControl6Policy:
         }
         if raw_score_snapshot is not None:
             diagnostics.update({
-                "native_control6_batched_raw_scores": True,
-                "native_control6_batched_raw_scores_diagnostic_only": False,
+                "native_control6_batched_raw_scores": bool(use_phase_less_snapshot),
+                "native_control6_batched_raw_scores_diagnostic_only": not use_phase_less_snapshot,
                 "native_control6_batch_manifest_id": raw_score_snapshot.manifest_id,
                 "native_control6_native_output_generation": raw_score_snapshot.output_generation,
                 "native_control6_listener_state_version": raw_score_snapshot.listener_state_version,
@@ -391,6 +604,63 @@ class GemmaNativeControl6Policy:
     def update_hidden(self, hidden: Any | None) -> None:
         del hidden
 
+    @staticmethod
+    def _current_user_rms(user_pcm: Any | None) -> float:
+        if user_pcm is None:
+            return 0.0
+        try:
+            pcm = np.asarray(user_pcm, dtype=np.float32)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("native Control6 current user PCM must be numeric") from exc
+        if pcm.ndim != 1 or not pcm.size or not np.isfinite(pcm).all():
+            raise ValueError("native Control6 current user PCM must be a finite mono frame")
+        values = pcm.astype(np.float64, copy=False)
+        return float(np.sqrt(np.mean(values * values, dtype=np.float64)))
+
+    def _native1540_user_ratio_activity(
+        self,
+        state: PolicyInput,
+        *,
+        current_user_rms: float,
+        phase_t: Any | None,
+    ) -> tuple[bool, float]:
+        """Use the existing ratio only with exact native1540 t-1 PCM provenance."""
+        if self.phase_profile != "native1540" or phase_t is None:
+            return False, 0.0
+        assistant_pcm = state.native_control_assistant_pcm_prior
+        assistant_frame_id = state.native_control_assistant_prior_frame_id
+        if (
+            assistant_pcm is None
+            or isinstance(assistant_frame_id, bool)
+            or not isinstance(assistant_frame_id, int)
+            or assistant_frame_id != int(state.frame_id) - 1
+            or current_user_rms <= EPSILON
+        ):
+            return False, 0.0
+        try:
+            assistant_values = np.asarray(assistant_pcm, dtype=np.float32)
+            if (
+                assistant_values.shape != (TICK_SAMPLES,)
+                or not np.isfinite(assistant_values).all()
+            ):
+                return False, 0.0
+            assistant_rms = self._current_user_rms(assistant_values)
+            if assistant_rms < self.speech_rms_floor:
+                return False, 0.0
+            if isinstance(phase_t, torch.Tensor):
+                phase_values = phase_t.detach().to(device="cpu", dtype=torch.float32).numpy()
+            else:
+                phase_values = np.asarray(phase_t, dtype=np.float32)
+            phase_values = np.asarray(phase_values, dtype=np.float32).reshape(-1)
+        except (TypeError, ValueError):
+            return False, 0.0
+        if (
+            phase_values.shape != (NATIVE_CONTROL6_PHASE_T_WIDTH,)
+            or not np.isfinite(phase_values).all()
+        ):
+            return False, 0.0
+        return True, float(phase_values[3])
+
     def reset(self) -> None:
         self._hysteresis_session_id = None
         self._hysteresis_speaker_active = None
@@ -398,8 +668,16 @@ class GemmaNativeControl6Policy:
         self._hysteresis_candidate = None
         self._hysteresis_count = 0
 
-    def _apply_hysteresis(self, state: PolicyInput, candidate: str) -> tuple[str, int, bool]:
-        """Require two fresh adjacent listener frames for SPEAK or YIELD."""
+    def _apply_hysteresis(
+        self, state: PolicyInput, candidate: str, effective_probability: float
+    ) -> tuple[str, int, bool]:
+        """Use one fresh frame only for high-confidence physical SPEAK/YIELD."""
+        required_ticks = self.hysteresis_required_ticks
+        if (
+            candidate in {ControlAction.SPEAK.value, ControlAction.YIELD.value}
+            and effective_probability >= self.high_confidence_single_tick_threshold
+        ):
+            required_ticks = 1
         session_id = str(state.session_id)
         speaker_active = bool(state.speaker_active)
         frame_id = int(state.frame_id)
@@ -417,6 +695,19 @@ class GemmaNativeControl6Policy:
             self._hysteresis_count = 0
             return candidate, 0, False
 
+        if effective_probability < self.minimum_transition_confidence:
+            hold_action = (
+                ControlAction.CONTINUE.value if speaker_active else ControlAction.LISTEN.value
+            )
+            if hold_action not in tuple(state.legal_actions or ()):
+                raise RuntimeError(
+                    f"native Control6 hysteresis hold action {hold_action} is not legal"
+                )
+            self._hysteresis_frame_id = frame_id
+            self._hysteresis_candidate = None
+            self._hysteresis_count = 0
+            return hold_action, 0, False
+
         last_frame = self._hysteresis_frame_id
         if last_frame == frame_id:
             if self._hysteresis_candidate != candidate:
@@ -427,14 +718,14 @@ class GemmaNativeControl6Policy:
             count = 1
             self._hysteresis_candidate = candidate
         elif self._hysteresis_candidate == candidate:
-            count = min(2, self._hysteresis_count + 1)
+            count = min(required_ticks, self._hysteresis_count + 1)
         else:
             count = 1
             self._hysteresis_candidate = candidate
 
         self._hysteresis_frame_id = frame_id
         self._hysteresis_count = count
-        if count >= 2:
+        if count >= required_ticks:
             return candidate, count, False
         hold_action = (
             ControlAction.CONTINUE.value if speaker_active else ControlAction.LISTEN.value
@@ -446,7 +737,11 @@ class GemmaNativeControl6Policy:
         return hold_action, count, True
 
 
-__all__ = ["GemmaNativeControl6Policy", "legal_control_actions"]
+__all__ = [
+    "GemmaNativeControl6Policy",
+    "legal_control_actions",
+    "native_control6_effective_members",
+]
 
 CONTROL6_POLICY_TYPES = (DuplexControl6Policy, GemmaNativeControl6Policy)
 

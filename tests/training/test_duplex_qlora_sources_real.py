@@ -372,43 +372,486 @@ def test_real_conversational_views_are_directed_masked_and_causal() -> None:
     assert [segment["target_mask"] for segment in local_targets] == [False, True, True]
     assert all(segment["task_kind"] == "conversation_response" for segment in local_targets)
     assert local_zero["segments"][0]["source_role"] is None
-    assert local_zero["frames"][0]["target_action"] == "SPEAK"
+    assert local_zero["frames"][0]["target_action"] is None
+    assert local_zero["frames"][0]["action_mask"] is False
+    assert local_zero["frames"][0]["action_masked_reason"] == "assistant_onset_without_qualified_user_endpoint"
     assert local_zero["frames"][1]["target_action"] == "CONTINUE"
+    # The newer peer backchannel overlaps this local onset, so this row has
+    # no eligible assistant-onset SPEAK seed to move back to an endpoint.
     assert local_zero["frames"][2]["target_action"] == "LISTEN"
-    assert local_zero["frames"][3]["target_action"] == "SPEAK"
+    assert local_zero["frames"][2]["target_action_source"] == "timestamp_derived_remote_speech_local_idle"
+    assert local_zero["frames"][3]["target_action"] is None
+    assert local_zero["frames"][3]["action_masked_reason"] == "assistant_onset_overlaps_unterminated_peer"
     assert local_one["frames"][3]["target_action"] == "BACKCHANNEL"
+    assert local_one["frames"][3]["target_action_source"] == "explicit_native_backchannel"
     assert local_one["frames"][2]["target_action"] == "CONTINUE"
     assert all(frame["target_action"] != "YIELD" for view in views for frame in view["frames"])
-    # A future local utterance cannot label frames before its observed onset.
-    assert local_zero["frames"][0]["target_action"] == "SPEAK"
+    # The unqualified initial onset stays visible as a masked proposal.
+    assert local_zero["frames"][0]["target_action"] is None
     assert local_zero["frames"][1]["target_action"] == "CONTINUE"
 
 
-def test_real_yield_requires_explicit_remote_speaker_link_and_observed_stop() -> None:
+def _timestamp_yield_fixture(
+    *,
+    local_end_ms: float = 240.0,
+    peer_start_ms: float = 160.0,
+    peer_end_ms: float = 480.0,
+    peer_state: str = "complete",
+    local_restart_ms: float = 440.0,
+) -> dict:
+    row = _real_conversation_fixture()
+    row["duration_ms"] = 800
+
+    def segment(segment_id, channel, start, end, state, text, speaker):
+        return {
+            "segment_id": segment_id,
+            "text": text,
+            "start_ms": start,
+            "end_ms": end,
+            "role": None,
+            "task_kind": "asr",
+            "channel_index": channel,
+            "source_track_index": channel,
+            "audio_channel_verified": True,
+            "time_mask": True,
+            "text_mask": True,
+            "action_mask": False,
+            "native_turn_state": state,
+            "native_other_turn": [],
+            "native_paralinguistic": [],
+            "source_speaker_id": speaker,
+            "source_other_speaker_id": None,
+        }
+
+    row["segments"] = [
+        segment("local-active", 0, 0, local_end_ms, "complete", "local speech", "A"),
+        segment("peer-onset", 1, peer_start_ms, peer_end_ms, peer_state, "peer speech", "B"),
+        segment("local-restart", 0, local_restart_ms, local_restart_ms + 80, "complete", "local reply", "A"),
+        segment("peer-later", 1, 600, 680, "complete", "later peer speech", "B"),
+    ]
+    return row
+
+
+def test_real_yield_is_timestamp_derived_at_peer_onset_and_keeps_evidence() -> None:
     from training.duplex_qlora.sources import build_real_conversational_views
 
-    views = build_real_conversational_views([_real_conversation_fixture(yield_cue=True)])
+    # The source labels the local utterance as complete and supplies no
+    # interruption tag or opposite-speaker link. Timing alone is enough here.
+    candidate = _timestamp_yield_fixture()
+    views = build_real_conversational_views([candidate])
     local_zero = next(view for view in views if view["view_local_channel"] == 0)
 
-    assert local_zero["frames"][0]["target_action"] == "SPEAK"
-    assert local_zero["frames"][1]["target_action"] == "CONTINUE"
-    assert local_zero["frames"][2]["target_action"] == "YIELD"
+    by_id = {frame["frame_id"]: frame for frame in local_zero["frames"]}
+    assert by_id[2]["target_action"] == "YIELD"
+    assert by_id[2]["target_action_source"] == "timestamp_derived_peer_onset_confirmed_local_stop"
+    assert by_id[2]["target_action_evidence"]["peer_onset_ms"] == 160
+    assert by_id[2]["target_action_evidence"]["local_stop_ms"] == 240
+    assert by_id[2]["target_action_evidence"]["lookahead_used_for_label_eligibility_only"] is True
+    assert by_id[3]["target_action"] != "YIELD"
+    assert local_zero["timestamp_action_derivation"]["replan_inferred"] is False
 
-    unlinked = _real_conversation_fixture(yield_cue=True)
-    unlinked["segments"][0]["source_other_speaker_id"] = None
-    no_remote_continuation = _real_conversation_fixture(yield_cue=True)
-    no_remote_continuation["segments"][1]["end_ms"] = 160
-    for candidate in (unlinked, no_remote_continuation):
-        candidate_views = build_real_conversational_views([candidate])
-        assert all(frame["target_action"] != "YIELD" for view in candidate_views for frame in view["frames"])
 
-    unlinked = _real_conversation_fixture(yield_cue=True)
-    unlinked["segments"][0]["source_other_speaker_id"] = None
-    no_remote_continuation = _real_conversation_fixture(yield_cue=True)
-    no_remote_continuation["segments"][1]["end_ms"] = 160
-    for candidate in (unlinked, no_remote_continuation):
-        candidate_views = build_real_conversational_views([candidate])
-        assert all(frame["target_action"] != "YIELD" for view in candidate_views for frame in view["frames"])
+def test_timestamp_yield_boundaries_persistence_restart_and_backchannel() -> None:
+    from training.duplex_qlora.sources import build_real_conversational_views
+
+    # Inclusive boundaries: 80 ms own lead, 320 ms until own stop, and 160 ms
+    # peer persistence. Event target remains the peer-onset tick.
+    boundary = _timestamp_yield_fixture(
+        local_end_ms=400,
+        peer_start_ms=80,
+        peer_end_ms=560,
+        local_restart_ms=560,
+    )
+    views = build_real_conversational_views([boundary])
+    local_zero = next(view for view in views if view["view_local_channel"] == 0)
+    assert next(f for f in local_zero["frames"] if f["frame_id"] == 1)["target_action"] == "YIELD"
+
+    rejected = [
+        _timestamp_yield_fixture(peer_start_ms=79),  # less than 80 ms local lead
+        _timestamp_yield_fixture(local_end_ms=401, peer_start_ms=80, peer_end_ms=561, local_restart_ms=561),
+        _timestamp_yield_fixture(local_end_ms=400, peer_start_ms=80, peer_end_ms=559, local_restart_ms=560),
+        _timestamp_yield_fixture(local_end_ms=400, peer_start_ms=80, peer_end_ms=560, local_restart_ms=559),
+        _timestamp_yield_fixture(peer_state="backchannel"),
+    ]
+    for row in rejected:
+        candidate_views = build_real_conversational_views([row])
+        local = next(view for view in candidate_views if view["view_local_channel"] == 0)
+        assert all(frame["target_action"] != "YIELD" for frame in local["frames"])
+    backchannel_local = next(view for view in build_real_conversational_views([rejected[-1]]) if view["view_local_channel"] == 0)
+    assert next(frame for frame in backchannel_local["frames"] if frame["frame_id"] == 2)["target_action"] == "CONTINUE"
+
+
+def test_timestamp_yield_does_not_promote_prolonged_overlap_or_conflicting_explicit_label() -> None:
+    from training.duplex_qlora.sources import build_real_conversational_views
+
+    prolonged = _timestamp_yield_fixture(local_end_ms=600, peer_start_ms=160, peer_end_ms=800, local_restart_ms=760)
+    views = build_real_conversational_views([prolonged])
+    local_zero = next(view for view in views if view["view_local_channel"] == 0)
+    assert all(frame["target_action"] != "YIELD" for frame in local_zero["frames"])
+
+    explicit = _timestamp_yield_fixture()
+    explicit["frames"] = [{
+        "frame_id": 2,
+        "target_action": "BACKCHANNEL",
+        "action_mask": True,
+        "target_action_source": "verified_native_assistant_action",
+    }]
+    views = build_real_conversational_views([explicit])
+    local_zero = next(view for view in views if view["view_local_channel"] == 0)
+    frame = next(frame for frame in local_zero["frames"] if frame["frame_id"] == 2)
+    assert frame["target_action"] == "BACKCHANNEL"
+    assert frame["target_action_source"] == "verified_native_assistant_action"
+
+
+def test_timestamp_speak_requires_peer_inactive_at_exact_onset() -> None:
+    from training.duplex_qlora.sources import build_real_conversational_views
+
+    row = _timestamp_yield_fixture(local_end_ms=240, peer_start_ms=160, peer_end_ms=400, local_restart_ms=440)
+    row["segments"] = [
+        dict(row["segments"][1], start_ms=160, end_ms=400),
+        dict(row["segments"][2], start_ms=160, end_ms=240),
+    ]
+    local = next(view for view in build_real_conversational_views([row]) if view["view_local_channel"] == 0)
+    onset = next(frame for frame in local["frames"] if frame["frame_id"] == 2)
+    assert onset["target_action"] is None
+    assert onset["action_masked_reason"] == "assistant_onset_overlaps_unterminated_peer"
+
+
+def test_timestamp_speak_targets_last_vocal_tick_once_and_preserves_direct_action() -> None:
+    from training.duplex_qlora.sources import derive_timestamp_action_frames
+
+    row = _real_conversation_fixture()
+    row.update(duration_ms=640, channel_map={"0": "assistant", "1": "user"})
+
+    def seg(name, channel, start, end, state):
+        return {
+            "segment_id": name,
+            "role": "assistant" if channel == 0 else "user",
+            "channel_index": channel,
+            "start_ms": start,
+            "end_ms": end,
+            "audio_channel_verified": True,
+            "time_mask": True,
+            "native_turn_state": state,
+        }
+
+    row["segments"] = [
+        seg("previous-assistant", 0, 0, 80, "complete"),
+        seg("complete-user", 1, 80, 220, "complete"),
+        seg("next-assistant", 0, 300, 380, "complete"),
+    ]
+    row["frames"] = [{
+        "frame_id": 3,
+        "target_action": "SPEAK",
+        "action_mask": True,
+        "target_action_source": "timestamp_derived_assistant_onset_after_peer_termination",
+        "target_action_evidence": {"local_segment_id": "next-assistant"},
+    }]
+    frames, report = derive_timestamp_action_frames(row)
+    by_frame = {frame["frame_id"]: frame for frame in frames}
+    # floor((220 ms - epsilon) / 80 ms) = 2; assistant onset is frame 3.
+    assert by_frame[2]["target_action"] == "SPEAK"
+    assert by_frame[2]["target_action_source"] == "timestamp_derived_last_vocal_complete_user_turn"
+    assert by_frame[2]["speaker_active_at_frame_start"] is False
+    assert by_frame[2]["peer_active_during_frame"] is True
+    assert by_frame[3]["action_mask"] is False
+    assert by_frame[3]["action_masked_reason"] == "timestamp_derived_assistant_onset_deferred_to_user_endpoint"
+    assert report["speak_last_vocal_endpoint_targets"] == 1
+    assert report["speak_assistant_onset_targets_deferred"] == 1
+
+    # A direct action label remains higher priority than the timestamp proxy.
+    row["frames"] = [{
+        "frame_id": 2,
+        "target_action": "CONTINUE",
+        "action_mask": True,
+        "target_action_source": "explicit_source_action_reviewed",
+        "target_action_evidence": {"review": "direct action annotation"},
+    }]
+    explicit_frames, _ = derive_timestamp_action_frames(row)
+    explicit = next(frame for frame in explicit_frames if frame["frame_id"] == 2)
+    assert explicit["target_action"] == "CONTINUE"
+    assert explicit["target_action_source"] == "explicit_source_action_reviewed"
+
+
+def test_timestamp_speak_same_tick_and_incomplete_turn_rules() -> None:
+    from training.duplex_qlora.sources import derive_timestamp_action_frames
+
+    row = _real_conversation_fixture()
+    row.update(duration_ms=640, channel_map={"0": "assistant", "1": "user"})
+
+    def seg(name, channel, start, end, state):
+        return {
+            "segment_id": name,
+            "role": "assistant" if channel == 0 else "user",
+            "channel_index": channel,
+            "start_ms": start,
+            "end_ms": end,
+            "audio_channel_verified": True,
+            "time_mask": True,
+            "native_turn_state": state,
+        }
+
+    row["segments"] = [seg("user", 1, 80, 220, "complete"), seg("assistant", 0, 235, 300, "complete")]
+    row["frames"] = [{
+        "frame_id": 2,
+        "target_action": "SPEAK",
+        "action_mask": True,
+        "target_action_source": "timestamp_derived_assistant_onset_after_peer_termination",
+        "target_action_evidence": {"local_segment_id": "assistant"},
+    }]
+    frames, report = derive_timestamp_action_frames(row)
+    speak_rows = [
+        frame for frame in frames
+        if frame.get("target_action") == "SPEAK"
+        and frame.get("target_action_source", "").startswith("timestamp_derived")
+    ]
+    assert len(speak_rows) == 1
+    assert speak_rows[0]["frame_id"] == 2
+    assert speak_rows[0]["target_action_source"] == "timestamp_derived_assistant_onset_after_peer_termination"
+    assert report["speak_last_vocal_endpoint_targets"] == 0
+    assert report["speak_last_vocal_endpoint_same_tick_seeds"] == 1
+    assert speak_rows[0]["target_action_evidence"]["same_tick_as_user_endpoint"] is True
+    assert speak_rows[0]["target_action_evidence"]["qualified_user_endpoint_key"] == [row["conversation_id"], 2]
+
+    row["segments"][0]["native_turn_state"] = "incomplete"
+    incomplete_frames, incomplete_report = derive_timestamp_action_frames(row)
+    assert not any(
+        frame.get("target_action_source") == "timestamp_derived_last_vocal_complete_user_turn"
+        for frame in incomplete_frames
+    )
+    assert incomplete_report["speak_last_vocal_endpoint_targets"] == 0
+    assert not any(
+        frame.get("target_action") == "SPEAK" and frame.get("action_mask") is True
+        for frame in incomplete_frames
+    )
+
+
+def test_timestamp_speak_masks_unqualified_assistant_onset() -> None:
+    from training.duplex_qlora.sources import derive_timestamp_action_frames
+
+    row = _real_conversation_fixture()
+    row.update(duration_ms=640, channel_map={"0": "assistant", "1": "user"})
+
+    def seg(name, channel, start, end, state="complete"):
+        return {
+            "segment_id": name,
+            "role": "assistant" if channel == 0 else "user",
+            "channel_index": channel,
+            "start_ms": start,
+            "end_ms": end,
+            "audio_channel_verified": True,
+            "time_mask": True,
+            "native_turn_state": state,
+        }
+
+    # The assistant's prior segment is active at the user's endpoint, so this
+    # onset is not a qualified endpoint key and must not become a SPEAK target.
+    row["segments"] = [
+        seg("user", 1, 80, 220),
+        seg("assistant-prior", 0, 150, 240),
+        seg("assistant-next", 0, 300, 380),
+    ]
+    row["frames"] = [{
+        "frame_id": 3,
+        "target_action": "SPEAK",
+        "action_mask": True,
+        "target_action_source": "timestamp_derived_assistant_onset_after_peer_termination",
+        "target_action_evidence": {"local_segment_id": "assistant-next"},
+    }]
+
+    frames, report = derive_timestamp_action_frames(row)
+    onset = next(frame for frame in frames if frame["frame_id"] == 3)
+    assert report["speak_last_vocal_endpoint_seed_selection"]["qualified_endpoint_pairs"] == 0
+    assert onset["target_action"] == "SPEAK"
+    assert onset["action_mask"] is False
+    assert onset["target_action_source"] == "timestamp_derived_assistant_onset_after_peer_termination"
+    assert onset["target_action_evidence"] == {"local_segment_id": "assistant-next"}
+    assert onset["action_masked_reason"] == "assistant_onset_without_qualified_user_endpoint"
+
+
+def test_timestamp_speak_deduplicates_peer_segments_to_last_peer_before_next_assistant() -> None:
+    from training.duplex_qlora.sources import derive_timestamp_action_frames
+
+    row = _real_conversation_fixture()
+    row.update(duration_ms=640, channel_map={"0": "assistant", "1": "user"})
+
+    def seg(name, channel, start, end, state="complete"):
+        return {
+            "segment_id": name,
+            "role": "assistant" if channel == 0 else "user",
+            "channel_index": channel,
+            "start_ms": start,
+            "end_ms": end,
+            "audio_channel_verified": True,
+            "time_mask": True,
+            "native_turn_state": state,
+        }
+
+    row["segments"] = [
+        seg("user-first-chunk", 1, 80, 145),
+        seg("user-last-chunk", 1, 145, 220),
+        seg("next-assistant", 0, 300, 380),
+    ]
+    row["frames"] = [{
+        "frame_id": 3,
+        "target_action": "SPEAK",
+        "action_mask": True,
+        "target_action_source": "timestamp_derived_assistant_onset_after_peer_termination",
+        "target_action_evidence": {"local_segment_id": "next-assistant"},
+    }]
+    frames, report = derive_timestamp_action_frames(row)
+    endpoint_rows = [
+        frame for frame in frames
+        if frame.get("target_action_source") == "timestamp_derived_last_vocal_complete_user_turn"
+    ]
+    assert len(endpoint_rows) == 1
+    assert endpoint_rows[0]["frame_id"] == 2
+    assert endpoint_rows[0]["target_action_evidence"]["peer_segment_id"] == "user-last-chunk"
+    assert report["speak_last_vocal_endpoint_targets"] == 1
+
+
+def test_timestamp_speak_uses_last_peer_state_not_an_older_complete_peer() -> None:
+    from training.duplex_qlora.sources import derive_timestamp_action_frames
+
+    row = _real_conversation_fixture()
+    row.update(duration_ms=640, channel_map={"0": "assistant", "1": "user"})
+
+    def seg(name, channel, start, end, state):
+        return {
+            "segment_id": name,
+            "role": "assistant" if channel == 0 else "user",
+            "channel_index": channel,
+            "start_ms": start,
+            "end_ms": end,
+            "audio_channel_verified": True,
+            "time_mask": True,
+            "native_turn_state": state,
+        }
+
+    row["segments"] = [
+        seg("older-complete-peer", 1, 80, 145, "complete"),
+        seg("newer-incomplete-peer", 1, 145, 220, "incomplete"),
+        seg("next-assistant", 0, 300, 380, "complete"),
+    ]
+    row["frames"] = [{
+        "frame_id": 3,
+        "target_action": "SPEAK",
+        "action_mask": True,
+        "target_action_source": "timestamp_derived_assistant_onset_after_peer_termination",
+        "target_action_evidence": {"local_segment_id": "next-assistant"},
+    }]
+    frames, report = derive_timestamp_action_frames(row)
+    assert not any(
+        frame.get("target_action_source") == "timestamp_derived_last_vocal_complete_user_turn"
+        for frame in frames
+    )
+    assert report["speak_last_vocal_endpoint_seed_selection"]["rejections"]["last_peer_not_complete"] == 1
+
+
+def test_relabel_prepared_real_timestamp_targets_preserves_split_and_row_identity() -> None:
+    from training.duplex_qlora.sources import (
+        build_real_conversational_views,
+        relabel_prepared_timestamp_actions,
+    )
+
+    train = build_real_conversational_views([_timestamp_yield_fixture()])
+    validation_source = _timestamp_yield_fixture()
+    validation_source.update(
+        conversation_id="validation-source",
+        source_group_id="validation-group",
+        split="validation",
+    )
+    validation = build_real_conversational_views([validation_source])
+    source_rows = [*train, *validation]
+    before = {
+        (row["split"], row["conversation_id"], row["source_group_id"])
+        for row in source_rows
+    }
+
+    rows, report = relabel_prepared_timestamp_actions(source_rows)
+
+    after = {
+        (row["split"], row["conversation_id"], row["source_group_id"])
+        for row in rows
+    }
+    assert after == before
+    assert report["train_validation_source_groups_disjoint"] is True
+    assert report["heldout_test_read"] is False
+    assert report["real_rows_relabelled_by_split"] == {"train": 2, "validation": 2}
+    assert report["supervision_counts_after_by_split_source_action"]["train"]["SmoothConv"]["YIELD"] == 1
+    assert report["supervision_counts_after_by_split_source_action"]["validation"]["SmoothConv"]["YIELD"] == 1
+
+
+def test_candidate_e_endpoint_provenance_is_recomputed_but_native_action_is_preserved() -> None:
+    from training.duplex_qlora.endpoint_causal_data import derive_native_endpoint_labels
+    from training.duplex_qlora.sources import build_real_conversational_views, relabel_prepared_timestamp_actions
+
+    views = build_real_conversational_views([_timestamp_yield_fixture()])
+    local = next(view for view in views if view["view_local_channel"] == 0)
+    # Candidate E's historical timing target was CONTINUE at this peer onset.
+    # Feed that old row through the real endpoint pass to obtain its actual
+    # `verified_native_assistant_action` provenance before converter replay.
+    local["frames"] = [
+        {
+            **frame,
+            **({
+                "target_action": "CONTINUE",
+                "action_mask": True,
+                "target_action_source": "native_turn_state_and_observed_channel_timing",
+            } if frame.get("frame_id") == 2 else {}),
+        }
+        for frame in local["frames"]
+    ]
+    endpoint_labeled, _ = derive_native_endpoint_labels(local)
+    # These are the repository's real endpoint-causal provenance strings,
+    # rather than aliases made specifically for this converter test.
+    assert any(
+        frame.get("target_action_source") == "verified_remote_user_active"
+        for frame in endpoint_labeled["frames"]
+    )
+    assert endpoint_labeled["frames"][[
+        frame["frame_id"] for frame in endpoint_labeled["frames"]
+    ].index(2)]["target_action_source"] == "verified_native_assistant_action"
+    assert endpoint_labeled["frames"][[
+        frame["frame_id"] for frame in endpoint_labeled["frames"]
+    ].index(2)]["target_action"] == "CONTINUE"
+    endpoint_labeled["frames"].append({
+        "frame_id": 3,
+        "target_action": "CONTINUE",
+        "action_mask": True,
+        "target_action_source": "native_turn_state_and_observed_channel_timing",
+    })
+    endpoint_labeled.update(split="train", source_group_id="candidate-e-source-group")
+
+    transformed, report = relabel_prepared_timestamp_actions([endpoint_labeled])
+    by_id = {frame["frame_id"]: frame for frame in transformed[0]["frames"]}
+    assert by_id[2]["target_action"] == "YIELD"
+    assert by_id[2]["target_action_source"] == "timestamp_derived_peer_onset_confirmed_local_stop"
+    assert by_id[3]["target_action"] == "LISTEN"
+    assert report["supervision_counts_before_by_split_source_provenance_action"]["train"]["SmoothConv"][
+        "verified_native_assistant_action"
+    ]["CONTINUE"] >= 1
+    assert report["supervision_counts_after_by_split_source_provenance_action"]["train"]["SmoothConv"].get(
+        "verified_native_assistant_action", {}
+    ).get("CONTINUE", 0) == 0
+    assert report["supervision_counts_after_by_split_source_action"]["train"]["SmoothConv"]["YIELD"] == 1
+
+
+def test_relabel_prepared_timestamp_targets_rejects_cross_split_group_and_test() -> None:
+    import pytest
+
+    from training.duplex_qlora.sources import (
+        build_real_conversational_views,
+        relabel_prepared_timestamp_actions,
+    )
+
+    first, original_second = build_real_conversational_views([_timestamp_yield_fixture()])
+    second = dict(original_second, conversation_id="same-group-val", split="validation")
+    with pytest.raises(ValueError, match="source groups leak"):
+        relabel_prepared_timestamp_actions([first, second])
+    heldout = dict(first, conversation_id="heldout", split="test")
+    with pytest.raises(ValueError, match="held-out test"):
+        relabel_prepared_timestamp_actions([heldout])
 
 
 def test_real_conversational_views_require_verified_two_channel_pairing() -> None:
@@ -497,7 +940,7 @@ def test_real_views_materialize_sparse_windows_and_keep_source_groups_atomic(tmp
     views = build_real_conversational_views([long], max_conversations=1)
     assert len(views) == 2
     assert all(len(view["frames"]) <= 3 for view in views)
-    assert all([frame["target_action"] for frame in view["frames"]] == ["SPEAK", "CONTINUE", "CONTINUE"] for view in views)
+    assert all([frame["target_action"] for frame in view["frames"]] == [None, "CONTINUE", "CONTINUE"] for view in views)
     assert all([frame["frame_id"] for frame in view["frames"]] == sorted(frame["frame_id"] for frame in view["frames"]) for view in views)
 
     paired = _real_conversation_fixture()

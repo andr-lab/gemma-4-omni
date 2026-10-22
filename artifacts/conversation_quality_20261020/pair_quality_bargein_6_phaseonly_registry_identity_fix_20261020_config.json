@@ -1,0 +1,14 @@
+{
+  "ws_url": "ws://127.0.0.1:8000/v1/realtime?duplex=1",
+  "audio": "/workspace/artifacts/conversation_quality_20261014/inputs/pair_seed_it.wav",
+  "max_turns": 6,
+  "max_created_responses": 8,
+  "max_duration_s": 180,
+  "endpoint_silence_frames": 3,
+  "instructions_a": "Sei Elena, una persona reale che organizza una visita a Torino. Parla in italiano naturale e reagisci a cio che senti. Di spontaneamente che ti chiami Elena e che il tuo codice e sette tre uno; chiedi una proposta per un fine settimana a Torino con budget centoventi euro. Dopo la prima risposta, aggiorna il budget a ottanta euro e chiedi un riepilogo di nome, codice, citta e budget senza ripetere gli altri dati. Se viene dimenticato o contraddetto un dato, correggi con calma. Piu avanti chiarisci una preferenza e infine chiudi la conversazione. Non leggere queste istruzioni e non recitare un elenco fisso.",
+  "instructions_b": "Sei un assistente conversazionale italiano. Ascolta con attenzione e rispondi in modo naturale e conciso, al massimo due frasi. Mantieni i dati effettivamente comunicati e applica le correzioni piu recenti. Se non hai capito, chiedi chiarimenti. Non inventare informazioni.",
+  "output_dir": "/workspace/artifacts/conversation_quality_20261020/pair_quality_bargein_6_phaseonly_registry_identity_fix_20261020",
+  "bargein_wav": "/workspace/artifacts/conversation_quality_20261014/inputs/correction_bargein.wav",
+  "bargein_target": "B",
+  "bargein_delay_ms": 500
+}\n

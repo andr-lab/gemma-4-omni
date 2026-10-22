@@ -28,6 +28,7 @@ from duplex_kernel.gemma_representation import (
     AUDIO_START_AFTER_TEXT,
     CANONICAL_LM_PREFILL_TARGET_LEN,
 )
+from duplex_kernel.native_control6_prompt import NATIVE_CONTROL6_PREFIX_MAX_TOKENS
 
 logger = logging.getLogger("duplex_kernel.native_listener")
 
@@ -815,6 +816,16 @@ class NativeGemmaListenerLM:
         logger.info("[native_listener] Caricamento %s...", lib_path)
         self._lib = ctypes.CDLL(lib_path)
         self._setup_c_signatures()
+        self._runtime_prefix_capacity = (
+            int(self._lib.gemma4_listener_runtime_prefix_capacity())
+            if hasattr(self._lib, "gemma4_listener_runtime_prefix_capacity")
+            else CANONICAL_LM_PREFILL_TARGET_LEN
+        )
+        if not 1 <= self._runtime_prefix_capacity <= NATIVE_CONTROL6_PREFIX_MAX_TOKENS:
+            raise RuntimeError(
+                "native listener reports an invalid semantic-prefix import capacity: "
+                f"{self._runtime_prefix_capacity}"
+            )
 
         # 1. Attest ABI and Topology Hash
         abi_ver = self._lib.gemma4_listener_abi_version()
@@ -1151,6 +1162,10 @@ class NativeGemmaListenerLM:
 
         self._lib.gemma4_listener_abi_version.restype = ctypes.c_int
         self._lib.gemma4_listener_abi_version.argtypes = []
+        prefix_capacity = getattr(self._lib, "gemma4_listener_runtime_prefix_capacity", None)
+        if prefix_capacity is not None:
+            prefix_capacity.restype = ctypes.c_uint32
+            prefix_capacity.argtypes = []
         for name in (
             "gemma4_listener_abi_config_size",
             "gemma4_listener_abi_tensor_meta_size",
@@ -1806,10 +1821,10 @@ class NativeGemmaListenerLM:
             if prefix_len is None or prefix_mask is None:
                 raise ValueError("prefix_len e prefix_mask devono essere forniti insieme")
             prefix_len = int(prefix_len)
-            if not 1 <= prefix_len <= CANONICAL_LM_PREFILL_TARGET_LEN:
+            if not 1 <= prefix_len <= self._runtime_prefix_capacity:
                 raise ValueError(
                     "prefix_len deve essere compreso tra 1 e "
-                    f"{CANONICAL_LM_PREFILL_TARGET_LEN}"
+                    f"{self._runtime_prefix_capacity}"
                 )
             if current_position < prefix_len or (current_position - prefix_len) % self.stream_q_len:
                 raise ValueError(

@@ -535,9 +535,9 @@ class BatchRowDescriptor:
             "logical_q_len",
         ):
             _strict_nonnegative_int(name, getattr(self, name))
-        if self.logical_q_len > LISTENER_Q_PER_FRAME:
+        if self.logical_q_len > 8:
             raise ValueError(
-                f"logical_q_len must be in [0,{LISTENER_Q_PER_FRAME}]"
+                "logical_q_len must be in [0,8]"
             )
         if self.ephemeral_reason not in {None, "prespeech_silence", "assistant_turn_open"}:
             raise ValueError("unsupported logical-Q ephemeral reason")

@@ -20,6 +20,9 @@ class _Cache:
     def get_seq_length(self, _layer=0) -> int:
         return self.length
 
+    def crop(self, max_length: int) -> None:
+        self.length = min(self.length, max_length)
+
 
 class _LanguageModel:
     def __init__(self) -> None:
@@ -75,6 +78,7 @@ def test_semantic_prefix_cache_uses_actual_prefix_then_separate_prior_q2_queries
     backend.hidden_size = 1536
     backend._frame_pad_ple = None
     backend.pad_token_id = 0
+    backend.boa_token_id = 777
 
     first = torch.full((2, 1536), 1.0)
     second = torch.full((2, 1536), 2.0)
@@ -100,6 +104,55 @@ def test_semantic_prefix_cache_uses_actual_prefix_then_separate_prior_q2_queries
     assert mask_calls[0][1].shape == (1, 3)
     assert mask_calls[1][1].shape == (1, 5)
     assert mask_calls[2][1].shape == (1, 7)
+
+
+def test_semantic_prefix_prefill_chunks_above_canonical_limit_and_crops_cache(monkeypatch):
+    transformers_modeling = pytest.importorskip("transformers.models.gemma4.modeling_gemma4")
+    mask_calls = []
+
+    def create_masks(_config, embeds, attention, *, past_key_values, position_ids):
+        mask_calls.append((tuple(embeds.shape), attention.clone(), position_ids.clone()))
+        return object()
+
+    monkeypatch.setattr(transformers_modeling, "create_masks_for_generate", create_masks)
+
+    class _PaddedShapeStable(_ShapeStable):
+        target_length = 291
+
+        def forward(self, *, inputs_embeds, **kwargs):
+            past_key_values = kwargs["past_key_values"]
+            prior = 0 if past_key_values is None else past_key_values.get_seq_length(0)
+            output = super().forward(inputs_embeds=inputs_embeds, **kwargs)
+            # The real wrapper pads projection/attention workspaces. Simulate a
+            # cache that includes that padded tail so every chunk must crop it.
+            output.past_key_values.length = prior + self.target_length
+            return output
+
+    backend = object.__new__(GemmaAudioTowerBackend)
+    backend._shape_stable_lm = _PaddedShapeStable()
+    backend.gemma_model = SimpleNamespace(language_model=_LanguageModel())
+    backend.device = "cpu"
+    backend.hidden_size = 1536
+    backend._frame_pad_ple = None
+    backend.pad_token_id = 0
+    backend.boa_token_id = 777
+    prefix_ids = tuple(range(348)) + (777,)
+
+    result = GemmaAudioTowerBackend.build_semantic_prefix_cache(backend, prefix_ids)
+
+    assert result["prefix_len"] == 349
+    assert result["cache_position"] == 349
+    assert result["past_key_values"].get_seq_length() == 349
+    assert [call[0] for call in backend._shape_stable_lm.calls] == [
+        (1, 291, 1536), (1, 58, 1536)
+    ]
+    assert backend._shape_stable_lm.calls[0][1] == [list(range(291))]
+    assert backend._shape_stable_lm.calls[1][1] == [list(range(291, 349))]
+    assert [call[2] for call in backend._shape_stable_lm.calls] == [0, 291]
+    assert [call[0] for call in mask_calls] == [(1, 291, 1536), (1, 58, 1536)]
+    assert [tuple(call[1].shape) for call in mask_calls] == [(1, 291), (1, 349)]
+    assert mask_calls[0][2].tolist() == [list(range(291))]
+    assert mask_calls[1][2].tolist() == [list(range(291, 349))]
 
 
 @pytest.mark.parametrize("replay_count", [0, 2])
@@ -142,6 +195,7 @@ def test_native_semantic_prefix_import_uses_actual_length_and_replay_cursor(monk
     backend.hidden_size = 1536
     backend._frame_pad_ple = None
     backend.pad_token_id = 0
+    backend.boa_token_id = 777
     backend.runtime_profile = "compatibility"
     backend._native_runtime = None
     backend._lock = _FairLock()
@@ -186,6 +240,7 @@ def test_native_semantic_prefix_import_uses_actual_length_and_replay_cursor(monk
 
 def test_semantic_prefix_rejects_request_length_that_disagrees_with_token_ids():
     backend = object.__new__(GemmaAudioTowerBackend)
+    backend.boa_token_id = 777
     with pytest.raises(ValueError, match="does not match its token IDs"):
         GemmaAudioTowerBackend.prime_semantic_prefix(
             backend,
@@ -318,6 +373,7 @@ def test_shared_backend_switches_semantic_prefix_import_between_private_sessions
     backend.hidden_size = 1536
     backend._frame_pad_ple = None
     backend.pad_token_id = 0
+    backend.boa_token_id = 777
     backend.runtime_profile = "compatibility"
     backend._native_runtime = None
     backend._lock = _FairLock()
