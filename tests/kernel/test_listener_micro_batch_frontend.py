@@ -819,6 +819,75 @@ def test_streaming_conformer_is_committed_only_with_the_frontend_transaction(
     assert stale_streaming.committed_positions == ()
 
 
+def test_unsupported_optimized_q2_runtime_falls_back_to_w240_row_runner(
+    runtime_signature: RuntimeSignature,
+    capability: NativeBatchCapability,
+) -> None:
+    class PreparedResult:
+        _committed = False
+
+        def __init__(self):
+            self.aborted = False
+            self.raw_tokens = torch.zeros((1, 2, 1536), dtype=torch.float32)
+            self.soft_tokens = torch.zeros((1, 1, 1536), dtype=torch.float32)
+
+        def abort(self):
+            self.aborted = True
+
+    class UnsupportedOptimizedTower:
+        optimize_cuda = True
+
+        def __init__(self):
+            self.closed = False
+            self.prepared = PreparedResult()
+            self.audio_tower = SimpleNamespace(
+                config=SimpleNamespace(output_proj_dims=1536)
+            )
+
+        def prepare_batch(self, *_args, **_kwargs):
+            return self.prepared
+
+        def close(self):
+            self.closed = True
+
+    streaming = UnsupportedOptimizedTower()
+    calls = []
+
+    def row_runner(features: torch.Tensor, q_start: int):
+        calls.append((tuple(features.shape), q_start))
+        output = torch.full((1, 2, 1536), 2.5, dtype=features.dtype)
+        return output, AudioTowerRowTiming(
+            graph_submit_ms=0.25,
+            copy_cuda_events=None,
+            tower_cuda_events=None,
+            execution_mode="eager_n1_degraded",
+        )
+
+    _, batch, states = _runtime_states_and_batch(
+        1, runtime_signature, capability, mel_frames=0, frame_id=0, include_reference=False
+    )
+    frontend = ListenerMicrobatchAudioFrontend(
+        _AudioTower(),
+        _production_extractor(),
+        device="cpu",
+        dtype=torch.float32,
+        audio_tower_row_runner=row_runner,
+        streaming_audio_tower=streaming,
+    )
+
+    prepared = frontend.encode_batch(batch, states)
+
+    assert calls == [((1, 8, 128), 0)]
+    assert streaming.prepared.aborted
+    assert streaming.closed
+    assert frontend.streaming_audio_tower is None
+    assert prepared.audio_tower_raw_tokens == ()
+    assert prepared.streaming_audio_input_shape is None
+    assert torch.all(prepared.audio_soft_tokens[0] == 2.5)
+    assert prepared.audio_tower_execution_mode == "eager_n1_degraded"
+    prepared.commit()
+
+
 def test_frontend_close_session_resets_only_when_idle():
     class ResetRecorder:
         def __init__(self):

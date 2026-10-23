@@ -9,13 +9,165 @@ import torch
 import duplex_kernel.engine as engine_module
 from duplex_kernel.engine import PipelineEngine
 from duplex_kernel.live_say import LiveQwenSayStream, TurnLocalQwenSayStream
-from duplex_kernel.session import SpokenTokenPacket, TurnLocalSpeechFIFO
+from duplex_kernel.session import (
+    SpanAlignedSpeechCursor,
+    SpokenTokenPacket,
+    TurnLocalSpeechFIFO,
+    estimate_token_audio_frames_80ms,
+)
 from duplex_kernel.server import (
     _filter_frame_residual_runtime_metrics,
     _filter_native_thinker_lock_metrics,
     _filter_turn_local_speech_runtime_metrics,
     _format_turn_local_speech_summary,
 )
+
+
+def test_token_audio_frame_estimator_uses_bounded_token_surface_heuristic() -> None:
+    assert estimate_token_audio_frames_80ms("  ") == 1
+    assert estimate_token_audio_frames_80ms("hello") == 4
+    assert estimate_token_audio_frames_80ms(".") == 2
+    assert estimate_token_audio_frames_80ms(",") == 1
+    assert estimate_token_audio_frames_80ms("abcdefghijkl") == 6
+
+
+def test_spoken_packet_exposes_transition_provenance_with_legacy_default() -> None:
+    hidden = torch.zeros((1, 1536))
+    legacy = SpokenTokenPacket(1, "x", hidden, 1)
+    assert legacy.hidden_provenance == "token"
+    assert legacy.kv_committed is True
+    assert SpokenTokenPacket(2, "y", hidden, 2, hidden_provenance="transition").hidden_provenance == "transition"
+    with pytest.raises(ValueError, match="hidden_provenance"):
+        SpokenTokenPacket(3, "z", hidden, 3, hidden_provenance="guessed")
+    with pytest.raises(TypeError, match="kv_committed"):
+        SpokenTokenPacket(4, "w", hidden, 4, kv_committed=1)
+
+
+def test_span_cursor_sentence_has_35_to_45_frames_and_small_40_frame_tail() -> None:
+    words = ("we", " can", " map", " each", " spoken", " word", " to", " frames",
+             " and", " keep", " audio", " in", " sync")
+    cursor = SpanAlignedSpeechCursor(generation_id=31)
+    for index, text in enumerate(words):
+        cursor.append(token_id=100 + index, token_text=text, hidden=torch.full((1, 1, 3), index))
+    spans = cursor.frame_spans
+    assert len(spans) == 13
+    assert spans[0].start_frame == 0
+    assert all(left.end_frame == right.start_frame for left, right in zip(spans, spans[1:]))
+    assert 35 <= spans[-1].end_frame <= 45
+
+    tail_holds = sum(cursor.select(frame, generation_id=31, segment_id=0).tail_hold for frame in range(40))
+    assert tail_holds / 40 < 0.25
+    assert cursor.select(0, generation_id=31, segment_id=0).span.token_id == 100
+    assert cursor.select(0, generation_id=31, segment_id=0).tail_hold is False
+
+
+def test_report_fixture_estimator_does_not_hide_historical_tail_hold_failure() -> None:
+    # The report records this sentence and 11 hidden rows, but no token surfaces.
+    # This reconstruction has 11 rows and the same exact source text; it records
+    # the heuristic's likely tail miss without pretending the report had offsets.
+    token_texts = ("Le", " ore", " son", "o", " le", " 1", "4", ":", "3", "0", ".")
+    cursor = SpanAlignedSpeechCursor(generation_id=32)
+    for index, text in enumerate(token_texts):
+        cursor.append(token_id=index, token_text=text, hidden=torch.zeros((1, 1, 3)))
+    tail_holds = sum(cursor.select(frame, generation_id=32, segment_id=0).tail_hold for frame in range(40))
+    assert "".join(token_texts) == "Le ore sono le 14:30."
+    assert cursor.frame_spans[-1].end_frame == 19
+    assert tail_holds == 21
+    assert tail_holds / 40 > 0.25
+
+
+def test_live_span_arrival_eos_and_stale_identity_keep_frame_schedule_stable() -> None:
+    cursor = SpanAlignedSpeechCursor(generation_id=7, segment_id=2)
+    first = cursor.append(token_id=20, token_text="a", hidden=torch.full((1, 1, 2), 1.0))
+    held = cursor.select(first.end_frame + 2, generation_id=7, segment_id=2)
+    assert held.span is first
+    assert held.tail_hold is True
+
+    second = cursor.append(token_id=21, token_text="b", hidden=torch.full((1, 1, 2), 2.0))
+    assert second.start_frame > first.end_frame + 2
+    assert cursor.select(first.end_frame + 2, generation_id=7, segment_id=2) is held
+    assert cursor.select(second.start_frame, generation_id=7, segment_id=2).span is second
+    third = cursor.append(token_id=22, token_text="c", hidden=torch.full((1, 1, 2), 3.0))
+    assert third.start_frame == second.end_frame
+    assert third.token_sequence == second.token_sequence + 1
+    cursor.close()
+    assert cursor.select(third.end_frame + 1, generation_id=7, segment_id=2).tail_hold is True
+    with pytest.raises(RuntimeError, match="stale generation"):
+        cursor.ack_emitted_frame(0, generation_id=6, segment_id=2)
+    with pytest.raises(RuntimeError, match="stale segment"):
+        cursor.ack_emitted_frame(0, generation_id=7, segment_id=1)
+
+
+def test_token_arriving_after_pcm_release_never_claims_an_already_emitted_frame() -> None:
+    cursor = SpanAlignedSpeechCursor(generation_id=8, segment_id=3)
+    first = cursor.append(token_id=30, token_text="a", hidden=torch.zeros((1, 1, 2)))
+    assert (first.start_frame, first.end_frame) == (0, 1)
+    cursor.ack_emitted_frame(0, generation_id=8, segment_id=3)
+    cursor.ack_emitted_frame(1, generation_id=8, segment_id=3)
+
+    second = cursor.append(token_id=31, token_text="b", hidden=torch.ones((1, 1, 2)))
+    assert second.start_frame == 2
+    assert cursor.select(2, generation_id=8, segment_id=3).span is second
+
+
+def test_pcm_ack_watermark_preserves_only_fully_started_packets_on_rollback() -> None:
+    fifo = TurnLocalSpeechFIFO()
+    fifo.begin_turn(generation_id=41)
+    packets = (
+        SpokenTokenPacket(1, "we can", torch.zeros((1, 1536)), 11),
+        SpokenTokenPacket(2, " map each spoken word", torch.ones((1, 1536)), 12),
+        SpokenTokenPacket(3, " to frames and keep audio", torch.full((1, 1536), 2.0), 13),
+    )
+    surfaces = (("we", " can"), (" map", " each", " spoken", " word"),
+                (" to", " frames", " and", " keep", " audio"))
+    token_id = 100
+    for packet, token_texts in zip(packets, surfaces):
+        ids = tuple(range(token_id, token_id + len(token_texts)))
+        fifo.put(
+            packet,
+            qwen_token_ids=ids,
+            qwen_token_texts=token_texts,
+            generation_id=41,
+        )
+        token_id += len(token_texts)
+    fifo.close()
+    while True:
+        token = fifo.take_qwen_token(generation_id=41, timeout_s=0)
+        if token is None:
+            break
+        fifo.consume_qwen_token(generation_id=41)
+
+    # Qwen ingestion alone must not move the rollback boundary.
+    assert fifo.last_vocalized_kv_position is None
+    assert fifo.vocalized_text == ""
+    for frame_id in range(20):
+        fifo.ack_emitted_audio_frame(
+            frame_id,
+            generation_id=41,
+            segment_id=0,
+        )
+
+    cursor = fifo.clear_unspoken_on_bargein()
+    assert cursor == 12
+    assert cursor != 13
+    assert fifo.vocalized_text == "we can map each spoken word"
+
+
+def test_fifo_pcm_ack_is_monotonic_and_segment_scoped() -> None:
+    fifo = TurnLocalSpeechFIFO()
+    fifo.begin_turn(generation_id=51)
+    fifo.put(
+        SpokenTokenPacket(1, "a", torch.zeros((1, 1536)), 1),
+        qwen_token_ids=(1,),
+        generation_id=51,
+    )
+    fifo.take_qwen_token(initial=True, generation_id=51, timeout_s=0)
+    assert fifo.consume_qwen_token(generation_id=51) is None
+    with pytest.raises(RuntimeError, match="contiguous"):
+        fifo.ack_qwen_token(generation_id=51, segment_id=0, frame_id=1)
+    fifo.ack_emitted_audio_frame(0, generation_id=51, segment_id=0)
+    with pytest.raises(RuntimeError, match="contiguous"):
+        fifo.ack_emitted_audio_frame(0, generation_id=51, segment_id=0)
 
 
 def test_frame_residual_metrics_survive_typed_response_filter() -> None:
@@ -489,12 +641,13 @@ def test_live_fifo_q1_callback_measures_pre_adapter_base_for_in_place_adapter(mo
 
     assert len(q1_inputs) >= 3, "expected actual iterative Q1 forwards after live FIFO callbacks"
     assert metrics["frame_residual_q1_steps"] == len(q1_inputs)
+    assert metrics["frame_residual_calls"] == metrics["frame_residual_q1_steps"] - 1
     assert metrics["frame_residual_calls"] >= 2
     assert metrics["frame_residual_tail_hold_calls"] >= 1
     trace = metrics["frame_residual_live_hidden_trace"]
-    assert [entry["gemma_token_id"] for entry in trace[:3]] == [101, 102, 102]
+    assert [entry["gemma_token_id"] for entry in trace[:4]] == [100, 101, 102, 102]
     assert trace[0]["tail_hold"] is False
-    assert trace[2]["tail_hold"] is True
+    assert trace[3]["tail_hold"] is True
     assert metrics["frame_residual_live_first_last_hidden_cosine"] == pytest.approx(0.0, abs=1e-5)
     assert metrics["frame_residual_rms"] > 0.001
     assert metrics["frame_residual_delta_sq_sum"] > 0.0
@@ -507,8 +660,13 @@ def test_live_fifo_q1_callback_measures_pre_adapter_base_for_in_place_adapter(mo
 
 
 def test_controller_guided_live_qwen_stream_q1_traces_hidden_without_gemma_cursor(monkeypatch) -> None:
-    """Run the actual LiveQwenSayStream through talk's iterative Q1 callback."""
+    """Run 13 real live Qwen spans through Talker's frame-indexed Q1 adapter."""
     hidden_size = 2048
+    token_surfaces = (
+        "we", " can", " map", " each", " spoken", " word", " to",
+        " frames", " and", " keep", " audio", " in", " sync",
+    )
+    sentence = "".join(token_surfaces)
 
     class TinyTokenizer:
         added_tokens_decoder = {}
@@ -516,26 +674,50 @@ def test_controller_guided_live_qwen_stream_q1_traces_hidden_without_gemma_curso
         suffix = "<|im_end|>\n<|im_start|>assistant\n"
 
         def __init__(self):
-            self.backend_tokenizer = SimpleNamespace(
-                pre_tokenizer=SimpleNamespace(pre_tokenize_str=lambda text: [
-                    (char, (index, index + 1)) for index, char in enumerate(text)
-                ]),
-            )
+            self.pieces = dict(enumerate(token_surfaces, start=100))
+
+            def split(text):
+                spans = []
+                cursor = 0
+                while cursor < len(text):
+                    match = next(
+                        (piece for piece in self.pieces.values() if text.startswith(piece, cursor)),
+                        None,
+                    )
+                    assert match is not None, (text, cursor)
+                    spans.append((match, (cursor, cursor + len(match))))
+                    cursor += len(match)
+                return spans
+
+            self.backend_tokenizer = SimpleNamespace(pre_tokenizer=SimpleNamespace(pre_tokenize_str=split))
 
         def __call__(self, text, *, return_offsets_mapping=False):
             assert return_offsets_mapping is True
+            assert text.startswith(self.prefix) and text.endswith(self.suffix)
             raw = text[len(self.prefix):-len(self.suffix)]
-            ids = [0, 1, 2] + [ord(char) for char in raw] + [900, 901, 902, 903, 904]
+            body = []
+            cursor = 0
+            while cursor < len(raw):
+                match = next(
+                    ((token_id, piece) for token_id, piece in self.pieces.items()
+                     if raw.startswith(piece, cursor)),
+                    None,
+                )
+                assert match is not None, (raw, cursor)
+                token_id, piece = match
+                body.append((token_id, cursor, cursor + len(piece)))
+                cursor += len(piece)
+            ids = [0, 1, 2] + [token_id for token_id, _start, _end in body] + [900, 901, 902, 903, 904]
             offsets = [(0, 0)] * 3 + [
-                (len(self.prefix) + index, len(self.prefix) + index + 1)
-                for index in range(len(raw))
+                (len(self.prefix) + start, len(self.prefix) + end)
+                for _token_id, start, end in body
             ] + [(0, 0)] * 5
             return {"input_ids": ids, "offset_mapping": offsets}
 
         def decode(self, ids, *, skip_special_tokens, clean_up_tokenization_spaces):
             assert skip_special_tokens is False
             assert clean_up_tokenization_spaces is False
-            return "".join(chr(int(token_id)) for token_id in ids)
+            return "".join(self.pieces[int(token_id)] for token_id in ids)
 
     class TinyProcessor:
         def __init__(self, tokenizer):
@@ -603,12 +785,14 @@ def test_controller_guided_live_qwen_stream_q1_traces_hidden_without_gemma_curso
         qwen_processor=TinyProcessor(tokenizer),
         text_eos_token_id=905,
     )
-    for token_index, char in enumerate("abc"):
+    for token_index, token_surface in enumerate(token_surfaces):
         hidden = torch.zeros((1, 1, 1536), dtype=torch.float32)
-        hidden[0, 0, token_index * 512:(token_index + 1) * 512] = 1.0
-        stream.feed_piece(char, hidden)
-    stream.finish(final_text="abc")
+        hidden[0, 0, (token_index % 3) * 512:((token_index % 3) + 1) * 512] = 1.0
+        stream.feed_piece(token_surface, hidden)
+    stream.finish(final_text=sentence)
     initial = stream.take_initial_token(timeout_s=0)
+    assert len(stream.span_cursor.frame_spans) == 13
+    assert stream.span_cursor.frame_spans[-1].end_frame == 41
 
     q1_inputs = []
     original_q1 = engine._qwen_q1_forward
@@ -620,11 +804,11 @@ def test_controller_guided_live_qwen_stream_q1_traces_hidden_without_gemma_curso
     engine._qwen_q1_forward = observe_q1
     metrics: dict[str, object] = {}
     engine.talk(
-        "abc",
+        sentence,
         torch.empty((1, 0, hidden_size), dtype=torch.float32),
-        n_words=1,
+        n_words=13,
         min_frames=2,
-        max_frames=5,
+        max_frames=43,
         raw_text_token_ids=[initial.token_id],
         include_text_eos=False,
         live_qwen_text_stream=stream,
@@ -632,11 +816,13 @@ def test_controller_guided_live_qwen_stream_q1_traces_hidden_without_gemma_curso
         metrics=metrics,
     )
 
-    assert len(q1_inputs) >= 3
+    assert len(q1_inputs) >= 42
     trace = metrics["frame_residual_live_hidden_trace"]
-    assert [entry["qwen_token_id"] for entry in trace[:3]] == [ord("a"), ord("b"), ord("c")]
-    assert all(entry["gemma_token_id"] is None for entry in trace[:3])
-    assert metrics["frame_residual_live_first_last_hidden_cosine"] == pytest.approx(0.0, abs=1e-5)
+    assert len({entry["qwen_token_id"] for entry in trace}) == 13
+    assert all(entry["gemma_token_id"] is None for entry in trace)
+    assert metrics["frame_residual_q1_steps"] == 42
+    assert metrics["frame_residual_tail_hold_calls"] == 1
+    assert metrics["frame_residual_tail_hold_calls"] / metrics["frame_residual_q1_steps"] < 0.25
     assert metrics["frame_residual_rms"] > 0.001
     assert 0.01 <= metrics["frame_residual_rms_to_base_ratio"] <= 0.25
-    assert len(_filter_frame_residual_runtime_metrics(metrics)["frame_residual_live_hidden_trace"]) >= 3
+    assert len(_filter_frame_residual_runtime_metrics(metrics)["frame_residual_live_hidden_trace"]) >= 13

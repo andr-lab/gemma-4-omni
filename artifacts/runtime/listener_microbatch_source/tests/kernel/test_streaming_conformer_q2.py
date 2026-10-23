@@ -84,6 +84,93 @@ def _cursor(session: str, frame: int, *, generation: int = 0, epoch: str = "epoc
     return AudioStreamCursor(session, generation, epoch, frame, frame)
 
 
+def test_compute_step_does_not_mutate_layer_state_with_copy_ops():
+    from torch.utils._python_dispatch import TorchDispatchMode
+
+    class CopyOperationRecorder(TorchDispatchMode):
+        def __init__(self):
+            super().__init__()
+            self.copy_operations = []
+
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            if func is torch.ops.aten.copy_.default:
+                self.copy_operations.append(func)
+            return func(*args, **(kwargs or {}))
+
+    _, audio_tower, embed_audio = _tiny_audio_tower(85)
+    streaming = StreamingConformerAudioTower(
+        audio_tower,
+        embed_audio,
+        device="cpu",
+        dtype=torch.float32,
+        max_sessions=2,
+    )
+    tick = torch.randn((1, 8, 128), generator=torch.Generator().manual_seed(86))
+    recorder = CopyOperationRecorder()
+    with torch.inference_mode(), recorder:
+        streaming._compute_step(
+            tick,
+            torch.ones((1, 8), dtype=torch.bool),
+            torch.tensor([0]),
+            torch.tensor([True]),
+        )
+    assert recorder.copy_operations == []
+
+
+def test_benchmark_primary_and_w240_diagnostic_thresholds_are_separate():
+    from tools import benchmark_streaming_conformer_q2 as benchmark
+
+    summary = {
+        "after_first_13_tokens": {"mean": 0.9998, "min": 0.9985},
+    }
+    primary = benchmark._cached_quality_thresholds(summary)
+    diagnostic = benchmark._w240_diagnostic_thresholds(summary)
+
+    assert primary["required_after_first_13_tokens"] == {
+        "mean_minimum": 0.9995,
+        "minimum_minimum": 0.9990,
+    }
+    assert primary["passed_after_first_13_tokens"] is False
+    assert diagnostic["required_after_first_13_tokens"] == {"minimum_minimum": 0.9970}
+    assert diagnostic["diagnostic_only"] is True
+    assert diagnostic["passed_after_first_13_tokens"] is True
+    assert benchmark.LATENCY_TARGET_MS == 1.90
+    assert benchmark._latency_within_budget([1.90, 1.90]) is True
+    assert benchmark._latency_within_budget([1.9001, 1.9001]) is False
+    assert benchmark.REFERENCE_SM_CLOCK_MHZ == 1995
+
+
+def test_benchmark_previous_report_loader_accepts_absent_and_empty_output(tmp_path):
+    from tools import benchmark_streaming_conformer_q2 as benchmark
+
+    absent = tmp_path / "absent.json"
+    empty = tmp_path / "empty.json"
+    empty.write_text("  \n", encoding="utf-8")
+
+    assert benchmark._load_previous_benchmark_report(absent) == {}
+    assert benchmark._load_previous_benchmark_report(empty) == {}
+
+
+def test_python_runtime_source_mirror_sha256_matches():
+    import hashlib
+    from pathlib import Path
+
+    root = next(
+        parent for parent in Path(__file__).resolve().parents
+        if (parent / "artifacts" / "runtime" / "listener_microbatch_source").is_dir()
+    )
+    mirror = root / "artifacts" / "runtime" / "listener_microbatch_source"
+    source_paths = (
+        Path("duplex_kernel/streaming_conformer.py"),
+        Path("duplex_kernel/listener_microbatch_serving.py"),
+        Path("duplex_kernel/listener_microbatch_frontend.py"),
+    )
+    for relative in source_paths:
+        source_digest = hashlib.sha256((root / relative).read_bytes()).digest()
+        mirror_digest = hashlib.sha256((mirror / relative).read_bytes()).digest()
+        assert source_digest == mirror_digest, f"runtime Python source mirror differs: {relative}"
+
+
 def test_streaming_tower_close_requires_idle_and_releases_cache():
     _, audio_tower, embed_audio = _tiny_audio_tower(78)
     streaming = StreamingConformerAudioTower(
@@ -587,8 +674,8 @@ def test_cuda_bf16_graph_restores_global_flag_and_matches_offline_after_warmup()
     soft_cos = torch.nn.functional.cosine_similarity(
         torch.cat(cached_soft, dim=1).float()[:, 13:], offline_soft.float()[:, 13:], dim=-1
     )
-    assert float(raw_cos.mean()) >= 0.9995 and float(raw_cos.min()) >= 0.998
-    assert float(soft_cos.mean()) >= 0.9995 and float(soft_cos.min()) >= 0.998
+    assert float(raw_cos.mean()) >= 0.9995 and float(raw_cos.min()) >= 0.999
+    assert float(soft_cos.mean()) >= 0.9995 and float(soft_cos.min()) >= 0.999
     assert clipped.forward.__func__ is original_forward.__func__
     assert "forward" not in clipped.__dict__
     assert tuple(
@@ -745,5 +832,3 @@ def test_q2_wrapper_install_remove_preserves_requires_grad_flags():
     assert tuple(parameter.requires_grad for parameter in linear.parameters()) == before
     restore_gemma4_linear_wrappers(wrappers)
     assert tuple(parameter.requires_grad for parameter in linear.parameters()) == before
-
-

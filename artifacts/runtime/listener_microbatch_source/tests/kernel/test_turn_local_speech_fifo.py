@@ -30,7 +30,12 @@ def test_fifo_holds_packet_until_all_qwen_ids_are_consumed_and_returns_exact_hid
     fifo.begin_turn(generation_id=7)
     packet = _packet(22, "Aspetta!", 412)
 
-    fifo.put(packet, qwen_token_ids=(31, 32), generation_id=7)
+    fifo.put(
+        packet,
+        qwen_token_ids=(31, 32),
+        qwen_token_texts=("Asp", "etta!"),
+        generation_id=7,
+    )
     first = fifo.take_qwen_token(initial=True, generation_id=7, timeout_s=0)
 
     assert first.token_id == 31
@@ -39,15 +44,154 @@ def test_fifo_holds_packet_until_all_qwen_ids_are_consumed_and_returns_exact_hid
     assert fifo.last_vocalized_kv_position is None
     assert len(fifo) == 1
 
-    fifo.ack_qwen_token(generation_id=7)
+    fifo.consume_qwen_token(generation_id=7)
     second = fifo.take_qwen_token(generation_id=7, timeout_s=0)
     assert second.token_id == 32
     assert second.packet is packet
     assert fifo.last_vocalized_kv_position is None
-    fifo.ack_qwen_token(generation_id=7)
+    fifo.consume_qwen_token(generation_id=7)
+    assert fifo.last_vocalized_kv_position is None
+    for frame_id in range(fifo.span_cursor.frame_spans[-1].end_frame):
+        fifo.ack_emitted_audio_frame(frame_id, generation_id=7, segment_id=0)
     assert fifo.last_vocalized_kv_position == 412
     assert fifo.vocalized_text == "Aspetta!"
     assert len(fifo) == 0
+
+
+def test_pcm_chunk_catches_up_token_spans_only_at_first_emitted_frame():
+    class TwoTokenTokenizer:
+        _surface_by_id = {101: "hello", 102: " world", 103: "!"}
+
+        def encode(self, text: str, *, add_special_tokens: bool) -> list[int]:
+            assert add_special_tokens is False
+            return {
+                "hello world": [101, 102],
+                "!": [103],
+            }[text]
+
+        def decode(
+            self,
+            ids: list[int],
+            *,
+            skip_special_tokens: bool,
+            clean_up_tokenization_spaces: bool,
+        ) -> str:
+            assert skip_special_tokens is False
+            assert clean_up_tokenization_spaces is False
+            return "".join(self._surface_by_id[int(token_id)] for token_id in ids)
+
+        def __call__(
+            self,
+            text: str,
+            *,
+            add_special_tokens: bool,
+            return_offsets_mapping: bool,
+        ) -> dict[str, object]:
+            assert add_special_tokens is False
+            assert return_offsets_mapping is True
+            if text == "hello world":
+                return {"input_ids": [101, 102], "offset_mapping": [(0, 5), (6, 11)]}
+            return {"input_ids": [103], "offset_mapping": [(0, 1)]}
+
+    fifo = TurnLocalSpeechFIFO()
+    fifo.begin_turn(generation_id=52)
+    packet_emissions: list[tuple[int, str]] = []
+    stream = TurnLocalQwenSayStream(
+        qwen_tokenizer=TwoTokenTokenizer(),
+        text_eos_token_id=900,
+        fifo=fifo,
+        generation_id=52,
+        on_packet_emitted=lambda cursor, text: packet_emissions.append((cursor, text)),
+    )
+    stream.feed_packet(_packet(5, "hello world", 501))
+    assert tuple(span.start_frame for span in fifo.span_cursor.frame_spans) == (0, 4)
+    first = stream.take_initial_token(timeout_s=0)
+    assert first.token_id == 101
+    stream.consume_initial_token()
+    assert stream.take_trailing_token(timeout_s=0) == 102
+    stream.consume_trailing_token()
+    stream.feed_packet(_packet(6, "!", 502))
+    assert stream.take_trailing_token(timeout_s=0) == 103
+    stream.consume_trailing_token()
+    stream.finish(final_text="hello world!")
+
+    # Decode/Q1 ingestion releases FIFO capacity but cannot advance the PCM
+    # watermark while a Talker chunk is still buffered.
+    assert fifo.last_vocalized_kv_position is None
+    assert packet_emissions == []
+    assert tuple(span.start_frame for span in fifo.span_cursor.frame_spans) == (0, 4, 8)
+
+    # One PCM chunk contains ten 80 ms frames. The emitter reports each frame
+    # in order so every token is ACKed at its first emitted frame, and packet
+    # cursors advance only once all packet tokens have started.
+    emitted = [
+        (frame_id, stream.ack_emitted_audio_frame(
+            frame_id,
+            generation_id=52,
+            segment_id=0,
+        ))
+        for frame_id in range(10)
+    ]
+    assert [(frame_id, cursor) for frame_id, cursor in emitted if cursor is not None] == [
+        (4, 501),
+        (8, 502),
+    ]
+    assert packet_emissions == [
+        (501, "hello world"),
+        (502, "hello world!"),
+    ]
+    with pytest.raises(RuntimeError, match="stale generation"):
+        stream.ack_emitted_audio_frame(10, generation_id=51, segment_id=0)
+    with pytest.raises(RuntimeError, match="stale segment"):
+        stream.ack_emitted_audio_frame(10, generation_id=52, segment_id=1)
+
+
+def test_pcm_ack_waits_for_gemma_commit_and_releases_in_order():
+    fifo = TurnLocalSpeechFIFO()
+    fifo.begin_turn(generation_id=53)
+    committed: list[tuple[int, str]] = []
+    stream = TurnLocalQwenSayStream(
+        qwen_tokenizer=_CharacterTokenizer(),
+        text_eos_token_id=900,
+        fifo=fifo,
+        generation_id=53,
+        on_packet_emitted=lambda cursor, text: committed.append((cursor, text)),
+    )
+    stream.feed_packet(SpokenTokenPacket(
+        7, "a", torch.zeros((1, 1536)), 601, hidden_provenance="transition", kv_committed=False,
+    ))
+    first = stream.take_initial_token(timeout_s=0)
+    assert first.token_id == ord("a") + 1
+    stream.consume_initial_token()
+    stream.feed_packet(_packet(8, "b", 602))
+    assert stream.take_trailing_token(timeout_s=0) == ord("b") + 1
+    stream.consume_trailing_token()
+
+    # Both PCM frames have reached the emitter, but the first source token's
+    # predicted future cursor cannot be exposed until Gemma append succeeds.
+    assert stream.ack_emitted_audio_frame(0, generation_id=53, segment_id=0) is None
+    assert stream.ack_emitted_audio_frame(1, generation_id=53, segment_id=0) is None
+    assert fifo.last_vocalized_kv_position is None
+    assert fifo.vocalized_text == ""
+    assert committed == []
+    assert stream.mark_packet_committed(601, generation_id=52, segment_id=0) is None
+    assert stream.mark_packet_committed(601, generation_id=53, segment_id=1) is None
+
+    # Out-of-order commit of a later packet cannot jump the watermark.
+    assert stream.mark_packet_committed(602, generation_id=53, segment_id=0) is None
+    assert fifo.last_vocalized_kv_position is None
+    assert stream.mark_packet_committed(601, generation_id=53, segment_id=0) == 602
+    assert fifo.last_vocalized_kv_position == 602
+    assert fifo.vocalized_text == "ab"
+    assert committed == [(602, "ab")]
+    assert stream.mark_packet_committed(601, generation_id=53, segment_id=0) is None
+
+    # Cancellation freezes this generation; a delayed callback cannot revive
+    # a discarded or future cursor.
+    fifo.clear()
+    assert stream.mark_packet_committed(603, generation_id=53, segment_id=0) is None
+    assert fifo.last_vocalized_kv_position == 602
+    assert fifo.vocalized_text == "ab"
 
 
 def test_fifo_clear_returns_last_consumed_cursor_and_discards_pending_turn_packets():
@@ -55,10 +199,18 @@ def test_fifo_clear_returns_last_consumed_cursor_and_discards_pending_turn_packe
     fifo.begin_turn(generation_id=3)
     fifo.put(_packet(1, "Ciao", 99), qwen_token_ids=(10,), generation_id=3)
     fifo.take_qwen_token(initial=True, generation_id=3, timeout_s=0)
-    fifo.ack_qwen_token(generation_id=3)
-    fifo.put(_packet(2, " dopo", 100), qwen_token_ids=(11, 12), generation_id=3)
+    fifo.consume_qwen_token(generation_id=3)
+    for frame_id in range(fifo.span_cursor.frame_spans[-1].end_frame):
+        fifo.ack_emitted_audio_frame(frame_id, generation_id=3, segment_id=0)
+    fifo.put(
+        _packet(2, " dopo", 100),
+        qwen_token_ids=(11, 12),
+        qwen_token_texts=(" ", "dopo"),
+        generation_id=3,
+    )
+    assert fifo.last_vocalized_kv_position == 99
     fifo.take_qwen_token(generation_id=3, timeout_s=0)
-    fifo.ack_qwen_token(generation_id=3)
+    fifo.consume_qwen_token(generation_id=3)
 
     assert fifo.clear() == 99
     assert len(fifo) == 0
@@ -168,34 +320,41 @@ def test_incremental_qwen_stream_uses_exact_packet_hidden_and_marks_tail_hold():
     first_packet = _packet(1, "As", 20)
     second_packet = _packet(2, "p", 21)
     stream.feed_packet(first_packet)
+    assert tuple(span.token_text for span in fifo.span_cursor.frame_spans) == ("A", "s")
 
     initial = stream.take_initial_token(timeout_s=0)
     assert initial.token_id == ord("A") + 1
     assert torch.equal(initial.hidden, first_packet.gemma_hidden_1536.unsqueeze(1))
     assert fifo.last_vocalized_kv_position is None
-    stream.ack_initial_token()
+    stream.consume_initial_token()
 
     stream.feed_packet(second_packet)
     second_id = stream.take_trailing_token(timeout_s=0)
     assert second_id == ord("s") + 1
     assert torch.equal(stream.hidden_for_frame(0).hidden, first_packet.gemma_hidden_1536.unsqueeze(1))
     assert fifo.last_vocalized_kv_position is None
-    stream.ack_trailing_token()
+    stream.consume_trailing_token()
+    assert fifo.last_vocalized_kv_position is None
+    assert consumed == []
+    stream.ack_emitted_audio_frame(0, generation_id=8, segment_id=0)
+    assert fifo.last_vocalized_kv_position is None
+    stream.ack_emitted_audio_frame(1, generation_id=8, segment_id=0)
     assert fifo.last_vocalized_kv_position == 20
     assert consumed == [(20, "As")]
 
     third_id = stream.take_trailing_token(timeout_s=0)
     assert third_id == ord("p") + 1
-    assert torch.equal(stream.hidden_for_frame(1).hidden, second_packet.gemma_hidden_1536.unsqueeze(1))
-    stream.ack_trailing_token()
+    assert torch.equal(stream.hidden_for_frame(2).hidden, second_packet.gemma_hidden_1536.unsqueeze(1))
+    stream.consume_trailing_token()
+    stream.ack_emitted_audio_frame(2, generation_id=8, segment_id=0)
     assert fifo.last_vocalized_kv_position == 21
     assert consumed == [(20, "As"), (21, "Asp")]
 
     stream.finish(final_text="Asp")
     assert stream.take_trailing_token(timeout_s=0) == 900
     assert stream.codec_eos_allowed is False
-    stream.ack_trailing_token()
-    assert stream.hidden_for_frame(2).tail_hold is True
+    stream.consume_trailing_token()
+    assert stream.hidden_for_frame(3).tail_hold is True
     assert stream.codec_eos_allowed is True
 
 
@@ -219,9 +378,20 @@ def test_session_generation_invalidation_preserves_only_acknowledged_spoken_pref
     packet = _packet(8, "Aspetta!", 58)
     session.speech_fifo.put(packet, qwen_token_ids=(70,), generation_id=token.session_generation_id)
     session.speech_fifo.take_qwen_token(initial=True, generation_id=token.session_generation_id, timeout_s=0)
-    session.speech_fifo.ack_qwen_token(generation_id=token.session_generation_id)
+    session.speech_fifo.consume_qwen_token(generation_id=token.session_generation_id)
+    for frame_id in range(session.speech_fifo.span_cursor.frame_spans[-1].end_frame):
+        session.speech_fifo.ack_emitted_audio_frame(
+            frame_id,
+            generation_id=token.session_generation_id,
+            segment_id=0,
+        )
     pending = _packet(9, " no", 59)
-    session.speech_fifo.put(pending, qwen_token_ids=(71, 72), generation_id=token.session_generation_id)
+    session.speech_fifo.put(
+        pending,
+        qwen_token_ids=(71, 72),
+        qwen_token_texts=(" ", "no"),
+        generation_id=token.session_generation_id,
+    )
 
     session.invalidate_generation("bargein")
 
@@ -280,7 +450,18 @@ def test_cancel_freezes_atomic_ack_snapshot_before_delayed_packet_callback():
     )
     stream.feed_packet(_packet(12, "Aspetta!", 123))
     stream.take_initial_token(timeout_s=0)
-    ack_thread = threading.Thread(target=stream.ack_initial_token, daemon=True)
+    def consume_and_emit() -> None:
+        stream.consume_initial_token()
+        for frame_id in range(stream.fifo.span_cursor.frame_spans[-1].end_frame):
+            cursor = stream.ack_emitted_audio_frame(
+                frame_id,
+                generation_id=generation,
+                segment_id=0,
+            )
+            if cursor is not None:
+                break
+
+    ack_thread = threading.Thread(target=consume_and_emit, daemon=True)
     ack_thread.start()
     try:
         assert callback_entered.wait(1.0)
@@ -300,7 +481,7 @@ def test_cancel_freezes_atomic_ack_snapshot_before_delayed_packet_callback():
         assert (archive_cursor, archive_text) == (123, "Aspetta!")
         assert (finalizer_cursor, finalizer_text) == (archive_cursor, archive_text)
         with pytest.raises(RuntimeError, match="snapshot is frozen"):
-            session.speech_fifo.ack_qwen_token(generation_id=generation)
+            session.speech_fifo.consume_qwen_token(generation_id=generation)
     finally:
         callback_release.set()
         ack_thread.join(timeout=1.0)
@@ -394,7 +575,7 @@ def test_closed_tts_unit_feed_runs_concurrently_with_capacity_four_fifo_consumer
     producer.start()
     initial = stream.take_initial_token(timeout_s=1.0)
     assert initial.token_id == ord("a") + 1
-    stream.ack_initial_token()
+    stream.consume_initial_token()
 
     while not stream.codec_eos_allowed:
         try:
@@ -404,11 +585,13 @@ def test_closed_tts_unit_feed_runs_concurrently_with_capacity_four_fifo_consumer
                 raise producer_error[0]
             continue
         if token_id is not None:
-            stream.ack_trailing_token()
+                stream.consume_trailing_token()
 
     producer.join(timeout=1.0)
     assert producer_done.is_set()
     assert not producer.is_alive()
     assert producer_error == []
     assert fifo.peak_depth <= fifo.capacity
+    for frame_id in range(fifo.span_cursor.frame_spans[-1].end_frame):
+        stream.ack_emitted_audio_frame(frame_id, generation_id=11, segment_id=0)
     assert fifo.last_vocalized_kv_position == 105

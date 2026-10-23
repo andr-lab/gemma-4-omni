@@ -38,6 +38,7 @@ from duplex_kernel.config import (
 )
 from duplex_kernel.conditioning_provenance import validate_trace_row
 from duplex_kernel.audio_response_conditioning import DEFAULT_MAX_AUDIO_MS
+from duplex_kernel.frame_residual_adapter import estimate_token_audio_frames_80ms
 from duplex_kernel.future_prefix import ConditioningFrameBuffer
 from duplex_kernel.kv_cache import TalkerPrefixKV, ThinkerContext, TurnKVState
 from duplex_kernel.listener import AssistantReferenceBuffer, GemmaListenerState
@@ -60,6 +61,166 @@ GEMMA_SPEECH_TOKENS_PER_TICK = 2
 
 
 @dataclass(frozen=True)
+class SpeechFrameSpan:
+    """One token's cumulative frame interval within a generation segment."""
+
+    generation_id: int
+    segment_id: int
+    token_sequence: int
+    token_id: int
+    token_text: str
+    start_frame: int
+    end_frame: int
+    hidden: Any = field(repr=False, compare=False)
+    producer_event: Any | None = field(default=None, repr=False, compare=False)
+    packet: Any = field(default=None, repr=False, compare=False)
+    packet_token_index: int | None = None
+    packet_token_count: int | None = None
+
+
+@dataclass(frozen=True)
+class SpeechFrameSelection:
+    span: SpeechFrameSpan
+    tail_hold: bool
+
+
+class SpanAlignedSpeechCursor:
+    """Cumulative token-to-frame schedule shared by FiLM and FIFO paths.
+
+    Newly arriving text never remaps a frame already queried from the cursor.
+    If the live producer is temporarily behind, the previous hidden is held;
+    a later token begins after both its known spans and every selected frame.
+    """
+
+    def __init__(self, *, generation_id: int, segment_id: int = 0) -> None:
+        self.generation_id = int(generation_id)
+        self.segment_id = int(segment_id)
+        self._spans: list[SpeechFrameSpan] = []
+        self._frame_count = 0
+        self._next_sequence = 0
+        self._last_selected_frame = -1
+        self._selections: dict[int, SpeechFrameSelection] = {}
+        self._last_emitted_frame = -1
+        self._closed = False
+
+    @property
+    def frame_spans(self) -> tuple[SpeechFrameSpan, ...]:
+        return tuple(self._spans)
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def append(
+        self,
+        *,
+        token_id: int,
+        token_text: str,
+        hidden: Any,
+        producer_event: Any | None = None,
+        packet: Any = None,
+        packet_token_index: int | None = None,
+        packet_token_count: int | None = None,
+    ) -> SpeechFrameSpan:
+        if self._closed:
+            raise RuntimeError("speech span cursor is closed")
+        if isinstance(token_id, bool) or int(token_id) < 0:
+            raise ValueError("span token_id must be nonnegative")
+        if not isinstance(token_text, str):
+            raise TypeError("span token_text must be str")
+        duration = estimate_token_audio_frames_80ms(token_text)
+        start = max(
+            self._frame_count,
+            self._last_selected_frame + 1,
+            self._last_emitted_frame + 1,
+        )
+        span = SpeechFrameSpan(
+            generation_id=self.generation_id,
+            segment_id=self.segment_id,
+            token_sequence=self._next_sequence,
+            token_id=int(token_id),
+            token_text=token_text,
+            start_frame=start,
+            end_frame=start + duration,
+            hidden=hidden,
+            producer_event=producer_event,
+            packet=packet,
+            packet_token_index=packet_token_index,
+            packet_token_count=packet_token_count,
+        )
+        self._next_sequence += 1
+        self._spans.append(span)
+        self._frame_count = span.end_frame
+        return span
+
+    def close(self) -> None:
+        self._closed = True
+
+    def select(
+        self,
+        frame_id: int,
+        *,
+        generation_id: int,
+        segment_id: int,
+    ) -> SpeechFrameSelection:
+        frame = _validate_speech_frame_identity(
+            frame_id, generation_id=generation_id, segment_id=segment_id,
+            expected_generation=self.generation_id, expected_segment=self.segment_id,
+        )
+        cached = self._selections.get(frame)
+        if cached is not None:
+            return cached
+        if frame < self._last_selected_frame:
+            raise RuntimeError("speech span frame selection must be monotonic")
+        if not self._spans:
+            raise RuntimeError("speech span cursor has no token spans")
+        selected = next(
+            (span for span in self._spans if span.start_frame <= frame < span.end_frame),
+            None,
+        )
+        tail_hold = selected is None
+        if selected is None:
+            selected = self._spans[-1]
+        result = SpeechFrameSelection(selected, tail_hold)
+        self._selections[frame] = result
+        self._last_selected_frame = frame
+        return result
+
+    def ack_emitted_frame(
+        self,
+        frame_id: int,
+        *,
+        generation_id: int,
+        segment_id: int,
+    ) -> tuple[SpeechFrameSpan, ...]:
+        frame = _validate_speech_frame_identity(
+            frame_id, generation_id=generation_id, segment_id=segment_id,
+            expected_generation=self.generation_id, expected_segment=self.segment_id,
+        )
+        if frame != self._last_emitted_frame + 1:
+            raise RuntimeError("emitted speech frames must be contiguous and monotonic")
+        self._last_emitted_frame = frame
+        return tuple(span for span in self._spans if span.start_frame == frame)
+
+
+def _validate_speech_frame_identity(
+    frame_id: int,
+    *,
+    generation_id: int,
+    segment_id: int,
+    expected_generation: int,
+    expected_segment: int,
+) -> int:
+    if isinstance(frame_id, bool) or not isinstance(frame_id, int) or frame_id < 0:
+        raise ValueError("frame_id must be a nonnegative integer")
+    if isinstance(generation_id, bool) or int(generation_id) != expected_generation:
+        raise RuntimeError("speech frame ACK belongs to a stale generation")
+    if isinstance(segment_id, bool) or int(segment_id) != expected_segment:
+        raise RuntimeError("speech frame ACK belongs to a stale segment")
+    return frame_id
+
+
+@dataclass(frozen=True)
 class SpokenTokenPacket:
     """One visible SAY delta and its exclusive committed Gemma KV cursor."""
 
@@ -68,6 +229,8 @@ class SpokenTokenPacket:
     gemma_hidden_1536: Any = field(repr=False, compare=False)
     exclusive_kv_cursor: int
     producer_event: Any | None = field(default=None, repr=False, compare=False)
+    hidden_provenance: str = "token"
+    kv_committed: bool = True
 
     def __post_init__(self) -> None:
         if isinstance(self.token_id, bool) or int(self.token_id) < 0:
@@ -76,6 +239,10 @@ class SpokenTokenPacket:
             raise TypeError("text_piece deve essere string")
         if isinstance(self.exclusive_kv_cursor, bool) or int(self.exclusive_kv_cursor) < 0:
             raise ValueError("exclusive_kv_cursor deve essere non negativo")
+        if not isinstance(self.hidden_provenance, str) or self.hidden_provenance not in {"token", "transition"}:
+            raise ValueError("hidden_provenance deve essere 'token' o 'transition'")
+        if not isinstance(self.kv_committed, bool):
+            raise TypeError("kv_committed deve essere booleano")
         shape = tuple(getattr(self.gemma_hidden_1536, "shape", ()))
         if shape != (1, 1536):
             raise ValueError(f"gemma_hidden_1536 deve avere shape (1,1536), ricevuto {shape}")
@@ -126,11 +293,21 @@ class SpeechQwenToken:
 class _QueuedSpokenPacket:
     packet: SpokenTokenPacket
     qwen_token_ids: tuple[int, ...]
+    qwen_token_texts: tuple[str, ...]
+    token_sequences: tuple[int, ...]
     next_token_index: int = 0
 
 
+@dataclass
+class _PendingSpeechEmission:
+    packet: SpokenTokenPacket
+    token_sequences: tuple[int, ...]
+    committed: bool
+    acknowledged: set[int] = field(default_factory=set)
+
+
 class TurnLocalSpeechFIFO:
-    """Bounded, response-owned FIFO; packet heads live until all Qwen IDs drain."""
+    """Bounded Qwen ingestion FIFO plus response-owned PCM span watermark."""
 
     def __init__(self, capacity: int = TURN_LOCAL_SPEECH_FIFO_CAPACITY) -> None:
         if isinstance(capacity, bool) or not 1 <= int(capacity) <= TURN_LOCAL_SPEECH_FIFO_CAPACITY:
@@ -140,6 +317,10 @@ class TurnLocalSpeechFIFO:
         self._entries: deque[_QueuedSpokenPacket] = deque()
         self._inflight: SpeechQwenToken | None = None
         self._generation_id: int | None = None
+        self._segment_id = 0
+        self.span_cursor: SpanAlignedSpeechCursor | None = None
+        self._pending_emission: deque[_PendingSpeechEmission] = deque()
+        self._completed_packet_cursors: set[int] = set()
         self._closed = False
         self._frozen = False
         self._initial_token_taken = False
@@ -153,13 +334,13 @@ class TurnLocalSpeechFIFO:
 
     @property
     def last_vocalized_kv_position(self) -> int | None:
-        """Last Gemma KV position consumed by Qwen text synthesis, not playback ACK."""
+        """Last Gemma cursor whose corresponding token spans began emitting PCM."""
         with self._condition:
             return self._last_vocalized_kv_position
 
     @property
     def vocalized_text(self) -> str:
-        """Gemma packet text whose complete Qwen ID spans were accepted by Q1."""
+        """Gemma packet text whose complete Qwen token spans began emitting PCM."""
         with self._condition:
             return "".join(self._vocalized_text_parts)
 
@@ -174,6 +355,11 @@ class TurnLocalSpeechFIFO:
         with self._condition:
             return self._generation_id
 
+    @property
+    def segment_id(self) -> int:
+        with self._condition:
+            return self._segment_id
+
     def begin_turn(self, *, generation_id: int) -> None:
         if isinstance(generation_id, bool) or int(generation_id) < 0:
             raise ValueError("generation_id deve essere non negativo")
@@ -181,6 +367,10 @@ class TurnLocalSpeechFIFO:
             self._entries.clear()
             self._inflight = None
             self._generation_id = int(generation_id)
+            self._segment_id = 0
+            self.span_cursor = SpanAlignedSpeechCursor(generation_id=int(generation_id))
+            self._pending_emission.clear()
+            self._completed_packet_cursors.clear()
             self._closed = False
             self._frozen = False
             self._initial_token_taken = False
@@ -192,8 +382,8 @@ class TurnLocalSpeechFIFO:
     def begin_segment(self, *, generation_id: int) -> None:
         """Reopen the same generation FIFO for the next fully drained TTS unit.
 
-        The cumulative Qwen-forward cursor and text remain intact across units;
-        only the per-unit EOS/initial-token state is reset. This is deliberately
+        The cumulative PCM-emission watermark and vocalized text remain intact
+        across units; only the per-unit EOS/initial-token state is reset. This is deliberately
         stricter than ``begin_turn`` so a late token from one TTS unit cannot be
         consumed as the next unit's prefix.
         """
@@ -207,6 +397,13 @@ class TurnLocalSpeechFIFO:
                 raise RuntimeError("turn-local speech FIFO segment must be closed before reopening")
             if self._entries or self._inflight is not None:
                 raise RuntimeError("previous turn-local speech FIFO segment is not fully drained")
+            if self._pending_emission:
+                raise RuntimeError("previous segment PCM emission is not fully acknowledged")
+            self._segment_id += 1
+            self._completed_packet_cursors.clear()
+            self.span_cursor = SpanAlignedSpeechCursor(
+                generation_id=int(generation_id), segment_id=self._segment_id,
+            )
             self._closed = False
             self._initial_token_taken = False
             self._condition.notify_all()
@@ -216,7 +413,9 @@ class TurnLocalSpeechFIFO:
         packet: SpokenTokenPacket,
         *,
         qwen_token_ids: tuple[int, ...] | list[int],
+        qwen_token_texts: tuple[str, ...] | list[str] | None = None,
         generation_id: int,
+        segment_id: int | None = None,
         stop_check: Callable[[], bool] | None = None,
         timeout_s: float | None = None,
     ) -> None:
@@ -227,10 +426,21 @@ class TurnLocalSpeechFIFO:
             raise ValueError("qwen_token_ids deve contenere ID interi non negativi")
         if packet.text_piece and not ids:
             raise ValueError("SAY visibile senza ID Qwen: gestire esplicitamente il carry, non scartarlo")
+        if qwen_token_texts is None:
+            if len(ids) > 1:
+                raise ValueError("multi-ID packet requires tokenizer-aligned qwen_token_texts")
+            token_texts = (packet.text_piece,) if ids else ()
+        else:
+            token_texts = tuple(qwen_token_texts)
+            if len(token_texts) != len(ids) or any(not isinstance(text, str) for text in token_texts):
+                raise ValueError("qwen_token_texts deve essere allineato agli ID Qwen")
+            if "".join(token_texts) != packet.text_piece:
+                raise ValueError("qwen_token_texts deve ricostruire esattamente packet.text_piece")
         started = time.monotonic()
         while True:
             with self._condition:
                 self._raise_generation(generation_id)
+                self._raise_segment(segment_id)
                 if self._frozen:
                     raise RuntimeError("turn-local speech FIFO snapshot is frozen")
                 if self._closed:
@@ -240,7 +450,32 @@ class TurnLocalSpeechFIFO:
                         # Empty/structural Gemma deltas have explicit zero-vocal-ID
                         # semantics and never advance the synthesis cursor.
                         return
-                    self._entries.append(_QueuedSpokenPacket(packet, ids))
+                    cursor = self.span_cursor
+                    if cursor is None:
+                        raise RuntimeError("turn-local speech span cursor is not initialized")
+                    packet_cursor = int(packet.exclusive_kv_cursor)
+                    if packet_cursor in self._completed_packet_cursors or any(
+                        int(pending.packet.exclusive_kv_cursor) == packet_cursor
+                        for pending in self._pending_emission
+                    ):
+                        raise ValueError("duplicate exclusive KV cursor in speech segment")
+                    token_sequences: list[int] = []
+                    for index, (token_id, token_text) in enumerate(zip(ids, token_texts)):
+                        span = cursor.append(
+                            token_id=token_id,
+                            token_text=token_text,
+                            hidden=packet.gemma_hidden_1536,
+                            packet=packet,
+                            packet_token_index=index,
+                            packet_token_count=len(ids),
+                        )
+                        token_sequences.append(span.token_sequence)
+                    self._entries.append(_QueuedSpokenPacket(
+                        packet, ids, token_texts, tuple(token_sequences),
+                    ))
+                    self._pending_emission.append(_PendingSpeechEmission(
+                        packet, tuple(token_sequences), bool(packet.kv_committed),
+                    ))
                     self._peak_depth = max(self._peak_depth, len(self._entries))
                     self._condition.notify_all()
                     return
@@ -261,10 +496,17 @@ class TurnLocalSpeechFIFO:
         if self._generation_id != int(generation_id):
             raise RuntimeError("turn-local speech FIFO generation changed")
 
+    def _raise_segment(self, segment_id: int | None) -> None:
+        if segment_id is not None and (
+            isinstance(segment_id, bool) or int(segment_id) != self._segment_id
+        ):
+            raise RuntimeError("turn-local speech FIFO segment changed")
+
     def take_qwen_token(
         self,
         *,
         generation_id: int,
+        segment_id: int | None = None,
         initial: bool = False,
         stop_check: Callable[[], bool] | None = None,
         timeout_s: float | None = None,
@@ -273,6 +515,7 @@ class TurnLocalSpeechFIFO:
         while True:
             with self._condition:
                 self._raise_generation(generation_id)
+                self._raise_segment(segment_id)
                 if initial and self._initial_token_taken:
                     raise RuntimeError("Qwen initial token was already consumed")
                 if self._inflight is not None:
@@ -305,10 +548,20 @@ class TurnLocalSpeechFIFO:
             if stop_check is not None and stop_check():
                 raise RuntimeError("turn-local speech FIFO consumer cancelled")
 
-    def ack_qwen_token(self, *, generation_id: int) -> int | None:
-        """Commit one reserved ID only after the Qwen forward accepted it."""
+    def consume_qwen_token(
+        self,
+        *,
+        generation_id: int,
+        segment_id: int | None = None,
+    ) -> int | None:
+        """Commit one reserved ID after Qwen prefill/forward ingests it.
+
+        This releases FIFO decode pressure only; it does not claim that the
+        corresponding text has produced or emitted PCM.
+        """
         with self._condition:
             self._raise_generation(generation_id)
+            self._raise_segment(segment_id)
             if self._frozen:
                 raise RuntimeError("turn-local speech FIFO snapshot is frozen")
             token = self._inflight
@@ -321,27 +574,159 @@ class TurnLocalSpeechFIFO:
             ):
                 raise RuntimeError("turn-local speech FIFO in-flight token lost its head owner")
             head.next_token_index += 1
-            cursor = None
             if head.next_token_index == len(head.qwen_token_ids):
                 self._entries.popleft()
-                self._last_vocalized_kv_position = head.packet.exclusive_kv_cursor
-                self._vocalized_text_parts.append(head.packet.text_piece)
-                cursor = head.packet.exclusive_kv_cursor
             self._inflight = None
             self._condition.notify_all()
-            return cursor
+            return None
 
-    def close(self) -> None:
+    def ack_qwen_token(
+        self,
+        *,
+        generation_id: int,
+        segment_id: int,
+        frame_id: int,
+    ) -> int | None:
+        """Acknowledge only token spans whose first PCM frame was emitted."""
+        with self._condition:
+            self._raise_generation(generation_id)
+            if self._frozen:
+                raise RuntimeError("turn-local speech FIFO snapshot is frozen")
+            cursor = self.span_cursor
+            if cursor is None:
+                raise RuntimeError("turn-local speech span cursor is not initialized")
+            started = cursor.ack_emitted_frame(
+                frame_id,
+                generation_id=generation_id,
+                segment_id=segment_id,
+            )
+            by_sequence = {span.token_sequence: span for span in started}
+            for pending in self._pending_emission:
+                pending.acknowledged.update(
+                    sequence for sequence in pending.token_sequences
+                    if sequence in by_sequence
+                )
+            completed_cursor = self._advance_vocalized_watermark_locked()
+            self._condition.notify_all()
+            return completed_cursor
+
+    def mark_packet_committed(
+        self,
+        exclusive_kv_cursor: int,
+        *,
+        generation_id: int,
+        segment_id: int | None = None,
+    ) -> int | None:
+        """Commit a packet only after its source token is appended to Gemma KV.
+
+        PCM ACKs may arrive before that append succeeds. Such ACKs remain
+        pending, and this method advances the vocalized watermark only when
+        every earlier packet is both committed and has started emitting PCM.
+        Stale generation/segment callbacks are ignored without mutation.
+        """
+        if isinstance(exclusive_kv_cursor, bool) or not isinstance(exclusive_kv_cursor, int) or exclusive_kv_cursor < 0:
+            raise ValueError("exclusive_kv_cursor must be a nonnegative integer")
+        if isinstance(generation_id, bool):
+            return None
+        if segment_id is not None and isinstance(segment_id, bool):
+            return None
+        with self._condition:
+            if (
+                self._generation_id != int(generation_id)
+                or (segment_id is not None and self._segment_id != int(segment_id))
+                or self._frozen
+            ):
+                return None
+            pending = next(
+                (
+                    item for item in self._pending_emission
+                    if int(item.packet.exclusive_kv_cursor) == exclusive_kv_cursor
+                ),
+                None,
+            )
+            if pending is None:
+                if exclusive_kv_cursor in self._completed_packet_cursors:
+                    return None
+                raise RuntimeError("committed packet cursor is not pending in this segment")
+            pending.committed = True
+            completed_cursor = self._advance_vocalized_watermark_locked()
+            if completed_cursor is not None:
+                self._condition.notify_all()
+            return completed_cursor
+
+    def _advance_vocalized_watermark_locked(self) -> int | None:
+        completed_cursor: int | None = None
+        while self._pending_emission:
+            pending = self._pending_emission[0]
+            if (
+                not pending.committed
+                or len(pending.acknowledged) != len(pending.token_sequences)
+            ):
+                break
+            self._pending_emission.popleft()
+            completed_cursor = int(pending.packet.exclusive_kv_cursor)
+            self._completed_packet_cursors.add(completed_cursor)
+            self._last_vocalized_kv_position = completed_cursor
+            self._vocalized_text_parts.append(pending.packet.text_piece)
+        return completed_cursor
+
+    def ack_emitted_audio_frame(
+        self,
+        frame_id: int,
+        *,
+        generation_id: int,
+        segment_id: int,
+    ) -> int | None:
+        return self.ack_qwen_token(
+            generation_id=generation_id,
+            segment_id=segment_id,
+            frame_id=frame_id,
+        )
+
+    def select_span_for_frame(
+        self,
+        frame_id: int,
+        *,
+        generation_id: int,
+        segment_id: int,
+    ) -> SpeechFrameSelection:
+        with self._condition:
+            self._raise_generation(generation_id)
+            cursor = self.span_cursor
+            if cursor is None:
+                raise RuntimeError("turn-local speech span cursor is not initialized")
+            return cursor.select(
+                frame_id,
+                generation_id=generation_id,
+                segment_id=segment_id,
+            )
+
+    def close(
+        self,
+        *,
+        generation_id: int | None = None,
+        segment_id: int | None = None,
+    ) -> bool:
         """Stop producers and let the consumer drain already accepted packets."""
         with self._condition:
+            if (
+                (generation_id is not None and self._generation_id != int(generation_id))
+                or (segment_id is not None and self._segment_id != int(segment_id))
+            ):
+                return False
             self._closed = True
+            if self.span_cursor is not None:
+                self.span_cursor.close()
             self._condition.notify_all()
+            return True
 
     def freeze_snapshot(self, *, generation_id: int) -> tuple[int | None, str]:
-        """Freeze the synthesis ACK boundary and return its atomic text/cursor."""
+        """Freeze the PCM-emission ACK boundary and return its atomic text/cursor."""
         with self._condition:
             self._raise_generation(generation_id)
             self._frozen = True
+            if self.span_cursor is not None:
+                self.span_cursor.close()
             self._closed = True
             snapshot = (
                 self._last_vocalized_kv_position,
@@ -350,12 +735,25 @@ class TurnLocalSpeechFIFO:
             self._condition.notify_all()
             return snapshot
 
-    def clear(self) -> int | None:
-        """Fence the turn, discard queued packets, and return its synthesis cursor."""
+    def clear(
+        self,
+        *,
+        generation_id: int | None = None,
+        segment_id: int | None = None,
+    ) -> int | None:
+        """Fence the turn, discard pending packets, and return the emitted-text cursor."""
         with self._condition:
+            if (
+                (generation_id is not None and self._generation_id != int(generation_id))
+                or (segment_id is not None and self._segment_id != int(segment_id))
+            ):
+                return None
             cursor = self._last_vocalized_kv_position
             self._entries.clear()
             self._inflight = None
+            self._pending_emission.clear()
+            if self.span_cursor is not None:
+                self.span_cursor.close()
             self._closed = True
             self._frozen = True
             self._condition.notify_all()

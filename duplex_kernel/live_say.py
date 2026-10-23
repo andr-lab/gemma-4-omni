@@ -13,6 +13,7 @@ import torch
 
 from duplex_kernel.response_intent_local import qwen_assistant_text_offsets
 from duplex_kernel.session import (
+    SpanAlignedSpeechCursor,
     SpeechQwenToken,
     SpokenTokenPacket,
     TurnLocalSpeechFIFO,
@@ -60,6 +61,9 @@ class LiveQwenSayStream:
         max_source_chars: int = 16_384,
         max_source_pieces: int = 2_048,
         max_retokenization_work: int = 1_000_000,
+        generation_id: int = 0,
+        segment_id: int = 0,
+        on_packet_emitted: Any | None = None,
     ) -> None:
         if isinstance(max_tokens, bool) or int(max_tokens) < 1:
             raise ValueError("max_tokens deve essere positivo")
@@ -81,8 +85,28 @@ class LiveQwenSayStream:
         self.max_source_chars = int(max_source_chars)
         self.max_source_pieces = int(max_source_pieces)
         self.max_retokenization_work = int(max_retokenization_work)
+        self.generation_id = int(generation_id)
+        self.segment_id = int(segment_id)
+        self.on_packet_emitted = on_packet_emitted
+        self.span_cursor = SpanAlignedSpeechCursor(
+            generation_id=self.generation_id,
+            segment_id=self.segment_id,
+        )
         self._condition = threading.Condition(threading.RLock())
-        self._pieces: list[tuple[str, torch.Tensor]] = []
+        self._pieces: list[tuple[str, torch.Tensor, int | None, int | None]] = []
+        self._source_packet_cursors: dict[int, int] = {}
+        self._source_cursor_to_index: dict[int, int] = {}
+        self._source_packets: dict[int, dict[str, Any]] = {}
+        self._source_packet_order: list[int] = []
+        self._source_piece_index: dict[int, int] = {}
+        self._next_source_packet_to_emit = 0
+        self._vocalized_text_parts: list[str] = []
+        self._committed_packet_cursors: set[int] = set()
+        self._span_packet_cursors: dict[int, tuple[int, ...]] = {}
+        self._pending_emitted_frames: deque[int] = deque()
+        self._last_received_emitted_frame = -1
+        self._last_processed_emitted_frame = -1
+        self._last_source_token_index: int | None = None
         self._source_char_count = 0
         self._retokenization_work = 0
         self._published_ids: list[int] = []
@@ -116,7 +140,7 @@ class LiveQwenSayStream:
         if self._error is not None:
             raise self._error
 
-    def _current_alignment(self, text: str, pieces: list[tuple[str, torch.Tensor]]):
+    def _current_alignment(self, text: str, pieces: list[tuple[str, torch.Tensor, int | None, int | None]]):
         """Retokenize the canonical visible prefix and align covered Qwen spans."""
         ids, qwen_offsets = qwen_assistant_text_offsets(
             text,
@@ -127,6 +151,7 @@ class LiveQwenSayStream:
         if canonical != text:
             raise ValueError("Gemma visible pieces do not reconstruct the canonical Qwen prefix")
         aligned: list[torch.Tensor] = []
+        source_cursors: list[tuple[int, ...]] = []
         for qwen_start, qwen_end in qwen_offsets:
             source_indices = sorted({
                 source_index
@@ -141,7 +166,12 @@ class LiveQwenSayStream:
             aligned.append(torch.cat(
                 [piece_hiddens[index] for index in source_indices], dim=1
             ).mean(dim=1, keepdim=True))
-        return ids, qwen_offsets, aligned
+            source_cursors.append(tuple(sorted({
+                int(pieces[index][3])
+                for index in source_indices
+                if pieces[index][3] is not None
+            })))
+        return ids, qwen_offsets, aligned, source_cursors, char_sources
 
     def _pretokenizer_segments(self, text: str) -> list[tuple[str, tuple[int, int]]]:
         """Return spans from the actual loaded fast-tokenizer backend."""
@@ -266,7 +296,8 @@ class LiveQwenSayStream:
         """NFC-normalize text while mapping output characters to source rows."""
         source_chars: list[tuple[str, set[int]]] = []
         source_hiddens: list[torch.Tensor] = []
-        for piece_index, (piece, hidden) in enumerate(pieces):
+        for piece_index, piece_row in enumerate(pieces):
+            piece, hidden = piece_row[0], piece_row[1]
             source_hiddens.append(hidden)
             source_chars.extend((char, {piece_index}) for char in piece)
         raw_text = "".join(char for char, _source in source_chars)
@@ -379,6 +410,7 @@ class LiveQwenSayStream:
         hidden: torch.Tensor,
         *,
         initial: bool = False,
+        source_packet_cursors: tuple[int, ...] = (),
     ) -> None:
         owned_hidden = hidden.detach().clone()
         producer_event = None
@@ -396,6 +428,23 @@ class LiveQwenSayStream:
                 raise RuntimeError("live Qwen stream is closed")
             if len(self._published_ids) >= self.max_tokens:
                 raise RuntimeError("live Qwen text token capacity exceeded")
+            start, end = int(offset[0]), int(offset[1])
+            token_text = self._last_prefix[start:end] if 0 <= start <= end <= len(self._last_prefix) else ""
+            span = self.span_cursor.append(
+                token_id=int(token_id),
+                token_text=token_text,
+                hidden=owned_hidden,
+                producer_event=producer_event,
+            )
+            self._span_packet_cursors[span.start_frame] = tuple(source_packet_cursors)
+            for cursor in source_packet_cursors:
+                source_index = self._source_cursor_to_index.get(int(cursor))
+                packet_record = (
+                    self._source_packets.get(source_index)
+                    if source_index is not None else None
+                )
+                if packet_record is not None:
+                    packet_record["span_sequences"].add(int(span.token_sequence))
             self._published_ids.append(int(token_id))
             self._published_offsets.append((int(offset[0]), int(offset[1])))
             self._published_hidden.append(owned_hidden)
@@ -408,6 +457,9 @@ class LiveQwenSayStream:
         gemma_hidden: Any,
         *,
         producer_event: Any | None = None,
+        token_index: int | None = None,
+        exclusive_kv_cursor: int | None = None,
+        kv_committed: bool = True,
     ) -> None:
         try:
             device = getattr(gemma_hidden, "device", None)
@@ -421,15 +473,71 @@ class LiveQwenSayStream:
                 stream.wait_event(producer_event)
                 if isinstance(gemma_hidden, torch.Tensor):
                     gemma_hidden.record_stream(stream)
-            self._feed_piece(text_piece, gemma_hidden)
+            self._feed_piece(
+                text_piece,
+                gemma_hidden,
+                token_index=token_index,
+                exclusive_kv_cursor=exclusive_kv_cursor,
+                kv_committed=kv_committed,
+            )
         except BaseException as exc:
             self.fail(exc)
             raise
 
-    def _feed_piece(self, text_piece: str, gemma_hidden: Any) -> None:
+    def _feed_piece(
+        self,
+        text_piece: str,
+        gemma_hidden: Any,
+        *,
+        token_index: int | None = None,
+        exclusive_kv_cursor: int | None = None,
+        kv_committed: bool = True,
+    ) -> None:
         if not isinstance(text_piece, str):
             raise TypeError("Thinker token text deve essere string")
         hidden = self._validate_hidden(gemma_hidden)
+        if not isinstance(kv_committed, bool):
+            raise TypeError("kv_committed must be bool")
+        if (token_index is None) != (exclusive_kv_cursor is None):
+            raise ValueError("source token index and exclusive KV cursor must be supplied together")
+        if token_index is None and not kv_committed:
+            raise ValueError("uncommitted source pieces require a token index and KV cursor")
+        if token_index is not None:
+            if (
+                isinstance(token_index, bool)
+                or not isinstance(token_index, int)
+                or token_index < 0
+                or isinstance(exclusive_kv_cursor, bool)
+                or not isinstance(exclusive_kv_cursor, int)
+                or exclusive_kv_cursor < 0
+            ):
+                raise ValueError("source token index and KV cursor must be nonnegative integers")
+            with self._condition:
+                self._raise_terminal_locked()
+                if self._closed:
+                    raise RuntimeError("live Qwen stream is closed")
+                expected_index = 0 if self._last_source_token_index is None else self._last_source_token_index + 1
+                if token_index != expected_index:
+                    raise RuntimeError("source Gemma token indices must be contiguous and monotonic")
+                cursor = int(exclusive_kv_cursor)
+                if cursor in self._source_cursor_to_index:
+                    raise RuntimeError("source Gemma KV cursor was reused")
+                if self._source_packet_cursors and cursor <= max(self._source_packet_cursors.values()):
+                    raise RuntimeError("source Gemma KV cursors must be strictly increasing")
+                self._source_packet_cursors[token_index] = cursor
+                self._source_cursor_to_index[cursor] = token_index
+                self._source_packets[token_index] = {
+                    "cursor": cursor,
+                    "text_piece": text_piece,
+                    "committed": kv_committed,
+                    "spans_known": False,
+                    "span_sequences": set(),
+                    "acked_sequences": set(),
+                }
+                self._source_packet_order.append(token_index)
+                if kv_committed:
+                    self._committed_packet_cursors.add(cursor)
+                self._last_source_token_index = token_index
         if not text_piece:
             with self._condition:
                 self._raise_terminal_locked()
@@ -445,13 +553,17 @@ class LiveQwenSayStream:
             if len(self._pieces) + 1 > self.max_source_pieces:
                 raise RuntimeError("live Qwen source piece capacity exceeded")
             self._source_char_count += len(text_piece)
-            self._pieces.append((text_piece, hidden))
+            self._pieces.append((text_piece, hidden, token_index, exclusive_kv_cursor))
+            if token_index is not None:
+                self._source_piece_index[token_index] = len(self._pieces) - 1
             snapshot = list(self._pieces)
         prefix, _char_sources, _source_hiddens = self._canonical_source_map(snapshot)
         if not prefix:
             return
         self._reserve_retokenization_work(len(prefix), len(snapshot))
-        ids, offsets, aligned = self._current_alignment(prefix, snapshot)
+        ids, offsets, aligned, source_packet_cursors, char_sources = self._current_alignment(
+            prefix, snapshot
+        )
         segments = self._pretokenizer_segments(prefix)
         if len(ids) > self.max_tokens or len(aligned) > self.max_tokens:
             raise RuntimeError("live Qwen observed token/hidden row capacity exceeded")
@@ -490,17 +602,49 @@ class LiveQwenSayStream:
                         break
                     lcp += 1
                 stable_count = min(stable_count, lcp)
+            stable_source_indices = {
+                self._source_cursor_to_index[cursor]
+                for token_sources in source_packet_cursors[:stable_count]
+                for cursor in token_sources
+                if cursor in self._source_cursor_to_index
+            }
+            latest_stable_source_index = max(stable_source_indices, default=-1)
+            source_char_ends: dict[int, int] = {}
+            for char_index, source_indices in enumerate(char_sources):
+                for source_index in source_indices:
+                    source_char_ends[source_index] = char_index + 1
+            for token_index, record in self._source_packets.items():
+                piece_index = self._source_piece_index.get(token_index)
+                if piece_index is not None and piece_index in source_char_ends:
+                    if source_char_ends[piece_index] <= stable_boundary:
+                        record["spans_known"] = True
+                elif token_index < latest_stable_source_index:
+                    # Canonicalized-away leading text has no Qwen span once a
+                    # later stable token has passed it.
+                    record["spans_known"] = True
             self._last_qwen_ids = list(ids)
             self._last_qwen_offsets = list(offsets)
             self._last_qwen_hidden = [hidden.detach().clone() for hidden in aligned]
             self._last_prefix = prefix
             next_index = len(self._published_ids)
             pending = [
-                (ids[index], offsets[index], aligned[index], index == 0)
+                (
+                    ids[index], offsets[index], aligned[index], index == 0,
+                    source_packet_cursors[index],
+                )
                 for index in range(next_index, stable_count)
             ]
-        for token_id, offset, token_hidden, initial in pending:
-            self._publish_token(token_id, offset, token_hidden, initial=initial)
+        for token_id, offset, token_hidden, initial, source_cursors in pending:
+            self._publish_token(
+                token_id,
+                offset,
+                token_hidden,
+                initial=initial,
+                source_packet_cursors=source_cursors,
+            )
+        with self._condition:
+            emitted = self._collect_vocalized_packets_locked()
+        self._dispatch_packet_emissions(emitted)
 
     def finish(self, *, final_text: str) -> None:
         try:
@@ -522,7 +666,9 @@ class LiveQwenSayStream:
         if canonical_text != final_text:
             raise ValueError("Thinker callback text non corrisponde al testo finale canonico")
         self._reserve_retokenization_work(len(canonical_text), len(snapshot))
-        ids, offsets, aligned = self._current_alignment(canonical_text, snapshot)
+        ids, offsets, aligned, source_packet_cursors, _char_sources = self._current_alignment(
+            canonical_text, snapshot
+        )
         if len(ids) > self.max_tokens or len(aligned) > self.max_tokens:
             raise RuntimeError("live Qwen observed token/hidden row capacity exceeded")
         if len(ids) != len(offsets) or len(ids) != len(aligned):
@@ -551,15 +697,26 @@ class LiveQwenSayStream:
                 raise ValueError("live Qwen full-prefix hidden alignment drifted at EOS")
             published = list(self._published_ids)
         for index in range(len(published), len(ids)):
-            self._publish_token(ids[index], offsets[index], aligned[index], initial=index == 0)
+            self._publish_token(
+                ids[index],
+                offsets[index],
+                aligned[index],
+                initial=index == 0,
+                source_packet_cursors=source_packet_cursors[index],
+            )
         with self._condition:
             self._raise_terminal_locked()
             if self._eos_enqueued:
                 raise RuntimeError("native Qwen text EOS è già stato accodato")
             self._finish_text = canonical_text
+            for record in self._source_packets.values():
+                record["spans_known"] = True
             self._eos_enqueued = True
             self._closed = True
+            self.span_cursor.close()
             self._condition.notify_all()
+            emitted = self._collect_vocalized_packets_locked()
+        self._dispatch_packet_emissions(emitted)
 
     def _wait_locked(self, predicate, *, timeout_s: float | None, stop_check: Any | None) -> None:
         started = time.monotonic()
@@ -629,46 +786,182 @@ class LiveQwenSayStream:
         *,
         stop_check: Any | None = None,
     ) -> LiveQwenHidden:
-        frame_id = int(frame_id)
-        if frame_id < 0:
-            raise ValueError("frame_id deve essere non negativo")
+        if isinstance(frame_id, bool) or not isinstance(frame_id, int) or frame_id < 0:
+            raise ValueError("frame_id deve essere un intero non negativo")
         with self._condition:
             self._wait_locked(
-                lambda: len(self._published_hidden) > frame_id or self._closed,
+                lambda: bool(self.span_cursor.frame_spans) or self._closed,
                 timeout_s=None,
                 stop_check=stop_check,
             )
             self._raise_terminal_locked()
-            if frame_id < len(self._published_hidden):
-                return LiveQwenHidden(
-                    self._published_hidden[frame_id],
-                    False,
-                    qwen_token_id=int(self._published_ids[frame_id]),
-                    producer_event=self._published_events[frame_id],
-                )
-            if self._closed and self._published_hidden:
-                return LiveQwenHidden(
-                    self._published_hidden[-1],
-                    True,
-                    qwen_token_id=int(self._published_ids[-1]),
-                    producer_event=self._published_events[-1],
-                )
-            raise RuntimeError("live Qwen stream closed before aligned text hidden was available")
+            if not self.span_cursor.frame_spans:
+                raise RuntimeError("live Qwen stream closed before aligned text hidden was available")
+            selected = self.span_cursor.select(
+                frame_id,
+                generation_id=self.generation_id,
+                segment_id=self.segment_id,
+            )
+            span = selected.span
+            return LiveQwenHidden(
+                span.hidden,
+                selected.tail_hold,
+                qwen_token_id=int(span.token_id),
+                producer_event=span.producer_event,
+            )
+
+    def ack_emitted_audio_frame(
+        self,
+        frame_id: int,
+        *,
+        generation_id: int,
+        segment_id: int,
+    ) -> tuple[int, ...]:
+        """Return Qwen IDs whose span-start PCM frame is emitted and committed."""
+        if int(generation_id) != self.generation_id or int(segment_id) != self.segment_id:
+            raise RuntimeError("PCM frame ACK belongs to a stale generation or segment")
+        if isinstance(frame_id, bool) or not isinstance(frame_id, int) or frame_id < 0:
+            raise ValueError("frame_id must be a nonnegative integer")
+        with self._condition:
+            self._raise_terminal_locked()
+            if frame_id != self._last_received_emitted_frame + 1:
+                raise RuntimeError("emitted PCM frame ACKs must be contiguous and monotonic")
+            self._pending_emitted_frames.append(frame_id)
+            self._last_received_emitted_frame = frame_id
+            acknowledged = self._flush_pending_emitted_frames_locked()
+            emitted = self._collect_vocalized_packets_locked()
+        self._dispatch_packet_emissions(emitted)
+        return acknowledged
+
+    def _flush_pending_emitted_frames_locked(self) -> tuple[int, ...]:
+        acknowledged: list[int] = []
+        while self._pending_emitted_frames:
+            frame_id = self._pending_emitted_frames[0]
+            if frame_id != self._last_processed_emitted_frame + 1:
+                raise RuntimeError("pending PCM emission frames lost contiguous order")
+            source_cursors = self._span_packet_cursors.get(frame_id, ())
+            last_source_index = max(
+                (self._source_cursor_to_index[cursor] for cursor in source_cursors),
+                default=-1,
+            )
+            if any(
+                cursor not in self._committed_packet_cursors
+                for index, cursor in self._source_packet_cursors.items()
+                if index <= last_source_index
+            ):
+                break
+            started = self.span_cursor.ack_emitted_frame(
+                frame_id,
+                generation_id=self.generation_id,
+                segment_id=self.segment_id,
+            )
+            acknowledged.extend(span.token_id for span in started)
+            for span in started:
+                for cursor in self._span_packet_cursors.get(span.start_frame, ()):
+                    source_index = self._source_cursor_to_index.get(cursor)
+                    packet_record = (
+                        self._source_packets.get(source_index)
+                        if source_index is not None else None
+                    )
+                    if packet_record is not None:
+                        packet_record["acked_sequences"].add(int(span.token_sequence))
+            self._pending_emitted_frames.popleft()
+            self._last_processed_emitted_frame = frame_id
+        return tuple(acknowledged)
+
+    def _collect_vocalized_packets_locked(self) -> list[tuple[int, str]]:
+        emitted: list[tuple[int, str]] = []
+        while self._next_source_packet_to_emit < len(self._source_packet_order):
+            token_index = self._source_packet_order[self._next_source_packet_to_emit]
+            record = self._source_packets[token_index]
+            if not record["spans_known"]:
+                break
+            span_sequences = record["span_sequences"]
+            if not span_sequences:
+                # No Qwen token depends on this source text, so it has no PCM
+                # span to own and cannot advance the voiced prefix.
+                self._next_source_packet_to_emit += 1
+                continue
+            if (
+                not record["committed"]
+                or not span_sequences.issubset(record["acked_sequences"])
+            ):
+                break
+            self._vocalized_text_parts.append(str(record["text_piece"]))
+            emitted.append((
+                int(record["cursor"]),
+                "".join(self._vocalized_text_parts),
+            ))
+            self._next_source_packet_to_emit += 1
+        return emitted
+
+    def _dispatch_packet_emissions(self, emitted: list[tuple[int, str]]) -> None:
+        callback = self.on_packet_emitted
+        if not callable(callback):
+            return
+        for cursor, text in emitted:
+            callback(cursor, text)
+
+    def mark_packet_committed(
+        self,
+        exclusive_kv_cursor: int,
+        *,
+        generation_id: int,
+        segment_id: int,
+    ) -> tuple[int, ...] | None:
+        """Release queued PCM ACKs after the matching Gemma packet appends."""
+        if (
+            isinstance(exclusive_kv_cursor, bool)
+            or not isinstance(exclusive_kv_cursor, int)
+            or exclusive_kv_cursor < 0
+        ):
+            raise ValueError("exclusive_kv_cursor must be a nonnegative integer")
+        if (
+            isinstance(generation_id, bool)
+            or int(generation_id) != self.generation_id
+            or isinstance(segment_id, bool)
+            or int(segment_id) != self.segment_id
+        ):
+            return None
+        with self._condition:
+            if self._error is not None:
+                return None
+            token_index = self._source_cursor_to_index.get(exclusive_kv_cursor)
+            if token_index is None:
+                raise RuntimeError("committed KV cursor has no source Gemma packet")
+            # A commit cannot leap over an earlier uncommitted source token.
+            for earlier_index, earlier_cursor in self._source_packet_cursors.items():
+                if earlier_index < token_index and earlier_cursor not in self._committed_packet_cursors:
+                    return None
+            if exclusive_kv_cursor in self._committed_packet_cursors:
+                return ()
+            self._committed_packet_cursors.add(exclusive_kv_cursor)
+            self._source_packets[token_index]["committed"] = True
+            acknowledged = self._flush_pending_emitted_frames_locked()
+            emitted = self._collect_vocalized_packets_locked()
+        self._dispatch_packet_emissions(emitted)
+        return acknowledged
 
     def cancel(self) -> None:
         with self._condition:
-            if self._closed or self._error is not None:
+            if self._error is not None:
                 return
             self._error = LiveSayCancelled("live Qwen stream cancelled")
+            self._pending_emitted_frames.clear()
+            self._committed_packet_cursors.clear()
+            self.span_cursor.close()
             self._condition.notify_all()
 
     def fail(self, error: BaseException) -> None:
         if not isinstance(error, BaseException):
             raise TypeError("error deve essere un'eccezione")
         with self._condition:
-            if self._closed or self._error is not None:
+            if self._error is not None:
                 return
             self._error = error
+            self._pending_emitted_frames.clear()
+            self._committed_packet_cursors.clear()
+            self.span_cursor.close()
             self._condition.notify_all()
 
     @property
@@ -729,6 +1022,7 @@ class TurnLocalQwenSayStream:
         max_tokens: int = 512,
         max_source_chars: int = 16_384,
         on_packet_consumed: Any | None = None,
+        on_packet_emitted: Any | None = None,
     ) -> None:
         if isinstance(text_eos_token_id, bool) or int(text_eos_token_id) < 0:
             raise ValueError("text_eos_token_id deve essere non negativo")
@@ -742,9 +1036,14 @@ class TurnLocalQwenSayStream:
         self.text_eos_token_id = int(text_eos_token_id)
         self.fifo = fifo
         self.generation_id = int(generation_id)
+        self.segment_id = fifo.segment_id
         self.max_tokens = int(max_tokens)
         self.max_source_chars = int(max_source_chars)
-        self.on_packet_consumed = on_packet_consumed
+        if on_packet_consumed is not None and on_packet_emitted is not None:
+            raise ValueError("specify only one packet emission callback")
+        # Keep the historical keyword accepted while moving its trigger to
+        # the PCM-emission boundary. New callers should use on_packet_emitted.
+        self.on_packet_emitted = on_packet_emitted or on_packet_consumed
         self._condition = threading.Condition(threading.RLock())
         self._visible_parts: list[str] = []
         self._visible_char_count = 0
@@ -777,7 +1076,7 @@ class TurnLocalQwenSayStream:
             raise ValueError("Qwen tokenizer ha prodotto un ID negativo")
         return ids
 
-    def _encode_piece(self, text_piece: str) -> list[int]:
+    def _encode_piece(self, text_piece: str) -> tuple[list[int], tuple[str, ...]]:
         encode = getattr(self.qwen_tokenizer, "encode", None)
         decode = getattr(self.qwen_tokenizer, "decode", None)
         if not callable(encode) or not callable(decode):
@@ -795,7 +1094,75 @@ class TurnLocalQwenSayStream:
             decoded = decode(ids)
         if not isinstance(decoded, str) or decoded != text_piece:
             raise RuntimeError("Qwen packet tokenization is not an exact text round trip")
-        return ids
+        surfaces = self._offset_surfaces(text_piece, ids)
+        if surfaces is None:
+            surfaces = self._decoded_prefix_surfaces(text_piece, ids, decode)
+        if "".join(surfaces) != text_piece:
+            raise RuntimeError("Qwen token surfaces do not reconstruct the packet text")
+        return ids, surfaces
+
+    def _offset_surfaces(self, text_piece: str, ids: list[int]) -> tuple[str, ...] | None:
+        tokenizer = self.qwen_tokenizer
+        if not callable(tokenizer):
+            return None
+        try:
+            encoded = tokenizer(
+                text_piece,
+                add_special_tokens=False,
+                return_offsets_mapping=True,
+            )
+            encoded_ids = self._ids(encoded["input_ids"])
+            offsets = encoded["offset_mapping"]
+            if callable(getattr(offsets, "tolist", None)):
+                offsets = offsets.tolist()
+            while isinstance(offsets, list) and len(offsets) == 1 and isinstance(offsets[0], list):
+                offsets = offsets[0]
+            if encoded_ids != ids or not isinstance(offsets, (list, tuple)) or len(offsets) != len(ids):
+                return None
+            normalized: list[tuple[int, int]] = []
+            previous_end = 0
+            for item in offsets:
+                if not isinstance(item, (list, tuple)) or len(item) != 2:
+                    return None
+                start, end = int(item[0]), int(item[1])
+                if start < previous_end or end < start or end > len(text_piece):
+                    return None
+                normalized.append((start, end))
+                previous_end = end
+            # Preserve skipped whitespace by attaching each gap to the token
+            # whose offset ends after it; no packet text is split heuristically.
+            surfaces: list[str] = []
+            start = 0
+            for index, (_token_start, token_end) in enumerate(normalized):
+                end = len(text_piece) if index == len(normalized) - 1 else max(start, token_end)
+                surfaces.append(text_piece[start:end])
+                start = end
+            if len(surfaces) == len(ids) and "".join(surfaces) == text_piece:
+                return tuple(surfaces)
+        except (KeyError, TypeError, ValueError, IndexError, AttributeError):
+            return None
+        return None
+
+    @staticmethod
+    def _decoded_prefix_surfaces(text_piece: str, ids: list[int], decode: Any) -> tuple[str, ...]:
+        surfaces: list[str] = []
+        previous = ""
+        for index in range(1, len(ids) + 1):
+            try:
+                prefix = decode(
+                    ids[:index],
+                    skip_special_tokens=False,
+                    clean_up_tokenization_spaces=False,
+                )
+            except TypeError:
+                prefix = decode(ids[:index])
+            if not isinstance(prefix, str) or not prefix.startswith(previous):
+                raise RuntimeError("Qwen tokenizer cannot expose stable token text surfaces")
+            surfaces.append(prefix[len(previous):])
+            previous = prefix
+        if previous != text_piece:
+            raise RuntimeError("Qwen decoded token prefixes do not reconstruct packet text")
+        return tuple(surfaces)
 
     def feed_packet(
         self,
@@ -823,7 +1190,7 @@ class TurnLocalQwenSayStream:
                 raise RuntimeError("turn-local Qwen SAY text capacity exceeded")
             if self._observed_qwen_tokens >= self.max_tokens:
                 raise RuntimeError("turn-local Qwen SAY token capacity exceeded")
-        qwen_ids = self._encode_piece(packet.text_piece)
+        qwen_ids, qwen_token_texts = self._encode_piece(packet.text_piece)
         if not qwen_ids:
             raise RuntimeError("visible Gemma SAY packet encoded to zero Qwen IDs")
         with self._condition:
@@ -836,7 +1203,9 @@ class TurnLocalQwenSayStream:
         self.fifo.put(
             packet,
             qwen_token_ids=tuple(qwen_ids),
+            qwen_token_texts=qwen_token_texts,
             generation_id=self.generation_id,
+            segment_id=self.segment_id,
             stop_check=stop_check,
         )
         with self._condition:
@@ -856,6 +1225,7 @@ class TurnLocalQwenSayStream:
                 raise RuntimeError("Qwen initial text token was already consumed")
         token = self.fifo.take_qwen_token(
             generation_id=self.generation_id,
+            segment_id=self.segment_id,
             initial=True,
             stop_check=stop_check,
             timeout_s=timeout_s,
@@ -872,18 +1242,24 @@ class TurnLocalQwenSayStream:
             self._last_packet_token = token
         return LiveQwenToken(token.token_id, hidden)
 
-    def ack_initial_token(self) -> None:
+    def consume_initial_token(self) -> None:
         with self._condition:
             if not self._initial_inflight:
                 raise RuntimeError("turn-local Qwen initial token is not in flight")
             packet = self._initial_packet
         if packet is None:
             raise RuntimeError("turn-local Qwen initial packet was lost before ACK")
-        cursor = self.fifo.ack_qwen_token(generation_id=self.generation_id)
+        self.fifo.consume_qwen_token(
+            generation_id=self.generation_id,
+            segment_id=self.segment_id,
+        )
         with self._condition:
             self._initial_inflight = False
             self._initial_packet = None
-        self._notify_packet_consumed(cursor)
+
+    def ack_initial_token(self) -> None:
+        """Compatibility alias; this acknowledges Qwen ingestion, not PCM."""
+        self.consume_initial_token()
 
     def take_trailing_token(
         self,
@@ -894,6 +1270,7 @@ class TurnLocalQwenSayStream:
         self._raise_terminal()
         token = self.fifo.take_qwen_token(
             generation_id=self.generation_id,
+            segment_id=self.segment_id,
             stop_check=stop_check,
             timeout_s=timeout_s,
         )
@@ -919,7 +1296,7 @@ class TurnLocalQwenSayStream:
                 return self.text_eos_token_id
             return None
 
-    def ack_trailing_token(self) -> None:
+    def consume_trailing_token(self) -> None:
         with self._condition:
             if self._eos_inflight:
                 self._eos_inflight = False
@@ -930,16 +1307,59 @@ class TurnLocalQwenSayStream:
             token = self._trailing_token
         if token is None:
             raise RuntimeError("turn-local Qwen trailing packet was lost before ACK")
-        cursor = self.fifo.ack_qwen_token(generation_id=self.generation_id)
+        self.fifo.consume_qwen_token(
+            generation_id=self.generation_id,
+            segment_id=self.segment_id,
+        )
         with self._condition:
             self._trailing_inflight = False
             self._trailing_token = None
-        self._notify_packet_consumed(cursor)
+    def ack_trailing_token(self) -> None:
+        """Compatibility alias; this acknowledges Qwen ingestion, not PCM."""
+        self.consume_trailing_token()
 
-    def _notify_packet_consumed(self, cursor: int | None) -> None:
-        if cursor is None or not callable(self.on_packet_consumed):
-            return
-        self.on_packet_consumed(int(cursor), self.fifo.vocalized_text)
+    def ack_emitted_audio_frame(
+        self,
+        frame_id: int,
+        *,
+        generation_id: int,
+        segment_id: int,
+    ) -> int | None:
+        if int(generation_id) != self.generation_id:
+            raise RuntimeError("PCM frame ACK belongs to a stale generation")
+        if int(segment_id) != self.segment_id:
+            raise RuntimeError("PCM frame ACK belongs to a stale segment")
+        cursor = self.fifo.ack_emitted_audio_frame(
+            frame_id,
+            generation_id=generation_id,
+            segment_id=segment_id,
+        )
+        if cursor is not None and callable(self.on_packet_emitted):
+            self.on_packet_emitted(int(cursor), self.fifo.vocalized_text)
+        return cursor
+
+    def mark_packet_committed(
+        self,
+        exclusive_kv_cursor: int,
+        *,
+        generation_id: int,
+        segment_id: int | None = None,
+    ) -> int | None:
+        """Release PCM-acknowledged text after its Gemma KV append succeeds."""
+        effective_segment_id = self.segment_id if segment_id is None else segment_id
+        if (
+            int(generation_id) != self.generation_id
+            or int(effective_segment_id) != self.segment_id
+        ):
+            return None
+        cursor = self.fifo.mark_packet_committed(
+            exclusive_kv_cursor,
+            generation_id=generation_id,
+            segment_id=effective_segment_id,
+        )
+        if cursor is not None and callable(self.on_packet_emitted):
+            self.on_packet_emitted(int(cursor), self.fifo.vocalized_text)
+        return cursor
 
     @staticmethod
     def _hidden_3d(packet: SpokenTokenPacket) -> torch.Tensor:
@@ -953,22 +1373,33 @@ class TurnLocalQwenSayStream:
             raise ValueError("frame_id deve essere non negativo")
         self._raise_terminal()
         with self._condition:
-            if self._last_hidden is not None:
-                token = self._last_packet_token
-                return LiveQwenHidden(
-                    self._last_hidden,
-                    tail_hold=self._tail_hold,
-                    gemma_token_id=(int(token.packet.token_id) if token is not None else None),
-                    packet_exclusive_kv_cursor=(
-                        int(token.packet.exclusive_kv_cursor) if token is not None else None
-                    ),
-                    qwen_token_id=(int(token.token_id) if token is not None else None),
-                    packet_token_index=(int(token.packet_token_index) if token is not None else None),
-                    packet_token_count=(int(token.packet_token_count) if token is not None else None),
-                    producer_event=(token.packet.producer_event if token is not None else None),
-                )
-            if self._closed:
-                raise RuntimeError("turn-local Qwen SAY stream closed before a text hidden was consumed")
+            if self.fifo.segment_id != self.segment_id:
+                raise RuntimeError("turn-local Qwen hidden requested from a stale segment")
+            has_spans = bool(
+                self.fifo.span_cursor is not None
+                and self.fifo.span_cursor.frame_spans
+            )
+            closed = self._closed
+        if has_spans:
+            selected = self.fifo.select_span_for_frame(
+                int(frame_id),
+                generation_id=self.generation_id,
+                segment_id=self.segment_id,
+            )
+            span = selected.span
+            packet = span.packet
+            return LiveQwenHidden(
+                self._hidden_3d(packet),
+                tail_hold=selected.tail_hold,
+                gemma_token_id=int(packet.token_id),
+                packet_exclusive_kv_cursor=int(packet.exclusive_kv_cursor),
+                qwen_token_id=int(span.token_id),
+                packet_token_index=span.packet_token_index,
+                packet_token_count=span.packet_token_count,
+                producer_event=packet.producer_event,
+            )
+        if closed:
+            raise RuntimeError("turn-local Qwen SAY stream closed before a text hidden was consumed")
         # The first acoustic Q1 query follows the first codec frame and the
         # corresponding trailing Qwen text ID. Waiting here would indicate an
         # engine ordering regression, so fail rather than substitute a hidden.
@@ -988,7 +1419,11 @@ class TurnLocalQwenSayStream:
                 raise ValueError("incremental Gemma SAY differs from validated v2 SAY")
             self._closed = True
             self._condition.notify_all()
-        self.fifo.close()
+        if not self.fifo.close(
+            generation_id=self.generation_id,
+            segment_id=self.segment_id,
+        ):
+            raise RuntimeError("turn-local Qwen stream closed a stale segment")
 
     def cancel(self) -> None:
         with self._condition:
@@ -996,7 +1431,10 @@ class TurnLocalQwenSayStream:
                 self._error = LiveSayCancelled("turn-local Qwen SAY stream cancelled")
             self._closed = True
             self._condition.notify_all()
-        self.fifo.clear()
+        self.fifo.clear(
+            generation_id=self.generation_id,
+            segment_id=self.segment_id,
+        )
 
     def fail(self, error: BaseException) -> None:
         if not isinstance(error, BaseException):
@@ -1006,7 +1444,10 @@ class TurnLocalQwenSayStream:
                 self._error = error
             self._closed = True
             self._condition.notify_all()
-        self.fifo.clear()
+        self.fifo.clear(
+            generation_id=self.generation_id,
+            segment_id=self.segment_id,
+        )
 
     def _raise_terminal(self) -> None:
         with self._condition:

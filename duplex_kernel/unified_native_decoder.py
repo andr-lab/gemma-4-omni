@@ -13,7 +13,7 @@ import copy
 import hashlib
 import inspect
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from numbers import Integral
 from typing import Any, Callable, Sequence
 
@@ -31,10 +31,10 @@ class TokenTiming:
     sampled_ns: int
     forward_duration_ns: int
     generation_elapsed_ns: int
-    token_forward_started_ns: int
-    token_hidden_ready_ns: int
-    token_forward_duration_ns: int
-    token_ready_elapsed_ns: int
+    token_forward_started_ns: int | None
+    token_hidden_ready_ns: int | None
+    token_forward_duration_ns: int | None
+    token_ready_elapsed_ns: int | None
 
 
 @dataclass(frozen=True)
@@ -47,11 +47,16 @@ class FirstLogitsReady:
 
 @dataclass(frozen=True)
 class GeneratedToken:
-    """A sampled non-EOS token paired with the hidden state that selected it."""
+    """A sampled non-EOS token paired with its explicitly sourced hidden state."""
 
     token_id: int
     hidden: torch.Tensor
     timing: TokenTiming
+    token_index: int = 0
+    hidden_provenance: str = "token"
+    kv_committed: bool = True
+    packet_published_ns: int | None = None
+    token_text: str = ""
 
 
 @dataclass(frozen=True)
@@ -352,6 +357,9 @@ class UnifiedNativeDecoder:
         first_logits_ready: Callable[[FirstLogitsReady], Any] | None = None,
         first_token: Callable[[GeneratedToken], Any] | None = None,
         on_token: Callable[[int, torch.Tensor, TokenTiming], Any] | None = None,
+        on_token_packet: Callable[[GeneratedToken], Any] | None = None,
+        on_token_committed: Callable[[GeneratedToken], Any] | None = None,
+        anticipate_first_token: bool = False,
     ) -> NativeDecodeResult:
         """Append only transition IDs and sample from their final returned logits.
 
@@ -359,6 +367,14 @@ class UnifiedNativeDecoder:
         tokenizer and verified as the suffix required by the owner. The owner
         callback handles embedding/PLE preparation, serial cache commit,
         cancellation safety, and assistant-branch rollback.
+
+        ``anticipate_first_token`` lets the packet callback publish token0
+        using the transition hidden before that token is appended to native KV.
+        The packet is marked uncommitted until its own forward succeeds, then
+        ``on_token_committed`` receives the same token index. Its token-forward
+        timing fields are ``None`` during the first callback; the returned
+        result carries completed timings. Later tokens use their own
+        post-forward hidden states and are committed before publication.
         """
         if isinstance(max_new_tokens, bool) or not isinstance(max_new_tokens, Integral):
             raise TypeError("max_new_tokens deve essere un intero")
@@ -377,6 +393,22 @@ class UnifiedNativeDecoder:
         terminal_token_id: int | None = None
         pending_token_id: int | None = None
         termination_reason = "budget_exhausted"
+        tokenizer = getattr(self.sampler, "tokenizer", None)
+        if tokenizer is None:
+            tokenizer = getattr(self.thinker, "tokenizer", None)
+        decode_text = getattr(tokenizer, "decode", None)
+        decoded_text_prefix = str(getattr(self.sampler, "last_decoded_output", "") or "")
+
+        def token_text_piece(generated_ids: tuple[int, ...]) -> str:
+            nonlocal decoded_text_prefix
+            if not callable(decode_text):
+                return ""
+            decoded = str(decode_text(list(generated_ids), skip_special_tokens=True))
+            if not decoded.startswith(decoded_text_prefix):
+                raise RuntimeError("Thinker token decode is not prefix-stable for audio response parsing")
+            piece = decoded[len(decoded_text_prefix):]
+            decoded_text_prefix = decoded
+            return piece
 
         if budget == 0:
             return NativeDecodeResult(
@@ -461,10 +493,66 @@ class UnifiedNativeDecoder:
                 termination_reason = "cancelled"
                 break
 
+            token_text = token_text_piece(tuple([*history, token_id]))
+            anticipate_token = bool(
+                anticipate_first_token and token_index == 0 and on_token_packet is not None
+            )
+            transition_hidden = hidden
+            if anticipate_token:
+                early_token = GeneratedToken(
+                    token_id=token_id,
+                    hidden=transition_hidden,
+                    timing=TokenTiming(
+                        forward_started_ns=source_forward_started_ns,
+                        logits_ready_ns=source_logits_ready_ns,
+                        sampled_ns=candidate_sampled_ns,
+                        forward_duration_ns=source_logits_ready_ns - source_forward_started_ns,
+                        generation_elapsed_ns=candidate_sampled_ns - decode_started_ns,
+                        token_forward_started_ns=None,
+                        token_hidden_ready_ns=None,
+                        token_forward_duration_ns=None,
+                        token_ready_elapsed_ns=None,
+                    ),
+                    token_index=token_index,
+                    hidden_provenance="transition",
+                    kv_committed=False,
+                    token_text=token_text,
+                )
+                generated.append(early_token)
+                await _resolve(on_token_packet(early_token))
+                early_token = replace(
+                    early_token,
+                    packet_published_ns=int(self.monotonic_ns()),
+                )
+                generated[-1] = early_token
+                if first_token is not None:
+                    await _resolve(first_token(early_token))
+                if await self._should_stop(stop_check):
+                    pending_token_id = token_id
+                    termination_reason = "cancelled"
+                    break
+
             token_forward_started_ns = int(self.monotonic_ns())
             logits, token_hidden = await self._forward([token_id])
             token_hidden_ready_ns = int(self.monotonic_ns())
             committed_count += 1
+            if anticipate_token and on_token_committed is not None:
+                committed_packet = replace(
+                    early_token,
+                    timing=TokenTiming(
+                        forward_started_ns=source_forward_started_ns,
+                        logits_ready_ns=source_logits_ready_ns,
+                        sampled_ns=candidate_sampled_ns,
+                        forward_duration_ns=source_logits_ready_ns - source_forward_started_ns,
+                        generation_elapsed_ns=candidate_sampled_ns - decode_started_ns,
+                        token_forward_started_ns=token_forward_started_ns,
+                        token_hidden_ready_ns=token_hidden_ready_ns,
+                        token_forward_duration_ns=token_hidden_ready_ns - token_forward_started_ns,
+                        token_ready_elapsed_ns=token_hidden_ready_ns - decode_started_ns,
+                    ),
+                    kv_committed=True,
+                )
+                await _resolve(on_token_committed(committed_packet))
             next_candidate = await self._sample(logits, tuple([*history, token_id]))
             next_sampled_ns = int(self.monotonic_ns())
             sampled_count += 1
@@ -478,7 +566,7 @@ class UnifiedNativeDecoder:
             )
             token = GeneratedToken(
                 token_id=token_id,
-                hidden=token_hidden,
+                hidden=transition_hidden if anticipate_token else token_hidden,
                 timing=TokenTiming(
                     forward_started_ns=source_forward_started_ns,
                     logits_ready_ns=source_logits_ready_ns,
@@ -490,11 +578,25 @@ class UnifiedNativeDecoder:
                     token_forward_duration_ns=token_hidden_ready_ns - token_forward_started_ns,
                     token_ready_elapsed_ns=token_hidden_ready_ns - decode_started_ns,
                 ),
+                token_index=token_index,
+                hidden_provenance="transition" if anticipate_token else "token",
+                kv_committed=True,
+                packet_published_ns=(
+                    early_token.packet_published_ns if anticipate_token else None
+                ),
+                token_text=token_text,
             )
-            generated.append(token)
+            if anticipate_token:
+                generated[-1] = token
+            else:
+                generated.append(token)
+                if on_token_packet is not None:
+                    await _resolve(on_token_packet(token))
+                    token = replace(token, packet_published_ns=int(self.monotonic_ns()))
+                    generated[-1] = token
             if on_token is not None:
                 await _resolve(on_token(token.token_id, token.hidden, token.timing))
-            if token_index == 0 and first_token is not None:
+            if token_index == 0 and first_token is not None and not anticipate_token:
                 await _resolve(first_token(token))
 
             if token_index + 1 >= budget:

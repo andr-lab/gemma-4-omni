@@ -1,8 +1,8 @@
 """OpenAI-compatible HTTP/SSE and realtime duplex WebSocket server."""
 from __future__ import annotations
-import asyncio, base64, hashlib, io, json, logging, os, queue, re, tempfile, threading, time, uuid
+import asyncio, base64, copy, hashlib, io, json, logging, os, queue, re, tempfile, threading, time, uuid
 import itertools
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from contextlib import contextmanager, nullcontext
 from concurrent.futures import ThreadPoolExecutor
 from collections import Counter, deque
@@ -22,6 +22,7 @@ from duplex_kernel.audio_stream import (
     iter_audio_packets,
 )
 from duplex_kernel.config import (
+    AUDIO_FRAME_SAMPLES,
     ARIA_BACKCHANNEL_MAX_FRAMES,
     ARIA_MAX_FRAMES,
     CODEC_SAMPLE_RATE,
@@ -204,6 +205,8 @@ _NATIVE_CONTROL6_SELECTION_TRACE_FIELDS = (
     "native_control6_hysteresis_pending",
     "native_control6_hysteresis_applied_action",
     "native_action_raw_probabilities",
+    "native_action_order",
+    "native_action_logits",
     "native_action_effective_order",
     "native_action_effective_probabilities",
     "native_action_legal_effective_probabilities",
@@ -214,6 +217,21 @@ _NATIVE_CONTROL6_SELECTION_TRACE_FIELDS = (
     "native_control6_selected_row_index",
     "native_control6_selected_token_id",
     "native_control6_selected_token",
+    "native_control6_peer_turn_active",
+    "native_control6_user_rms",
+    "native_control6_user_activity_detected",
+    "native_control6_speech_rms_floor",
+    "native_control6_early_speak_activity_active",
+    "native_control6_early_speak_confidence",
+    "native_control6_early_speak_confidence_source",
+    "native_control6_early_speak_confidence_threshold",
+    "native_control6_early_speak_gated",
+    "native_control6_endpoint_speak_pending",
+    "native_control6_endpoint_speak_evidence_count",
+    "native_control6_endpoint_speak_quiet_count",
+    "native_control6_endpoint_speak_ready",
+    "native_control6_endpoint_speak_released",
+    "native_control6_endpoint_speak_turn_onset_frame_id",
 )
 
 
@@ -1820,6 +1838,7 @@ async def _finalize_unified_native_cache_branch(
         branch["finalized"] = True
         branch["private_slot_released"] = True
         branch["history_committed"] = False
+        _retire_response_speech_ack_streams(branch)
         return None
 
     listener_generation_id = int(branch["listener_generation_id"])
@@ -1876,6 +1895,7 @@ async def _finalize_unified_native_cache_branch(
                 branch["queue_open"] = False
                 branch["finalized"] = True
                 branch["rollback_recovered"] = True
+                _retire_response_speech_ack_streams(branch)
                 return drained
             except RuntimeError as exc:
                 if (
@@ -2085,6 +2105,7 @@ async def _finalize_unified_native_cache_branch(
             branch["queue_open"] = False
             branch["finalized"] = True
             branch["history_committed"] = True
+            _retire_response_speech_ack_streams(branch)
             return drained
         except RuntimeError as exc:
             if (
@@ -2202,9 +2223,14 @@ def _run_unified_native_thinker(
         branch["cache_position"] = cache_cursor
         branch["turn_start_cache_position"] = cache_cursor
     branch["transition_token_ids"] = private_transition_ids
-    branch["spoken_prefix_base_cursor"] = cache_cursor + len(private_transition_ids)
+    # The native owner can rebase the first append while a listener tick is in
+    # flight. Until the transition has actually committed, its suffix cursor
+    # is unknown; anchor it from the append result below.
+    branch["spoken_prefix_base_cursor"] = cache_cursor
+    branch["spoken_prefix_transition_cursor"] = None
     if not tuple(branch.get("client_consumed_segments", ())):
         branch["spoken_prefix_exclusive_cursor"] = int(branch["spoken_prefix_base_cursor"])
+    transition_tokens_appended = 0
     token_timings: dict[str, int] = {}
     # Unified-native decode submits token work to its owning queue and does not
     # acquire the shared Python Thinker/Gemma model lock in this call chain.
@@ -2224,10 +2250,13 @@ def _run_unified_native_thinker(
         "append_steps": [],
         "sampling_steps": [],
     }
+    native_profile_lock = threading.Lock()
     branch["unified_native_profile"] = native_profile
+    branch["unified_native_profile_lock"] = native_profile_lock
 
-    def adopt_append_cursor(result: Any, token_count: int) -> None:
-        nonlocal cache_cursor
+    def adopt_append_cursor(result: Any, token_ids: Sequence[int]) -> None:
+        nonlocal cache_cursor, transition_tokens_appended
+        token_count = len(token_ids)
         result_cursor = getattr(result, "cache_position", None)
         first_append = int(branch.get("native_token_append_count", 0)) == 0
         if result_cursor is None:
@@ -2253,21 +2282,47 @@ def _run_unified_native_thinker(
         branch["native_token_append_count"] = int(
             branch.get("native_token_append_count", 0)
         ) + token_count
+        if transition_tokens_appended < len(private_transition_ids):
+            expected_transition = private_transition_ids[
+                transition_tokens_appended : transition_tokens_appended + token_count
+            ]
+            actual_tokens = tuple(int(value) for value in token_ids)
+            if actual_tokens != expected_transition:
+                raise RuntimeError(
+                    "unified native append diverged from the pending Thinker transition: "
+                    f"transition_offset={transition_tokens_appended}, "
+                    f"expected={expected_transition}, actual={actual_tokens}"
+                )
+            transition_tokens_appended += token_count
+            if transition_tokens_appended == len(private_transition_ids):
+                branch["spoken_prefix_base_cursor"] = committed_cursor
+                branch["spoken_prefix_transition_cursor"] = committed_cursor
+                if not tuple(branch.get("client_consumed_segments", ())):
+                    branch["spoken_prefix_exclusive_cursor"] = committed_cursor
 
     def publish_profile() -> None:
         if thinker_metrics:
             token_timings["thinker_runtime_metrics"] = dict(thinker_metrics)
-        token_timings["unified_native_profile"] = {
-            **native_profile,
-            "append_steps": [dict(step) for step in native_profile["append_steps"]],
-            "sampling_steps": [dict(step) for step in native_profile["sampling_steps"]],
-        }
+        with native_profile_lock:
+            token_timings["unified_native_profile"] = {
+                **native_profile,
+                "append_steps": [dict(step) for step in native_profile["append_steps"]],
+                "sampling_steps": [dict(step) for step in native_profile["sampling_steps"]],
+            }
         callback = request.get("_on_thinker_metrics")
         if callable(callback):
             callback(dict(token_timings))
 
     async def forward_native_tokens(token_ids: list[int]):
         nonlocal cache_cursor, private_transition_remaining, private_transition_offset
+        first_generated_forward = (
+            (
+                private_transition_remaining == 0
+                if private_handle is not None
+                else transition_tokens_appended >= len(private_transition_ids)
+            )
+            and "token0_forward_submit_ns" not in native_profile
+        )
         retry_deadline = time.monotonic() + 2.0
         append_call_ns = time.monotonic_ns()
         if private_handle is not None:
@@ -2289,6 +2344,17 @@ def _run_unified_native_thinker(
             else:
                 if private_transition_offset != len(private_transition_ids):
                     raise RuntimeError("private decode sampled before the original Thinker transition completed")
+                token0_submit_ns = time.monotonic_ns()
+                if first_generated_forward:
+                    with native_profile_lock:
+                        native_profile.setdefault("token0_forward_submit_ns", token0_submit_ns)
+                        native_profile.setdefault("token0_append_request", {
+                            "response_id": branch.get("response_id"),
+                            "generation_id": generation_id,
+                            "listener_generation_id": listener_generation_id,
+                            "q_len": len(token_ids),
+                            "expected_cache_position": cache_cursor,
+                        })
                 owner_future = worker.append_private_tokens(
                     private_handle,
                     token_ids,
@@ -2299,18 +2365,38 @@ def _run_unified_native_thinker(
                 result = await asyncio.shield(wrapped)
             except asyncio.CancelledError:
                 result = await asyncio.shield(wrapped)
+                received_ns = time.monotonic_ns()
                 cache_cursor = int(result.cache_position)
                 branch["cache_position"] = cache_cursor
                 if is_private_transition:
                     private_transition_offset = next_transition_offset
                     private_transition_remaining = len(private_transition_ids) - private_transition_offset
+                elif first_generated_forward:
+                    with native_profile_lock:
+                        native_profile.setdefault("token0_forward_return_ns", received_ns)
+                        native_profile.setdefault(
+                            "token0_forward_owner_future_wait_ns",
+                            max(0, received_ns - token0_submit_ns),
+                        )
                 raise
             cache_cursor = int(result.cache_position)
             branch["cache_position"] = cache_cursor
             if is_private_transition:
                 private_transition_offset = next_transition_offset
                 private_transition_remaining = len(private_transition_ids) - private_transition_offset
+                if private_transition_remaining == 0:
+                    branch["spoken_prefix_base_cursor"] = cache_cursor
+                    branch["spoken_prefix_transition_cursor"] = cache_cursor
+                    if not tuple(branch.get("client_consumed_segments", ())):
+                        branch["spoken_prefix_exclusive_cursor"] = cache_cursor
             received_ns = time.monotonic_ns()
+            if first_generated_forward and not is_private_transition:
+                with native_profile_lock:
+                    native_profile.setdefault("token0_forward_return_ns", received_ns)
+                    native_profile.setdefault(
+                        "token0_forward_owner_future_wait_ns",
+                        max(0, received_ns - token0_submit_ns),
+                    )
             step_profile: dict[str, Any] = {
                 "phase": "private_transition" if is_private_transition else "private_generated_token",
                 "logical_token_count": len(token_ids),
@@ -2345,6 +2431,18 @@ def _run_unified_native_thinker(
             }
             if prepared_protocol is not None:
                 append_kwargs["prepared_protocol"] = prepared_protocol
+            token0_submit_ns = time.monotonic_ns()
+            if first_generated_forward:
+                with native_profile_lock:
+                    native_profile.setdefault("token0_forward_submit_ns", token0_submit_ns)
+                    native_profile.setdefault("token0_append_request", {
+                        "response_id": branch.get("response_id"),
+                        "generation_id": generation_id,
+                        "listener_generation_id": listener_generation_id,
+                        "q_len": len(token_ids),
+                        "expected_cache_position": cache_cursor,
+                        "append_scope_id": append_kwargs["append_scope_id"],
+                    })
             owner_future = worker.append_text_tokens(
                 session.session_id,
                 token_ids,
@@ -2362,7 +2460,15 @@ def _run_unified_native_thinker(
                     if str(append_error) == "text append response canceled before native KV mutation":
                         raise asyncio.CancelledError from append_error
                     raise
-                adopt_append_cursor(result, len(token_ids))
+                adopt_append_cursor(result, token_ids)
+                received_ns = time.monotonic_ns()
+                if first_generated_forward:
+                    with native_profile_lock:
+                        native_profile.setdefault("token0_forward_return_ns", received_ns)
+                        native_profile.setdefault(
+                            "token0_forward_owner_future_wait_ns",
+                            max(0, received_ns - token0_submit_ns),
+                        )
                 raise
             except RuntimeError as exc:
                 if str(exc) == "text append requires completed listener frame watermark":
@@ -2395,8 +2501,15 @@ def _run_unified_native_thinker(
                     await asyncio.sleep(0.002)
                     continue
                 raise
-            adopt_append_cursor(result, len(token_ids))
+            adopt_append_cursor(result, token_ids)
             received_ns = time.monotonic_ns()
+            if first_generated_forward:
+                with native_profile_lock:
+                    native_profile.setdefault("token0_forward_return_ns", received_ns)
+                    native_profile.setdefault(
+                        "token0_forward_owner_future_wait_ns",
+                        max(0, received_ns - token0_submit_ns),
+                    )
             step_profile: dict[str, Any] = {
                 "phase": "suffix" if not branch.get("first_logits_ready") else "generated_token",
                 "logical_token_count": len(token_ids),
@@ -2410,6 +2523,12 @@ def _run_unified_native_thinker(
                 owner_started_ns = worker_timings.get("owner_started_ns")
                 if isinstance(owner_started_ns, int):
                     step_profile["owner_queue_wait_ns"] = max(0, owner_started_ns - append_call_ns)
+                    if first_generated_forward:
+                        with native_profile_lock:
+                            native_profile.setdefault(
+                                "token0_forward_owner_queue_wait_ns",
+                                max(0, owner_started_ns - token0_submit_ns),
+                            )
             transition_cache_hit = getattr(result, "prepared_transition_cache_hit", None)
             if transition_cache_hit is not None:
                 step_profile["prepared_transition_cache_hit"] = bool(transition_cache_hit)
@@ -2430,7 +2549,6 @@ def _run_unified_native_thinker(
             first_logits_ms = max(0.0, (int(event.ready_ns) - decision_ns) / 1_000_000.0)
             token_timings["first_logits_after_decision_ms"] = first_logits_ms
             native_profile["first_logits_after_decision_ms"] = first_logits_ms
-        publish_profile()
 
     async def on_native_token(
         token_id: int,
@@ -2458,12 +2576,13 @@ def _run_unified_native_thinker(
                 )
                 token_timings["first_token_sampled_ms"] = sampled_ms
                 token_timings["first_packet_hidden_ready_ms"] = packet_ready_ms
-                # TTFT is measured at the first token's own post-forward hidden,
-                # never at the earlier sample or the preceding token's hidden.
-                token_timings["ttft_ms"] = packet_ready_ms
                 native_profile["first_token_sampled_ms"] = sampled_ms
                 native_profile["first_packet_hidden_ready_ms"] = packet_ready_ms
-                native_profile["ttft_ms"] = packet_ready_ms
+                if not bool(think_kwargs.get("anticipate_first_token")):
+                    # Legacy TTFT is measured when the first post-forward token
+                    # reaches its publication callback.
+                    token_timings["ttft_ms"] = packet_ready_ms
+                    native_profile["ttft_ms"] = packet_ready_ms
             native_profile["first_token_callback_ns"] = int(
                 token_timings["first_thinker_token_at_ns"]
             )
@@ -2471,6 +2590,22 @@ def _run_unified_native_thinker(
             # owner; the websocket action is emitted later by the protocol.
             native_profile["first_token_model_callback_ns"] = time.monotonic_ns()
             publish_profile()
+
+    async def on_first_token(token: Any) -> None:
+        published_ns = getattr(token, "packet_published_ns", None)
+        if isinstance(published_ns, int):
+            token_timings["first_packet_published_at_ns"] = int(published_ns)
+            decision_ns = native_profile.get("policy_decision_at_ns")
+            if isinstance(decision_ns, int):
+                ttft_ms = max(0.0, (int(published_ns) - decision_ns) / 1_000_000.0)
+                token_timings["ttft_ms"] = ttft_ms
+                native_profile["first_packet_published_at_ns"] = int(published_ns)
+                native_profile["ttft_ms"] = ttft_ms
+        callback = think_kwargs.get("on_first_token")
+        if callable(callback):
+            result = callback(token)
+            if asyncio.iscoroutine(result) or isinstance(result, asyncio.Future):
+                await result
 
     raw_candidate_guard = think_kwargs.get("on_candidate_token")
     candidate_guard_trace: list[dict[str, Any]] = []
@@ -2504,7 +2639,11 @@ def _run_unified_native_thinker(
         action=None,
         runtime_metrics=thinker_metrics,
         on_generation_start=think_kwargs.get("on_generation_start"),
-        on_generated_token=think_kwargs.get("on_generated_token"),
+        on_generated_token=(
+            None
+            if bool(think_kwargs.get("anticipate_first_token"))
+            else think_kwargs.get("on_generated_token")
+        ),
         on_candidate_token=think_kwargs.get("on_candidate_token"),
         on_candidate_fallback=think_kwargs.get("on_candidate_fallback"),
         on_action_logits_probe=think_kwargs.get("on_action_logits_probe"),
@@ -2643,12 +2782,59 @@ def _run_unified_native_thinker(
         monotonic_ns=time.monotonic_ns,
         eos_token_ids=sampler.eos_token_ids,
     )
+
+    token_packet_callback = think_kwargs.get("on_token_packet")
+    token_committed_callback = think_kwargs.get("on_token_committed")
+
+    async def timed_token_packet_callback(generated: Any) -> None:
+        token_index = int(getattr(generated, "token_index", -1))
+        if token_index == 0:
+            _record_unified_native_profile_timestamp(
+                branch, "token0_packet_callback_entry_ns", time.monotonic_ns()
+            )
+        try:
+            if callable(token_packet_callback):
+                result = token_packet_callback(generated)
+                if asyncio.iscoroutine(result) or isinstance(result, asyncio.Future):
+                    await result
+        finally:
+            if token_index == 0:
+                _record_unified_native_profile_timestamp(
+                    branch, "token0_packet_callback_exit_ns", time.monotonic_ns()
+                )
+
+    async def timed_token_committed_callback(generated: Any) -> None:
+        token_index = int(getattr(generated, "token_index", -1))
+        if token_index == 0:
+            _record_unified_native_profile_timestamp(
+                branch, "token0_committed_callback_entry_ns", time.monotonic_ns()
+            )
+        try:
+            if callable(token_committed_callback):
+                result = token_committed_callback(generated)
+                if asyncio.iscoroutine(result) or isinstance(result, asyncio.Future):
+                    await result
+        finally:
+            if token_index == 0:
+                _record_unified_native_profile_timestamp(
+                    branch, "token0_committed_callback_exit_ns", time.monotonic_ns()
+                )
+
     decoded = asyncio.run(decoder.decode(
         transition_token_ids=transition_token_ids,
         max_new_tokens=int(think_kwargs["max_new_tokens"]),
         stop_check=think_kwargs.get("stop_check"),
         first_logits_ready=on_first_logits_ready,
         on_token=on_native_token,
+        first_token=on_first_token,
+        on_token_packet=(
+            timed_token_packet_callback if callable(token_packet_callback) else None
+        ),
+        on_token_committed=(
+            timed_token_committed_callback
+            if callable(token_committed_callback) else None
+        ),
+        anticipate_first_token=bool(think_kwargs.get("anticipate_first_token")),
     ))
     publish_profile()
     # Preserve engine.think's raw trace contract: EOS is observable for
@@ -2853,6 +3039,255 @@ def _record_turn_local_vocalized_prefix(
             raise RuntimeError("turn-local spoken-prefix KV cursor moved backwards")
         branch["spoken_prefix_kv_position"] = int(kv_position)
         branch["spoken_prefix_text"] = normalized_text
+
+
+def _validate_unified_say_packet_frontier(
+    branch: Mapping[str, Any],
+    token_index: int,
+    exclusive_kv_cursor: int,
+    *,
+    kv_committed: bool,
+) -> int:
+    """Validate an early or committed packet against its native KV frontier."""
+    if isinstance(token_index, bool) or not isinstance(token_index, int) or token_index < 0:
+        raise ValueError("unified SAY packet requires a nonnegative token index")
+    if (
+        isinstance(exclusive_kv_cursor, bool)
+        or not isinstance(exclusive_kv_cursor, int)
+        or exclusive_kv_cursor < 0
+    ):
+        raise ValueError("unified SAY packet requires a nonnegative exclusive KV cursor")
+    base_cursor = branch.get("spoken_prefix_base_cursor")
+    actual_frontier = branch.get("cache_position")
+    transition_ids = tuple(branch.get("transition_token_ids", ()))
+    transition_cursor = branch.get("spoken_prefix_transition_cursor")
+    if (
+        isinstance(base_cursor, bool)
+        or not isinstance(base_cursor, int)
+        or isinstance(actual_frontier, bool)
+        or not isinstance(actual_frontier, int)
+    ):
+        raise RuntimeError("unified SAY branch has no authoritative transition/frontier cursor")
+    if transition_ids and transition_cursor != base_cursor:
+        raise RuntimeError(
+            "unified SAY packet arrived before the native transition suffix was anchored: "
+            f"transition_token_count={len(transition_ids)}, "
+            f"transition_cursor={transition_cursor}, base_cursor={base_cursor}, "
+            f"actual_frontier={actual_frontier}"
+        )
+
+    expected_cursor = int(base_cursor) + token_index + 1
+    expected_frontier = expected_cursor if kv_committed else expected_cursor - 1
+    if int(exclusive_kv_cursor) != expected_cursor or int(actual_frontier) != expected_frontier:
+        raise RuntimeError(
+            "unified V1 SPEAK packet cursor mismatch: "
+            f"base_cursor={base_cursor}, "
+            f"transition_token_count={len(transition_ids)}, "
+            f"token_index={token_index}, "
+            f"packet_cursor={exclusive_kv_cursor}, "
+            f"expected_cursor={expected_cursor}, "
+            f"expected_frontier={expected_frontier}, "
+            f"actual_frontier={actual_frontier}, "
+            f"kv_committed={bool(kv_committed)}, "
+            f"session_generation_id={branch.get('session_generation_id')}, "
+            f"listener_generation_id={branch.get('listener_generation_id')}"
+        )
+    return expected_cursor
+
+
+def _publish_thinker_metrics_event(
+    values: Mapping[str, Any],
+    *,
+    response_id: str,
+    policy_decision_at_ns: int | None,
+    session: Any,
+    token: Any,
+    cancellation_event: threading.Event | None,
+    update_runtime_metrics: Callable[[str, str, Any], None],
+    send_event: Callable[[dict[str, Any]], bool],
+) -> bool:
+    """Keep local Thinker metrics, but drop their WS event after cancellation."""
+    metrics = dict(values)
+    if policy_decision_at_ns is not None:
+        metrics["policy_decision_at_ns"] = int(policy_decision_at_ns)
+    update_runtime_metrics(response_id, "thinker_metrics", metrics)
+
+    cancelled = bool(cancellation_event is not None and cancellation_event.is_set())
+    if cancelled or not session.is_generation_current(token):
+        return False
+
+    sent = bool(send_event({
+        "type": "response.thinker_metrics",
+        "response_id": response_id,
+        **metrics,
+    }))
+    if sent:
+        return True
+
+    cancelled = bool(cancellation_event is not None and cancellation_event.is_set())
+    if cancelled or not session.is_generation_current(token):
+        return False
+    raise RuntimeError("thinker timing event lost its response generation")
+
+
+def _record_unified_native_profile_timestamp(
+    branch: Any,
+    field: str,
+    timestamp_ns: int | None = None,
+) -> None:
+    if not isinstance(branch, dict):
+        return
+    profile = branch.get("unified_native_profile")
+    if not isinstance(profile, dict):
+        return
+    timestamp = time.monotonic_ns() if timestamp_ns is None else int(timestamp_ns)
+    lock = branch.get("unified_native_profile_lock")
+    if lock is None:
+        profile.setdefault(field, timestamp)
+        return
+    with lock:
+        profile.setdefault(field, timestamp)
+
+
+def _mark_unified_say_packet_committed(
+    branch: dict[str, Any],
+    live_stream: Any,
+    token_index: int,
+    exclusive_kv_cursor: int,
+    *,
+    generation_id: int,
+    segment_id: int,
+) -> Any:
+    """Commit the matching early V1 packet, then release its queued PCM ACKs."""
+    lock = branch.get("spoken_prefix_lock")
+    if lock is None:
+        raise RuntimeError("unified SAY branch has no spoken-prefix lock")
+    if (
+        isinstance(token_index, bool)
+        or not isinstance(token_index, int)
+        or token_index < 0
+        or isinstance(exclusive_kv_cursor, bool)
+        or not isinstance(exclusive_kv_cursor, int)
+        or exclusive_kv_cursor < 0
+    ):
+        raise ValueError("unified SAY commit requires a nonnegative token index and KV cursor")
+    with lock:
+        try:
+            stream_generation_id = int(live_stream.generation_id)
+            stream_segment_id = int(live_stream.segment_id)
+        except (AttributeError, TypeError, ValueError):
+            return None
+        if (
+            int(branch.get("session_generation_id", -1)) != int(generation_id)
+            or stream_generation_id != int(generation_id)
+            or stream_segment_id != int(segment_id)
+        ):
+            return None
+        actual_frontier = branch.get("cache_position")
+        if (
+            isinstance(actual_frontier, bool)
+            or not isinstance(actual_frontier, int)
+            or int(exclusive_kv_cursor) > int(actual_frontier)
+        ):
+            raise RuntimeError(
+                "native token commit arrived before its KV cursor was committed: "
+                f"token_index={token_index}, packet_cursor={exclusive_kv_cursor}, "
+                f"actual_frontier={actual_frontier}"
+            )
+        packet_records = branch.get("say_token_packets", ())
+        segment_records = branch.get("segment_token_packets", ())
+        if token_index >= len(packet_records) or token_index >= len(segment_records):
+            raise RuntimeError("native token commit has no matching early SAY packet")
+        packet = packet_records[token_index]
+        record = segment_records[token_index]
+        expected_cursor = int(branch["spoken_prefix_base_cursor"]) + token_index + 1
+        if (
+            int(packet.exclusive_kv_cursor) != expected_cursor
+            or int(record.get("token_index", -1)) != token_index
+            or int(record.get("exclusive_kv_cursor", -1)) != expected_cursor
+            or expected_cursor != exclusive_kv_cursor
+            or bool(packet.kv_committed)
+            or bool(record.get("kv_committed"))
+        ):
+            raise RuntimeError("native token commit does not match its pending SAY packet")
+        packet_records[token_index] = replace(packet, kv_committed=True)
+        record["kv_committed"] = True
+    return live_stream.mark_packet_committed(
+        exclusive_kv_cursor,
+        generation_id=int(generation_id),
+        segment_id=int(segment_id),
+    )
+
+
+def _publish_acknowledged_speech_prefix(
+    branch: dict[str, Any] | None,
+    generation_id: int,
+    exclusive_kv_cursor: int,
+    cumulative_vocalized_text: str,
+) -> bool:
+    """Advance canonical V1 speech state at a committed, per-frame ACK frontier."""
+    if not isinstance(branch, dict):
+        return False
+    lock = branch.get("spoken_prefix_lock")
+    if lock is None:
+        return False
+    if (
+        isinstance(exclusive_kv_cursor, bool)
+        or not isinstance(exclusive_kv_cursor, int)
+        or exclusive_kv_cursor < 0
+        or not isinstance(cumulative_vocalized_text, str)
+    ):
+        raise ValueError("acknowledged V1 speech prefix has an invalid cursor or text")
+    with lock:
+        if int(branch.get("session_generation_id", -1)) != int(generation_id):
+            return False
+        base_cursor = int(branch.get("spoken_prefix_base_cursor", 0))
+        previous_cursor = int(branch.get("spoken_prefix_exclusive_cursor", base_cursor))
+        if exclusive_kv_cursor < previous_cursor:
+            raise RuntimeError("acknowledged V1 speech cursor moved backwards")
+        if exclusive_kv_cursor == previous_cursor:
+            if str(branch.get("spoken_prefix_text", "")) != cumulative_vocalized_text:
+                raise RuntimeError("same V1 speech cursor was reported with different text")
+            return False
+        if exclusive_kv_cursor <= base_cursor:
+            raise RuntimeError("acknowledged V1 speech cursor did not advance past its transition")
+
+        packet_records = branch.get("say_token_packets", ())
+        segment_records = branch.get("segment_token_packets", ())
+        token_ids = list(int(value) for value in branch.get("spoken_prefix_token_ids", ()))
+        text_parts = list(branch.get("spoken_prefix_text_parts", ()))
+        cursor = previous_cursor
+        for token_index, record in enumerate(segment_records):
+            record_cursor = int(record.get("exclusive_kv_cursor", -1))
+            if record_cursor <= previous_cursor:
+                continue
+            if record_cursor > exclusive_kv_cursor:
+                break
+            if record_cursor != cursor + 1:
+                raise RuntimeError("acknowledged V1 speech packets are not contiguous")
+            if token_index >= len(packet_records):
+                raise RuntimeError("acknowledged V1 speech packet record has no source packet")
+            packet = packet_records[token_index]
+            if (
+                not bool(record.get("kv_committed"))
+                or not bool(packet.kv_committed)
+                or int(packet.exclusive_kv_cursor) != record_cursor
+                or int(packet.token_id) != int(record.get("token_id", -1))
+            ):
+                raise RuntimeError("V1 speech ACK crossed an uncommitted Gemma packet")
+            token_ids.append(int(packet.token_id))
+            text_parts.append(str(packet.text_piece))
+            cursor = record_cursor
+        if cursor != exclusive_kv_cursor:
+            raise RuntimeError("V1 speech ACK cursor has no contiguous source Gemma packet")
+
+        branch["spoken_prefix_token_ids"] = tuple(token_ids)
+        branch["spoken_prefix_text_parts"] = tuple(text_parts)
+        branch["spoken_prefix_exclusive_cursor"] = int(exclusive_kv_cursor)
+        branch["spoken_prefix_kv_position"] = int(exclusive_kv_cursor)
+        branch["spoken_prefix_text"] = cumulative_vocalized_text
+        branch["spoken_prefix_ack_provenance"] = "v1_live_qwen_frame_ack"
+        return True
 
 
 def _record_client_consumed_pcm(
@@ -3227,6 +3662,53 @@ def _snapshot_direct_policy_audio(
         "_direct_audio_active": is_active,
         "_direct_audio_window": dict(window),
     }
+
+
+def _snapshot_speaking_branch_context(
+    direct_audio_context: dict[str, Any] | None,
+    listener_state: Any,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Copy SPEAK metadata and acoustic priors independently of its KV fork."""
+    direct_copy = copy.deepcopy(direct_audio_context) if direct_audio_context is not None else None
+    lock = getattr(listener_state, "_lock", None)
+    if lock is None:
+        raise RuntimeError("speaking Q2 branch requires a lockable listener acoustic state")
+
+    def copy_history(value: Any) -> tuple[np.ndarray, ...]:
+        return tuple(np.array(item, copy=True) for item in tuple(value or ()))
+
+    with lock:
+        acoustic = {
+            "state_epoch_id": str(getattr(listener_state, "state_epoch_id", "")),
+            "listener_state_version": int(getattr(listener_state, "listener_state_version", 0)),
+            "next_frame_id": int(getattr(listener_state, "next_frame_id", 0)),
+            "gemma_lm_context_start_frame": int(
+                getattr(listener_state, "gemma_lm_context_start_frame", 0)
+            ),
+            "gemma_lm_source_frame_ids": tuple(
+                int(value) for value in getattr(listener_state, "gemma_lm_source_frame_ids", ())
+            ),
+            "gemma_lm_last_source_frame_id": getattr(
+                listener_state, "gemma_lm_last_source_frame_id", None
+            ),
+            "user_pcm_history": copy_history(getattr(listener_state, "user_pcm_history", ())),
+            "assistant_pcm_history": copy_history(
+                getattr(listener_state, "assistant_pcm_history", ())
+            ),
+            "user_mel_history": copy_history(getattr(listener_state, "user_mel_history", ())),
+            "assistant_mel_history": copy_history(
+                getattr(listener_state, "assistant_mel_history", ())
+            ),
+            "user_pcm_tail": (
+                None if getattr(listener_state, "user_pcm_tail", None) is None
+                else np.array(listener_state.user_pcm_tail, copy=True)
+            ),
+            "assistant_pcm_tail": (
+                None if getattr(listener_state, "assistant_pcm_tail", None) is None
+                else np.array(listener_state.assistant_pcm_tail, copy=True)
+            ),
+        }
+    return direct_copy, acoustic
 
 
 def _manual_commit_speak_owner_for_span(
@@ -4326,6 +4808,397 @@ def _align_generated_response_hidden_with_diagnostics(
             except Exception:
                 pass
         raise
+
+
+def _qwen_text_token_surfaces(
+    text: str,
+    offsets: Sequence[tuple[int, int]],
+) -> tuple[str, ...]:
+    """Partition canonical text using the Qwen tokenizer's exact character offsets."""
+    if not isinstance(text, str) or not text:
+        raise ValueError("Qwen surface text must be nonempty")
+    if not offsets:
+        raise ValueError("Qwen surface offsets must be nonempty")
+    surfaces: list[str] = []
+    cursor = 0
+    for index, raw_offset in enumerate(offsets):
+        if not isinstance(raw_offset, (tuple, list)) or len(raw_offset) != 2:
+            raise ValueError("Qwen surface offset must contain a start and end")
+        start, end = int(raw_offset[0]), int(raw_offset[1])
+        if start < 0 or end <= start or end > len(text):
+            raise ValueError("Qwen surface offset is outside canonical text")
+        surface_end = len(text) if index == len(offsets) - 1 else max(cursor, end)
+        surfaces.append(text[cursor:surface_end])
+        cursor = surface_end
+    if cursor != len(text) or "".join(surfaces) != text:
+        raise ValueError("Qwen token surfaces do not reconstruct canonical text")
+    return tuple(surfaces)
+
+
+def _ack_emitted_audio_packet(
+    packet: Any,
+    *,
+    generation_id: int,
+    response_segment_id: str,
+    live_stream: Any | None,
+    closed_unit_streams: Mapping[str, Any],
+) -> bool:
+    """Advance token speech watermarks only for a released PCM packet's frames."""
+    try:
+        packet_generation = int(packet.generation_id)
+        packet_segment = str(packet.speaker_segment_id)
+        first_frame_id = int(packet.first_frame_id)
+        last_frame_id = int(packet.last_frame_id)
+    except (AttributeError, TypeError, ValueError):
+        return False
+    if (
+        packet_generation != int(generation_id)
+        or not packet_segment
+        or first_frame_id < 0
+        or last_frame_id < first_frame_id
+    ):
+        return False
+    stream = closed_unit_streams.get(packet_segment)
+    if stream is None and packet_segment == str(response_segment_id):
+        stream = live_stream
+    if stream is None:
+        # Static or non-speech audio has no token stream to acknowledge.
+        return True
+    try:
+        stream_generation = int(stream.generation_id)
+        stream_segment = int(stream.segment_id)
+    except (AttributeError, TypeError, ValueError):
+        return False
+    acknowledge = getattr(stream, "ack_emitted_audio_frame", None)
+    if stream_generation != packet_generation or not callable(acknowledge):
+        return False
+    for frame_id in range(first_frame_id, last_frame_id + 1):
+        acknowledge(
+            frame_id,
+            generation_id=packet_generation,
+            segment_id=stream_segment,
+        )
+    return True
+
+
+def _response_speech_ack_lock(branch: dict[str, Any]) -> Any:
+    lock = branch.get("speech_ack_lock")
+    if lock is None:
+        lock = threading.RLock()
+        branch["speech_ack_lock"] = lock
+    return lock
+
+
+def _register_response_speech_ack_streams(
+    branch: dict[str, Any],
+    *,
+    response_id: str,
+    generation_id: int,
+    response_segment_id: str,
+    live_stream: Any | None,
+    closed_unit_streams: dict[str, Any],
+    closed_unit_events: dict[str, threading.Event],
+    required: bool,
+) -> bool:
+    """Bind V1/V2 speech ACK resources to their exact response branch."""
+    if not isinstance(branch, dict):
+        return False
+    lock = _response_speech_ack_lock(branch)
+    with lock:
+        if (
+            branch.get("speech_ack_retired") is True
+            or str(branch.get("response_id", "")) != str(response_id)
+            or int(branch.get("session_generation_id", -1)) != int(generation_id)
+            or str(branch.get("speaker_segment_id", "")) != str(response_segment_id)
+        ):
+            return False
+        if live_stream is not None:
+            try:
+                if int(live_stream.generation_id) != int(generation_id):
+                    return False
+            except (AttributeError, TypeError, ValueError):
+                return False
+        branch["speech_ack_resources"] = {
+            "response_id": str(response_id),
+            "generation_id": int(generation_id),
+            "response_segment_id": str(response_segment_id),
+            "live_stream": live_stream,
+            "closed_unit_streams": closed_unit_streams,
+            "closed_unit_events": closed_unit_events,
+        }
+        branch["speech_ack_required"] = bool(required)
+        return True
+
+
+def _response_speech_ack_resources(
+    branch: dict[str, Any],
+    *,
+    response_id: str,
+    generation_id: int,
+    response_segment_id: str,
+) -> dict[str, Any] | None:
+    """Resolve resources only when the response and generation still own them."""
+    if not isinstance(branch, dict):
+        return None
+    lock = _response_speech_ack_lock(branch)
+    with lock:
+        if (
+            branch.get("speech_ack_retired") is True
+            or str(branch.get("response_id", "")) != str(response_id)
+            or int(branch.get("session_generation_id", -1)) != int(generation_id)
+            or str(branch.get("speaker_segment_id", "")) != str(response_segment_id)
+        ):
+            return None
+        resources = branch.get("speech_ack_resources")
+        if resources is None:
+            if branch.get("speech_ack_required") is True:
+                return None
+            return {
+                "response_id": str(response_id),
+                "generation_id": int(generation_id),
+                "response_segment_id": str(response_segment_id),
+                "live_stream": None,
+                "closed_unit_streams": {},
+                "closed_unit_events": {},
+            }
+        if (
+            str(resources.get("response_id", "")) != str(response_id)
+            or int(resources.get("generation_id", -1)) != int(generation_id)
+            or str(resources.get("response_segment_id", "")) != str(response_segment_id)
+        ):
+            return None
+        return resources
+
+
+def _make_finish_audio_segment_callback(
+    *,
+    active_output_segment_id: dict[str, str],
+    playout: Any,
+    packetizer: Any,
+    ack_resources_branch: dict[str, Any],
+    response_id: str,
+    generation_id: int,
+    response_segment_id: str,
+    packetize_frames_as_packets: Callable[[list[PlayoutFrame]], list[AudioPacket]],
+    queue_response_output: Callable[..., bool],
+    audio_queue: Any,
+) -> Callable[[str, Sequence[Mapping[str, Any]]], None]:
+    """Build the response-scoped callback that flushes a closed TTS unit."""
+
+    def finish_audio_segment(
+        segment_id: str,
+        source_tokens: Sequence[Mapping[str, Any]],
+    ) -> None:
+        normalized_segment_id = str(segment_id)
+        if normalized_segment_id != active_output_segment_id["value"]:
+            raise RuntimeError("closed TTS segment does not own the active playout")
+        if playout is None or packetizer is None:
+            raise RuntimeError("closed TTS segment has no playout or packetizer")
+        ack_resources = _response_speech_ack_resources(
+            ack_resources_branch,
+            response_id=response_id,
+            generation_id=generation_id,
+            response_segment_id=response_segment_id,
+        )
+        if ack_resources is None:
+            raise RuntimeError("closed TTS segment lost its response speech ACK owner")
+        emitted_events = ack_resources["closed_unit_events"]
+        if normalized_segment_id in emitted_events:
+            raise RuntimeError("closed TTS segment emission identity was reused")
+        emitted_events[normalized_segment_id] = threading.Event()
+        packets = packetize_frames_as_packets(
+            playout.flush_segment(
+                generation_id=generation_id,
+                speaker_segment_id=normalized_segment_id,
+            )
+        )
+        packets.extend(packetizer.flush_segment(generation_id, normalized_segment_id))
+        burst_items = len(packets) + 1
+        for packet in packets:
+            if not queue_response_output(
+                packet,
+                queue_kind="audio",
+                output_queue=audio_queue,
+                burst_items=burst_items,
+            ):
+                return
+        marker = _ClosedTTSSegment(
+            speaker_segment_id=normalized_segment_id,
+            source_tokens=tuple(dict(row) for row in source_tokens),
+        )
+        queue_response_output(
+            marker,
+            queue_kind="audio",
+            output_queue=audio_queue,
+            burst_items=burst_items,
+        )
+
+    return finish_audio_segment
+
+
+def _retire_response_speech_ack_streams(branch: dict[str, Any]) -> None:
+    """Fence late ACKs and release stream references after response cleanup."""
+    if not isinstance(branch, dict):
+        return
+    lock = _response_speech_ack_lock(branch)
+    with lock:
+        branch["speech_ack_retired"] = True
+        resources = branch.get("speech_ack_resources")
+        if isinstance(resources, dict):
+            resources["live_stream"] = None
+            closed_streams = resources.get("closed_unit_streams")
+            if isinstance(closed_streams, dict):
+                closed_streams.clear()
+            closed_events = resources.get("closed_unit_events")
+            if isinstance(closed_events, dict):
+                closed_events.clear()
+
+
+def _ack_response_speech_packet(
+    branch: dict[str, Any],
+    packet: Any,
+    *,
+    response_id: str,
+    generation_id: int,
+    response_segment_id: str,
+) -> bool:
+    """Acknowledge released PCM through resources owned by this response only."""
+    if not isinstance(branch, dict):
+        return False
+    lock = _response_speech_ack_lock(branch)
+    with lock:
+        resources = _response_speech_ack_resources(
+            branch,
+            response_id=response_id,
+            generation_id=generation_id,
+            response_segment_id=response_segment_id,
+        )
+        if resources is None:
+            return False
+        return _ack_emitted_audio_packet(
+            packet,
+            generation_id=int(generation_id),
+            response_segment_id=str(response_segment_id),
+            live_stream=resources["live_stream"],
+            closed_unit_streams=resources["closed_unit_streams"],
+        )
+
+
+def _backchannel_budget_without_eos(
+    action: str | None,
+    *,
+    private: bool,
+    controller_guided: bool,
+    terminal_reason: Any,
+    cancelled: bool,
+) -> str | None:
+    """Discard a buffered V1 backchannel unless Thinker reached real EOS."""
+    if (
+        str(action or "").strip().upper() == ControlAction.BACKCHANNEL.value
+        and not bool(cancelled)
+        and str(terminal_reason or "") != "eos"
+    ):
+        if private and str(terminal_reason or "") == "budget_exhausted":
+            return "backchannel_budget_without_eos"
+        if controller_guided:
+            return "backchannel_without_eos"
+    return None
+
+
+def _publish_backchannel_tokens_after_eos(
+    buffered_tokens: Sequence[tuple[int, int, str, Any]],
+    *,
+    terminal_reason: Any,
+    publish: Callable[[int, int, str, Any], Any],
+) -> bool:
+    """Release buffered private backchannel tokens to Qwen only after real EOS."""
+    if str(terminal_reason or "") != "eos":
+        return False
+    for token_index, token_id, token_text, hidden in buffered_tokens:
+        publish(int(token_index), int(token_id), str(token_text), hidden)
+    return True
+
+
+def _audio_packet_matches_emission_owner(
+    packet: Any,
+    *,
+    generation_id: int,
+    speaker_segment_id: str,
+) -> bool:
+    """Reject buffered PCM that does not belong to this response segment."""
+    try:
+        return (
+            int(packet.generation_id) == int(generation_id)
+            and str(packet.speaker_segment_id) == str(speaker_segment_id)
+            and bool(str(packet.speaker_segment_id))
+        )
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
+async def _release_pcm_packet_then_ack(
+    packet: Any,
+    *,
+    validate: Callable[[Any], bool] | None = None,
+    release: Callable[[Any], Any],
+    acknowledge: Callable[[Any], Any],
+) -> bool:
+    """Run the ACK callback only after the PCM release callback succeeds."""
+    if validate is not None and validate(packet) is not True:
+        return False
+    if await release(packet) is not True:
+        return False
+    return acknowledge(packet) is not False
+
+
+def _legacy_audio_chunk_conditioning_horizon(
+    next_frame_id: int,
+    pcm_sample_count: int,
+) -> int:
+    """Use the final frame in a newly produced legacy PCM chunk as its horizon."""
+    frame_id = int(next_frame_id)
+    sample_count = int(pcm_sample_count)
+    if frame_id < 0:
+        raise ValueError("next_frame_id non può essere negativo")
+    if sample_count <= 0 or sample_count % AUDIO_FRAME_SAMPLES:
+        raise ValueError("legacy PCM chunk non allineato ai frame da 80 ms")
+    return frame_id + sample_count // AUDIO_FRAME_SAMPLES - 1
+
+
+def _wait_for_emitted_tts_segment(
+    emitted_events: Mapping[str, threading.Event],
+    segment_id: str,
+    *,
+    stop_check: Callable[[], bool] | None = None,
+    poll_interval_s: float = 0.05,
+) -> bool:
+    """Wait until the queued close marker passed the PCM emitter."""
+    event = emitted_events.get(str(segment_id))
+    if event is None:
+        return False
+    while not event.wait(max(0.001, float(poll_interval_s))):
+        if stop_check is not None and stop_check():
+            return False
+    return not (stop_check is not None and stop_check())
+
+
+def _signal_emitted_tts_segment(
+    emitted_events: Mapping[str, threading.Event],
+    segment_id: str,
+) -> bool:
+    event = emitted_events.get(str(segment_id))
+    if event is None:
+        return False
+    event.set()
+    return True
+
+
+def _cancel_tts_segment_emission_waiters(
+    emitted_events: dict[str, threading.Event],
+) -> None:
+    for event in tuple(emitted_events.values()):
+        event.set()
+    emitted_events.clear()
 
 
 def _message_text(content: Any) -> str:
@@ -5972,6 +6845,8 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
         live_tts_unit_wavs: list[np.ndarray] = []
         live_tts_visible_text_parts: list[str] = []
         live_tts_active_stream: dict[str, TurnLocalQwenSayStream | None] = {"value": None}
+        live_tts_streams_by_segment: dict[str, TurnLocalQwenSayStream] = {}
+        live_tts_segment_emitted_events: dict[str, threading.Event] = {}
         live_say_eos_text_id: int | None = None
         live_say_result: dict[str, Any] = {}
         live_say_timing: dict[str, int | None] = {
@@ -5997,17 +6872,55 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     text_eos_token_id=eos_text_id,
                     max_tokens=ARIA_MAX_FRAMES,
                     queue_capacity=16,
+                    generation_id=int(generation_id),
+                    on_packet_emitted=(
+                        lambda cursor, text: _publish_acknowledged_speech_prefix(
+                            unified_branch,
+                            int(generation_id),
+                            int(cursor),
+                            str(text),
+                        )
+                        if (
+                            unified_native
+                            and normalized_action == ControlAction.SPEAK.value
+                        )
+                        else None
+                    ),
                 )
             elif live_v2_say_active:
                 live_tts_unit_assembler = SpokenTextUnitAssembler(max_words=2)
                 live_tts_unit_queue = queue.Queue(maxsize=2)
+            response_ack_branch = (
+                unified_branch
+                if isinstance(unified_branch, dict)
+                else request.get("_playback_ack_branch")
+            )
+            generation_token = request.get("_generation_token")
+            if isinstance(response_ack_branch, dict) and generation_token is not None:
+                if not _register_response_speech_ack_streams(
+                    response_ack_branch,
+                    response_id=str(generation_token.response_id),
+                    generation_id=int(generation_token.session_generation_id),
+                    response_segment_id=str(generation_token.speaker_segment_id),
+                    live_stream=live_say_stream,
+                    closed_unit_streams=live_tts_streams_by_segment,
+                    closed_unit_events=live_tts_segment_emitted_events,
+                    required=bool(live_say_active or live_v2_say_active),
+                ):
+                    raise RuntimeError(
+                        "response speech ACK resources do not match the active response identity"
+                    )
 
             def live_say_talker_worker() -> None:
+                _record_unified_native_profile_timestamp(
+                    unified_branch, "live_talker_worker_started_ns"
+                )
                 try:
                     if live_v2_say_active:
                         if live_tts_unit_queue is None or live_say_tokenizer is None:
                             raise RuntimeError("closed-unit Qwen worker is not initialized")
                         live_say_timing["consumer_started_at_ns"] = time.perf_counter_ns()
+                        previous_unit_segment_id: str | None = None
                         while not live_say_cancel.is_set():
                             try:
                                 unit_item = live_tts_unit_queue.get(timeout=0.05)
@@ -6024,6 +6937,22 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                                 if unit_index == 0 and request.get("_generation_token") is not None
                                 else f"{request.get('_generation_token').speaker_segment_id}.tts{unit_index}"
                             )
+                            if previous_unit_segment_id is not None:
+                                if not _wait_for_emitted_tts_segment(
+                                    live_tts_segment_emitted_events,
+                                    previous_unit_segment_id,
+                                    stop_check=lambda: bool(
+                                        live_say_cancel.is_set()
+                                        or sess.stop_requested
+                                        or (request.get("_stop_check") and request["_stop_check"]())
+                                    ),
+                                ):
+                                    raise RuntimeError(
+                                        "closed TTS segment PCM release cancelled before next unit"
+                                    )
+                                live_tts_segment_emitted_events.pop(
+                                    previous_unit_segment_id, None
+                                )
                             begin_segment = request.get("_begin_audio_segment")
                             finish_segment = request.get("_finish_audio_segment")
                             if not callable(begin_segment) or not callable(finish_segment):
@@ -6046,6 +6975,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                                 ),
                             )
                             live_tts_active_stream["value"] = unit_stream
+                            live_tts_streams_by_segment[unit_segment_id] = unit_stream
                             unit_feed_error: list[BaseException] = []
 
                             def feed_closed_unit() -> None:
@@ -6160,6 +7090,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                                 "text_piece": str(source.text_piece),
                             } for source in unit.source_tokens)
                             finish_segment(unit_segment_id, source_tokens)
+                            previous_unit_segment_id = unit_segment_id
                             live_tts_active_stream["value"] = None
                             live_tts_unit_metrics.append(unit_metrics)
                             if isinstance(wav, np.ndarray) and wav.size:
@@ -6186,12 +7117,18 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
 
                     assert live_say_stream is not None
                     live_say_timing["consumer_started_at_ns"] = time.perf_counter_ns()
+                    _record_unified_native_profile_timestamp(
+                        unified_branch, "live_talker_take_initial_started_ns"
+                    )
                     initial_token = live_say_stream.take_initial_token(
                         stop_check=lambda: bool(
                             live_say_cancel.is_set()
                             or sess.stop_requested
                             or (request.get("_stop_check") and request["_stop_check"]())
                         ),
+                    )
+                    _record_unified_native_profile_timestamp(
+                        unified_branch, "live_talker_initial_token_ready_ns"
                     )
                     talker_metrics: dict[str, Any] = {}
                     h_pfx = torch.empty((1, 0, 2048), device=engine.device, dtype=engine.dtype)
@@ -6298,6 +7235,8 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
 
             def cancel_live_v2_units(error: BaseException | None = None) -> None:
                 live_say_cancel.set()
+                _cancel_tts_segment_emission_waiters(live_tts_segment_emitted_events)
+                live_tts_streams_by_segment.clear()
                 if error is not None and live_tts_active_stream.get("value") is not None:
                     live_tts_active_stream["value"].fail(error)
                 else:
@@ -6322,6 +7261,10 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                 _token_id: int,
                 token_text: str,
                 token_hidden: Any,
+                *,
+                exclusive_kv_cursor: int | None = None,
+                hidden_provenance: str = "token",
+                kv_committed: bool = True,
             ) -> None:
                 nonlocal thinker_first_token_id
                 if thinker_first_token_id is None:
@@ -6350,24 +7293,95 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                         token_id=int(_token_id),
                         text_piece=str(token_text),
                         gemma_hidden_1536=packet_hidden,
-                        exclusive_kv_cursor=int(unified_branch["cache_position"]),
+                        exclusive_kv_cursor=int(
+                            unified_branch["cache_position"]
+                            if exclusive_kv_cursor is None
+                            else exclusive_kv_cursor
+                        ),
+                        hidden_provenance=str(hidden_provenance),
+                        kv_committed=bool(kv_committed),
                     )
                     producer_event = packet.producer_event
                     with unified_branch["spoken_prefix_lock"]:
-                        unified_branch.setdefault("say_token_packets", []).append(packet)
-                        unified_branch["segment_token_packets"].append({
+                        packet_records = unified_branch.get("say_token_packets")
+                        segment_records = unified_branch.get("segment_token_packets")
+                        if not isinstance(packet_records, list) or not isinstance(segment_records, list):
+                            raise RuntimeError(
+                                "unified SAY branch lacks initialized token packet records"
+                            )
+                        if len(packet_records) != len(segment_records):
+                            raise RuntimeError(
+                                "unified SAY packet and segment record counts differ"
+                            )
+                        if exclusive_kv_cursor is not None and int(_token_index) != len(packet_records):
+                            raise RuntimeError(
+                                "V1 Gemma SAY token indices are not contiguous: "
+                                f"token_index={int(_token_index)}, packet_count={len(packet_records)}"
+                            )
+                        packet_records.append(packet)
+                        segment_records.append({
                             "token_id": packet.token_id,
                             "exclusive_kv_cursor": packet.exclusive_kv_cursor,
                             "text_piece": packet.text_piece,
+                            "token_index": int(_token_index),
+                            "hidden_provenance": packet.hidden_provenance,
+                            "kv_committed": packet.kv_committed,
                         })
                     stream_hidden = packet.gemma_hidden_1536.unsqueeze(1)
                 live_say_stream.feed_piece(
                     token_text,
                     stream_hidden,
                     producer_event=producer_event,
+                    token_index=(int(_token_index) if exclusive_kv_cursor is not None else None),
+                    exclusive_kv_cursor=exclusive_kv_cursor,
+                    kv_committed=bool(kv_committed),
                 )
                 if token_text and live_say_stream.visible_text:
                     start_live_say_talker()
+
+            def live_say_native_token_packet(generated: Any) -> None:
+                if not unified_native or normalized_action != ControlAction.SPEAK.value:
+                    raise RuntimeError("anticipated Gemma token packet is only valid for unified SPEAK")
+                if not isinstance(unified_branch, dict) or live_say_stream is None:
+                    raise RuntimeError("anticipated V1 SPEAK packet lacks its live native branch")
+                token_index = int(generated.token_index)
+                expected_cursor = _validate_unified_say_packet_frontier(
+                    unified_branch,
+                    token_index,
+                    int(unified_branch["spoken_prefix_base_cursor"]) + token_index + 1,
+                    kv_committed=bool(generated.kv_committed),
+                )
+                live_say_generated_token(
+                    token_index,
+                    int(generated.token_id),
+                    str(generated.token_text),
+                    generated.hidden,
+                    exclusive_kv_cursor=expected_cursor,
+                    hidden_provenance=str(generated.hidden_provenance),
+                    kv_committed=bool(generated.kv_committed),
+                )
+                release_pause = unified_branch.get("release_listener_burst_pause")
+                if token_index >= 1 and bool(generated.kv_committed) and callable(release_pause):
+                    release_pause("second_token_commit")
+
+            def live_say_native_token_committed(generated: Any) -> None:
+                if not isinstance(unified_branch, dict) or live_say_stream is None:
+                    raise RuntimeError("committed V1 SPEAK packet lacks its live native branch")
+                token_index = int(generated.token_index)
+                expected_cursor = _validate_unified_say_packet_frontier(
+                    unified_branch,
+                    token_index,
+                    int(unified_branch["spoken_prefix_base_cursor"]) + token_index + 1,
+                    kv_committed=True,
+                )
+                _mark_unified_say_packet_committed(
+                    unified_branch,
+                    live_say_stream,
+                    token_index,
+                    expected_cursor,
+                    generation_id=int(live_say_stream.generation_id),
+                    segment_id=int(live_say_stream.segment_id),
+                )
 
         diagnostic_talker_seed = getattr(engine, "diagnostic_talker_seed", None)
         streamed_audio: list[np.ndarray] = []
@@ -6496,21 +7510,22 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                 raise RuntimeError("controller_guided_backchannel_requires_thinker_eos")
             controller_backchannel_eos_id = min(eos_ids)
             controller_backchannel_text: list[str] = []
+            controller_backchannel_packets: list[tuple[int, int, str, Any]] = []
 
             def controller_backchannel_generated_token(
-                _token_index: int,
-                _token_id: int,
+                token_index: int,
+                token_id: int,
                 token_text: str,
                 token_hidden: Any,
             ) -> tuple[int, str] | None:
                 controller_backchannel_text.append(str(token_text))
                 if live_say_active:
-                    live_say_generated_token(
-                        _token_index,
-                        _token_id,
-                        token_text,
+                    controller_backchannel_packets.append((
+                        int(token_index),
+                        int(token_id),
+                        str(token_text),
                         token_hidden,
-                    )
+                    ))
                 if controller_backchannel_should_stop("".join(controller_backchannel_text)):
                     return controller_backchannel_eos_id, "structure"
                 return None
@@ -6539,7 +7554,13 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
             think_kwargs["on_candidate_token"] = controller_backchannel_candidate
             think_kwargs["on_candidate_fallback"] = controller_backchannel_fallback
         elif live_say_active:
-            think_kwargs["on_generated_token"] = live_say_generated_token
+            if unified_native and normalized_action == ControlAction.SPEAK.value:
+                think_kwargs["anticipate_first_token"] = True
+                think_kwargs["on_token_packet"] = live_say_native_token_packet
+                think_kwargs["on_token_committed"] = live_say_native_token_committed
+                think_kwargs["on_generated_token"] = None
+            else:
+                think_kwargs["on_generated_token"] = live_say_generated_token
         v9_dual_audio_context_enabled = bool(
             response_v2_collector is not None
             and getattr(engine, "v9_dual_audio_context_experimental", False)
@@ -6899,6 +7920,44 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
             )
         if live_say_stream is not None:
             live_say_timing["thinker_returned_at_ns"] = time.perf_counter_ns()
+        backchannel_skip_reason = _backchannel_budget_without_eos(
+            normalized_action,
+            private=private_backchannel_active,
+            controller_guided=controller_guided_say,
+            terminal_reason=think.get("terminal_reason"),
+            cancelled=bool(think.get("cancelled")),
+        )
+        if backchannel_skip_reason is not None:
+            stop_live_say_worker()
+            backchannel_metrics = {
+                "status": "not_emitted",
+                "reason": backchannel_skip_reason,
+                "terminal_reason": str(think.get("terminal_reason")),
+                "generated_token_ids": [int(value) for value in think.get("gen_ids", ())],
+                "sampled_text_token_limit": 2 if private_backchannel_active else None,
+                "audio_flushed": False,
+                "canonical_listener_mutated": False,
+            }
+            metric_name = (
+                "private_backchannel_decode"
+                if private_backchannel_active
+                else "controller_backchannel_decode"
+            )
+            skipped_metrics = {
+                "thinker": dict(think.get("runtime_metrics", {})),
+                metric_name: backchannel_metrics,
+            }
+            if callable(runtime_callback):
+                runtime_callback(metric_name, backchannel_metrics)
+            return {
+                "text": "",
+                "tool_calls": [],
+                "wav": None,
+                "elapsed": 0.0,
+                "skip_reason": backchannel_skip_reason,
+                "runtime_metrics": skipped_metrics,
+                "_skip_history_commit": True,
+            }
         if live_say_active:
             if think.get("cancelled"):
                 stop_live_say_worker()
@@ -6910,6 +7969,21 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                 raise incomplete
             else:
                 try:
+                    if controller_guided_say and normalized_action == ControlAction.BACKCHANNEL.value:
+                        if live_say_stream is None:
+                            raise RuntimeError(
+                                "controller-guided backchannel reached Thinker EOS without its live SAY stream"
+                            )
+                        _publish_backchannel_tokens_after_eos(
+                            controller_backchannel_packets,
+                            terminal_reason=think.get("terminal_reason"),
+                            publish=lambda token_index, token_id, token_text, hidden: live_say_generated_token(
+                                token_index,
+                                token_id,
+                                token_text,
+                                hidden,
+                            ),
+                        )
                     final_callback_text = re.sub(
                         r"\s*<unused\d+>\s*", " ", str(think.get("text", ""))
                     )
@@ -6966,6 +8040,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
         response_prompt_len = int(think.get("hidden_prompt_len", think.get("prompt_len", len(ids))))
         response_action_value: str | None = None
         frame_residual_response_hidden: torch.Tensor | None = None
+        frame_residual_response_texts: tuple[str, ...] | None = None
         frame_residual_alignment_metrics: dict[str, Any] | None = None
         if private_backchannel_active:
             generated_ids = think.get("gen_ids")
@@ -7064,6 +8139,16 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     hidden_prompt_len=raw_response_prompt_len,
                     raw_hidden=raw_response_hidden,
                 )
+                _qwen_token_ids, qwen_offsets = qwen_assistant_text_offsets(
+                    generated_text,
+                    tokenizer=qwen_tokenizer,
+                    processor=processor,
+                )
+                frame_residual_response_texts = _qwen_text_token_surfaces(
+                    generated_text, qwen_offsets
+                )
+                if len(frame_residual_response_texts) != int(frame_residual_response_hidden.shape[1]):
+                    raise RuntimeError("frame_residual_response_text_hidden_alignment_mismatch")
             if response_action_value == ControlAction.BACKCHANNEL.value:
                 backchannel_ok, backchannel_reason, backchannel_word_count = (
                     validate_backchannel_phrase(generated_text, max_words=4)
@@ -7436,11 +8521,16 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     tokenizer=qwen_tokenizer,
                     processor=processor,
                 )
+                frame_residual_response_texts = _qwen_text_token_surfaces(
+                    generated_text, qwen_offsets
+                )
                 frame_residual_response_hidden = align_hidden_states_by_char_overlap(
                     response_hidden,
                     say_spans,
                     qwen_offsets,
                 )
+                if len(frame_residual_response_texts) != int(frame_residual_response_hidden.shape[1]):
+                    raise RuntimeError("frame_residual_response_text_hidden_alignment_mismatch")
                 frame_residual_alignment_metrics = {
                     "source": "validated_v2_say_posttoken_hidden",
                     "source_protocol": AUDIO_RESPONSE_PROTOCOL_V2,
@@ -7495,8 +8585,18 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                         raw_hidden=raw_response_hidden,
                     )
                 )
+                _qwen_token_ids, qwen_offsets = qwen_assistant_text_offsets(
+                    generated_text,
+                    tokenizer=qwen_tokenizer,
+                    processor=processor,
+                )
+                frame_residual_response_texts = _qwen_text_token_surfaces(
+                    generated_text, qwen_offsets
+                )
                 if frame_residual_response_hidden is None or int(frame_residual_response_hidden.shape[1]) < 1:
                     raise RuntimeError("frame_residual_response_hidden_alignment_empty")
+                if len(frame_residual_response_texts) != int(frame_residual_response_hidden.shape[1]):
+                    raise RuntimeError("frame_residual_response_text_hidden_alignment_mismatch")
                 frame_residual_alignment_metrics = dict(frame_residual_alignment_metrics or {})
                 frame_residual_alignment_metrics.update({
                     "source": "gemma_assistant_response_posttoken_hidden",
@@ -8129,6 +9229,10 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     if frame_residual_response_hidden is None:
                         raise RuntimeError("frame_residual_response_hidden_alignment_missing")
                     talker_admission_kwargs["frame_residual_response_hidden"] = frame_residual_response_hidden
+                    if frame_residual_response_texts is not None:
+                        if len(frame_residual_response_texts) != int(frame_residual_response_hidden.shape[1]):
+                            raise RuntimeError("frame_residual_response_text_hidden_alignment_mismatch")
+                        talker_admission_kwargs["frame_residual_response_texts"] = frame_residual_response_texts
                 with _diagnostic_talker_rng_scope(engine):
                     wav = engine.talk(text, h_pfx, n_words=max(1, len(text.split())), voice_conditioning=cond,
                                        stop_check=lambda: (
@@ -9447,6 +10551,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
             transcript_epoch: int | None = None,
             transcript_utterance_id: str | None = None,
             transcript_allow_response_active: bool = False,
+            first_pcm_trace_callback: Callable[[str, int], None] | None = None,
         ) -> bool:
             """Serialize WS writers and fence response/scheduler payloads."""
             async with ws_send_lock:
@@ -9496,10 +10601,17 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                         if token is None and generation_id is not None and not sess.is_generation_current(generation_id=generation_id):
                             return False
                 try:
+                    if first_pcm_trace_callback is not None:
+                        first_pcm_trace_callback("ws_lock_acquired", time.monotonic_ns())
+                        first_pcm_trace_callback("send_json_started", time.monotonic_ns())
                     await asyncio.wait_for(ws.send_json(payload), timeout=0.08)
                 except asyncio.TimeoutError:
+                    if first_pcm_trace_callback is not None:
+                        first_pcm_trace_callback("send_json_timeout", time.monotonic_ns())
                     logger.warning("[realtime %s] WebSocket send timeout", sess.session_id[:8])
                     return False
+                if first_pcm_trace_callback is not None:
+                    first_pcm_trace_callback("send_json_completed", time.monotonic_ns())
                 mark_cancelled_response_playback(payload)
                 return True
 
@@ -10442,6 +11554,11 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                 user_pcm=frame.pcm,
                 speaker_active=speaker_active,
                 generation_id=turn_generation_id,
+                user_turn_onset_frame_id=(
+                    int(pending_onset)
+                    if user_turn_pending and pending_onset is not None
+                    else None
+                ),
                 peer_turn_active=peer_turn_active,
                 speaker_segment_id=speaker_segment_id,
                 legal_actions=tuple(legal_actions),
@@ -12388,6 +13505,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                 "response_id": response_id,
                 "session_generation_id": int(token.session_generation_id),
                 "speaker_segment_id": str(token.speaker_segment_id),
+                "speech_ack_retired": False,
                 "playback_segments": {},
                 "segment_token_packets": [],
                 "spoken_prefix_token_ids": (),
@@ -12404,7 +13522,32 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     playback_ack_branches.pop(next(iter(playback_ack_branches)))
             unified_native_branch: dict[str, Any] | None = None
             unified_transition_lock: Any | None = None
+            unified_transition_lock_acquired = False
             unified_close_ids: tuple[int, ...] | None = None
+            listener_dispatcher = shared_listener_dispatcher_holder.get("dispatcher")
+            listener_dispatch_pause: dict[str, Any] = {"held": False, "released": False}
+            listener_dispatch_pause_lock = threading.Lock()
+
+            def release_listener_burst_pause(reason: str) -> bool:
+                with listener_dispatch_pause_lock:
+                    if not listener_dispatch_pause["held"]:
+                        return False
+                    listener_dispatch_pause["held"] = False
+                    listener_dispatch_pause["released"] = True
+                resumed = bool(
+                    listener_dispatcher is not None
+                    and listener_dispatcher.resume_session(sess.session_id)
+                )
+                if unified_native_branch is not None:
+                    unified_native_branch["listener_dispatch_pause_release_reason"] = str(reason)
+                    unified_native_branch["listener_dispatch_pause_resumed"] = resumed
+                update_response_runtime_metrics(response_id, "listener_burst_dispatch_pause", {
+                    "status": "released" if resumed else "already_unregistered",
+                    "reason": str(reason),
+                    "release_at_ns": time.monotonic_ns(),
+                })
+                return resumed
+
             if unified_kv_enabled and response_uses_direct_audio:
                 binding = shared_listener_bindings.get(sess.session_id)
                 worker = shared_listener_worker_holder.get("worker")
@@ -12420,8 +13563,34 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     })
                     return
                 unified_transition_lock = binding["unified_turn_transition_lock"]
-                unified_transition_lock.acquire()
                 try:
+                    if action == ControlAction.SPEAK:
+                        if listener_dispatcher is None:
+                            raise RuntimeError(
+                                "unified SPEAK requires a registered shared listener dispatcher"
+                            )
+                        paused = await asyncio.to_thread(
+                            listener_dispatcher.pause_session,
+                            sess.session_id,
+                            wait_for_inflight=True,
+                            timeout=5.0,
+                        )
+                        if not paused:
+                            raise RuntimeError(
+                                "unified SPEAK could not pause its shared listener registration"
+                            )
+                        with listener_dispatch_pause_lock:
+                            listener_dispatch_pause["held"] = True
+                        update_response_runtime_metrics(response_id, "listener_burst_dispatch_pause", {
+                            "status": "paused",
+                            "at_ns": time.monotonic_ns(),
+                            "release_policy": "second_token_commit_or_decode_completion",
+                            "queued_audio_preserved": True,
+                        })
+                    # Do not hold the unified transition lock while waiting for
+                    # a listener row that was already in flight to finish.
+                    unified_transition_lock.acquire()
+                    unified_transition_lock_acquired = True
                     if action == ControlAction.BACKCHANNEL:
                         begin_deadline = asyncio.get_running_loop().time() + 2.0
                         private_handle = None
@@ -12461,6 +13630,8 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                             "cache_position": int(private_handle.source_cache_position),
                             "turn_start_cache_position": int(private_handle.source_cache_position),
                             "playback_segments": {},
+                            "say_token_packets": [],
+                            "segment_token_packets": [],
                             "client_consumed_pcm_sequence": -1,
                             "client_consumed_segments": (),
                             "spoken_prefix_lock": threading.Lock(),
@@ -12542,6 +13713,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                                 "spoken_prefix_exclusive_cursor": int(opened_snapshot.cache_position),
                                 "spoken_prefix_text_parts": (),
                                 "playback_segments": {},
+                                "say_token_packets": [],
                                 "segment_token_packets": [],
                                 "client_consumed_pcm_sequence": -1,
                                 "client_consumed_segments": (),
@@ -12558,8 +13730,20 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                                 ),
                                 "queue_open_requested_ns": queue_open_requested_ns,
                                 "queue_open_ready_ns": time.monotonic_ns(),
+                                "direct_audio_context": None,
+                                "acoustic_state_snapshot": None,
+                                "release_listener_burst_pause": release_listener_burst_pause,
                                 **new_playback_ack_state(),
                             }
+                            if action == ControlAction.SPEAK:
+                                (
+                                    unified_native_branch["direct_audio_context"],
+                                    unified_native_branch["acoustic_state_snapshot"],
+                                ) = _snapshot_speaking_branch_context(
+                                    direct_audio_context,
+                                    sess.listener_state,
+                                )
+                                unified_native_branch["listener_dispatch_pause_active"] = True
                             with playback_ack_branches_lock:
                                 playback_ack_branches[response_id] = unified_native_branch
                             if os.environ.get("DUPLEX_NATIVE_CONTROL6_TRACE") == "1":
@@ -12576,7 +13760,10 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                                 )
                             break
                 except BaseException as exc:
-                    unified_transition_lock.release()
+                    if unified_transition_lock_acquired:
+                        unified_transition_lock.release()
+                        unified_transition_lock_acquired = False
+                    release_listener_burst_pause("queue_open_failed")
                     sess.end_response(token)
                     if user_turn_onset_frame_id is not None:
                         sess.cancel_user_onset_response(user_turn_onset_frame_id)
@@ -12807,8 +13994,9 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                         sess.speaker_segment.control_opened = True
                         sess.speaker_segment.control_action = ControlAction.BACKCHANNEL.value
                         sess.speaker_segment.control_frames_remaining = 4
-            if unified_transition_lock is not None:
+            if unified_transition_lock is not None and unified_transition_lock_acquired:
                 unified_transition_lock.release()
+                unified_transition_lock_acquired = False
             logger.info("[realtime %s] start %s audio_samples=%d auto=%s", sess.session_id[:8], response_id, committed_audio.size, sess.auto_response)
             playout: SpeakerPlayoutBuffer | None = None
             packetizer: NetworkPacketizer | None = None
@@ -12964,7 +14152,53 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                 next_generated_frame_id = 0
                 streamed_chunks = 0
                 first_tts_audio_chunk_pcm_at_ns: int | None = None
+                first_pcm_trace_lock = threading.Lock()
+                first_pcm_trace: dict[str, Any] = {}
                 active_output_segment_id = {"value": str(token.speaker_segment_id)}
+
+                def record_first_pcm_trace(
+                    boundary: str,
+                    at_ns: int | None = None,
+                    **metadata: Any,
+                ) -> None:
+                    """Keep monotonic first-PCM boundary times in response metrics only."""
+                    key = f"first_pcm_{boundary}_ns"
+                    timestamp = time.monotonic_ns() if at_ns is None else int(at_ns)
+                    with first_pcm_trace_lock:
+                        if key in first_pcm_trace:
+                            return
+                        first_pcm_trace.setdefault("clock", "monotonic_ns")
+                        first_pcm_trace.setdefault("response_id", response_id)
+                        first_pcm_trace[key] = timestamp
+                        for name, value in metadata.items():
+                            if value is not None:
+                                first_pcm_trace.setdefault(name, value)
+                        snapshot = dict(first_pcm_trace)
+                    with response_runtime_metrics_lock:
+                        response_runtime_metrics.setdefault(response_id, {})[
+                            "first_pcm_trace"
+                        ] = snapshot
+
+                def record_first_pcm_packet_identity(packet: AudioPacket) -> None:
+                    record_first_pcm_trace(
+                        "packet_identity",
+                        packet_id=int(packet.packet_id),
+                        generation_id=int(packet.generation_id),
+                        speaker_segment_id=str(packet.speaker_segment_id),
+                        first_frame_id=int(packet.first_frame_id),
+                        last_frame_id=int(packet.last_frame_id),
+                        start_sample=int(packet.start_sample),
+                        end_sample=int(packet.end_sample),
+                    )
+
+                def record_first_pcm_consumer_get(item: Any) -> None:
+                    if not isinstance(item, AudioPacket):
+                        return
+                    with first_pcm_trace_lock:
+                        expected_packet_id = first_pcm_trace.get("packet_id")
+                    if expected_packet_id is not None and int(item.packet_id) == int(expected_packet_id):
+                        record_first_pcm_trace("consumer_get")
+
                 def packetize_frames_as_packets(frames: list[PlayoutFrame]) -> list[AudioPacket]:
                     if packetizer is None:
                         raise RuntimeError("packetizer non inizializzato")
@@ -13008,6 +14242,11 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                                 output_queue.put_nowait(item)
                             except queue.Full:
                                 return None
+                            if queue_kind == "audio" and isinstance(item, AudioPacket):
+                                with first_pcm_trace_lock:
+                                    first_packet_id = first_pcm_trace.get("packet_id")
+                                if first_packet_id is not None and int(item.packet_id) == int(first_packet_id):
+                                    record_first_pcm_trace("queue_put")
                             return True
 
                     metrics = _put_response_queue_bounded(
@@ -13028,11 +14267,18 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
 
                 def on_audio_chunk_with_horizon(chunk: np.ndarray, conditioning_frame_id: int) -> None:
                     nonlocal next_generated_frame_id, first_tts_audio_chunk_pcm_at_ns
+                    callback_entry_ns = time.monotonic_ns()
                     if first_tts_audio_chunk_pcm_at_ns is None:
                         # Same monotonic clock as Control6's policy_decision_at_ns.
                         # This latch is before playout, packetization, and WS relay.
-                        first_tts_audio_chunk_pcm_at_ns = time.monotonic_ns()
+                        first_tts_audio_chunk_pcm_at_ns = callback_entry_ns
                     array = np.asarray(chunk, dtype=np.float32)
+                    record_first_pcm_trace(
+                        "callback_entry",
+                        callback_entry_ns,
+                        conditioning_frame_id=int(conditioning_frame_id),
+                        pcm_samples=int(array.size),
+                    )
                     packets_to_enqueue: list[AudioPacket] = []
                     def enqueue_ready() -> None:
                         nonlocal next_generated_frame_id
@@ -13044,7 +14290,25 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                         )
                         next_generated_frame_id += len(generated)
                         ready = playout.release_ready(conditioning_frame_id=int(conditioning_frame_id))
-                        packets_to_enqueue.extend(packetize_frames_as_packets(ready))
+                        if ready:
+                            record_first_pcm_trace(
+                                "playout_release",
+                                frame_count=len(ready),
+                                first_frame_id=int(ready[0].frame_id),
+                                last_frame_id=int(ready[-1].frame_id),
+                            )
+                        packets = packetize_frames_as_packets(ready)
+                        if packets:
+                            packets_to_enqueue.extend(packets)
+                            first_packet = packets[0]
+                            record_first_pcm_packet_identity(first_packet)
+                            record_first_pcm_trace(
+                                "packetizer_ready",
+                                frame_count=sum(
+                                    packet.last_frame_id - packet.first_frame_id + 1
+                                    for packet in packets
+                                ),
+                            )
                     if not sess.guarded_write(token, "audio", enqueue_ready):
                         return
                     burst_items = len(packets_to_enqueue)
@@ -13058,8 +14322,12 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                 def on_audio_chunk(chunk: np.ndarray) -> None:
                     # Compatibility callback for the legacy one-shot path.  The
                     # stateful path supplies the real V9 horizon explicitly.
-                    horizon = max(-1, next_generated_frame_id - 1)
-                    on_audio_chunk_with_horizon(chunk, horizon)
+                    array = np.asarray(chunk, dtype=np.float32).reshape(-1)
+                    horizon = _legacy_audio_chunk_conditioning_horizon(
+                        next_generated_frame_id,
+                        int(array.size),
+                    )
+                    on_audio_chunk_with_horizon(array, horizon)
 
                 def begin_audio_segment(segment_id: str) -> None:
                     nonlocal next_generated_frame_id
@@ -13077,44 +14345,23 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     active_output_segment_id["value"] = normalized_segment_id
                     next_generated_frame_id = 0
 
-                def finish_audio_segment(
-                    segment_id: str,
-                    source_tokens: Sequence[Mapping[str, Any]],
-                ) -> None:
-                    normalized_segment_id = str(segment_id)
-                    if normalized_segment_id != active_output_segment_id["value"]:
-                        raise RuntimeError("closed TTS segment does not own the active playout")
-                    if playout is None or packetizer is None:
-                        raise RuntimeError("closed TTS segment has no playout or packetizer")
-                    packets = packetize_frames_as_packets(
-                        playout.flush_segment(
-                            generation_id=token.session_generation_id,
-                            speaker_segment_id=normalized_segment_id,
-                        )
-                    )
-                    packets.extend(packetizer.flush_segment(
-                        token.session_generation_id,
-                        normalized_segment_id,
-                    ))
-                    burst_items = len(packets) + 1
-                    for packet in packets:
-                        if not queue_response_output(
-                            packet,
-                            queue_kind="audio",
-                            output_queue=audio_queue,
-                            burst_items=burst_items,
-                        ):
-                            return
-                    marker = _ClosedTTSSegment(
-                        speaker_segment_id=normalized_segment_id,
-                        source_tokens=tuple(dict(row) for row in source_tokens),
-                    )
-                    queue_response_output(
-                        marker,
-                        queue_kind="audio",
-                        output_queue=audio_queue,
-                        burst_items=burst_items,
-                    )
+                ack_resources_branch = (
+                    unified_native_branch
+                    if isinstance(unified_native_branch, dict)
+                    else playback_branch
+                )
+                finish_audio_segment = _make_finish_audio_segment_callback(
+                    active_output_segment_id=active_output_segment_id,
+                    playout=playout,
+                    packetizer=packetizer,
+                    ack_resources_branch=ack_resources_branch,
+                    response_id=response_id,
+                    generation_id=int(token.session_generation_id),
+                    response_segment_id=str(token.speaker_segment_id),
+                    packetize_frames_as_packets=packetize_frames_as_packets,
+                    queue_response_output=queue_response_output,
+                    audio_queue=audio_queue,
+                )
 
                 def on_text_chunk(chunk: str) -> None:
                     cleaned_chunk = re.sub(r"<unused\d+>", " ", str(chunk))
@@ -13146,48 +14393,104 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
 
                 async def emit_audio_packet(packet: AudioPacket) -> bool:
                     nonlocal streamed_chunks
-                    server_emit_started_at_ns = time.monotonic_ns()
-                    payload = {
-                        "type": "response.audio.delta",
-                        "delta": _wav_b64(packet.pcm),
-                        "response_id": response_id,
-                        "server_emit_started_at_ns": server_emit_started_at_ns,
-                        "raw_source_audio_quality": _raw_source_audio_quality(packet.pcm),
-                        "packet_id": packet.packet_id,
-                        "sequence": packet.packet_id,
-                        "generation_id": packet.generation_id,
-                        "speaker_segment_id": packet.speaker_segment_id,
-                        "first_frame_id": packet.first_frame_id,
-                        "last_frame_id": packet.last_frame_id,
-                        "start_sample": packet.start_sample,
-                        "end_sample": packet.end_sample,
-                        "sample_rate": CODEC_SAMPLE_RATE,
-                    }
-                    if not await send_ws(payload, token):
-                        if not discard_fenced_output():
-                            cancel_response_output("websocket_audio_send_failed")
-                        return False
-                    if discard_fenced_output():
-                        return False
-                    if not record_emitted_reference(packet.pcm):
-                        discard_fenced_output()
-                        return False
-                    frame_count = packet.last_frame_id - packet.first_frame_id + 1
-                    if not sess.record_emitted_audio(token, frame_count):
-                        discard_fenced_output()
-                        return False
-                    with policy_causality_lock:
-                        response_audio_admission.mark_audio_sent_locked(frame_count)
-                        input_watermark_frame_id = response_audio_admission.input_watermark
-                    with playback_ack_branches_lock:
-                        ack_branch = playback_ack_branches.get(response_id)
-                    if ack_branch is not None:
-                        with ack_branch.get("spoken_prefix_lock", nullcontext()):
-                            if ack_branch.get("input_audio_watermark_frame_id") is None:
-                                ack_branch["input_audio_watermark_frame_id"] = input_watermark_frame_id
-                            _record_emitted_pcm_packet(ack_branch, packet)
-                    streamed_chunks += 1
-                    return True
+
+                    async def release_pcm(released_packet: AudioPacket) -> bool:
+                        nonlocal streamed_chunks
+                        server_emit_started_at_ns = time.monotonic_ns()
+                        payload = {
+                            "type": "response.audio.delta",
+                            "delta": _wav_b64(released_packet.pcm),
+                            "response_id": response_id,
+                            "server_emit_started_at_ns": server_emit_started_at_ns,
+                            "raw_source_audio_quality": _raw_source_audio_quality(released_packet.pcm),
+                            "packet_id": released_packet.packet_id,
+                            "sequence": released_packet.packet_id,
+                            "generation_id": released_packet.generation_id,
+                            "speaker_segment_id": released_packet.speaker_segment_id,
+                            "first_frame_id": released_packet.first_frame_id,
+                            "last_frame_id": released_packet.last_frame_id,
+                            "start_sample": released_packet.start_sample,
+                            "end_sample": released_packet.end_sample,
+                            "sample_rate": CODEC_SAMPLE_RATE,
+                        }
+                        with first_pcm_trace_lock:
+                            is_first_pcm_packet = (
+                                first_pcm_trace.get("packet_id")
+                                == int(released_packet.packet_id)
+                            )
+                        if not await send_ws(
+                            payload,
+                            token,
+                            first_pcm_trace_callback=(
+                                record_first_pcm_trace if is_first_pcm_packet else None
+                            ),
+                        ):
+                            if not discard_fenced_output():
+                                cancel_response_output("websocket_audio_send_failed")
+                            return False
+                        if discard_fenced_output():
+                            return False
+                        if not record_emitted_reference(released_packet.pcm):
+                            discard_fenced_output()
+                            return False
+                        frame_count = released_packet.last_frame_id - released_packet.first_frame_id + 1
+                        if not sess.record_emitted_audio(token, frame_count):
+                            discard_fenced_output()
+                            return False
+                        with policy_causality_lock:
+                            response_audio_admission.mark_audio_sent_locked(frame_count)
+                            input_watermark_frame_id = response_audio_admission.input_watermark
+                        with playback_ack_branches_lock:
+                            ack_branch = playback_ack_branches.get(response_id)
+                        if ack_branch is not None:
+                            with ack_branch.get("spoken_prefix_lock", nullcontext()):
+                                if ack_branch.get("input_audio_watermark_frame_id") is None:
+                                    ack_branch["input_audio_watermark_frame_id"] = input_watermark_frame_id
+                                _record_emitted_pcm_packet(ack_branch, released_packet)
+                        streamed_chunks += 1
+                        return True
+
+                    def acknowledge_released_pcm(released_packet: AudioPacket) -> bool:
+                        ack_result = {"ok": False}
+
+                        def advance_speech_watermark() -> None:
+                            with playback_ack_branches_lock:
+                                ack_branch = playback_ack_branches.get(response_id)
+                            ack_result["ok"] = _ack_response_speech_packet(
+                                ack_branch,
+                                released_packet,
+                                response_id=response_id,
+                                generation_id=int(token.session_generation_id),
+                                response_segment_id=str(token.speaker_segment_id),
+                            )
+
+                        if not sess.guarded_write(
+                            token, "speech_pcm_ack", advance_speech_watermark
+                        ):
+                            discard_fenced_output()
+                            return False
+                        if not ack_result["ok"]:
+                            cancel_response_output("speech_pcm_ack_identity_mismatch")
+                            return False
+                        return True
+
+                    def validate_pcm_packet(released_packet: AudioPacket) -> bool:
+                        if not _audio_packet_matches_emission_owner(
+                            released_packet,
+                            generation_id=int(token.session_generation_id),
+                            speaker_segment_id=str(active_output_segment_id["value"]),
+                        ):
+                            if not discard_fenced_output():
+                                cancel_response_output("audio_packet_identity_mismatch")
+                            return False
+                        return not discard_fenced_output()
+
+                    return await _release_pcm_packet_then_ack(
+                        packet,
+                        validate=validate_pcm_packet,
+                        release=release_pcm,
+                        acknowledge=acknowledge_released_pcm,
+                    )
 
                 async def emit_audio_queue_item(item: Any) -> bool:
                     if isinstance(item, AudioPacket):
@@ -13196,15 +14499,46 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                         raise TypeError("realtime audio queue contains an unsupported item")
                     with playback_ack_branches_lock:
                         ack_branch = playback_ack_branches.get(response_id)
+                    ack_resources_branch = (
+                        ack_branch
+                        if ack_branch is not None
+                        else (
+                            unified_native_branch
+                            if isinstance(unified_native_branch, dict)
+                            else playback_branch
+                        )
+                    )
+                    ack_resources = _response_speech_ack_resources(
+                        ack_resources_branch,
+                        response_id=response_id,
+                        generation_id=int(token.session_generation_id),
+                        response_segment_id=str(token.speaker_segment_id),
+                    )
                     if ack_branch is None:
+                        if ack_resources is not None:
+                            ack_resources["closed_unit_streams"].pop(
+                                item.speaker_segment_id, None
+                            )
+                            _signal_emitted_tts_segment(
+                                ack_resources["closed_unit_events"], item.speaker_segment_id
+                            )
                         return True
+                    if ack_resources is None:
+                        cancel_response_output("speech_ack_branch_identity_mismatch")
+                        return False
                     with ack_branch.get("spoken_prefix_lock", nullcontext()):
                         marker = _complete_client_pcm_segment(
                             ack_branch,
                             speaker_segment_id=item.speaker_segment_id,
                             token_packets=item.source_tokens,
                         )
-                    return marker is None or await send_ws(marker, token)
+                    sent = marker is None or await send_ws(marker, token)
+                    if sent:
+                        ack_resources["closed_unit_streams"].pop(item.speaker_segment_id, None)
+                        _signal_emitted_tts_segment(
+                            ack_resources["closed_unit_events"], item.speaker_segment_id
+                        )
+                    return sent
 
                 async def emit_text_chunk(chunk: str) -> bool:
                     sent = await send_ws(
@@ -13230,20 +14564,26 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                 )
 
                 def publish_thinker_metrics(values: dict[str, Any]) -> None:
-                    metrics = dict(values)
-                    if policy_decision_at_ns is not None:
-                        metrics["policy_decision_at_ns"] = policy_decision_at_ns
-                    update_response_runtime_metrics(response_id, "thinker_metrics", metrics)
-                    event = {
-                        "type": "response.thinker_metrics",
-                        "response_id": response_id,
-                        **metrics,
-                    }
-                    sent = asyncio.run_coroutine_threadsafe(
-                        send_ws(event, token), response_event_loop
-                    ).result(timeout=5.0)
-                    if not sent:
-                        raise RuntimeError("thinker timing event lost its response generation")
+                    def send_event(event: dict[str, Any]) -> bool:
+                        async def send_if_current() -> bool:
+                            if response_output_cancel.is_set():
+                                return False
+                            return await send_ws(event, token)
+
+                        return asyncio.run_coroutine_threadsafe(
+                            send_if_current(), response_event_loop
+                        ).result(timeout=5.0)
+
+                    _publish_thinker_metrics_event(
+                        values,
+                        response_id=response_id,
+                        policy_decision_at_ns=policy_decision_at_ns,
+                        session=sess,
+                        token=token,
+                        cancellation_event=response_output_cancel,
+                        update_runtime_metrics=update_response_runtime_metrics,
+                        send_event=send_event,
+                    )
 
                 def infer_ws():
                     nonlocal empty_asr_cooldown_until_frame
@@ -13417,6 +14757,11 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                                     "_generation_id": token.session_generation_id,
                                     "_generation_token": token,
                                     "_unified_native_branch": unified_native_branch,
+                                    "_playback_ack_branch": (
+                                        unified_native_branch
+                                        if isinstance(unified_native_branch, dict)
+                                        else playback_branch
+                                    ),
                                     "_response_cancel_event": response_output_cancel,
                                     "_on_thinker_metrics": publish_thinker_metrics,
                                     "_talk_context": talk_context,
@@ -13508,6 +14853,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     except queue.Empty:
                         await asyncio.sleep(0.005)
                     else:
+                        record_first_pcm_consumer_get(chunk_wav)
                         if not await emit_audio_queue_item(chunk_wav):
                             return
                     try:
@@ -13588,9 +14934,11 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                     queued_audio: list[Any] = []
                     while True:
                         try:
-                            queued_audio.append(audio_queue.get_nowait())
+                            queued_item = audio_queue.get_nowait()
                         except queue.Empty:
                             break
+                        record_first_pcm_consumer_get(queued_item)
+                        queued_audio.append(queued_item)
                     last_closed_index = max(
                         (
                             index for index, item in enumerate(queued_audio)
@@ -13640,6 +14988,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                         chunk_wav = audio_queue.get_nowait()
                     except queue.Empty:
                         break
+                    record_first_pcm_consumer_get(chunk_wav)
                     if not await emit_audio_queue_item(chunk_wav):
                         return
                 if discard_fenced_output():
@@ -13999,6 +15348,7 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                         token,
                     )
             finally:
+                release_listener_burst_pause("response_finally")
                 if user_turn_onset_frame_id is not None and not user_turn_completed:
                     sess.cancel_user_onset_response(user_turn_onset_frame_id)
                 if archive_id_holder["archive_id"] is not None:
@@ -14807,9 +16157,26 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                         break
                     sess.touch()
                 elif et in {"input_audio_buffer.commit", "response.create"}:
+                    controller_owned_auto_commit = bool(
+                        et == "input_audio_buffer.commit"
+                        and direct_audio_candidate
+                        and sess.auto_response
+                        and response_protocol == CONTROLLER_GUIDED_SAY_V1
+                    )
                     with sess._generation_lock:
                         response_busy = sess.active_response or sess.policy_response_pending
-                    if (response_task and not response_task.done()) or response_busy:
+                    response_running = bool(
+                        (response_task and not response_task.done()) or response_busy
+                    )
+                    if controller_owned_auto_commit:
+                        # V1 is driven by the live listener/controller.  A
+                        # client commit acknowledges its continuous input
+                        # boundary; it must not consume the pending PCM or
+                        # create an action-less response, especially while an
+                        # earlier controller response is still active.
+                        sess.touch()
+                        continue
+                    if response_running:
                         await send_ws({"type": "error", "error": {"code": "RESPONSE_ACTIVE", "message": "response già attiva"}})
                         continue
                     if (
@@ -14852,9 +16219,10 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                                 committed_audio_size=int(committed_audio.size),
                             )
                         )
-                        sess.reset_policy_audio(committed_sample_count=committed_sample_count)
-                        sess.reset_turn_policy()
-                        sess.policy_response_pending = True
+                        if not controller_owned_auto_commit:
+                            sess.reset_policy_audio(committed_sample_count=committed_sample_count)
+                            sess.reset_turn_policy()
+                        sess.policy_response_pending = not controller_owned_auto_commit
                         committed_through_frame = (
                             (committed_sample_count + POLICY_FRAME_SAMPLES - 1) // POLICY_FRAME_SAMPLES - 1
                         )
@@ -14928,17 +16296,18 @@ def create_app(engine: Any, session_mgr: SessionManager | None = None) -> FastAP
                                 )
                             ),
                         }
-                    response_task = asyncio.create_task(
-                        produce_response(
-                            committed_audio,
-                            action=(
-                                ControlAction.SPEAK
-                                if manual_commit_speaks
-                                else None
-                            ),
-                            intent_origin=manual_audio_context,
+                    if not controller_owned_auto_commit:
+                        response_task = asyncio.create_task(
+                            produce_response(
+                                committed_audio,
+                                action=(
+                                    ControlAction.SPEAK
+                                    if manual_commit_speaks
+                                    else None
+                                ),
+                                intent_origin=manual_audio_context,
+                            )
                         )
-                    )
                 elif et == "session.close": break
         except (WebSocketDisconnect, asyncio.CancelledError): pass
         finally:

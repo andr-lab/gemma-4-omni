@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 from types import SimpleNamespace
 import unicodedata
+from concurrent.futures import Future
 
 import pytest
 import torch
@@ -20,7 +22,13 @@ from duplex_kernel.audio_response_protocol import (
     audio_response_v2_say_token_char_spans,
     finish_audio_response_v2_with_say_hidden,
 )
-from duplex_kernel.server import _configured_audio_response_protocol
+from duplex_kernel.server import (
+    _configured_audio_response_protocol,
+    _finalize_unified_native_cache_branch,
+    _mark_unified_say_packet_committed,
+    _publish_acknowledged_speech_prefix,
+)
+from duplex_kernel.session import SpokenTokenPacket
 from duplex_kernel.response_intent_local import qwen_assistant_text_offsets
 
 
@@ -94,7 +102,7 @@ class _Processor:
         return {"input_ids": torch.tensor([self.tokenizer(text)["input_ids"]])}
 
 
-def _new_stream(*, queue_capacity: int = 16) -> LiveQwenSayStream:
+def _new_stream(*, queue_capacity: int = 16, **kwargs) -> LiveQwenSayStream:
     tokenizer = _TokenizingQwen()
     return LiveQwenSayStream(
         qwen_tokenizer=tokenizer,
@@ -102,6 +110,7 @@ def _new_stream(*, queue_capacity: int = 16) -> LiveQwenSayStream:
         text_eos_token_id=99,
         max_tokens=16,
         queue_capacity=queue_capacity,
+        **kwargs,
     )
 
 
@@ -240,6 +249,296 @@ def test_live_qwen_ids_release_causally_once_and_flush_in_full_prefix_order():
     assert stream.published_qwen_ids == [10, 11, 12, 13]
 
 
+def test_live_v1_pcm_ack_waits_for_unified_kv_packet_commit_and_catches_up_multiframe():
+    stream = _new_stream()
+    committed_prefixes = []
+    stream.on_packet_emitted = lambda cursor, text: committed_prefixes.append((cursor, text))
+    stream.feed_piece(
+        "Ciao",
+        torch.ones((1, 1, 2)),
+        token_index=0,
+        exclusive_kv_cursor=100,
+        kv_committed=False,
+    )
+    stream.finish(final_text="Ciao")
+    assert stream.published_qwen_ids == [17]
+    assert stream.mark_packet_committed(
+        100, generation_id=9, segment_id=0
+    ) is None
+
+    # A three-frame PCM packet can be released before the native append. Its
+    # frame ACKs stay pending until the source Gemma token commits.
+    assert stream.ack_emitted_audio_frame(
+        0, generation_id=0, segment_id=0
+    ) == ()
+    assert stream.ack_emitted_audio_frame(
+        1, generation_id=0, segment_id=0
+    ) == ()
+    assert stream.ack_emitted_audio_frame(
+        2, generation_id=0, segment_id=0
+    ) == ()
+    assert stream.mark_packet_committed(
+        100, generation_id=0, segment_id=0
+    ) == (17,)
+    assert committed_prefixes == [(100, "Ciao")]
+    assert stream._last_processed_emitted_frame == 2
+    assert stream.ack_emitted_audio_frame(
+        3, generation_id=0, segment_id=0
+    ) == ()
+
+
+def test_live_v1_commit_barrier_does_not_skip_an_uncommitted_empty_source_packet():
+    stream = _new_stream()
+    committed_prefixes = []
+    stream.on_packet_emitted = lambda cursor, text: committed_prefixes.append((cursor, text))
+    hidden = torch.ones((1, 1, 2))
+    stream.feed_piece(
+        "",
+        hidden,
+        token_index=0,
+        exclusive_kv_cursor=200,
+        kv_committed=False,
+    )
+    stream.feed_piece(
+        "Ciao",
+        hidden,
+        token_index=1,
+        exclusive_kv_cursor=201,
+        kv_committed=True,
+    )
+    stream.finish(final_text="Ciao")
+    assert stream.ack_emitted_audio_frame(
+        0, generation_id=0, segment_id=0
+    ) == ()
+    assert stream.mark_packet_committed(
+        201, generation_id=0, segment_id=0
+    ) is None
+    assert stream.mark_packet_committed(
+        200, generation_id=0, segment_id=0
+    ) == (17,)
+    assert committed_prefixes == [(201, "Ciao")]
+
+
+def test_live_v1_cancel_discards_pcm_ack_waiting_for_packet_commit():
+    stream = _new_stream()
+    stream.feed_piece(
+        "Ciao",
+        torch.ones((1, 1, 2)),
+        token_index=0,
+        exclusive_kv_cursor=300,
+        kv_committed=False,
+    )
+    stream.finish(final_text="Ciao")
+    assert stream.ack_emitted_audio_frame(
+        0, generation_id=0, segment_id=0
+    ) == ()
+    stream.cancel()
+    assert stream.mark_packet_committed(
+        300, generation_id=0, segment_id=0
+    ) is None
+    assert not stream._pending_emitted_frames
+    with pytest.raises(RuntimeError, match="cancelled"):
+        stream.ack_emitted_audio_frame(0, generation_id=0, segment_id=0)
+
+
+def test_live_v1_stale_packet_commit_does_not_mutate_branch_record():
+    hidden = torch.zeros((1, 1536))
+    branch = {
+        "session_generation_id": 4,
+        "spoken_prefix_base_cursor": 60,
+        "spoken_prefix_lock": threading.RLock(),
+        "say_token_packets": [SpokenTokenPacket(
+            token_id=21,
+            text_piece="Ciao",
+            gemma_hidden_1536=hidden,
+            exclusive_kv_cursor=61,
+            kv_committed=False,
+        )],
+        "segment_token_packets": [{
+            "token_id": 21,
+            "text_piece": "Ciao",
+            "token_index": 0,
+            "exclusive_kv_cursor": 61,
+            "kv_committed": False,
+        }],
+    }
+    stream = _new_stream(generation_id=5, segment_id=0)
+
+    assert _mark_unified_say_packet_committed(
+        branch, stream, 0, 61, generation_id=4, segment_id=0
+    ) is None
+    assert branch["say_token_packets"][0].kv_committed is False
+    assert branch["segment_token_packets"][0]["kv_committed"] is False
+
+
+def test_live_v1_frame20_ack_advances_partial_watermark_and_yield_rebuilds_only_heard_prefix():
+    class Worker:
+        def __init__(self):
+            self.cursor = 64
+            self.rollback_targets = []
+            self.append_calls = []
+            self.drain_open_modes = []
+
+        @staticmethod
+        def done(value):
+            future = Future()
+            future.set_result(value)
+            return future
+
+        def session_state(self, _session_id):
+            return self.done(SimpleNamespace(generation_id=12, cache_position=self.cursor))
+
+        def rollback_assistant_branch(
+            self, _session_id, *, expected_generation_id, expected_cache_position,
+            target_cache_position,
+        ):
+            assert expected_generation_id == 12
+            assert expected_cache_position == self.cursor
+            self.rollback_targets.append(target_cache_position)
+            self.cursor = target_cache_position
+            return self.done(SimpleNamespace(cache_position=self.cursor))
+
+        def reserve_tail_tokens(
+            self, _session_id, *, expected_generation_id, expected_cache_position, token_count,
+        ):
+            assert expected_generation_id == 12
+            assert expected_cache_position == self.cursor
+            assert token_count == 7
+            return self.done(SimpleNamespace(cache_position=self.cursor))
+
+        def append_text_tokens(
+            self, _session_id, token_ids, *, expected_generation_id, expected_cache_position,
+            consume_reserved_tokens,
+        ):
+            assert expected_generation_id == 12
+            assert expected_cache_position == self.cursor
+            values = tuple(token_ids)
+            self.append_calls.append(values)
+            self.cursor += len(values)
+            return self.done(SimpleNamespace(cache_position=self.cursor))
+
+        def drain_queued_audio(
+            self, _session_id, *, expected_generation_id, expected_cache_position,
+            user_turn_already_open,
+        ):
+            assert expected_generation_id == 12
+            assert expected_cache_position == self.cursor
+            self.drain_open_modes.append(user_turn_already_open)
+            return self.done(SimpleNamespace(cache_position=self.cursor))
+
+    spoken_prefix_lock = threading.RLock()
+    branch = {
+        "listener_generation_id": 12,
+        "session_generation_id": 0,
+        "cache_position": 64,
+        "turn_start_cache_position": 60,
+        "spoken_prefix_base_cursor": 62,
+        "spoken_prefix_exclusive_cursor": 62,
+        "spoken_prefix_token_ids": (),
+        "spoken_prefix_text_parts": (),
+        "spoken_prefix_text": "",
+        "spoken_prefix_kv_position": None,
+        "spoken_prefix_lock": spoken_prefix_lock,
+        "transition_token_ids": (11, 12),
+        "queue_open": True,
+        "finalized": False,
+        "say_token_packets": [],
+        "segment_token_packets": [],
+    }
+    first_text = "Ciao" * 7  # Seven Qwen spans end at PCM frame 20.
+    second_text = "L’"
+    packet_hidden = torch.zeros((1, 1536))
+    branch["say_token_packets"] = [
+        SpokenTokenPacket(
+            token_id=21,
+            text_piece=first_text,
+            gemma_hidden_1536=packet_hidden,
+            exclusive_kv_cursor=63,
+            hidden_provenance="transition",
+            kv_committed=False,
+        ),
+        SpokenTokenPacket(
+            token_id=22,
+            text_piece=second_text,
+            gemma_hidden_1536=packet_hidden,
+            exclusive_kv_cursor=64,
+            hidden_provenance="token",
+            kv_committed=True,
+        ),
+    ]
+    branch["segment_token_packets"] = [
+        {
+            "token_id": 21, "text_piece": first_text,
+            "exclusive_kv_cursor": 63, "token_index": 0,
+            "hidden_provenance": "transition", "kv_committed": False,
+        },
+        {
+            "token_id": 22, "text_piece": second_text,
+            "exclusive_kv_cursor": 64, "token_index": 1,
+            "hidden_provenance": "token", "kv_committed": True,
+        },
+    ]
+
+    stream = _new_stream(
+        generation_id=0,
+        segment_id=0,
+        on_packet_emitted=lambda cursor, text: _publish_acknowledged_speech_prefix(
+            branch, 0, cursor, text
+        ),
+    )
+    source_hidden = torch.zeros((1, 1, 2))
+    stream.feed_piece(
+        first_text,
+        source_hidden,
+        token_index=0,
+        exclusive_kv_cursor=63,
+        kv_committed=False,
+    )
+    stream.feed_piece(
+        second_text,
+        source_hidden,
+        token_index=1,
+        exclusive_kv_cursor=64,
+        kv_committed=True,
+    )
+    stream.finish(final_text=first_text + second_text)
+
+    for frame_id in range(21):
+        stream.ack_emitted_audio_frame(frame_id, generation_id=0, segment_id=0)
+    assert branch["spoken_prefix_exclusive_cursor"] == 62
+    assert branch["spoken_prefix_token_ids"] == ()
+
+    branch["cache_position"] = 62
+    with pytest.raises(RuntimeError, match="before its KV cursor was committed"):
+        _mark_unified_say_packet_committed(
+            branch, stream, 0, 63, generation_id=0, segment_id=0
+        )
+    assert branch["say_token_packets"][0].kv_committed is False
+    assert branch["segment_token_packets"][0]["kv_committed"] is False
+    branch["cache_position"] = 64
+
+    _mark_unified_say_packet_committed(
+        branch, stream, 0, 63, generation_id=0, segment_id=0
+    )
+    assert branch["spoken_prefix_exclusive_cursor"] == 63
+    assert branch["spoken_prefix_token_ids"] == (21,)
+    assert branch["spoken_prefix_text"] == first_text
+    assert stream._last_processed_emitted_frame == 20
+
+    worker = Worker()
+    asyncio.run(_finalize_unified_native_cache_branch(
+        worker,
+        "session",
+        branch,
+        history_committed=False,
+        close_ids=(90, 91),
+    ))
+    assert worker.rollback_targets == [60]
+    assert worker.append_calls == [(11, 12), (21, 90), (91,)]
+    assert worker.drain_open_modes == [False]
+    assert branch["spoken_prefix_rebuilt"] is True
+
+
 def test_live_alignment_matches_full_prefix_for_split_accented_pieces():
     stream = _new_stream()
     gemma_pieces = [("L\u2019", 1.0), ("\u00e9", 3.0), ("lan", 5.0), ("o", 7.0)]
@@ -374,9 +673,11 @@ def test_live_text_tail_cancel_and_error_wake_blocked_producer_and_consumer(term
     def blocked_consumer():
         consumer_started.set()
         try:
-            stream.hidden_for_frame(99)
+            empty_stream.hidden_for_frame(0)
         except BaseException as exc:  # captured to assert thread cleanup
             consumer_errors.append(exc)
+
+    empty_stream = _new_stream(queue_capacity=1)
 
     producer = threading.Thread(target=blocked_producer)
     producer.start()
@@ -389,11 +690,15 @@ def test_live_text_tail_cancel_and_error_wake_blocked_producer_and_consumer(term
     assert producer.is_alive(), "bounded text queue should backpressure the producer"
     assert not producer_second_feed_returned.is_set()
     assert stream._tail_queue_size_locked() == 1
-    assert consumer.is_alive(), "future hidden cursor should wait for causally covered text"
+    tail = stream.hidden_for_frame(99)
+    assert tail.tail_hold is True, "live audio must reuse the last known token during starvation"
+    assert consumer.is_alive(), "an empty live stream should wait for its first aligned token"
     if terminal == "cancel":
         stream.cancel()
+        empty_stream.cancel()
     else:
         stream.fail(RuntimeError("producer failed"))
+        empty_stream.fail(RuntimeError("producer failed"))
     producer.join(timeout=0.5)
     consumer.join(timeout=0.5)
     assert not producer.is_alive() and not consumer.is_alive()
@@ -575,7 +880,7 @@ def test_feed_fails_immediately_if_published_alignment_changes(mutation: str):
     current_alignment = stream._current_alignment
 
     def changed_alignment(text, pieces):
-        ids, offsets, aligned = current_alignment(text, pieces)
+        ids, offsets, aligned, source_cursors, char_sources = current_alignment(text, pieces)
         ids = list(ids)
         offsets = list(offsets)
         aligned = list(aligned)
@@ -585,7 +890,7 @@ def test_feed_fails_immediately_if_published_alignment_changes(mutation: str):
             offsets[0] = (1, offsets[0][1])
         else:
             aligned[0] = aligned[0] + 1
-        return ids, offsets, aligned
+        return ids, offsets, aligned, source_cursors, char_sources
 
     stream._current_alignment = changed_alignment
     with pytest.raises(ValueError, match="published Qwen"):

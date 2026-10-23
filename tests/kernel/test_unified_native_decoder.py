@@ -96,6 +96,280 @@ def test_decode_forwards_only_transition_suffix_and_samples_first_token_from_its
     assert result.owner_action == "handle_terminal_eos"
 
 
+def test_anticipated_first_token_uses_transition_hidden_and_publishes_before_own_forward() -> None:
+    events = []
+    forwarded: list[list[int]] = []
+    sample_ids = iter((42, 43, 99))
+    committed = []
+
+    async def forward_tokens(token_ids: list[int]):
+        forwarded.append(list(token_ids))
+        events.append(("forward", tuple(token_ids)))
+        hidden = torch.tensor([1000 + token_ids[-1]], dtype=torch.float32)
+        logits = torch.zeros((1, 100))
+        logits[0, 1 if token_ids[-1] == 7 else 2 if token_ids[-1] == 42 else 99] = 10.0
+        return logits, hidden
+
+    def sample_token(_logits: torch.Tensor, _history: tuple[int, ...]) -> int:
+        token_id = next(sample_ids)
+        events.append(("sample", token_id))
+        return token_id
+
+    def on_token_packet(packet) -> None:
+        events.append((
+            "publish", packet.token_index, packet.token_id, packet.hidden_provenance,
+            packet.kv_committed, int(packet.hidden.item()),
+        ))
+
+    def on_token_committed(packet) -> None:
+        committed.append(packet)
+        events.append((
+            "commit", packet.token_index, packet.token_id, packet.hidden_provenance,
+            packet.kv_committed, int(packet.hidden.item()),
+        ))
+
+    def first_token_ready(packet) -> None:
+        events.append(("first_ready", packet.token_id, packet.kv_committed, packet.packet_published_ns))
+
+    decoder = UnifiedNativeDecoder(
+        _thinker(), forward_tokens=forward_tokens, sample_token=sample_token, monotonic_ns=_Clock()
+    )
+    result = asyncio.run(
+        decoder.decode(
+            transition_token_ids=[7],
+            max_new_tokens=3,
+            anticipate_first_token=True,
+            on_token_packet=on_token_packet,
+            on_token_committed=on_token_committed,
+            first_token=first_token_ready,
+        )
+    )
+
+    assert events.index(("publish", 0, 42, "transition", False, 1007)) < events.index(("forward", (42,)))
+    first_ready = next(event for event in events if event[0] == "first_ready")
+    assert first_ready[2] is False and isinstance(first_ready[3], int)
+    assert events.index(first_ready) < events.index(("forward", (42,)))
+    assert events.index(("forward", (42,))) < events.index(("commit", 0, 42, "transition", True, 1007))
+    assert events.index(("commit", 0, 42, "transition", True, 1007)) < events.index(("sample", 43))
+    assert ("publish", 1, 43, "token", True, 1043) in events
+    assert events.index(("forward", (43,))) < events.index(("publish", 1, 43, "token", True, 1043))
+    assert [token.hidden_provenance for token in result.generated_tokens] == [
+        "transition",
+        "token",
+    ]
+    assert [token.kv_committed for token in result.generated_tokens] == [True, True]
+    assert [int(token.hidden.item()) for token in result.generated_tokens] == [1007, 1043]
+    assert result.termination_reason == "eos"
+    assert result.committed_count == 2
+    assert [(token.token_index, token.hidden_provenance) for token in committed] == [(0, "transition")]
+
+
+def test_anticipated_first_token_cancellation_after_publish_does_not_forward_it() -> None:
+    forwarded: list[list[int]] = []
+    published = []
+    committed = []
+
+    async def forward_tokens(token_ids: list[int]):
+        forwarded.append(list(token_ids))
+        return torch.zeros((1, 3)), torch.tensor([100 + token_ids[-1]])
+
+    def on_token_packet(packet) -> None:
+        published.append(packet.token_id)
+
+    decoder = UnifiedNativeDecoder(
+        _thinker(), forward_tokens=forward_tokens, sample_token=lambda *_args: 42, monotonic_ns=_Clock()
+    )
+    result = asyncio.run(
+        decoder.decode(
+            transition_token_ids=[7],
+            max_new_tokens=3,
+            anticipate_first_token=True,
+            stop_check=lambda: bool(published),
+            on_token_packet=on_token_packet,
+            on_token_committed=committed.append,
+        )
+    )
+
+    assert published == [42]
+    assert forwarded == [[7]]
+    assert result.termination_reason == "cancelled"
+    assert result.pending_token_id == 42
+    assert result.committed_count == 0
+    assert result.generated_tokens[0].kv_committed is False
+    assert result.generated_tokens[0].hidden_provenance == "transition"
+    assert result.generated_tokens[0].packet_published_ns is not None
+    assert committed == []
+    assert result.owner_action == "rollback_assistant_branch"
+
+
+def test_anticipated_first_token_callback_error_prevents_its_native_forward() -> None:
+    forwarded: list[list[int]] = []
+
+    async def forward_tokens(token_ids: list[int]):
+        forwarded.append(list(token_ids))
+        return torch.zeros((1, 3)), torch.tensor([token_ids[-1]])
+
+    def fail_publish(_packet) -> None:
+        raise RuntimeError("packet publish failed")
+
+    decoder = UnifiedNativeDecoder(
+        _thinker(), forward_tokens=forward_tokens, sample_token=lambda *_args: 42, monotonic_ns=_Clock()
+    )
+    with pytest.raises(RuntimeError, match="packet publish failed"):
+        asyncio.run(
+            decoder.decode(
+                transition_token_ids=[7],
+                max_new_tokens=2,
+                anticipate_first_token=True,
+                on_token_packet=fail_publish,
+            )
+        )
+
+    assert forwarded == [[7]]
+
+
+def test_anticipated_first_token_late_commit_is_identified_for_stale_generation_filtering() -> None:
+    async def scenario():
+        token_forward_started = asyncio.Event()
+        finish_token_forward = asyncio.Event()
+        stale_generation = False
+        committed_callbacks = []
+        accepted_commits = []
+
+        async def forward_tokens(token_ids: list[int]):
+            if token_ids == [42]:
+                token_forward_started.set()
+                await finish_token_forward.wait()
+            logits = torch.zeros((1, 100))
+            logits[0, 99 if token_ids[-1] == 42 else 1] = 10.0
+            return logits, torch.tensor([100 + token_ids[-1]])
+
+        def on_token_committed(packet) -> None:
+            committed_callbacks.append(packet)
+            if not stale_generation:
+                accepted_commits.append(packet.token_index)
+
+        decoder = UnifiedNativeDecoder(
+            _thinker(),
+            forward_tokens=forward_tokens,
+            sample_token=lambda *_args: 42,
+            monotonic_ns=_Clock(),
+        )
+        decode_task = asyncio.create_task(
+            decoder.decode(
+                transition_token_ids=[7],
+                max_new_tokens=3,
+                anticipate_first_token=True,
+                on_token_packet=lambda _packet: None,
+                on_token_committed=on_token_committed,
+                stop_check=lambda: stale_generation,
+            )
+        )
+        await token_forward_started.wait()
+        stale_generation = True
+        finish_token_forward.set()
+        result = await decode_task
+        return result, committed_callbacks, accepted_commits
+
+    result, committed_callbacks, accepted_commits = asyncio.run(scenario())
+
+    assert result.termination_reason == "cancelled"
+    assert result.generated_tokens[0].kv_committed is True
+    assert result.committed_count == 1
+    assert result.pending_token_id == 42
+    assert [(packet.token_index, packet.kv_committed) for packet in committed_callbacks] == [(0, True)]
+    assert accepted_commits == []
+
+
+def test_anticipated_first_token_respects_one_token_budget_and_eos_has_no_packet() -> None:
+    forwarded: list[list[int]] = []
+    published = []
+    committed = []
+    sample_ids = iter((42, 99))
+
+    async def forward_tokens(token_ids: list[int]):
+        forwarded.append(list(token_ids))
+        return torch.zeros((1, 3)), torch.tensor([100 + token_ids[-1]])
+
+    decoder = UnifiedNativeDecoder(
+        _thinker(),
+        forward_tokens=forward_tokens,
+        sample_token=lambda *_args: next(sample_ids),
+        monotonic_ns=_Clock(),
+    )
+    result = asyncio.run(
+        decoder.decode(
+            transition_token_ids=[7],
+            max_new_tokens=1,
+            anticipate_first_token=True,
+            on_token_packet=published.append,
+            on_token_committed=committed.append,
+        )
+    )
+
+    assert [packet.token_id for packet in published] == [42]
+    assert forwarded == [[7], [42]]
+    assert result.generated_count == result.committed_count == 1
+    assert result.termination_reason == "budget_exhausted"
+    assert len(committed) == 1
+    assert committed[0].kv_committed is True
+    assert committed[0].packet_published_ns == result.generated_tokens[0].packet_published_ns
+
+    eos_published = []
+    eos_decoder = UnifiedNativeDecoder(
+        _thinker(),
+        forward_tokens=forward_tokens,
+        sample_token=lambda *_args: 99,
+        monotonic_ns=_Clock(),
+    )
+    eos_result = asyncio.run(
+        eos_decoder.decode(
+            transition_token_ids=[8],
+            max_new_tokens=2,
+            anticipate_first_token=True,
+            on_token_packet=eos_published.append,
+        )
+    )
+    assert eos_published == []
+    assert eos_result.generated_count == 0
+
+
+def test_token_packet_text_uses_full_prefix_delta_contract() -> None:
+    class Tokenizer:
+        def decode(self, token_ids, *, skip_special_tokens=True):
+            return "".join(f"<{token_id}>" for token_id in token_ids)
+
+    sampler = SimpleNamespace(tokenizer=Tokenizer(), last_decoded_output="")
+    forwarded = []
+    sample_ids = iter((42, 43, 99))
+    packets = []
+
+    async def forward_tokens(token_ids: list[int]):
+        forwarded.append(list(token_ids))
+        logits = torch.zeros((1, 100))
+        logits[0, 1 if token_ids[-1] == 7 else 2 if token_ids[-1] == 42 else 99] = 10.0
+        return logits, torch.tensor([token_ids[-1]])
+
+    decoder = UnifiedNativeDecoder(
+        _thinker(),
+        forward_tokens=forward_tokens,
+        sample_token=lambda *_args: next(sample_ids),
+        sampler=sampler,
+        monotonic_ns=_Clock(),
+    )
+    result = asyncio.run(
+        decoder.decode(
+            transition_token_ids=[7],
+            max_new_tokens=3,
+            anticipate_first_token=True,
+            on_token_packet=packets.append,
+        )
+    )
+
+    assert [packet.token_text for packet in packets] == ["<42>", "<43>"]
+    assert [token.token_text for token in result.generated_tokens] == ["<42>", "<43>"]
+
+
 @pytest.mark.parametrize("transition_len", [5, 8])
 def test_decode_forwards_transition_up_to_eight_tokens_in_one_native_call(transition_len: int) -> None:
     forwarded: list[list[int]] = []

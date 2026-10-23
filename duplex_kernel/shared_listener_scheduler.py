@@ -140,6 +140,7 @@ class SharedListenerTickDispatcher:
         self._stack_watchdog_state_lock = threading.Lock()
         self._registrations: dict[str, tuple[Any, int, str | None]] = {}
         self._deferred: dict[str, AudioFrame] = {}
+        self._paused_sessions: set[str] = set()
         self._lock = threading.RLock()
         self._dispatch_idle = threading.Condition(self._lock)
         self._inflight_sessions: set[str] = set()
@@ -177,6 +178,48 @@ class SharedListenerTickDispatcher:
         """
         with self._lock:
             return session_id in self._deferred or session_id in self._inflight_sessions
+
+    def pause_session(
+        self,
+        session_id: str,
+        *,
+        wait_for_inflight: bool = True,
+        timeout: float = 5.0,
+    ) -> bool:
+        """Pause dispatch without consuming queued or deferred audio frames.
+
+        The pause is installed before waiting, so a tick not yet snapshotted
+        cannot race into the batch. An already snapshotted row is allowed to
+        finish and is included in the bounded wait.
+        """
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise ValueError("session_id must be non-empty")
+        if not isinstance(wait_for_inflight, bool):
+            raise TypeError("wait_for_inflight must be a bool")
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(float(timeout)) or timeout < 0:
+            raise ValueError("timeout must be a finite non-negative number")
+        with self._dispatch_idle:
+            if session_id not in self._registrations:
+                return False
+            self._paused_sessions.add(session_id)
+            if wait_for_inflight and not self._dispatch_idle.wait_for(
+                lambda: session_id not in self._inflight_sessions,
+                timeout=float(timeout),
+            ):
+                raise TimeoutError(f"shared listener row is still in flight for {session_id}")
+            return True
+
+    def resume_session(self, session_id: str) -> bool:
+        """Resume a paused registration; ingress/deferred FIFO stays intact."""
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise ValueError("session_id must be non-empty")
+        with self._dispatch_idle:
+            if session_id not in self._registrations:
+                return False
+            was_paused = session_id in self._paused_sessions
+            self._paused_sessions.discard(session_id)
+            self._dispatch_idle.notify_all()
+            return was_paused
 
     def register_session(
         self,
@@ -225,6 +268,7 @@ class SharedListenerTickDispatcher:
         with self._dispatch_idle:
             removed = self._registrations.pop(session_id, None) is not None
             self._deferred.pop(session_id, None)
+            self._paused_sessions.discard(session_id)
             if wait_for_inflight and not self._dispatch_idle.wait_for(
                 lambda: session_id not in self._inflight_sessions,
                 timeout=float(timeout),
@@ -450,6 +494,8 @@ class SharedListenerTickDispatcher:
             registrations = tuple(self._registrations.items())
             rows: list[SharedListenerInput] = []
             for session_id, (ingress, listener_generation_id, state_epoch_id) in registrations:
+                if session_id in self._paused_sessions:
+                    continue
                 frame = self._deferred.pop(session_id, None)
                 if frame is None:
                     try:

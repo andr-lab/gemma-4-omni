@@ -61,6 +61,30 @@ def _capture_experimental_streaming_q2(
     )
 
 
+def _build_streaming_q2_for_serving(
+    gemma_model: Any,
+    *,
+    device: Any,
+    dtype: Any,
+    max_sessions: int,
+    max_graph_batch_size: int,
+) -> tuple[Any | None, str]:
+    """Capture supported Q2 graph shapes, retaining W240 on opt-out/failure."""
+    if not _strict_env_flag(STREAMING_CONFORMER_Q2_EXPERIMENTAL_ENV, default=True):
+        return None, "disabled_explicit_opt_out_w240"
+    try:
+        tower = _capture_experimental_streaming_q2(
+            gemma_model,
+            device=device,
+            dtype=dtype,
+            max_sessions=max_sessions,
+            max_graph_batch_size=max_graph_batch_size,
+        )
+    except Exception as exc:
+        return None, f"unsupported_fallback_w240: {type(exc).__name__}: {exc}"
+    return tower, f"experimental_graphs_n1_to_n{max_graph_batch_size}_captured"
+
+
 def _strict_env_flag(name: str, *, default: bool = False) -> bool:
     """Read an explicit 0/1 serving switch without accepting ambiguous values."""
     value = os.environ.get(name)
@@ -188,8 +212,12 @@ def make_listener_microbatch_worker(
     prefix. There is deliberately no per-session fallback.
     """
     gemm_graphs_enabled = _strict_env_flag(GEMM_GRAPHS_ENV)
-    stable_turn_policy_q2_context = _strict_env_flag(
-        STABLE_TURN_POLICY_Q2_CONTEXT_ENV,
+    stable_turn_policy_q2_context = bool(
+        unified_kv_enabled
+        and _strict_env_flag(
+            STABLE_TURN_POLICY_Q2_CONTEXT_ENV,
+            default=True,
+        )
     )
     if type(unified_kv_enabled) is not bool:
         raise TypeError("unified_kv_enabled must be a bool")
@@ -339,28 +367,13 @@ def make_listener_microbatch_worker(
             raise RuntimeError(
                 f"primary listener capacity prewarm returned {primary_capacity}, expected >=4"
             )
-        streaming_q2_opt_in = os.environ.get(
-            STREAMING_CONFORMER_Q2_EXPERIMENTAL_ENV, ""
-        ).strip().lower() in {"1", "true", "yes", "on"}
-        streaming_audio_tower = None
-        streaming_q2_status = "disabled_default_w240"
-        if streaming_q2_opt_in:
-            try:
-                streaming_audio_tower = _capture_experimental_streaming_q2(
-                    backend.gemma_model,
-                    device=device,
-                    dtype=backend.dtype,
-                    max_sessions=128,
-                    max_graph_batch_size=int(native.max_batch_size),
-                )
-                streaming_q2_status = (
-                    f"experimental_graphs_n1_to_n{int(native.max_batch_size)}_captured"
-                )
-            except Exception as exc:
-                # Q2 remains optional; any unsupported capture/runtime form
-                # uses the existing rolling W240 row runner.
-                streaming_audio_tower = None
-                streaming_q2_status = f"unsupported_fallback_w240: {type(exc).__name__}: {exc}"
+        streaming_audio_tower, streaming_q2_status = _build_streaming_q2_for_serving(
+            backend.gemma_model,
+            device=device,
+            dtype=backend.dtype,
+            max_sessions=128,
+            max_graph_batch_size=int(native.max_batch_size),
+        )
         frontend = ListenerMicrobatchAudioFrontend(
             backend.gemma_model,
             backend._extract_single_frame,
@@ -392,7 +405,7 @@ def make_listener_microbatch_worker(
         backend._listener_microbatch_runtime_info = {
             "enabled": True,
             "mode": "shared_fixed_80ms_microbatch",
-            "streaming_conformer_q2_opt_in": streaming_q2_opt_in,
+            "streaming_conformer_q2_opt_in": streaming_audio_tower is not None,
             "streaming_conformer_q2_status": streaming_q2_status,
             "audio_frontend_default": (
                 "streaming_conformer_q2_experimental"

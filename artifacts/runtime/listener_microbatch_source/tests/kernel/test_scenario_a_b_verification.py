@@ -3,15 +3,18 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import time
+import wave
 import numpy as np
 import pytest
 import torch
 
+from client import duplex_dialogue_harness
 from client.duplex_dialogue_harness import (
     FRAME_SAMPLES_16K,
     StreamingDialogueScenario,
     StreamingDialogueStep,
     streaming_scenario_from_fixtures,
+    validate_scenario_initial_sample_count,
 )
 from duplex_kernel.session import (
     DuplexSession,
@@ -22,6 +25,52 @@ from duplex_kernel.session import (
     SpokenTokenPacket,
     TurnLocalSpeechFIFO,
 )
+
+
+def test_scenario_fixture_reports_resolved_path_and_enforces_expected_sample_count(tmp_path: Path) -> None:
+    initial_path = tmp_path / "A_initial_milano.wav"
+    correction_path = tmp_path / "A_correction_torino.wav"
+    for path, sample_count in ((initial_path, 64_000), (correction_path, 3_627 * 16)):
+        with wave.open(str(path), "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(16_000)
+            wav.writeframes(np.zeros(sample_count, dtype="<i2").tobytes())
+
+    scenario = streaming_scenario_from_fixtures("A", fixture_dir=tmp_path)
+
+    assert scenario.steps[0].source_path == str(initial_path.resolve())
+    assert scenario.steps[0].pcm_16k.size == 64_000
+    validate_scenario_initial_sample_count(scenario, expected_sample_count=64_000)
+    with pytest.raises(ValueError, match=r"expected 50283 samples at 16000 Hz"):
+        validate_scenario_initial_sample_count(scenario, expected_sample_count=50_283)
+
+
+def test_harness_rejects_wrong_initial_fixture_before_opening_websocket(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    initial_path = tmp_path / "A_initial_milano.wav"
+    correction_path = tmp_path / "A_correction_torino.wav"
+    for path, sample_count in ((initial_path, 50_283), (correction_path, 3_627 * 16)):
+        with wave.open(str(path), "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(16_000)
+            wav.writeframes(np.zeros(sample_count, dtype="<i2").tobytes())
+
+    result = duplex_dialogue_harness.main([
+        "--stream-scenario", "A",
+        "--fixture-dir", str(tmp_path),
+        "--expected-initial-sample-count", "64000",
+    ])
+
+    captured = capsys.readouterr()
+    assert result == 2
+    resolved = json.loads(captured.out)
+    assert resolved["steps"][0]["resolved_input_path"] == str(initial_path.resolve())
+    assert resolved["steps"][0]["sample_count"] == 50_283
+    assert "before WebSocket" in captured.err
 
 
 class ConversationalGemmaEngine:
@@ -115,13 +164,27 @@ def test_scenario_a_bargein_replan_criteria() -> None:
         gemma_hidden_1536=torch.zeros((1, 1536), dtype=torch.float32),
         exclusive_kv_cursor=22,
     )
-    session.speech_fifo.put(packet_vocalized, qwen_token_ids=[1001, 1002], generation_id=1)
+    session.speech_fifo.put(
+        packet_vocalized,
+        qwen_token_ids=[1001, 1002],
+        qwen_token_texts=("partire", " dal"),
+        generation_id=1,
+    )
 
     # Qwen consumed both tokens of "partire dal"
     tok1 = session.speech_fifo.take_qwen_token(generation_id=1)
-    session.speech_fifo.ack_qwen_token(generation_id=1)
+    session.speech_fifo.consume_qwen_token(generation_id=1)
     tok2 = session.speech_fifo.take_qwen_token(generation_id=1)
-    cursor = session.speech_fifo.ack_qwen_token(generation_id=1)
+    session.speech_fifo.consume_qwen_token(generation_id=1)
+    cursor = None
+    for frame_id in range(session.speech_fifo.span_cursor.frame_spans[-1].end_frame):
+        acknowledged = session.speech_fifo.ack_emitted_audio_frame(
+            frame_id,
+            generation_id=1,
+            segment_id=0,
+        )
+        if acknowledged is not None:
+            cursor = acknowledged
     assert cursor == 22
 
     # Queued unspoken packets (thinking ahead)

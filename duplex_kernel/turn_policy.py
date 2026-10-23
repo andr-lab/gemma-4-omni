@@ -77,10 +77,19 @@ class PolicyInput:
     native_listener_generation: int | None = None
     # True only after the scheduler verifies exact-zero user and self-reference PCM.
     native_control_no_input_tick: bool = False
+    # Stable identity for the currently unanswered user turn. Unlike the
+    # response generation, this stays constant while a response is prepared.
+    user_turn_onset_frame_id: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.peer_turn_active, bool):
             raise TypeError("peer_turn_active must be bool")
+        if self.user_turn_onset_frame_id is not None and (
+            isinstance(self.user_turn_onset_frame_id, bool)
+            or not isinstance(self.user_turn_onset_frame_id, int)
+            or self.user_turn_onset_frame_id < 0
+        ):
+            raise ValueError("user_turn_onset_frame_id must be a non-negative integer or None")
 
 
 @dataclass(frozen=True)

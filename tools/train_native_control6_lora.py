@@ -828,6 +828,14 @@ def load_sequences(
             "hidden_states": torch.stack(hidden_parts),
             "target_ids": torch.tensor(target_ids, dtype=torch.int64),
             "loss_mask": torch.tensor(loss_masks, dtype=torch.bool),
+            # Legacy 1536-wide cache rows never carried runtime context. These
+            # false placeholders keep the common window API shape without
+            # claiming the context was observed; runtime_effective training is
+            # rejected for this profile below.
+            "speaker_active": torch.zeros(len(ordered_ids), dtype=torch.bool),
+            "user_activity_detected": torch.zeros(len(ordered_ids), dtype=torch.bool),
+            "runtime_context_available": False,
+            "runtime_context_source": "unobserved_legacy_1536_cache",
         })
         feature_rows += len(hidden_parts)
     if not sequences or not any(bool(sequence["loss_mask"].any()) for sequence in sequences):
@@ -839,6 +847,8 @@ def load_sequences(
         "feature_rows_aligned": feature_rows,
         "masked_stale_labeled_frames": masked_stale,
         "action_counts": {action: int(class_counts[action]) for action in ACTIONS},
+        "runtime_context_available": False,
+        "runtime_context_source": "unobserved_legacy_1536_cache",
         "cache_metadata": cache_metadata,
     }
 
@@ -1055,7 +1065,17 @@ def load_stage2_feature_sequences(
         action = row.get("action")
         speaker_active = row.get("speaker_active_at_frame_start")
         user_activity_detected = row.get("native_control6_user_activity_detected")
-        context_valid = row.get("native_control6_context_valid", type(speaker_active) is bool)
+        if "native_control6_context_valid" in row:
+            context_valid = row.get("native_control6_context_valid")
+        else:
+            # In current Stage2 metadata, an omitted validity bit means the
+            # context is observed only when its source-derived speaker flag is
+            # present. Missing source context must fail closed.
+            if type(speaker_active) is not bool:
+                raise ValueError(
+                    f"{conversation_id}:{frame_id}: native1540 rows require source-derived runtime context flags"
+                )
+            context_valid = True
         if (
             type(context_valid) is not bool
             or (context_valid and type(speaker_active) is not bool)
@@ -1755,6 +1775,8 @@ def train_adapter(
             raise ValueError("snapshot_steps must be unique in-range integers including 0 and the final step")
     if loss_space not in {"six_class", "runtime_effective"}:
         raise ValueError("loss_space must be 'six_class' or 'runtime_effective'")
+    if loss_space == "runtime_effective" and phase_profile != "native1540":
+        raise ValueError("runtime_effective loss requires native1540 context")
     if sampling_strategy not in {"sequence_windows", "balanced_runtime_bucket_source"}:
         raise ValueError("unknown sampling_strategy")
     if (

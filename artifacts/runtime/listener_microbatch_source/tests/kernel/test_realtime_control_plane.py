@@ -56,6 +56,7 @@ from duplex_kernel.turn_policy import (
 
 FRAME_SAMPLES = 1280
 MAX_REALTIME_PENDING_SAMPLES = server_module.USER_SAMPLE_RATE * 30
+ASYNC_TEST_SAFETY_TIMEOUT_S = 5.0
 
 
 def test_realtime_inference_error_has_terminal_response_done_event() -> None:
@@ -81,6 +82,18 @@ def test_auto_response_disabled_event_preserves_candidate_and_fallback_has_no_to
         "native_control6_selected_row_index": 2,
         "native_control6_selected_token_id": 256003,
         "native_control6_selected_token": "<unused91>",
+        "native_action_order": ["LISTEN", "SPEAK", "CONTINUE", "YIELD", "BACKCHANNEL", "REPLAN"],
+        "native_action_logits": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+        "native_action_raw_probabilities": [0.05, 0.10, 0.15, 0.20, 0.10, 0.40],
+        "native_control6_peer_turn_active": False,
+        "native_control6_user_rms": 0.05,
+        "native_control6_user_activity_detected": True,
+        "native_control6_early_speak_activity_active": True,
+        "native_control6_early_speak_confidence": 0.10,
+        "native_control6_early_speak_confidence_source": "legal_normalized_raw_speak_member",
+        "native_control6_early_speak_confidence_threshold": 0.80,
+        "native_control6_early_speak_gated": True,
+        "policy_fallback_reason": "native_control6_early_speak_user_active_hold",
     }
     decision = SimpleNamespace(action=ControlAction.CONTINUE, diagnostics=diagnostics)
 
@@ -105,6 +118,16 @@ def test_auto_response_disabled_event_preserves_candidate_and_fallback_has_no_to
     assert trace_selection["native_control6_raw_token_id"] == 256004
     assert trace_selection["native_control6_selected_row_index"] == 2
     assert trace_selection["native_control6_selected_token_id"] == 256003
+    assert trace_selection["native_action_order"][-1] == "REPLAN"
+    assert trace_selection["native_action_logits"][-1] == 0.6
+    assert trace_selection["native_action_raw_probabilities"][-1] == 0.40
+    assert trace_selection["native_control6_peer_turn_active"] is False
+    assert trace_selection["native_control6_user_rms"] == 0.05
+    assert trace_selection["native_control6_early_speak_confidence"] == 0.10
+    assert trace_selection["native_control6_early_speak_gated"] is True
+    assert trace_selection["policy_fallback_reason"] == (
+        "native_control6_early_speak_user_active_hold"
+    )
     assert trace_selection["native_control6_token_selection_scope"] == (
         "six_projected_rows_collapsed_to_physical_actions_not_full_vocabulary_sample"
     )
@@ -1665,15 +1688,17 @@ def test_realtime_v2_talker_uses_validated_say_prefix_and_keeps_listener_ticks(
 
 
 @pytest.mark.parametrize(
-    ("action", "say_text", "expected_min_frames", "expected_frame_cap"),
+    ("action", "say_text", "expected_min_frames", "expected_frame_cap", "terminal_reason"),
     [
-        ("SPEAK", "Ciao.", 48, server_module.ARIA_MAX_FRAMES),
-        ("BACKCHANNEL", "Va bene grazie davvero.", 2, server_module.ARIA_BACKCHANNEL_MAX_FRAMES),
-        ("MANUAL", "Ciao.", 48, server_module.ARIA_MAX_FRAMES),
-        ("MANUAL", "", None, 0),
+        ("SPEAK", "Ciao.", 48, server_module.ARIA_MAX_FRAMES, "eos"),
+        ("BACKCHANNEL", "Va bene.", 2, server_module.ARIA_BACKCHANNEL_MAX_FRAMES, "eos"),
+        ("BACKCHANNEL", "Va bene.", 2, server_module.ARIA_BACKCHANNEL_MAX_FRAMES, "budget_exhausted"),
+        ("MANUAL", "Ciao.", 48, server_module.ARIA_MAX_FRAMES, "eos"),
+        ("AUTO_COMMIT_THEN_SPEAK", "Ciao.", 48, server_module.ARIA_MAX_FRAMES, "eos"),
+        ("MANUAL", "", None, 0, "eos"),
     ],
 )
-def test_controller_guided_vocal_actions_start_live_qwen_and_keep_plain_prefill(monkeypatch, action, say_text, expected_min_frames, expected_frame_cap) -> None:
+def test_controller_guided_vocal_actions_start_live_qwen_and_keep_plain_prefill(monkeypatch, action, say_text, expected_min_frames, expected_frame_cap, terminal_reason) -> None:
     """Controller SAY starts its Qwen consumer during Thinker decode with one-token prefill."""
     processor_audio_snapshots: list[np.ndarray] = []
 
@@ -1731,7 +1756,14 @@ def test_controller_guided_vocal_actions_start_live_qwen_and_keep_plain_prefill(
     say_token_pieces = (
         [(101, "Va"), (102, " bene"), (2, " grazie"), (104, " davvero.")]
         if say_text == "Va bene grazie davvero."
-        else ([(101, "C"), (102, "ia"), (2, "o.")] if say_text else [])
+        else (
+            [(101, "Va"), (102, " bene.")]
+            if say_text == "Va bene."
+            else ([(101, "C"), (102, "ia"), (2, "o.")] if say_text else [])
+        )
+    )
+    emitted_token_pieces = (
+        say_token_pieces[:2] if action == "BACKCHANNEL" else say_token_pieces
     )
     say_hidden = torch.full((1, 3 + len(say_token_pieces), 1536), -9.0)
     if say_token_pieces:
@@ -1745,9 +1777,11 @@ def test_controller_guided_vocal_actions_start_live_qwen_and_keep_plain_prefill(
     engine.live_frame_residual_hidden_seen = None
 
     def think(_ids, *, on_generated_token=None, **_kwargs):
+        observed_token_pieces: list[tuple[int, str]] = []
         if say_text:
             assert callable(on_generated_token)
-            for token_index, (token_id, token_text) in enumerate(say_token_pieces):
+            for token_index, (token_id, token_text) in enumerate(emitted_token_pieces):
+                observed_token_pieces.append((token_id, token_text))
                 stop = on_generated_token(
                     token_index,
                     token_id,
@@ -1756,26 +1790,30 @@ def test_controller_guided_vocal_actions_start_live_qwen_and_keep_plain_prefill(
                 )
                 if stop is not None:
                     engine.controller_forced_stop = stop
-                if token_index == 2 and token_id == 2:
+                if action != "BACKCHANNEL" and token_index == 2 and token_id == 2:
                     engine.token_2_callback_seen.set()
                     assert not engine.thinker_returned.is_set()
-                    assert engine.first_pcm_callback.wait(timeout=1.0), (
+                    assert engine.first_pcm_callback.wait(timeout=ASYNC_TEST_SAFETY_TIMEOUT_S), (
                         "first internal PCM callback did not run while Thinker was blocked on token 2"
                     )
                     engine.pcm_preceded_thinker_return = not engine.thinker_returned.is_set()
                 if stop is not None:
                     break
-            assert engine.talk_started.wait(timeout=1.0), "live Qwen consumer did not start during Thinker decode"
-            assert engine.talker_entered.wait(timeout=1.0), "engine.talk was not entered before Thinker returned"
-            assert engine.first_pcm_callback.wait(timeout=1.0), "existing PCM callback did not run before Thinker returned"
+            if action != "BACKCHANNEL":
+                assert engine.talk_started.wait(timeout=ASYNC_TEST_SAFETY_TIMEOUT_S), "live Qwen consumer did not start during Thinker decode"
+                assert engine.talker_entered.wait(timeout=ASYNC_TEST_SAFETY_TIMEOUT_S), "engine.talk was not entered before Thinker returned"
+                assert engine.first_pcm_callback.wait(timeout=ASYNC_TEST_SAFETY_TIMEOUT_S), "existing PCM callback did not run before Thinker returned"
+            else:
+                assert not engine.first_pcm_callback.is_set(), "private BACKCHANNEL must buffer text until Thinker EOS"
+                assert not engine.talker_entered.is_set(), "private BACKCHANNEL started Qwen before Thinker EOS"
         engine.thinker_returned.set()
         return {
-            "text": say_text,
+            "text": "".join(token_text for _token_id, token_text in observed_token_pieces),
             "hidden": say_hidden,
             "hidden_prompt_len": 3,
-            "gen_ids": [token_id for token_id, _ in say_token_pieces],
+            "gen_ids": [token_id for token_id, _ in observed_token_pieces],
             "runtime_metrics": {},
-            "terminal_reason": "eos",
+            "terminal_reason": terminal_reason,
         }
 
     engine.say_hidden_seen = None
@@ -1799,6 +1837,7 @@ def test_controller_guided_vocal_actions_start_live_qwen_and_keep_plain_prefill(
     engine.live_tail_tokens_seen = []
     engine.live_qwen_session_count = 0
     engine.talker_exited = threading.Event()
+    engine.allow_talker_finish = threading.Event()
     engine._thinker_lock = threading.Lock()
     engine._talker_lock = threading.Lock()
     engine._gpu_priority_lock = threading.Lock()
@@ -1808,7 +1847,10 @@ def test_controller_guided_vocal_actions_start_live_qwen_and_keep_plain_prefill(
              live_qwen_text_stream=None, max_frames=None, **kwargs):
         engine.talker_entered.set()
         engine.live_qwen_session_count += 1
-        assert not engine.thinker_returned.is_set()
+        if action == "BACKCHANNEL":
+            assert engine.thinker_returned.is_set(), "BACKCHANNEL must wait for Thinker EOS before starting Qwen"
+        else:
+            assert not engine.thinker_returned.is_set()
         assert text
         assert tuple(h_pfx.shape) == (1, 0, 2048)
         assert raw_text_token_ids and len(raw_text_token_ids) == 1
@@ -1840,12 +1882,14 @@ def test_controller_guided_vocal_actions_start_live_qwen_and_keep_plain_prefill(
             assert not engine._thinker_lock.locked(), "Thinker priority lock held while waiting for Qwen text"
             assert not engine._talker_lock.locked(), "Talker lock held while waiting for Qwen text"
             assert not engine._gpu_priority_lock.locked(), "GPU priority lock held while waiting for Qwen text"
-            token_id = live_qwen_text_stream.take_trailing_token(timeout_s=2.0)
+            token_id = live_qwen_text_stream.take_trailing_token(timeout_s=ASYNC_TEST_SAFETY_TIMEOUT_S)
             if token_id is None:
                 break
             consumed.append(token_id)
         assert consumed.count(9999) == 1
         assert live_qwen_text_stream.codec_eos_allowed
+        if action in {"AUTO_COMMIT_THEN_SPEAK", "MANUAL"} and say_text:
+            assert engine.allow_talker_finish.wait(timeout=ASYNC_TEST_SAFETY_TIMEOUT_S)
         engine.live_tail_tokens_seen = consumed
         engine.talker_exited.set()
         return wav
@@ -1861,7 +1905,7 @@ def test_controller_guided_vocal_actions_start_live_qwen_and_keep_plain_prefill(
         assert ws.receive_json()["type"] == "session.created"
         seen_events: list[dict[str, object]] = []
 
-        def receive_until_test(target: str, *, limit: int = 80):
+        def receive_until_test(target: str, *, limit: int = 80, allow_errors: bool = False):
             received = []
             for _ in range(limit):
                 async def receive_with_timeout():
@@ -1881,15 +1925,36 @@ def test_controller_guided_vocal_actions_start_live_qwen_and_keep_plain_prefill(
                 event = json.loads(message["text"])
                 received.append(event)
                 seen_events.append(event)
-                if event.get("type") == "error":
+                if event.get("type") == "error" and not allow_errors:
                     raise AssertionError(f"realtime error while waiting for {target}: {event!r}")
                 if event.get("type") == target:
                     return received
             raise AssertionError(f"{target} not received; last events={received[-12:]!r}")
 
+        async def receive_optional_events(timeout_s: float):
+            deadline = time.monotonic() + timeout_s
+            received = []
+            while (remaining := deadline - time.monotonic()) > 0:
+                try:
+                    message = await asyncio.wait_for(ws._send_rx.receive(), timeout=remaining)
+                except TimeoutError:
+                    break
+                if message.get("type") != "websocket.send":
+                    raise AssertionError(f"unexpected websocket message: {message!r}")
+                event = json.loads(message["text"])
+                received.append(event)
+                seen_events.append(event)
+            return received
+
         session_config = {"input_audio_buffer_acknowledgements": True}
         if action == "MANUAL":
             session_config["auto_response"] = False
+        elif action == "AUTO_COMMIT_THEN_SPEAK":
+            session_config.update({
+                "auto_response": True,
+                "turn_policy": "scripted",
+                "scripted_actions": ["LISTEN", "SPEAK"],
+            })
         else:
             session_config.update({
                 "auto_response": True,
@@ -1899,27 +1964,129 @@ def test_controller_guided_vocal_actions_start_live_qwen_and_keep_plain_prefill(
         ws.send_json({"type": "session.update", "session": session_config})
         assert ws.receive_json()["type"] == "session.updated"
         _send_pcm(ws)
-        receive_until_test("input_audio_buffer.consumed")
-        if action == "SPEAK":
+        first_consumed = receive_until_test("input_audio_buffer.consumed")[-1]
+        assert first_consumed["frame_id"] == 0
+        if action == "AUTO_COMMIT_THEN_SPEAK":
+            first_decision = next((
+                event for event in seen_events
+                if event.get("type") == "duplex_control6.decision"
+                and event.get("frame_id") == 0
+            ), None)
+            if first_decision is None:
+                first_decision = receive_until_test("duplex_control6.decision")[-1]
+            assert first_decision["action"] == "LISTEN"
+            session = sessions.all()[0]
+            with session._pending_audio_lock:
+                first_commit_pcm = session.pending_audio.copy()
+            assert first_commit_pcm.size == FRAME_SAMPLES
+            ws.send_json({"type": "input_audio_buffer.commit"})
+            commit_events = ws.portal.call(receive_optional_events, 0.10)
+            assert not any(event.get("type") == "error" for event in commit_events), commit_events
+            assert not any(
+                event.get("type") in {"response.created", "response.done"}
+                for event in commit_events
+            ), commit_events
+            with session._pending_audio_lock:
+                assert np.array_equal(session.pending_audio, first_commit_pcm)
             for expected_frame_id in range(1, 11):
                 _send_pcm_level(ws, 0)
                 quiet_events = receive_until_test("input_audio_buffer.consumed")
                 assert quiet_events[-1]["frame_id"] == expected_frame_id
-        if action == "MANUAL":
-            ws.send_json({"type": "input_audio_buffer.commit"})
-        events = receive_until_test("response.done", limit=80)
+            created = next((
+                event for event in seen_events
+                if event.get("type") == "response.created"
+            ), None)
+            if created is None:
+                created = receive_until_test("response.created")[-1]
+            assert created.get("action") == "SPEAK"
+            assert created.get("intent_source") != "manual_audio_commit"
 
-        expected_action = "SPEAK" if action == "MANUAL" else action
+            # A controller-owned V1 commit while the policy response is live
+            # is accepted without spawning or cancelling another response.
+            _send_pcm_level(ws, 0)
+            active_input = receive_until_test("input_audio_buffer.consumed")[-1]
+            assert active_input["frame_id"] == 11
+            with session._pending_audio_lock:
+                pending_before_commit = session.pending_audio.copy()
+            assert pending_before_commit.size >= FRAME_SAMPLES
+            active_response_id = session.response_id
+            assert active_response_id == created["response_id"]
+            ws.send_json({"type": "input_audio_buffer.commit"})
+            commit_events = ws.portal.call(receive_optional_events, 0.10)
+            assert not any(event.get("type") == "error" for event in commit_events), commit_events
+            assert not any(
+                event.get("type") in {"response.created", "response.done"}
+                for event in commit_events
+            ), commit_events
+            with session._pending_audio_lock:
+                assert np.array_equal(session.pending_audio, pending_before_commit)
+            assert session.active_response is True
+            assert session.response_id == active_response_id
+            engine.allow_talker_finish.set()
+            receive_until_test("response.done", allow_errors=True)
+            events = list(seen_events)
+            assert sum(event.get("type") == "response.created" for event in events) == 1
+        else:
+            if action == "BACKCHANNEL" and terminal_reason != "eos":
+                cancelled = receive_until_test("response.cancelled", allow_errors=True)
+                assert cancelled[-1].get("reason") == "backchannel_without_eos"
+                assert not any(event.get("type") == "response.audio.delta" for event in seen_events)
+                assert engine.first_pcm_callback.is_set() is False
+                assert engine.talker_entered.is_set() is False
+                assert engine.live_qwen_session_count == 0
+                assert _wait_for(lambda: not sessions.all()[0].active_response, timeout=2.0)
+                assert talk_context_pool.active_count == 0
+                assert not engine.transcriptions
+                ws.send_json({"type": "session.close"})
+                return
+            if action == "SPEAK":
+                for expected_frame_id in range(1, 11):
+                    _send_pcm_level(ws, 0)
+                    quiet_events = receive_until_test("input_audio_buffer.consumed")
+                    assert quiet_events[-1]["frame_id"] == expected_frame_id
+            if action == "MANUAL":
+                ws.send_json({"type": "input_audio_buffer.commit"})
+                if say_text:
+                    created = receive_until_test("response.created")[-1]
+                    assert engine.talker_entered.wait(timeout=1.0)
+                    _send_pcm_level(ws, 0)
+                    consumed = receive_until_test("input_audio_buffer.consumed")[-1]
+                    assert consumed["frame_id"] == 1
+                    session = sessions.all()[0]
+                    with session._pending_audio_lock:
+                        pending_before_duplicate = session.pending_audio.copy()
+                    assert pending_before_duplicate.size == FRAME_SAMPLES
+                    ws.send_json({"type": "input_audio_buffer.commit"})
+                    duplicate = receive_until_test("error", allow_errors=True)[-1]
+                    assert duplicate["error"]["code"] == "RESPONSE_ACTIVE"
+                    with session._pending_audio_lock:
+                        assert np.array_equal(session.pending_audio, pending_before_duplicate)
+                    assert session.active_response is True
+                    engine.allow_talker_finish.set()
+                    receive_until_test("response.done", limit=80, allow_errors=True)
+                    events = list(seen_events)
+                    assert sum(event.get("type") == "response.created" for event in seen_events) == 1
+                else:
+                    events = receive_until_test("response.done", limit=80)
+            else:
+                events = receive_until_test("response.done", limit=80)
+
+        expected_action = "SPEAK" if action in {"MANUAL", "AUTO_COMMIT_THEN_SPEAK"} else action
         selected = next(event for event in events if event.get("type") == "response.action_selected")
         assert selected["wake_action"] == expected_action
         assert selected["response_action"] == expected_action
         assert selected["deferred_until_endpoint"] is False
-        assert engine.controller_forced_stop == ((999, "structure") if action == "BACKCHANNEL" and say_text else None)
+        assert engine.controller_forced_stop == (
+            (999, "structure") if action == "BACKCHANNEL" else None
+        )
         assert engine.v9_prefix_calls == 0
         assert any(event.get("type") == "response.audio.delta" for event in events) == bool(say_text)
         if say_text:
-            assert engine.token_2_callback_seen.is_set()
-            assert engine.pcm_preceded_thinker_return is True
+            assert engine.token_2_callback_seen.is_set() is (action != "BACKCHANNEL")
+            assert engine.pcm_preceded_thinker_return is (action != "BACKCHANNEL")
+            if action == "BACKCHANNEL":
+                assert engine.first_pcm_callback.is_set()
+                assert engine.talker_entered.is_set()
             assert engine.live_qwen_session_count == 1
             assert engine.say_hidden_seen is None
             assert engine.live_frame_residual_hidden_seen is not None
@@ -1939,12 +2106,21 @@ def test_controller_guided_vocal_actions_start_live_qwen_and_keep_plain_prefill(
             assert engine.talker_exited.is_set(), "Talker worker must exit before response.done"
             talker_metrics = response_done["runtime_metrics"]["talker"]
             assert "live_say_consumer_started_before_thinker_return" in talker_metrics, talker_metrics
-            assert talker_metrics["live_say_consumer_started_before_thinker_return"] is True
-            assert talker_metrics["live_say_consumer_started_at_ns"] < talker_metrics["live_say_thinker_returned_at_ns"]
+            assert talker_metrics["live_say_consumer_started_before_thinker_return"] is (
+                action != "BACKCHANNEL"
+            )
+            if action == "BACKCHANNEL":
+                assert talker_metrics["live_say_consumer_started_at_ns"] >= talker_metrics[
+                    "live_say_thinker_returned_at_ns"
+                ]
+            else:
+                assert talker_metrics["live_say_consumer_started_at_ns"] < talker_metrics[
+                    "live_say_thinker_returned_at_ns"
+                ]
             assert isinstance(response_done.get("t_first_audio_chunk_pcm_at_ns"), int)
             assert isinstance(response_done.get("response_done_at_monotonic_ns"), int)
             assert response_done["t_first_audio_chunk_pcm_at_ns"] < response_done["response_done_at_monotonic_ns"]
-            if action in {"SPEAK", "BACKCHANNEL"}:
+            if action in {"SPEAK", "AUTO_COMMIT_THEN_SPEAK"}:
                 selected = next(
                     event for event in seen_events
                     if event.get("type") == "response.action_selected"

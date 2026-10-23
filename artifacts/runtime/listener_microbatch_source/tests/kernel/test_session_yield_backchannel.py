@@ -77,15 +77,25 @@ def test_turn_local_speech_fifo_clear_unspoken_on_bargein() -> None:
         gemma_hidden_1536=torch.zeros((1, 1536), dtype=torch.float32),
         exclusive_kv_cursor=15,
     )
-    fifo.put(packet, qwen_token_ids=[101, 102], generation_id=1)
+    fifo.put(
+        packet,
+        qwen_token_ids=[101, 102],
+        qwen_token_texts=("ci", "ao"),
+        generation_id=1,
+    )
 
     token = fifo.take_qwen_token(generation_id=1)
     assert token is not None
-    assert fifo.ack_qwen_token(generation_id=1) is None
+    assert fifo.consume_qwen_token(generation_id=1) is None
 
     token2 = fifo.take_qwen_token(generation_id=1)
     assert token2 is not None
-    cursor = fifo.ack_qwen_token(generation_id=1)
+    assert fifo.consume_qwen_token(generation_id=1) is None
+    cursor = None
+    for frame_id in range(fifo.span_cursor.frame_spans[-1].end_frame):
+        acknowledged = fifo.ack_emitted_audio_frame(frame_id, generation_id=1, segment_id=0)
+        if acknowledged is not None:
+            cursor = acknowledged
     assert cursor == 15
     assert fifo.last_vocalized_kv_position == 15
 
@@ -125,7 +135,13 @@ def test_handle_bargein_yield_end_to_end() -> None:
     session.speech_fifo.put(packet, qwen_token_ids=[201], generation_id=0)
     tok = session.speech_fifo.take_qwen_token(generation_id=0)
     assert tok is not None
-    session.speech_fifo.ack_qwen_token(generation_id=0)
+    session.speech_fifo.consume_qwen_token(generation_id=0)
+    for frame_id in range(session.speech_fifo.span_cursor.frame_spans[-1].end_frame):
+        session.speech_fifo.ack_emitted_audio_frame(
+            frame_id,
+            generation_id=0,
+            segment_id=0,
+        )
 
     # Put 2 prebuffer embeddings (Q=2 frames)
     prebuffer_frame1 = torch.randn(1, 2, 1536)
@@ -163,6 +179,7 @@ def test_handle_bargein_yield_exact_exclusive_cursor_no_off_by_one() -> None:
     session.kv_cache.current_position = 200
     session.speech_fifo.begin_turn(generation_id=0)
 
+    pcm_frame_cursor = 0
     for index in range(4):
         session.speech_fifo.put(
             SpokenTokenPacket(
@@ -177,7 +194,17 @@ def test_handle_bargein_yield_exact_exclusive_cursor_no_off_by_one() -> None:
         if index < 2:
             token = session.speech_fifo.take_qwen_token(generation_id=0)
             assert token is not None
-            session.speech_fifo.ack_qwen_token(generation_id=0)
+            session.speech_fifo.consume_qwen_token(generation_id=0)
+            for frame_id in range(
+                pcm_frame_cursor,
+                session.speech_fifo.span_cursor.frame_spans[-1].end_frame,
+            ):
+                session.speech_fifo.ack_emitted_audio_frame(
+                    frame_id,
+                    generation_id=0,
+                    segment_id=0,
+                )
+            pcm_frame_cursor = session.speech_fifo.span_cursor.frame_spans[-1].end_frame
 
     assert session.speech_fifo.last_vocalized_kv_position == 102
     manager.handle_bargein_yield(session.session_id)

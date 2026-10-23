@@ -12,8 +12,8 @@ import math
 import queue
 import threading
 import time
-from dataclasses import dataclass
-from typing import Callable
+from dataclasses import dataclass, replace
+from typing import Any, Callable
 
 import numpy as np
 
@@ -235,6 +235,11 @@ class AudioIngressQueue:
         self._transport_buffer = bytearray()
         self._transport_serialization: str | None = None
         self._closed = False
+        self._speaking_prebuffer_active = False
+        self._prebuffer_max_frames = 0
+        self._prebuffer_frames: list[AudioFrame] = []
+        self._prebuffer_dropped_frames = 0
+        self._prebuffer_dropped_spans: list[tuple[int, int]] = []
         self._stats = {
             "input_samples_received": 0,
             "input_frames_enqueued": 0,
@@ -362,6 +367,23 @@ class AudioIngressQueue:
                 raise ValueError("non è possibile usare put mentre esiste un PCM parziale")
             start = time.monotonic_ns() if capture_start_ns is None else int(capture_start_ns)
             raw_transport, serialization, _ = self._normalize_transport(transport_bytes, array)
+            if self._speaking_prebuffer_active:
+                fid = self._next_frame_id if frame_id is None else int(frame_id)
+                self._next_frame_id = max(self._next_frame_id, fid + 1)
+                frame = AudioFrame(
+                    frame_id=fid,
+                    pcm=array,
+                    capture_start_ns=start,
+                    capture_end_ns=start + self.frame_duration_ns,
+                    enqueue_ns=time.monotonic_ns() if enqueue_ns is None else int(enqueue_ns),
+                    transport_sha256=self._transport_sha256(raw_transport),
+                    transport_serialization=serialization,
+                    capture_timestamp_source="server_receive_clock",
+                )
+                self._prebuffer_frames.append(frame)
+                self._stats["input_samples_received"] += self.frame_samples
+                self._stats["input_frames_enqueued"] += 1
+                return frame
             frame = self._enqueue_locked(
                 array,
                 capture_start_ns=start,
@@ -372,6 +394,76 @@ class AudioIngressQueue:
             )
             self._stats["input_samples_received"] += self.frame_samples
             return frame
+
+    def begin_speaking_prebuffer(self, max_frames: int | None = None) -> None:
+        """Hold microphone frames in an elastic prebuffer while the model speaks."""
+        with self._lock:
+            self._speaking_prebuffer_active = True
+            self._prebuffer_max_frames = (
+                int(max_frames) if max_frames is not None
+                else (self._queue.maxsize or 3)
+            )
+            self._prebuffer_frames = []
+            self._prebuffer_dropped_frames = 0
+            self._prebuffer_dropped_spans = []
+            while not self._queue.empty():
+                try:
+                    self._prebuffer_frames.append(self._queue.get_nowait())
+                except queue.Empty:
+                    break
+
+    def end_speaking_prebuffer(self) -> dict[str, Any]:
+        """Release the retained frames, reindexing them contiguously into ingress."""
+        with self._lock:
+            if not self._speaking_prebuffer_active:
+                return {
+                    "limit_frames": self._prebuffer_max_frames,
+                    "replayed_frames": 0,
+                    "replayed_samples": 0,
+                    "dropped_frames": 0,
+                    "dropped_spans": [],
+                }
+            limit_frames = self._prebuffer_max_frames
+            pending = int(self._buffer.size)
+            max_samples = limit_frames * self.frame_samples
+            allowed_samples = max(0, max_samples - pending)
+            max_allowed_frames = allowed_samples // self.frame_samples
+
+            if len(self._prebuffer_frames) > max_allowed_frames:
+                excess = len(self._prebuffer_frames) - max_allowed_frames
+                dropped = self._prebuffer_frames[:excess]
+                self._prebuffer_dropped_frames += excess
+                for f in dropped:
+                    self._prebuffer_dropped_spans.append((f.capture_start_ns, f.capture_end_ns))
+                self._prebuffer_frames = self._prebuffer_frames[excess:]
+
+            start_frame_id = (
+                (self._last_consumed_frame_id + 1)
+                if self._last_consumed_frame_id is not None
+                else 0
+            )
+            replayed_frames: list[AudioFrame] = []
+            for idx, frame in enumerate(self._prebuffer_frames):
+                new_frame_id = start_frame_id + idx
+                reindexed_frame = replace(frame, frame_id=new_frame_id)
+                self._queue.put_nowait(reindexed_frame)
+                replayed_frames.append(reindexed_frame)
+
+            self._next_frame_id = start_frame_id + len(self._prebuffer_frames)
+            replayed_count = len(replayed_frames)
+            replayed_samples = replayed_count * self.frame_samples + pending
+
+            metrics = {
+                "limit_frames": limit_frames,
+                "replayed_frames": replayed_count,
+                "replayed_samples": replayed_samples,
+                "dropped_frames": self._prebuffer_dropped_frames,
+                "dropped_spans": list(self._prebuffer_dropped_spans),
+            }
+            self._speaking_prebuffer_active = False
+            self._prebuffer_frames = []
+            self._frame_condition.notify_all()
+            return metrics
 
     def append(
         self,
@@ -398,19 +490,49 @@ class AudioIngressQueue:
             combined = np.concatenate((self._buffer, array))
             combined_transport = bytes(self._transport_buffer) + raw_transport
             full_count = combined.size // self.frame_samples
-            self._ensure_capacity(int(full_count))
             self._stats["input_samples_received"] += int(array.size)
             frames: list[AudioFrame] = []
-            for index in range(int(full_count)):
-                offset = index * self.frame_samples
-                frame_start = start + self._sample_time_ns(offset)
-                frame_transport = combined_transport[offset * bytes_per_sample:(offset + self.frame_samples) * bytes_per_sample]
-                frames.append(self._enqueue_locked(
-                    combined[offset:offset + self.frame_samples],
-                    capture_start_ns=frame_start,
-                    transport_bytes=frame_transport,
-                    transport_serialization=serialization,
-                ))
+            if self._speaking_prebuffer_active:
+                for index in range(int(full_count)):
+                    offset = index * self.frame_samples
+                    frame_start = start + self._sample_time_ns(offset)
+                    frame_transport = combined_transport[offset * bytes_per_sample:(offset + self.frame_samples) * bytes_per_sample]
+                    frame_arr = np.array(combined[offset:offset + self.frame_samples], dtype=np.float32, copy=True)
+                    frame_arr.setflags(write=False)
+                    frame = AudioFrame(
+                        frame_id=self._next_frame_id,
+                        pcm=frame_arr,
+                        capture_start_ns=frame_start,
+                        capture_end_ns=frame_start + self.frame_duration_ns,
+                        enqueue_ns=time.monotonic_ns(),
+                        transport_sha256=self._transport_sha256(frame_transport),
+                        transport_serialization=serialization,
+                        capture_timestamp_source="server_receive_clock",
+                    )
+                    self._next_frame_id += 1
+                    self._prebuffer_frames.append(frame)
+                    self._stats["input_frames_enqueued"] += 1
+                    frames.append(frame)
+            else:
+                admit_count = int(full_count)
+                if self._queue.maxsize:
+                    available = max(0, self._queue.maxsize - self._queue.qsize())
+                    admit_count = min(int(full_count), available)
+                    drop_count = int(full_count) - admit_count
+                    if drop_count > 0:
+                        self._stats["dropped_input_frames"] += int(drop_count)
+                    if available == 0:
+                        raise queue.Full("AudioIngressQueue piena: nessun frame è stato scartato silenziosamente")
+                for index in range(int(admit_count)):
+                    offset = index * self.frame_samples
+                    frame_start = start + self._sample_time_ns(offset)
+                    frame_transport = combined_transport[offset * bytes_per_sample:(offset + self.frame_samples) * bytes_per_sample]
+                    frames.append(self._enqueue_locked(
+                        combined[offset:offset + self.frame_samples],
+                        capture_start_ns=frame_start,
+                        transport_bytes=frame_transport,
+                        transport_serialization=serialization,
+                    ))
             remainder_offset = int(full_count) * self.frame_samples
             self._buffer = np.array(combined[remainder_offset:], dtype=np.float32, copy=True)
             remainder_transport_offset = remainder_offset * bytes_per_sample

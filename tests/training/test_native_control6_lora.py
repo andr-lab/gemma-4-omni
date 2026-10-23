@@ -190,6 +190,9 @@ def test_hidden_cache_requires_final_norm_contract_and_masks_stale_frame(tmp_pat
 
     train, train_info = load_sequences(target_dir / "train.jsonl", cache_dir, "train")
     validation, validation_info = load_sequences(target_dir / "validation.jsonl", cache_dir, "validation")
+    assert train[0]["runtime_context_available"] is False
+    assert not bool(train[0]["speaker_active"].any())
+    assert not bool(train[0]["user_activity_detected"].any())
     assert train_info["masked_stale_labeled_frames"] == 1
     assert train_info["action_counts"][ACTIONS[2]] == 0
     assert validation_info["feature_rows_aligned"] == 6
@@ -287,3 +290,11 @@ def test_cpu_training_runner_updates_only_native_row_lora_and_saves_adapter(tmp_
     assert adapter["ordinary_vocabulary_rows_modified"] is False
     assert adapter["base_gemma_weights_modified"] is False
     assert loaded_adapter(torch.randn(2, HIDDEN_WIDTH)).shape == (2, 6)
+
+
+def test_legacy_training_rejects_runtime_effective_loss_without_native_context(tmp_path) -> None:
+    with pytest.raises(ValueError, match="runtime_effective loss requires native1540 context"):
+        train_adapter(
+            output_path=tmp_path / "legacy-runtime-effective.pt",
+            loss_space="runtime_effective",
+        )

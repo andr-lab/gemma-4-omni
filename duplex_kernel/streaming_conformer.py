@@ -763,6 +763,9 @@ class StreamingConformerAudioTower:
         hidden_tick = subsampled
         valid_now = mask1
         layer_rows: list[torch.Tensor] = []
+        next_keys_by_layer: list[torch.Tensor] = []
+        next_values_by_layer: list[torch.Tensor] = []
+        next_conv_inputs_by_layer: list[torch.Tensor] = []
         for layer_index, layer in enumerate(self.audio_tower.layers):
             profile_range = None
             if self._profile_layer_events is not None:
@@ -815,8 +818,8 @@ class StreamingConformerAudioTower:
             staged_values = torch.cat(
                 (values[:, layer_index, Q2_TOKENS:], new_value), dim=1
             )[:, -CACHED_PAST_TOKENS:]
-            keys[:, layer_index].copy_(staged_keys)
-            values[:, layer_index].copy_(staged_values)
+            next_keys_by_layer.append(staged_keys)
+            next_values_by_layer.append(staged_values)
             post_clip = min(
                 layer.gradient_clipping,
                 torch.finfo(layer.norm_post_attn.weight.dtype).max,
@@ -830,7 +833,7 @@ class StreamingConformerAudioTower:
             gated = F.glu(light.linear_start(normalized), dim=-1)
             conv_window = torch.cat((conv_inputs[:, layer_index], gated), dim=1)
             staged_conv_inputs = conv_window[:, -4:, :]
-            conv_inputs[:, layer_index].copy_(staged_conv_inputs)
+            next_conv_inputs_by_layer.append(staged_conv_inputs)
             conv = F.conv1d(
                 conv_window.transpose(1, 2),
                 light.depthwise_conv1d.weight,
@@ -859,6 +862,9 @@ class StreamingConformerAudioTower:
                 profile_range.__exit__(None, None, None)
                 self._profile_layer_events[layer_index][1].record()
 
+        keys = torch.stack(next_keys_by_layer, dim=1)
+        values = torch.stack(next_values_by_layer, dim=1)
+        conv_inputs = torch.stack(next_conv_inputs_by_layer, dim=1)
         token_valid = torch.cat((token_valid[:, Q2_TOKENS:], valid_now), dim=1)[
             :, -CACHED_PAST_TOKENS:
         ]

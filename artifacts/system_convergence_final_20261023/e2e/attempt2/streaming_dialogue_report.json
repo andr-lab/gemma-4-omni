@@ -1,0 +1,667 @@
+{
+  "status": "INCOMPLETE",
+  "mode": "single_session_streaming",
+  "scenario_id": "A_milano_correction_torino",
+  "stop_reason": "quiet_timeout",
+  "input_steps": {
+    "initial_milano": {
+      "reference": "scenario_start",
+      "target_offset_s": 0.0,
+      "actual_start_ns": 5510750910212230,
+      "commit_ns": 5510754904546606
+    },
+    "correction_torino": {
+      "reference": "first_client_pcm_consumed",
+      "target_offset_s": 1.5,
+      "anchor_ns": 5510754255246780,
+      "target_ns": 5510755755246780,
+      "actual_start_ns": 5510755755550336,
+      "old_response_ids_at_first_correction_sample": [],
+      "first_sample_sent_ns": 5510755755954492,
+      "commit_ns": 5510759523732787
+    }
+  },
+  "input_transcripts": {
+    "initial_milano": {
+      "expected_text": "Consigliami un itinerario di tre giorni a Milano",
+      "asr_transcript": "",
+      "asr_available": false,
+      "sample_rate": 16000,
+      "sample_count": 64000,
+      "source_sample_start": 0,
+      "source_sample_end": 64000
+    },
+    "correction_torino": {
+      "expected_text": "Scusa, intendevo dire Torino, non Milano",
+      "asr_transcript": "",
+      "asr_available": false,
+      "sample_rate": 16000,
+      "sample_count": 58039,
+      "source_sample_start": 0,
+      "source_sample_end": 58039
+    }
+  },
+  "responses": [
+    {
+      "response_id": "resp_f353c29d3bc4",
+      "created_ns": 5510752198086112,
+      "created_after_commit_ns": null,
+      "text": "",
+      "audio_packets": []
+    },
+    {
+      "response_id": "resp_d929fe48b431",
+      "created_ns": 5510753402825558,
+      "created_after_commit_ns": null,
+      "text": "",
+      "audio_packets": [
+        {
+          "packet_id": 0,
+          "generation_id": 2,
+          "speaker_segment_id": "seg_7328ec55de9c",
+          "start_sample": 0,
+          "end_sample": 3840,
+          "sample_rate": 24000
+        }
+      ],
+      "first_audio_delta_ns": 5510754185178344
+    },
+    {
+      "response_id": "resp_a7b782c52292",
+      "created_ns": 5510756516183696,
+      "created_after_commit_ns": 5510754904546606,
+      "text": "",
+      "audio_packets": [
+        {
+          "packet_id": 1,
+          "generation_id": 3,
+          "speaker_segment_id": "seg_ddf133399a2b",
+          "start_sample": 0,
+          "end_sample": 3840,
+          "sample_rate": 24000
+        }
+      ],
+      "first_audio_delta_ns": 5510757177339060
+    }
+  ],
+  "consumed_acknowledgements": [
+    {
+      "type": "client_consumed_pcm",
+      "response_id": "resp_d929fe48b431",
+      "generation_id": 2,
+      "speaker_segment_id": "seg_7328ec55de9c",
+      "start_sample": 0,
+      "end_sample": 3840,
+      "sample_rate": 24000,
+      "sequence": 1,
+      "client_monotonic_ns": 5510754336610127,
+      "consumption_semantics": "logical_client_device_buffer",
+      "sent_ns": 5510754336928962
+    },
+    {
+      "type": "client_consumed_pcm",
+      "response_id": "resp_a7b782c52292",
+      "generation_id": 3,
+      "speaker_segment_id": "seg_ddf133399a2b",
+      "start_sample": 0,
+      "end_sample": 3840,
+      "sample_rate": 24000,
+      "sequence": 2,
+      "client_monotonic_ns": 5510757327732946,
+      "consumption_semantics": "logical_client_device_buffer",
+      "sent_ns": 5510757328043841
+    }
+  ],
+  "policy_diagnostics": [
+    {
+      "timestamp_ns": 5510751078805887,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5510751098380819,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5510751139190659,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5510751219139183,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5510751303638459,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5510751384458147,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5510751473580807,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5510751554473956,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5510751633684098,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5510751714246652,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5510751796605914,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5510751874408554,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5510751953863550,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5510752034116589,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5510752114450369,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5510752195224316,
+      "response_id": null,
+      "selected_action": "BACKCHANNEL"
+    },
+    {
+      "timestamp_ns": 5510752282603368,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510752346823802,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510752419761674,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5510752504630756,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5510752594432237,
+      "response_id": null,
+      "selected_action": "BACKCHANNEL"
+    },
+    {
+      "timestamp_ns": 5510752674955870,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5510752755219979,
+      "response_id": null,
+      "selected_action": "SPEAK"
+    },
+    {
+      "timestamp_ns": 5510752835508958,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5510752915496843,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5510752996190579,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5510753076388817,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5510753156501303,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5510753235874748,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5510753315965264,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5510753397188848,
+      "response_id": null,
+      "selected_action": "SPEAK"
+    },
+    {
+      "timestamp_ns": 5510753661325917,
+      "response_id": null,
+      "selected_action": "YIELD"
+    },
+    {
+      "timestamp_ns": 5510753729133207,
+      "response_id": null,
+      "selected_action": "YIELD"
+    },
+    {
+      "timestamp_ns": 5510753809880284,
+      "response_id": null,
+      "selected_action": "YIELD"
+    },
+    {
+      "timestamp_ns": 5510753898416935,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510753999960242,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510754057185434,
+      "response_id": null,
+      "selected_action": "YIELD"
+    },
+    {
+      "timestamp_ns": 5510754127065748,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510754227027520,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510754285294759,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510754368294061,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510754435807487,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510754523181869,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510754588810155,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510754668884611,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510754814242947,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510754851966248,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510754912429682,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510754993998531,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510755075316127,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510755818037211,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510755898814748,
+      "response_id": null,
+      "selected_action": "YIELD"
+    },
+    {
+      "timestamp_ns": 5510756067160161,
+      "response_id": null,
+      "selected_action": "YIELD"
+    },
+    {
+      "timestamp_ns": 5510756365992152,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5510756392798989,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5510756415948198,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5510756438960325,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5510756509650311,
+      "response_id": null,
+      "selected_action": "SPEAK"
+    },
+    {
+      "timestamp_ns": 5510756683239797,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510756786361230,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510756866950404,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510756944331667,
+      "response_id": null,
+      "selected_action": "YIELD"
+    },
+    {
+      "timestamp_ns": 5510757005996280,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510757094399479,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510757161638330,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510757247838313,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510757334552805,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510757403943221,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510757484030087,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510757572265183,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510757650338147,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510757731824185,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510757812112964,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510757892603767,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510757971107378,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510758044174272,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510758134969209,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510758207640537,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510758291089346,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510758371764232,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510758444989229,
+      "response_id": null,
+      "selected_action": "YIELD"
+    },
+    {
+      "timestamp_ns": 5510758530227927,
+      "response_id": null,
+      "selected_action": "YIELD"
+    },
+    {
+      "timestamp_ns": 5510758610826291,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510758690653653,
+      "response_id": null,
+      "selected_action": "YIELD"
+    },
+    {
+      "timestamp_ns": 5510758772389535,
+      "response_id": null,
+      "selected_action": "YIELD"
+    },
+    {
+      "timestamp_ns": 5510758844580596,
+      "response_id": null,
+      "selected_action": "YIELD"
+    },
+    {
+      "timestamp_ns": 5510758930856900,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510759004629056,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510759068246339,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510759153879344,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510759228733797,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510759314628995,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510759395534384,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510759474520953,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510759549549908,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5510759635797523,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    }
+  ],
+  "server_errors": [
+    {
+      "code": "INFERENCE_ERROR",
+      "message": "controller-guided live SAY requires Thinker EOS before Qwen text flush"
+    },
+    {
+      "code": "INFERENCE_ERROR",
+      "message": "name 'live_say_stream' is not defined"
+    },
+    {
+      "code": "STALE_CLIENT_CONSUMPTION_ACK",
+      "message": "client_consumed_pcm identity, sequence, or closed segment range is stale or mismatched"
+    },
+    {
+      "code": "RESPONSE_ACTIVE",
+      "message": "response già attiva"
+    },
+    {
+      "code": "INFERENCE_ERROR",
+      "message": "name 'live_say_stream' is not defined"
+    },
+    {
+      "code": "STALE_CLIENT_CONSUMPTION_ACK",
+      "message": "client_consumed_pcm identity, sequence, or closed segment range is stale or mismatched"
+    },
+    {
+      "code": "RESPONSE_ACTIVE",
+      "message": "response già attiva"
+    }
+  ],
+  "playback_shadow_tracker_errors": [],
+  "last_consumed_pcm_ns_by_response": {
+    "resp_d929fe48b431": 5510754336622467,
+    "resp_a7b782c52292": 5510757327742187
+  },
+  "timing": {
+    "scenario_started_ns": 5510750910086958,
+    "first_response_created_ns": 5510752198086112,
+    "first_response_created_after_commit_ms": 1611.63709,
+    "first_audio_delta_ns": 5510754185178344,
+    "first_audio_delta_after_response_created_ms": 1987.092232,
+    "first_client_pcm_consumed_ns": 5510754255246780,
+    "policy_speak_to_first_client_pcm_consumed_ms": null,
+    "correction_timing": {
+      "step_id": "correction_torino",
+      "started_ns": 5510755755550336,
+      "first_sample_sent_ns": 5510755755954492,
+      "commit_ns": 5510759523732787,
+      "old_response_ids_at_first_correction_sample": [],
+      "last_old_response_pcm_consumed_ns": null,
+      "first_response_created_ns": null,
+      "first_audio_delta_ns": null,
+      "first_consumed_segment_ack_ns": null,
+      "commit_to_first_consumed_segment_ack_ms": null,
+      "stop_latency_first_correction_sample_to_last_old_consumed_pcm_ms": null
+    },
+    "first_client_consumed_pcm_ack_sent_ns": 5510754336928962,
+    "last_response_terminal_ns": 5510757181236552,
+    "stop_ns": 5510764656957130,
+    "client_consumption_semantics": "logical_client_device_buffer"
+  },
+  "ingress_frames_sent": 96,
+  "logical_pcm_samples_consumed": 7680,
+  "wav_files": {
+    "interlocutor_a_input": "/workspace/artifacts/system_convergence_final_20261023/e2e/attempt2_after_callback_fixes/output/interlocutor_a_input.wav",
+    "interlocutor_a_output": "/workspace/artifacts/system_convergence_final_20261023/e2e/attempt2_after_callback_fixes/output/interlocutor_a_output.wav",
+    "interlocutor_b_input": "/workspace/artifacts/system_convergence_final_20261023/e2e/attempt2_after_callback_fixes/output/interlocutor_b_input.wav",
+    "interlocutor_b_output": "/workspace/artifacts/system_convergence_final_20261023/e2e/attempt2_after_callback_fixes/output/interlocutor_b_output.wav"
+  },
+  "events_jsonl": "/workspace/artifacts/system_convergence_final_20261023/e2e/attempt2_after_callback_fixes/output/dialogue_events.jsonl"
+}

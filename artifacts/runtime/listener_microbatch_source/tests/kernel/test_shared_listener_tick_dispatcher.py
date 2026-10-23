@@ -336,6 +336,62 @@ def test_future_batch_result_is_resolved_before_fanout() -> None:
     assert delivered == [(7, 7)]
 
 
+def test_pause_session_waits_for_inflight_and_preserves_ingress_fifo() -> None:
+    clock = _Clock()
+    batch_entered = threading.Event()
+    release_batch = threading.Event()
+    pause_finished = threading.Event()
+    ingress = _FakeIngress(
+        _frame(0, 70_000_000),
+        _frame(1, 71_000_000),
+    )
+
+    def run_batch(rows):
+        batch_entered.set()
+        assert release_batch.wait(2.0)
+        return {row.session_id: row.frame.frame_id for row in rows}
+
+    dispatcher = SharedListenerTickDispatcher(
+        run_batch,
+        now_ns=clock.now_ns,
+        wait_until=clock.wait_until,
+    )
+    dispatcher.register_session("s", ingress)
+    receipts = []
+    dispatch_thread = threading.Thread(
+        target=lambda: receipts.append(dispatcher.dispatch_next_tick()),
+        daemon=True,
+    )
+    dispatch_thread.start()
+    assert batch_entered.wait(1.0)
+
+    pause_result = []
+
+    def pause():
+        pause_result.append(dispatcher.pause_session("s", timeout=2.0))
+        pause_finished.set()
+
+    pause_thread = threading.Thread(target=pause, daemon=True)
+    pause_thread.start()
+    assert not pause_finished.wait(0.05)
+    release_batch.set()
+    dispatch_thread.join(2.0)
+    pause_thread.join(2.0)
+
+    assert not dispatch_thread.is_alive()
+    assert not pause_thread.is_alive()
+    assert pause_result == [True]
+    assert len(receipts) == 1 and receipts[0].rows[0].frame.frame_id == 0
+    paused = dispatcher.dispatch_next_tick()
+    assert paused.rows == ()
+    assert [frame.frame_id for frame in ingress.frames] == [1]
+
+    assert dispatcher.resume_session("s") is True
+    resumed = dispatcher.dispatch_next_tick()
+    assert [row.frame.frame_id for row in resumed.rows] == [1]
+    assert list(ingress.frames) == []
+
+
 def test_shared_context_spans_batch_future_and_all_row_fanout() -> None:
     clock = _Clock()
     phases: list[str] = []

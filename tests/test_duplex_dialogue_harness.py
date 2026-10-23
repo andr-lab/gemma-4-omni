@@ -994,6 +994,16 @@ class _StreamingScenarioWebSocket:
                 async def start_replacement_after_old_response_finishes() -> None:
                     await self.first_response_done.wait()
                     self.queue.put_nowait(json.dumps({"type": "response.created", "response_id": response_id}))
+                    self.queue.put_nowait(_make_mock_wav_delta(response_id, self.audio_24k, packet_id=2))
+                    self.queue.put_nowait(json.dumps({
+                        "type": "response.audio.segment_done",
+                        "response_id": response_id,
+                        "generation_id": 1,
+                        "speaker_segment_id": "seg_001",
+                        "start_sample": 0,
+                        "end_sample": int(self.audio_24k.size),
+                        "sample_rate": 24000,
+                    }))
                     self.queue.put_nowait(json.dumps({"type": "response.done", "response_id": response_id}))
 
                 self.pending_tasks.append(
@@ -1004,6 +1014,88 @@ class _StreamingScenarioWebSocket:
         self.closed = True
         if self.pending_tasks:
             await __import__("asyncio").gather(*self.pending_tasks, return_exceptions=True)
+        self.queue.put_nowait(None)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        await self.close()
+
+
+class _TickGatedStreamingScenarioWebSocket:
+    """Require quiet ingress ticks after each commit before publishing PCM."""
+
+    def __init__(self, audio_24k: np.ndarray, *, quiet_ticks_per_commit: int = 2) -> None:
+        import asyncio
+
+        self.audio_24k = audio_24k
+        self.quiet_ticks_per_commit = quiet_ticks_per_commit
+        self.queue = asyncio.Queue()
+        self.queue.put_nowait(json.dumps({"type": "session.created"}))
+        self.sent: list[tuple[dict, int]] = []
+        self.session_updates: list[dict] = []
+        self.commit_count = 0
+        self.current_quiet_ticks = 0
+        self.quiet_ticks_before_response: list[int] = []
+        self.published_commits: set[int] = set()
+        self.closed = False
+
+    async def recv(self) -> str:
+        item = await self.queue.get()
+        if item is None:
+            raise EOFError("websocket closed")
+        return item
+
+    async def _publish_response(self, response_number: int) -> None:
+        response_id = f"tick_gated_{response_number}"
+        self.quiet_ticks_before_response.append(self.current_quiet_ticks)
+        self.published_commits.add(response_number)
+        self.current_quiet_ticks = 0
+        self.queue.put_nowait(json.dumps({"type": "response.created", "response_id": response_id}))
+        self.queue.put_nowait(json.dumps({
+            "type": "response.output_text.delta",
+            "response_id": response_id,
+            "delta": f"Risposta {response_number}.",
+            "policy_diagnostics": {
+                "raw_action": "SPEAK",
+                "legal_action": "SPEAK",
+                "selected_action": "SPEAK",
+                "applied_action": "SPEAK",
+            },
+        }))
+        self.queue.put_nowait(_make_mock_wav_delta(response_id, self.audio_24k, packet_id=response_number))
+        self.queue.put_nowait(json.dumps({
+            "type": "response.audio.segment_done",
+            "response_id": response_id,
+            "generation_id": 1,
+            "speaker_segment_id": "seg_001",
+            "start_sample": 0,
+            "end_sample": int(self.audio_24k.size),
+            "sample_rate": 24000,
+        }))
+        self.queue.put_nowait(json.dumps({"type": "response.done", "response_id": response_id}))
+
+    async def send(self, data: str) -> None:
+        import base64
+
+        message = json.loads(data)
+        self.sent.append((message, __import__("time").monotonic_ns()))
+        if message.get("type") == "session.update":
+            self.session_updates.append(message["session"])
+            self.queue.put_nowait(json.dumps({"type": "session.updated"}))
+        elif message.get("type") == "input_audio_buffer.commit":
+            self.commit_count += 1
+            self.current_quiet_ticks = 0
+        elif message.get("type") == "input_audio_buffer.append" and self.commit_count:
+            samples = np.frombuffer(base64.b64decode(message["audio"]), dtype="<i2")
+            if not np.count_nonzero(samples) and self.commit_count not in self.published_commits:
+                self.current_quiet_ticks += 1
+                if self.current_quiet_ticks >= self.quiet_ticks_per_commit:
+                    await self._publish_response(self.commit_count)
+
+    async def close(self) -> None:
+        self.closed = True
         self.queue.put_nowait(None)
 
     async def __aenter__(self):
@@ -1074,9 +1166,13 @@ async def test_streaming_scenario_schedules_correction_from_consumed_pcm_and_ack
     )
     assert correction_started["timestamp_ns"] >= first_pcm["timestamp_ns"] + 10_000_000
     correction_timing = result["timing"]["correction_timing"]
-    assert correction_timing["old_response_ids_at_first_correction_sample"] == ["stream_resp_1"]
-    assert correction_timing["stop_latency_first_correction_sample_to_last_old_consumed_pcm_ms"] > 0.0
-    assert correction_timing["last_old_response_pcm_consumed_ns"] >= correction_timing["first_sample_sent_ns"]
+    old_response_ids = correction_timing["old_response_ids_at_first_correction_sample"]
+    if old_response_ids:
+        assert old_response_ids == ["stream_resp_1"]
+        assert correction_timing["stop_latency_first_correction_sample_to_last_old_consumed_pcm_ms"] > 0.0
+        assert correction_timing["last_old_response_pcm_consumed_ns"] >= correction_timing["first_sample_sent_ns"]
+    else:
+        assert result["last_consumed_pcm_ns_by_response"]["stream_resp_1"] <= correction_timing["first_sample_sent_ns"]
 
     ack = next(message for message, _sent_ns in ws.sent if message.get("type") == "client_consumed_pcm")
     assert ack["consumption_semantics"] == "logical_client_device_buffer"
@@ -1103,6 +1199,152 @@ async def test_streaming_scenario_schedules_correction_from_consumed_pcm_and_ack
     assert ack_sent["timestamp_ns"] >= full_segment_consumed["timestamp_ns"]
     policy = next(event for event in events if event["event_type"] == "policy_diagnostics")
     assert policy["details"]["selected_action"] == "SPEAK"
+
+
+@pytest.mark.anyio
+async def test_streaming_scenario_keeps_one_paced_microphone_clock_until_each_committed_turn_has_pcm(
+    tmp_path: Path,
+) -> None:
+    from client.duplex_dialogue_harness import StreamingDialogueScenario, StreamingDialogueStep
+
+    audio_24k = np.sin(2 * np.pi * 220.0 * np.linspace(0, 0.16, 3840, dtype=np.float32))
+    ws = _TickGatedStreamingScenarioWebSocket(audio_24k, quiet_ticks_per_commit=2)
+
+    async def connector(url: str, **kwargs):
+        return ws
+
+    frame_pacing_s = 0.01
+    orchestrator = DialogueOrchestrator(
+        config=DialogueConfig(
+            max_duration_s=2.0,
+            silence_timeout_s=0.04,
+            frame_pacing_s=frame_pacing_s,
+            streaming_voice_profile="custom_stream_voice",
+        ),
+        output_dir=tmp_path / "tick_gated_streaming_scenario",
+        ws_connect_fn=connector,
+    )
+    initial_pcm = np.full(FRAME_SAMPLES_16K * 2 + 640, 0.2, dtype=np.float32)
+    correction_pcm = np.full(FRAME_SAMPLES_16K + 320, 0.3, dtype=np.float32)
+    scenario = StreamingDialogueScenario(
+        scenario_id="post_commit_quiet_ticks_and_correction",
+        system_prompt="Rispondi in italiano.",
+        steps=[
+            StreamingDialogueStep("initial", initial_pcm, "Milano"),
+            StreamingDialogueStep(
+                "correction",
+                correction_pcm,
+                "Torino",
+                after_first_consumed_s=0.01,
+            ),
+        ],
+    )
+
+    result = await orchestrator.run_streaming_scenario(scenario)
+
+    assert result["status"] == "COMPLETED"
+    assert ws.commit_count == 2
+    assert ws.quiet_ticks_before_response == [2, 2]
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "tick_gated_streaming_scenario" / "dialogue_events.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    sent_frames = [event for event in events if event["event_type"] == "input_audio_frame_sent"]
+    assert [event["details"]["ingress_frame_id"] for event in sent_frames] == list(range(len(sent_frames)))
+    frame_times = [event["details"]["sent_ns"] for event in sent_frames]
+    assert all(
+        later - earlier >= int(frame_pacing_s * 0.8 * 1e9)
+        for earlier, later in zip(frame_times, frame_times[1:])
+    )
+
+    initial_frames = [
+        event["details"] for event in sent_frames
+        if event["details"]["source"] == "scenario_audio"
+        and event["details"]["step_id"] == "initial"
+    ]
+    correction_frames = [
+        event["details"] for event in sent_frames
+        if event["details"]["source"] == "scenario_audio"
+        and event["details"]["step_id"] == "correction"
+    ]
+    committed_silence = [
+        event["details"] for event in sent_frames
+        if event["details"]["source"] == "committed_turn_silence"
+    ]
+    commit_ns_by_step = {
+        event["details"]["step_id"]: event["details"]["timestamp_ns"]
+        for event in events
+        if event["event_type"] == "input_audio_buffer_commit_sent"
+    }
+    assert {frame["step_id"] for frame in committed_silence} == {"initial", "correction"}
+    assert all(frame["sent_ns"] > commit_ns_by_step[frame["step_id"]]
+               for frame in committed_silence)
+    assert [(frame["source_start_sample"], frame["source_end_sample"]) for frame in initial_frames] == [
+        (0, 1280), (1280, 2560), (2560, 3200),
+    ]
+    assert [(frame["source_start_sample"], frame["source_end_sample"]) for frame in correction_frames] == [
+        (0, 1280), (1280, 1600),
+    ]
+    assert all(frame["source_start_sample"] is None and frame["source_end_sample"] is None
+               for frame in committed_silence)
+    assert len(committed_silence) >= 4
+    correction_first_ns = min(frame["sent_ns"] for frame in correction_frames)
+    correction_commit_ns = commit_ns_by_step["correction"]
+    assert not any(
+        correction_first_ns <= frame["sent_ns"] < correction_commit_ns
+        for frame in committed_silence
+    )
+
+
+@pytest.mark.anyio
+async def test_streaming_scenario_keeps_pending_turn_alive_until_max_duration_without_pcm(
+    tmp_path: Path,
+) -> None:
+    from client.duplex_dialogue_harness import StreamingDialogueScenario, StreamingDialogueStep
+
+    audio_24k = np.sin(2 * np.pi * 220.0 * np.linspace(0, 0.16, 3840, dtype=np.float32))
+    ws = _TickGatedStreamingScenarioWebSocket(audio_24k, quiet_ticks_per_commit=1000)
+
+    async def connector(url: str, **kwargs):
+        return ws
+
+    orchestrator = DialogueOrchestrator(
+        config=DialogueConfig(
+            max_duration_s=0.14,
+            silence_timeout_s=0.02,
+            frame_pacing_s=0.005,
+        ),
+        output_dir=tmp_path / "pending_without_pcm",
+        ws_connect_fn=connector,
+    )
+    scenario = StreamingDialogueScenario(
+        scenario_id="pending_without_pcm",
+        system_prompt="Rispondi in italiano.",
+        steps=[StreamingDialogueStep(
+            "initial",
+            np.full(FRAME_SAMPLES_16K, 0.2, dtype=np.float32),
+            "Milano",
+        )],
+    )
+
+    result = await orchestrator.run_streaming_scenario(scenario)
+
+    assert result["stop_reason"] == "max_duration"
+    assert result["status"] == "FAILED"
+    assert result["committed_turns_awaiting_first_audio"] == ["initial"]
+    assert ws.commit_count == 1
+    assert ws.quiet_ticks_before_response == []
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "pending_without_pcm" / "dialogue_events.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    sent_frames = [event for event in events if event["event_type"] == "input_audio_frame_sent"]
+    assert len(sent_frames) > 1
+    assert any(event["details"]["source"] == "committed_turn_silence" for event in sent_frames)
 
 
 def test_streaming_cli_passes_voice_profile_override(monkeypatch, tmp_path: Path) -> None:

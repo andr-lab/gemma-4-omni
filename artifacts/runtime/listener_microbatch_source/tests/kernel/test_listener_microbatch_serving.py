@@ -14,6 +14,8 @@ from duplex_kernel.listener_microbatch_serving import (
     GEMM_GRAPHS_ENV,
     SEMANTIC_SHADOW_ENV,
     STABLE_TURN_POLICY_Q2_CONTEXT_ENV,
+    STREAMING_CONFORMER_Q2_EXPERIMENTAL_ENV,
+    _build_streaming_q2_for_serving,
     _build_native_control6_batch_policy,
     _semantic_prefix_request_matches_applied_row,
     _strict_env_flag,
@@ -88,13 +90,92 @@ def test_microbatch_serving_switches_reject_ambiguous_values(monkeypatch, value:
         _strict_env_flag(GEMM_GRAPHS_ENV)
 
 
-def test_microbatch_serving_switches_default_off(monkeypatch) -> None:
+def test_microbatch_serving_compat_switches_default_off_and_q2_defaults_on(monkeypatch) -> None:
     monkeypatch.delenv(GEMM_GRAPHS_ENV, raising=False)
     monkeypatch.delenv(SEMANTIC_SHADOW_ENV, raising=False)
     monkeypatch.delenv(STABLE_TURN_POLICY_Q2_CONTEXT_ENV, raising=False)
+    monkeypatch.delenv(STREAMING_CONFORMER_Q2_EXPERIMENTAL_ENV, raising=False)
     assert _strict_env_flag(GEMM_GRAPHS_ENV) is False
     assert _strict_env_flag(SEMANTIC_SHADOW_ENV) is False
     assert _strict_env_flag(STABLE_TURN_POLICY_Q2_CONTEXT_ENV) is False
+    assert _strict_env_flag(STREAMING_CONFORMER_Q2_EXPERIMENTAL_ENV, default=True) is True
+
+
+def test_streaming_q2_default_captures_every_native_supported_batch_shape(monkeypatch) -> None:
+    import duplex_kernel.listener_microbatch_serving as serving
+
+    monkeypatch.delenv(STREAMING_CONFORMER_Q2_EXPERIMENTAL_ENV, raising=False)
+    calls = []
+    tower = object()
+
+    def capture(gemma_model, **kwargs):
+        calls.append((gemma_model, kwargs))
+        return tower
+
+    monkeypatch.setattr(serving, "_capture_experimental_streaming_q2", capture)
+    model = object()
+    result, status = _build_streaming_q2_for_serving(
+        model,
+        device="cpu",
+        dtype=torch.float32,
+        max_sessions=128,
+        max_graph_batch_size=4,
+    )
+
+    assert result is tower
+    assert status == "experimental_graphs_n1_to_n4_captured"
+    assert calls == [(
+        model,
+        {
+            "device": "cpu",
+            "dtype": torch.float32,
+            "max_sessions": 128,
+            "max_graph_batch_size": 4,
+        },
+    )]
+
+
+def test_streaming_q2_explicit_opt_out_keeps_w240(monkeypatch) -> None:
+    import duplex_kernel.listener_microbatch_serving as serving
+
+    monkeypatch.setenv(STREAMING_CONFORMER_Q2_EXPERIMENTAL_ENV, "0")
+
+    def unexpected_capture(*_args, **_kwargs):
+        raise AssertionError("explicit opt-out must not attempt Q2 capture")
+
+    monkeypatch.setattr(serving, "_capture_experimental_streaming_q2", unexpected_capture)
+    result, status = _build_streaming_q2_for_serving(
+        object(),
+        device="cpu",
+        dtype=torch.float32,
+        max_sessions=128,
+        max_graph_batch_size=4,
+    )
+
+    assert result is None
+    assert status == "disabled_explicit_opt_out_w240"
+
+
+@pytest.mark.parametrize("failure", ["startup unsupported", "capture unsupported"])
+def test_streaming_q2_unsupported_startup_or_capture_keeps_w240(monkeypatch, failure) -> None:
+    import duplex_kernel.listener_microbatch_serving as serving
+
+    monkeypatch.delenv(STREAMING_CONFORMER_Q2_EXPERIMENTAL_ENV, raising=False)
+
+    def fail_capture(*_args, **_kwargs):
+        raise RuntimeError(failure)
+
+    monkeypatch.setattr(serving, "_capture_experimental_streaming_q2", fail_capture)
+    result, status = _build_streaming_q2_for_serving(
+        object(),
+        device="cpu",
+        dtype=torch.float32,
+        max_sessions=128,
+        max_graph_batch_size=4,
+    )
+
+    assert result is None
+    assert status == f"unsupported_fallback_w240: RuntimeError: {failure}"
 
 
 def test_native_control6_serving_factory_builds_mixed_policy_and_reads_frame_context() -> None:

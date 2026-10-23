@@ -433,6 +433,18 @@ def test_native1540_training_warmstarts_legacy_tracks_provenance_and_learnabilit
     assert unknown_info["context_unsupported_targets_by_source_action"][
         "authored_synthetic_audio_test:SPEAK:pre_action_context_unknown"
     ] == 1
+
+    missing_speaker_context = [dict(row) for row in original_metadata]
+    missing_speaker_context[speak_index].pop("speaker_active_at_frame_start")
+    metadata_path.write_text(json.dumps(missing_speaker_context), encoding="utf-8")
+    with pytest.raises(ValueError, match="require source-derived runtime context flags"):
+        trainer.load_stage2_feature_sequences(feature_dir, "train")
+
+    missing_user_activity = [dict(row) for row in original_metadata]
+    missing_user_activity[speak_index].pop("native_control6_user_activity_detected")
+    metadata_path.write_text(json.dumps(missing_user_activity), encoding="utf-8")
+    with pytest.raises(ValueError, match="require source-derived runtime context flags"):
+        trainer.load_stage2_feature_sequences(feature_dir, "train")
     metadata_path.write_text(json.dumps(original_metadata), encoding="utf-8")
 
     legacy_checkpoint = tmp_path / "native-control6-legacy.pt"

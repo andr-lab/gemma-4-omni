@@ -9,6 +9,26 @@ import torch
 from torch import nn
 
 
+def estimate_token_audio_frames_80ms(text: str) -> int:
+    """Estimate 80 ms CB0 frames for one token surface.
+
+    This bounded text-span heuristic is neither a phonetic duration model nor
+    a claim about client playback. Alphanumeric surfaces use their character
+    count; punctuation-only surfaces assign two units to sentence marks and
+    one to other marks.
+    """
+    if not isinstance(text, str):
+        raise TypeError("token surface must be str")
+    stripped = text.strip()
+    if not stripped:
+        return 1
+    alnum = sum(char.isalnum() for char in stripped)
+    alpha = alnum if alnum else sum(
+        2 if char in ".?!;:" else 1 for char in stripped
+    )
+    return max(1, min(6, round(alpha / 1.15)))
+
+
 def response_state_at_cursor(
     response_hidden_by_qwen_token: torch.Tensor,
     generation_step: int,
@@ -294,6 +314,7 @@ __all__ = [
     "FrameResidualQueryFiLMAdapter",
     "NormPreservingQueryFiLMAdapter",
     "apply_response_state_residual",
+    "estimate_token_audio_frames_80ms",
     "load_frame_residual_adapter",
     "project_norm_preserving_query",
     "response_state_at_cursor",

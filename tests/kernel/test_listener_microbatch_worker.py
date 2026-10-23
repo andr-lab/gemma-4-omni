@@ -4,6 +4,8 @@ import asyncio
 from concurrent.futures import Future
 from dataclasses import dataclass, replace
 import hashlib
+import json
+import logging
 from pathlib import Path
 import threading
 import time
@@ -33,7 +35,7 @@ from duplex_kernel.microbatch_contract import (
     RuntimeSignature,
 )
 from duplex_kernel.native_listener_microbatch import NativeBatchOutput, NativeBatchOutputHealth
-from duplex_kernel.turn_policy import PolicyInput
+from duplex_kernel.turn_policy import ControlAction, PolicyInput
 from training.duplex_qlora.native_control6 import ACTIONS, HIDDEN_WIDTH, NativeControl6LoRA
 
 from duplex_kernel.listener_microbatch_worker import (
@@ -302,6 +304,10 @@ class _FakeNativeBatch:
             tensor=output_tensor,
             completion_event=_FakeCompletionEvent(),
             logical_q_lens=tuple(row.logical_q_len for row in manifest.rows),
+            kv_rollback_tokens_by_row=tuple(
+                int(audio_soft.shape[1]) - int(row.logical_q_len)
+                for row in manifest.rows
+            ),
             embedded_text_input=per_layer_inputs is not None,
         )
 
@@ -367,6 +373,14 @@ class _FakeNativeBatch:
         return SimpleNamespace(
             cache_position=int(target_position),
             valid_history_tokens=int(target_position),
+        )
+
+    def session_state(self, row):
+        self._claim()
+        return SimpleNamespace(
+            current_position=int(row.cache_position),
+            valid_kv_len=int(row.valid_history_tokens),
+            native_context_id=int(row.native_context_id),
         )
 
     def verify_output_health(self, output):
@@ -2180,7 +2194,12 @@ def test_initial_text_append_rebases_once_on_owner_and_rejects_stale_or_new_gene
     assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
 
 
-def test_speaking_q2_decision_view_extends_private_fork_across_queue_ticks() -> None:
+def test_speaking_q2_decision_view_extends_private_fork_across_queue_ticks(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("DUPLEX_NATIVE_CONTROL6_TRACE", "1")
+    caplog.set_level(logging.INFO, logger=listener_microbatch_worker_module.__name__)
     rig = _rig()
     state = _state(rig.coordinator.runtime_signature, "speaking-q2-view")
     _register(rig, state)
@@ -2249,6 +2268,29 @@ def test_speaking_q2_decision_view_extends_private_fork_across_queue_ticks() -> 
     )
     assert len(rig.native.slot_fork_calls) == 1
     assert len(rig.native.metadata_rebind_calls) == 1
+    integrity_events = [
+        json.loads(record.message.partition(" ")[2])
+        for record in caplog.records
+        if record.message.startswith("[unified_kv_integrity] ")
+    ]
+    frame_events = [
+        event for event in integrity_events
+        if event.get("event") == "speaking_q2_frame_committed"
+    ]
+    assert [event["source_frame_id"] for event in frame_events] == [0, 1]
+    assert all(event["queue_open"] is True for event in frame_events)
+    assert all(event["canonical_logical_q_len"] == 0 for event in frame_events)
+    assert all(event["canonical_cursor_delta_tokens"] == 0 for event in frame_events)
+    assert all(event["canonical_audio_tokens_committed"] == 0 for event in frame_events)
+    assert all(event["native_cursor_delta_tokens"] == 0 for event in frame_events)
+    assert all(event["canonical_q0_physical_rollback_tokens"] == 2 for event in frame_events)
+    assert all(event["private_context_distinct"] is True for event in frame_events)
+    assert all(
+        event["private_native_context_id"] != event["canonical_native_context_id"]
+        for event in frame_events
+    )
+    assert frame_events[0]["queued_soft_frame_ids"] == [0]
+    assert frame_events[1]["queued_soft_frame_ids"] == [0, 1]
     cached_hidden = second_view.gemma_hidden_t.detach().clone()
     assert not [item for item in rig.native.releases if item[0].startswith("__q2view__")]
 
@@ -2314,6 +2356,113 @@ def test_speaking_q2_decision_view_extends_private_fork_across_queue_ticks() -> 
     assert len(baseline.native.slot_fork_calls) == 2
     assert len(baseline.worker._q2_decision_caches) == 0
     assert baseline.worker.stop(drain=True).result(timeout=3).stopped_cleanly
+
+
+def test_unified_kv_integrity_trace_has_separate_opt_in_and_legacy_alias(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    logger = listener_microbatch_worker_module.__name__
+    caplog.set_level(logging.INFO, logger=logger)
+    monkeypatch.delenv("DUPLEX_NATIVE_CONTROL6_TRACE", raising=False)
+    monkeypatch.delenv("DUPLEX_UNIFIED_KV_INTEGRITY_TRACE", raising=False)
+
+    ListenerMicrobatchWorker._trace_unified_kv_integrity("trace-test", "default")
+    assert not any(
+        record.message.startswith("[unified_kv_integrity] ")
+        for record in caplog.records
+    )
+
+    monkeypatch.setenv("DUPLEX_UNIFIED_KV_INTEGRITY_TRACE", "1")
+    ListenerMicrobatchWorker._trace_unified_kv_integrity("trace-test", "integrity-only")
+    assert any(
+        record.message.startswith("[unified_kv_integrity] ")
+        and json.loads(record.message.partition(" ")[2]).get("event") == "integrity-only"
+        for record in caplog.records
+    )
+
+    caplog.clear()
+    monkeypatch.setenv("DUPLEX_UNIFIED_KV_INTEGRITY_TRACE", "0")
+    monkeypatch.setenv("DUPLEX_NATIVE_CONTROL6_TRACE", "1")
+    ListenerMicrobatchWorker._trace_unified_kv_integrity("trace-test", "legacy-alias")
+    assert any(
+        record.message.startswith("[unified_kv_integrity] ")
+        and json.loads(record.message.partition(" ")[2]).get("event") == "legacy-alias"
+        for record in caplog.records
+    )
+
+
+def test_canonical_text_append_integrity_trace_records_commit_and_failure_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    rig = _rig()
+    state = _state(rig.coordinator.runtime_signature, "integrity-text-append")
+    _register(rig, state)
+    _prime_native_prefix(rig, state)
+
+    class ReadyEvent:
+        def record(self, _stream: Any) -> None:
+            return None
+
+    monkeypatch.setattr(torch.cuda, "Event", lambda **_kwargs: ReadyEvent())
+    monkeypatch.setenv("DUPLEX_UNIFIED_KV_INTEGRITY_TRACE", "1")
+    monkeypatch.setenv("DUPLEX_NATIVE_CONTROL6_TRACE", "0")
+    caplog.set_level(logging.INFO, logger=listener_microbatch_worker_module.__name__)
+
+    result = rig.worker.append_text_tokens(
+        state.session_id,
+        (701, 702),
+        expected_generation_id=state.generation_id,
+        expected_cache_position=34,
+        append_scope_id="resp-append-success",
+    ).result(timeout=4)
+    assert result.cache_position == 36
+
+    canceled = threading.Event()
+    canceled.set()
+    with pytest.raises(RuntimeError, match="canceled before native KV mutation"):
+        rig.worker.append_text_tokens(
+            state.session_id,
+            (703,),
+            expected_generation_id=state.generation_id,
+            expected_cache_position=36,
+            append_scope_id="resp-append-canceled",
+            response_cancel_event=canceled,
+        ).result(timeout=4)
+
+    records = [
+        json.loads(record.message.partition(" ")[2])
+        for record in caplog.records
+        if record.message.startswith("[unified_kv_integrity] ")
+    ]
+    committed = next(
+        item for item in records
+        if item.get("event") == "canonical_text_append"
+        and item.get("response_id") == "resp-append-success"
+    )
+    assert committed["status"] == "committed"
+    assert committed["generation_id"] == state.generation_id
+    assert committed["state_epoch_id"] == state.state_epoch_id
+    assert committed["request_q_len"] == 2
+    assert committed["cache_position_before"] == 34
+    assert committed["cache_position_after"] == 36
+    timings = committed["timings_ns"]
+    assert timings["owner_queue_wait_ns"] >= 0
+    assert timings["native_step_started_ns"] <= timings["native_step_returned_ns"]
+    assert timings["owner_completed_ns"] >= timings["native_step_returned_ns"]
+
+    failed = next(
+        item for item in records
+        if item.get("event") == "canonical_text_append"
+        and item.get("response_id") == "resp-append-canceled"
+    )
+    assert failed["status"] == "failed"
+    assert failed["request_q_len"] == 1
+    assert failed["generation_id"] == state.generation_id
+    assert failed["error_type"] == "RuntimeError"
+    assert "rolled_back_tokens_count" not in failed
+    assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
 
 
 def test_stable_turn_q2_context_reuses_queue_open_fork_across_text_appends() -> None:
@@ -2417,7 +2566,29 @@ def test_stable_turn_q2_context_reuses_queue_open_fork_across_text_appends() -> 
     assert reference.worker.stop(drain=False).result(timeout=3).stopped_cleanly
 
 
-def test_stable_turn_q2_idle_prefill_and_rollback_fallback_do_not_reanchor() -> None:
+def test_stable_turn_q2_queue_open_fails_closed_without_a_fork() -> None:
+    rig = _rig(stable_turn_policy_q2_context=True)
+    state = _state(rig.coordinator.runtime_signature, "stable-turn-q2-no-source-row")
+    _register(rig, state)
+    _prime_native_prefix(rig, state)
+    reserved_before = rig.worker._reserved_tail_tokens[state.session_id]
+    rig.worker._last_native_rows.pop(state.session_id)
+
+    with pytest.raises(RuntimeError, match="refusing to open a SPEAK queue"):
+        rig.worker.begin_assistant_audio_queue(
+            state.session_id,
+            expected_generation_id=state.generation_id,
+            expected_cache_position=34,
+            reserve_tail_tokens=0,
+        ).result(timeout=3)
+
+    assert state.session_id not in rig.worker._assistant_audio_queue_open
+    assert state.session_id not in rig.worker._q2_decision_caches
+    assert rig.worker._reserved_tail_tokens[state.session_id] == reserved_before
+    assert rig.worker.stop(drain=False).result(timeout=3).stopped_cleanly
+
+
+def test_stable_turn_q2_idle_prefill_and_rollback_fail_closed() -> None:
     rig = _rig(stable_turn_policy_q2_context=True)
     state = _state(rig.coordinator.runtime_signature, "stable-turn-q2-invalidation")
     _register(rig, state)
@@ -2489,8 +2660,8 @@ def test_stable_turn_q2_idle_prefill_and_rollback_fallback_do_not_reanchor() -> 
     assert canonical.cache_position == 36
     assert len(rig.native.slot_fork_calls) == 1
 
-    # A rollback invalidates this stable epoch. The next view may use the
-    # legacy canonical context, but the old queue epoch must never re-anchor.
+    # A rollback invalidates this stable epoch. The next policy row must fail
+    # closed rather than observing canonical Q0 after text has advanced KV.
     rig.worker.append_text_tokens(
         state.session_id,
         (913,),
@@ -2503,45 +2674,19 @@ def test_stable_turn_q2_idle_prefill_and_rollback_fallback_do_not_reanchor() -> 
         expected_cache_position=37,
         target_cache_position=34,
     ).result(timeout=4)
-    fallback1 = rig.worker.submit_tick((
+    failed_closed = rig.worker.submit_tick((
         _assistant_q0(state, 1),
     )).result(timeout=4)[state.session_id]
-    assert fallback1.decision_view is not None
-    assert fallback1.decision_view.context_mode == "legacy_fallback"
-    assert fallback1.decision_view.source_q2_frame_ids == (0, 1)
-    assert fallback1.decision_view.fork_count == 1
-    assert fallback1.decision_view.replayed_q2_count == 2
-    fallback_cache = rig.worker._q2_decision_caches[state.session_id]
-    assert fallback_cache.stable_turn_context is False
-    assert fallback_cache.base_cache_position == 34
-    assert len(rig.native.slot_fork_calls) == 2
-
-    fallback2 = rig.worker.submit_tick((
-        _assistant_q0(state, 2),
-    )).result(timeout=4)[state.session_id]
-    assert fallback2.decision_view is not None
-    assert fallback2.decision_view.context_mode == "legacy_fallback"
-    assert fallback2.decision_view.source_q2_frame_ids == (0, 1, 2)
-    assert fallback2.decision_view.fork_count == 0
-    assert fallback2.decision_view.replayed_q2_count == 1
-    assert len(rig.native.slot_fork_calls) == 2
-    assert rig.worker._q2_decision_caches[state.session_id].stable_turn_context is False
-
-    queued = rig.worker._queued_audio_soft[state.session_id]
-    for index, item in enumerate(tuple(queued)):
-        queued[index] = replace(
-            item,
-            audio_soft_tokens=_CudaProvenanceTensor(item.audio_soft_tokens),
-        )
-    drained = rig.worker.drain_queued_audio(
-        state.session_id,
-        expected_generation_id=state.generation_id,
-        expected_cache_position=34,
-    ).result(timeout=4)
-    assert drained.cache_position == drained.valid_history_tokens == 40
-    assert state.session_id not in rig.worker._q2_decision_caches
-    assert len([row for row in rig.native.releases if row[0].startswith("__q2view__")]) == 2
-    assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
+    assert failed_closed.decision_view is None
+    assert failed_closed.policy_decision is not None
+    assert failed_closed.policy_decision.action is ControlAction.CONTINUE
+    assert failed_closed.policy_decision.reason == "stable_q2_context_unavailable_fail_closed"
+    assert failed_closed.policy_decision.diagnostics["policy_head_skipped"] is True
+    assert "refusing canonical Q0 policy fallback" in failed_closed.decision_view_unavailable_reason
+    canonical_after_failure = rig.worker.session_state(state.session_id).result(timeout=3)
+    assert canonical_after_failure.cache_position == 34
+    assert len(rig.native.slot_fork_calls) == 1
+    assert rig.worker.stop(drain=False).result(timeout=3).stopped_cleanly
 
 
 def test_exact_zero_speaking_queue_tick_skips_view_then_voiced_tick_catches_up() -> None:
@@ -3436,7 +3581,12 @@ def test_backchannel_native_slot_fork_error_and_cancel_leave_primary_unchanged()
     assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
 
 
-def test_cancel_releases_close_reservation_and_drains_queued_q2_into_open_user_turn() -> None:
+def test_cancel_releases_close_reservation_and_drains_queued_q2_into_open_user_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("DUPLEX_UNIFIED_KV_INTEGRITY_TRACE", "1")
+    caplog.set_level(logging.INFO, logger=listener_microbatch_worker_module.__name__)
     rig = _rig()
     _set_fixture_capacity(rig, 40)
     state = _state(rig.coordinator.runtime_signature, "unified-reserve-cancel")
@@ -3448,6 +3598,7 @@ def test_cancel_releases_close_reservation_and_drains_queued_q2_into_open_user_t
         expected_generation_id=state.generation_id,
         expected_cache_position=34,
         reserve_tail_tokens=4,
+        response_id="response-rollback-trace",
     ).result(timeout=3)
     rig.worker.submit_tick((_assistant_q0(state),)).result(timeout=4)
     rig.worker.append_text_tokens(
@@ -3477,7 +3628,87 @@ def test_cancel_releases_close_reservation_and_drains_queued_q2_into_open_user_t
     assert (drained.next_frame_id, drained.state_version, drained.sequence_position) == (1, 1, 1)
     assert rig.native is not None
     assert rig.native.manifests[-1].rows[0].frame_id == 1
+    integrity_events = [
+        json.loads(record.message.partition(" ")[2])
+        for record in caplog.records
+        if record.message.startswith("[unified_kv_integrity] ")
+    ]
+    rollback = next(
+        event for event in integrity_events
+        if event.get("event") == "assistant_branch_rollback_committed"
+    )
+    assert rollback["response_id"] == "response-rollback-trace"
+    assert rollback["requested_exclusive_target"] == 34
+    assert rollback["coordinator_cursor_before"] == 35
+    assert rollback["coordinator_cursor_after"] == 34
+    assert rollback["rolled_back_tokens_count"] == 1
+    drain = next(
+        event for event in integrity_events
+        if event.get("event") == "queued_audio_drain_committed"
+    )
+    assert drain["source_frame_ids"] == [0]
+    assert drain["reinjected_frame_ids"] == [0]
+    assert drain["user_turn_already_open"] is True
+    assert drain["audio_boa_reused_existing_user_turn"] is True
+    assert drain["coordinator_cursor_before"] == 34
+    assert drain["coordinator_cursor_after"] == 36
+    assert drain["q2_tokens_reinjected"] == 2
     assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
+
+
+def test_failed_assistant_rollback_trace_omits_rolled_back_token_count(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("DUPLEX_NATIVE_CONTROL6_TRACE", "1")
+    caplog.set_level(logging.INFO, logger=listener_microbatch_worker_module.__name__)
+    rig = _rig()
+    state = _state(rig.coordinator.runtime_signature, "unified-rollback-trace-failure")
+    _register(rig, state)
+    _prime_native_prefix(rig, state)
+    rig.worker.begin_assistant_audio_queue(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        expected_cache_position=34,
+        reserve_tail_tokens=2,
+        response_id="response-rollback-failure",
+    ).result(timeout=3)
+    rig.worker.append_text_tokens(
+        state.session_id,
+        (202,),
+        expected_generation_id=state.generation_id,
+        expected_cache_position=34,
+        consume_reserved_tokens=1,
+    ).result(timeout=4)
+
+    assert rig.native is not None
+
+    def fail_rewind(_row, *, target_position):
+        raise RuntimeError(f"injected rewind failure at {target_position}")
+
+    rig.native.rewind_session_async = fail_rewind
+    with pytest.raises(RuntimeError, match="assistant branch rollback failed after native CAS"):
+        rig.worker.rollback_assistant_branch(
+            state.session_id,
+            expected_generation_id=state.generation_id,
+            expected_cache_position=35,
+            target_cache_position=34,
+        ).result(timeout=4)
+
+    failure = next(
+        json.loads(record.message.partition(" ")[2])
+        for record in caplog.records
+        if record.message.startswith("[unified_kv_integrity] ")
+        and json.loads(record.message.partition(" ")[2]).get("event")
+        == "assistant_branch_rollback_failed"
+    )
+    assert failure["response_id"] == "response-rollback-failure"
+    assert failure["native_cursor_before"] == 35
+    assert failure["requested_exclusive_target"] == 34
+    assert "rolled_back_tokens_count" not in failure
+    stopped = rig.worker.stop(drain=False).result(timeout=3)
+    assert stopped.status == "failed"
+    assert rig.worker._thread is None or not rig.worker._thread.is_alive()
 
 
 def test_empty_assistant_queue_drain_releases_reserved_tail() -> None:

@@ -469,6 +469,7 @@ class StreamingDialogueStep:
     start_after_s: float = 0.0
     after_first_consumed_s: Optional[float] = None
     commit_after: bool = True
+    source_path: Optional[str] = None
 
     def __post_init__(self) -> None:
         if not self.step_id:
@@ -513,39 +514,64 @@ def streaming_scenario_from_fixtures(
     normalized = str(name).strip().upper()
     fixture_dir = Path(fixture_dir)
     if normalized == "A":
+        initial_path = fixture_dir / "A_initial_milano.wav"
+        correction_path = fixture_dir / "A_correction_torino.wav"
         return StreamingDialogueScenario(
             scenario_id="A_milano_correction_torino",
             system_prompt="Sei un assistente AI accogliente. Rispondi in italiano.",
             steps=[
                 StreamingDialogueStep(
                     step_id="initial_milano",
-                    pcm_16k=read_scenario_audio_wav(fixture_dir / "A_initial_milano.wav"),
+                    pcm_16k=read_scenario_audio_wav(initial_path),
                     expected_text="Consigliami un itinerario di tre giorni a Milano",
+                    source_path=str(initial_path.resolve()),
                 ),
                 StreamingDialogueStep(
                     step_id="correction_torino",
-                    pcm_16k=read_scenario_audio_wav(fixture_dir / "A_correction_torino.wav"),
+                    pcm_16k=read_scenario_audio_wav(correction_path),
                     expected_text="Scusa, intendevo dire Torino, non Milano",
                     after_first_consumed_s=1.5,
+                    source_path=str(correction_path.resolve()),
                 ),
             ],
         )
     if normalized == "B":
+        utterance_path = fixture_dir / "B_docker_15s_pause300.wav"
         return StreamingDialogueScenario(
             scenario_id="B_docker_long_utterance",
             system_prompt="Sei un assistente AI accogliente. Rispondi in italiano.",
             steps=[
                 StreamingDialogueStep(
                     step_id="docker_15s_with_pause",
-                    pcm_16k=read_scenario_audio_wav(fixture_dir / "B_docker_15s_pause300.wav"),
+                    pcm_16k=read_scenario_audio_wav(utterance_path),
                     expected_text=(
                         "Sto avviando il servizio. Docker è il software per i container. "
                         "Uso Python e CUDA."
                     ),
+                    source_path=str(utterance_path.resolve()),
                 ),
             ],
         )
     raise ValueError(f"Scenario streaming sconosciuto: {name!r}; usare A o B")
+
+
+def validate_scenario_initial_sample_count(
+    scenario: StreamingDialogueScenario,
+    expected_sample_count: Optional[int],
+) -> None:
+    """Fail before connecting when a run requires an exact initial WAV duration."""
+    if expected_sample_count is None:
+        return
+    if expected_sample_count <= 0:
+        raise ValueError("expected_initial_sample_count deve essere positivo")
+    first = scenario.steps[0]
+    actual = int(first.pcm_16k.size)
+    if actual != expected_sample_count:
+        source = first.source_path or "<scenario PCM>"
+        raise ValueError(
+            f"Initial scenario input {source} has {actual} samples at {SAMPLE_RATE_INPUT} Hz; "
+            f"expected {expected_sample_count} samples at {SAMPLE_RATE_INPUT} Hz"
+        )
 
 
 def decode_response_audio(event: Dict[str, Any]) -> DecodedAudioPacket:
@@ -677,6 +703,15 @@ class DialogueOrchestrator:
                 "voice_profile": self.config.streaming_voice_profile,
                 "frame_pacing_s": self.config.frame_pacing_s,
                 "playback_consumption_semantics": "logical_client_device_buffer",
+                "input_fixtures": [
+                    {
+                        "step_id": step.step_id,
+                        "resolved_input_path": step.source_path,
+                        "sample_rate": SAMPLE_RATE_INPUT,
+                        "sample_count": int(step.pcm_16k.size),
+                    }
+                    for step in scenario.steps
+                ],
             },
         )
         ws_ctx = await self._connect_ws(self.config.ws_url)
@@ -700,7 +735,9 @@ class DialogueOrchestrator:
             first_pcm_consumed = asyncio.Event()
             frame_consumed_event = asyncio.Event()
             send_lock = asyncio.Lock()
+            input_frame_lock = asyncio.Lock()
             event_lock = asyncio.Lock()
+            next_input_frame_deadline = 0.0
             state: Dict[str, Any] = {
                 "input_active": False,
                 "input_frame_id": 0,
@@ -716,6 +753,8 @@ class DialogueOrchestrator:
                 "policy_diagnostics": [],
                 "consumed_acknowledgements": [],
                 "commit_timestamps_ns": [],
+                "pending_committed_steps": {},
+                "response_pending_steps": {},
                 "server_errors": [],
                 "last_event_ns": time.monotonic_ns(),
                 "last_commit_ns": None,
@@ -823,73 +862,98 @@ class DialogueOrchestrator:
                 source_sample_start: Optional[int] = None,
                 source_sample_end: Optional[int] = None,
                 padded_samples: int = 0,
-            ) -> None:
-                frame_id = int(state["input_frame_id"])
-                ingress_start = int(state["ingress_sample_cursor"])
-                ingress_end = ingress_start + FRAME_SAMPLES_16K
-                step_timing = state["step_schedule"].get(step_id, {})
-                is_correction_first_sample = (
-                    source == "scenario_audio"
-                    and source_sample_start == 0
-                    and step_timing.get("reference") == "first_client_pcm_consumed"
-                )
-                if state.get("ingress_acks_observed", False):
-                    while (
-                        state["input_frame_id"] - state.get("frames_consumed", 0) >= 3
-                        and not stop_tasks.is_set()
-                    ):
-                        frame_consumed_event.clear()
-                        try:
-                            await asyncio.wait_for(frame_consumed_event.wait(), timeout=0.1)
-                        except asyncio.TimeoutError:
-                            break
+                idle_only: bool = False,
+            ) -> bool:
+                nonlocal next_input_frame_deadline
+                async with input_frame_lock:
+                    if idle_only and (state["input_active"] or stop_tasks.is_set()):
+                        return False
+                    pacing_delay = next_input_frame_deadline - time.monotonic()
+                    if pacing_delay > 0.0:
+                        await asyncio.sleep(pacing_delay)
+                    if idle_only and (state["input_active"] or stop_tasks.is_set()):
+                        return False
 
-                message = {
-                    "type": "input_audio_buffer.append",
-                    "audio": base64.b64encode(float_to_pcm16_bytes(frame)).decode("ascii"),
-                }
-                async with send_lock:
-                    if is_correction_first_sample:
-                        # Snapshot the old playback tail and put the correction frame
-                        # on the wire under the same event fence. A cancel cannot
-                        # make the snapshot stale between those two operations.
-                        async with event_lock:
-                            step_timing["old_response_ids_at_first_correction_sample"] = sorted(
-                                {chunk["response_id"] for chunk in shadow_chunks}
-                            )
+                    if state.get("ingress_acks_observed", False):
+                        while (
+                            state["input_frame_id"] - state.get("frames_consumed", 0) >= 3
+                            and not stop_tasks.is_set()
+                        ):
+                            frame_consumed_event.clear()
+                            try:
+                                await asyncio.wait_for(frame_consumed_event.wait(), timeout=0.1)
+                            except asyncio.TimeoutError:
+                                break
+                            if idle_only and (state["input_active"] or stop_tasks.is_set()):
+                                return False
+                    if idle_only and (state["input_active"] or stop_tasks.is_set()):
+                        return False
+
+                    message = {
+                        "type": "input_audio_buffer.append",
+                        "audio": base64.b64encode(float_to_pcm16_bytes(frame)).decode("ascii"),
+                    }
+                    step_timing = state["step_schedule"].get(step_id, {})
+                    is_correction_first_sample = (
+                        source == "scenario_audio"
+                        and source_sample_start == 0
+                        and step_timing.get("reference") == "first_client_pcm_consumed"
+                    )
+                    async with send_lock:
+                        # Recheck after every potentially blocking wait. Idle silence
+                        # must never take a frame ID after a WAV producer has resumed.
+                        if idle_only and (state["input_active"] or stop_tasks.is_set()):
+                            return False
+                        frame_id = int(state["input_frame_id"])
+                        ingress_start = int(state["ingress_sample_cursor"])
+                        ingress_end = ingress_start + FRAME_SAMPLES_16K
+                        if is_correction_first_sample:
+                            # Snapshot the old playback tail and put the correction frame
+                            # on the wire under the same event fence. A cancel cannot
+                            # make the snapshot stale between those two operations.
+                            async with event_lock:
+                                if idle_only and (state["input_active"] or stop_tasks.is_set()):
+                                    return False
+                                step_timing["old_response_ids_at_first_correction_sample"] = sorted(
+                                    {chunk["response_id"] for chunk in shadow_chunks}
+                                )
+                                await ws.send(json.dumps(message))
+                                sent_ns = time.monotonic_ns()
+                                step_timing["first_sample_sent_ns"] = sent_ns
+                        else:
                             await ws.send(json.dumps(message))
                             sent_ns = time.monotonic_ns()
-                            step_timing["first_sample_sent_ns"] = sent_ns
-                    else:
-                        await ws.send(json.dumps(message))
-                        sent_ns = time.monotonic_ns()
-                    self.event_logger.log(
-                        "raw_ws_send",
-                        speaker="user",
-                        turn_index=frame_id,
-                        details=message,
-                    )
-                    self.recorder.record_input("A", frame)
-                    self.event_logger.log(
-                        "input_audio_frame_sent",
-                        speaker="user",
-                        turn_index=frame_id,
-                        details={
-                            "ingress_frame_id": frame_id,
-                            "source": source,
-                            "step_id": step_id,
-                            "sent_ns": sent_ns,
-                            "sample_rate": SAMPLE_RATE_INPUT,
-                            "sample_count": FRAME_SAMPLES_16K,
-                            "ingress_start_sample": ingress_start,
-                            "ingress_end_sample": ingress_end,
-                            "source_start_sample": source_sample_start,
-                            "source_end_sample": source_sample_end,
-                            "padded_samples": int(padded_samples),
-                        },
-                    )
-                state["input_frame_id"] = frame_id + 1
-                state["ingress_sample_cursor"] = ingress_end
+                        state["input_frame_id"] = frame_id + 1
+                        state["ingress_sample_cursor"] = ingress_end
+                        next_input_frame_deadline = sent_ns / 1e9 + max(
+                            0.0, float(self.config.frame_pacing_s)
+                        )
+                        self.event_logger.log(
+                            "raw_ws_send",
+                            speaker="user",
+                            turn_index=frame_id,
+                            details=message,
+                        )
+                        self.recorder.record_input("A", frame)
+                        self.event_logger.log(
+                            "input_audio_frame_sent",
+                            speaker="user",
+                            turn_index=frame_id,
+                            details={
+                                "ingress_frame_id": frame_id,
+                                "source": source,
+                                "step_id": step_id,
+                                "sent_ns": sent_ns,
+                                "sample_rate": SAMPLE_RATE_INPUT,
+                                "sample_count": FRAME_SAMPLES_16K,
+                                "ingress_start_sample": ingress_start,
+                                "ingress_end_sample": ingress_end,
+                                "source_start_sample": source_sample_start,
+                                "source_end_sample": source_sample_end,
+                                "padded_samples": int(padded_samples),
+                            },
+                        )
+                    return True
 
             async def record_asr(step: StreamingDialogueStep) -> None:
                 transcript, available, error = await self._transcribe_input_audio(step.pcm_16k)
@@ -956,7 +1020,8 @@ class DialogueOrchestrator:
                                 **schedule,
                             },
                         )
-                        state["input_active"] = True
+                        async with input_frame_lock:
+                            state["input_active"] = True
                         total_frames = math.ceil(step.pcm_16k.size / FRAME_SAMPLES_16K)
                         for frame_index in range(total_frames):
                             source_start = frame_index * FRAME_SAMPLES_16K
@@ -972,8 +1037,6 @@ class DialogueOrchestrator:
                                 source_sample_end=source_end,
                                 padded_samples=FRAME_SAMPLES_16K - int(source_chunk.size),
                             )
-                            if frame_index + 1 < total_frames:
-                                await asyncio.sleep(self.config.frame_pacing_s)
 
                         if step.commit_after:
                             async with send_lock:
@@ -987,6 +1050,7 @@ class DialogueOrchestrator:
                                 )
                             state["last_commit_ns"] = commit_ns
                             state["commit_timestamps_ns"].append(commit_ns)
+                            state["pending_committed_steps"][step.step_id] = commit_ns
                             state["step_schedule"][step.step_id]["commit_ns"] = commit_ns
                             self.event_logger.log(
                                 "input_audio_buffer_commit_sent",
@@ -998,7 +1062,8 @@ class DialogueOrchestrator:
                                     "ingress_frame_count": int(state["input_frame_id"]),
                                 },
                             )
-                        state["input_active"] = False
+                        async with input_frame_lock:
+                            state["input_active"] = False
                         transcription_tasks.append(asyncio.create_task(record_asr(step)))
                     producer_finished.set()
                 except asyncio.CancelledError:
@@ -1007,7 +1072,8 @@ class DialogueOrchestrator:
                     state["producer_errors"].append(f"{type(exc).__name__}: {exc}")
                     state["stop_reason"] = "input_error"
                 finally:
-                    state["input_active"] = False
+                    async with input_frame_lock:
+                        state["input_active"] = False
                     producer_finished.set()
 
             async def playback_reader() -> None:
@@ -1076,14 +1142,25 @@ class DialogueOrchestrator:
                 while not stop_tasks.is_set():
                     await asyncio.sleep(self.config.frame_pacing_s)
                     if (
-                        (state["active_responses"] or playback.pending_samples > 0)
+                        (state["pending_committed_steps"] or state["active_responses"]
+                         or playback.pending_samples > 0)
                         and not state["input_active"]
-                        and (
-                            not state.get("ingress_acks_observed", False)
-                            or state["input_frame_id"] - state.get("frames_consumed", 0) < 3
-                        )
                     ):
-                        await send_input_frame(silence, source="assistant_playback_silence")
+                        pending_turns = state["pending_committed_steps"]
+                        if pending_turns:
+                            step_id = max(pending_turns, key=pending_turns.get)
+                            await send_input_frame(
+                                silence,
+                                source="committed_turn_silence",
+                                step_id=step_id,
+                                idle_only=True,
+                            )
+                        else:
+                            await send_input_frame(
+                                silence,
+                                source="assistant_playback_silence",
+                                idle_only=True,
+                            )
 
             producer_task = asyncio.create_task(input_producer())
             playback_task = asyncio.create_task(playback_reader())
@@ -1111,6 +1188,7 @@ class DialogueOrchestrator:
                         and not state["active_responses"]
                         and playback.pending_samples == 0
                         and ack_queue.empty()
+                        and not state["pending_committed_steps"]
                     )
                     if completion_ready:
                         state["stop_reason"] = "response_terminal"
@@ -1119,6 +1197,8 @@ class DialogueOrchestrator:
                         producer_finished.is_set()
                         and not state["active_responses"]
                         and playback.pending_samples == 0
+                        and not state["pending_committed_steps"]
+                        and ack_queue.empty()
                         and now_ns - last_event_ns >= quiet_timeout_ns
                     ):
                         state["stop_reason"] = "quiet_timeout"
@@ -1147,6 +1227,16 @@ class DialogueOrchestrator:
                                 playback.begin_response(response_id)
                                 shadow_begin_response(response_id)
                             state["active_responses"].add(response_id)
+                            pending_commits = [
+                                (step_id, int(commit_ns))
+                                for step_id, commit_ns in state["pending_committed_steps"].items()
+                                if int(commit_ns) <= received_ns
+                            ]
+                            if pending_commits:
+                                pending_step_id, _pending_commit_ns = max(
+                                    pending_commits, key=lambda item: item[1]
+                                )
+                                state["response_pending_steps"][response_id] = pending_step_id
                             response = state["responses"].setdefault(response_id, {
                                 "response_id": response_id,
                                 "created_ns": received_ns,
@@ -1181,6 +1271,30 @@ class DialogueOrchestrator:
                         if state["first_audio_delta_ns"] is None:
                             state["first_audio_delta_ns"] = received_ns
                         packet = decode_playback_packet(msg)
+                        pending_step_id = state["response_pending_steps"].get(packet.response_id)
+                        if pending_step_id is None:
+                            pending_commits = [
+                                (step_id, int(commit_ns))
+                                for step_id, commit_ns in state["pending_committed_steps"].items()
+                                if int(commit_ns) <= received_ns
+                            ]
+                            if pending_commits:
+                                pending_step_id, _pending_commit_ns = max(
+                                    pending_commits, key=lambda item: item[1]
+                                )
+                                state["response_pending_steps"][packet.response_id] = pending_step_id
+                        if pending_step_id in state["pending_committed_steps"]:
+                            pending_commit_ns = state["pending_committed_steps"].pop(pending_step_id)
+                            self.event_logger.log(
+                                "committed_turn_first_audio_available",
+                                speaker="assistant",
+                                details={
+                                    "step_id": pending_step_id,
+                                    "commit_ns": pending_commit_ns,
+                                    "response_id": packet.response_id,
+                                    "first_audio_delta_received_ns": received_ns,
+                                },
+                            )
                         async with event_lock:
                             accepted = playback.enqueue_packet(
                                 response_id=packet.response_id,
@@ -1454,6 +1568,10 @@ class DialogueOrchestrator:
             "status": (
                 "COMPLETED" if state["stop_reason"] == "response_terminal"
                 else "INCOMPLETE" if state["stop_reason"] == "quiet_timeout"
+                else "FAILED" if (
+                    state["stop_reason"] == "max_duration"
+                    and state["pending_committed_steps"]
+                )
                 else "STOPPED"
             ),
             "mode": "single_session_streaming",
@@ -1465,6 +1583,7 @@ class DialogueOrchestrator:
             "consumed_acknowledgements": state["consumed_acknowledgements"],
             "policy_diagnostics": state["policy_diagnostics"],
             "server_errors": state["server_errors"],
+            "committed_turns_awaiting_first_audio": sorted(state["pending_committed_steps"]),
             "playback_shadow_tracker_errors": state["shadow_tracker_errors"],
             "last_consumed_pcm_ns_by_response": state["last_consumed_ns_by_response"],
             "timing": {
@@ -2669,11 +2788,38 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--max-duration-s", type=float, default=120.0)
     parser.add_argument("--silence-timeout-s", type=float, default=3.0)
     parser.add_argument("--frame-pacing-s", type=float, default=0.080)
+    parser.add_argument(
+        "--expected-initial-sample-count",
+        type=int,
+        default=None,
+        help="Require this exact sample count for the first 16 kHz fixture before opening WebSocket",
+    )
     args = parser.parse_args(argv)
 
     scenario = streaming_scenario_from_fixtures(args.stream_scenario, args.fixture_dir)
+    scenario_id = getattr(scenario, "scenario_id", str(args.stream_scenario))
+    steps = getattr(scenario, "steps", [])
+    fixture_summary = {
+        "event_type": "scenario_fixture_resolved",
+        "scenario_id": scenario_id,
+        "steps": [
+            {
+                "step_id": getattr(step, "step_id", None),
+                "resolved_input_path": getattr(step, "source_path", None),
+                "sample_rate": SAMPLE_RATE_INPUT,
+                "sample_count": int(getattr(getattr(step, "pcm_16k", None), "size", 0)),
+            }
+            for step in steps
+        ],
+    }
+    print(json.dumps(fixture_summary, ensure_ascii=False), flush=True)
+    try:
+        validate_scenario_initial_sample_count(scenario, args.expected_initial_sample_count)
+    except ValueError as exc:
+        print(f"scenario fixture rejected before WebSocket: {exc}", file=sys.stderr, flush=True)
+        return 2
     output_dir = args.output_dir or Path("artifacts") / (
-        f"streaming_dialogue_{scenario.scenario_id}_{time.strftime('%Y%m%d_%H%M%S')}"
+        f"streaming_dialogue_{scenario_id}_{time.strftime('%Y%m%d_%H%M%S')}"
     )
     config = DialogueConfig(
         max_duration_s=args.max_duration_s,

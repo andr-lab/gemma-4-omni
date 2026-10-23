@@ -33,7 +33,7 @@ from numbers import Integral
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 import numpy as np
 import torch
@@ -94,6 +94,7 @@ from duplex_kernel.frame_residual_adapter import (
     apply_response_state_residual,
     load_frame_residual_adapter,
 )
+from duplex_kernel.session import SpanAlignedSpeechCursor
 from duplex_kernel.audio_response_protocol import (
     AUDIO_RESPONSE_ACTIONS,
     AUDIO_RESPONSE_PROTOCOL_V2,
@@ -2865,6 +2866,12 @@ class PipelineEngine:
                 f"(numel={speaker_embedding.numel()}, expected={expected_speaker_dim})"
             )
         frame_residual_warmup = getattr(self, "frame_residual_adapter", None) is not None
+        frame_residual_warmup_texts = tuple(
+            warmup_say[int(token.char_span[0]) : int(token.char_span[1])]
+            for token in warmup_collector.say_tokens
+        ) if frame_residual_warmup else None
+        if frame_residual_warmup and "".join(frame_residual_warmup_texts or ()) != warmup_say:
+            raise RuntimeError("direct v2 warmup SAY token spans do not reconstruct visible text")
         if frame_residual_warmup:
             warmup_prefix = torch.empty(
                 (1, 0, 2048), device=self.device, dtype=self.dtype
@@ -2928,6 +2935,7 @@ class PipelineEngine:
                 frame_residual_response_hidden=(
                     say_hidden if frame_residual_warmup else None
                 ),
+                frame_residual_response_texts=frame_residual_warmup_texts,
             )
             if self.talker_q1_compile_status == "warming":
                 if self._talker_q1_compile_warmup_calls < 3:
@@ -2953,6 +2961,7 @@ class PipelineEngine:
                 frame_residual_response_hidden=(
                     say_hidden if frame_residual_warmup else None
                 ),
+                frame_residual_response_texts=frame_residual_warmup_texts,
             )
         self._native_q1_startup_warmup_active = False
         if warmup_audio.size and not np.isfinite(warmup_audio).all():
@@ -6246,6 +6255,7 @@ class PipelineEngine:
              live_qwen_text_stream: Any | None = None,
              live_frame_residual_hidden_stream: Any | None = None,
              frame_residual_response_hidden: torch.Tensor | None = None,
+             frame_residual_response_texts: list[str] | tuple[str, ...] | None = None,
              listener_admission_wait: Callable[[], Any] | None = None,
              quality_diagnostic: dict[str, Any] | None = None,
              talk_context: Any | None = None) -> np.ndarray:
@@ -6300,6 +6310,15 @@ class PipelineEngine:
                 or int(frame_residual_response_hidden.shape[-1]) != 1536
             ):
                 raise ValueError("frame residual response hidden must have shape (1,T,1536)")
+            if frame_residual_response_texts is not None:
+                if (
+                    len(frame_residual_response_texts)
+                    != int(frame_residual_response_hidden.shape[1])
+                    or any(not isinstance(text, str) for text in frame_residual_response_texts)
+                ):
+                    raise ValueError(
+                        "frame residual response texts must align one-to-one with hidden rows"
+                    )
         if live_qwen_text_stream is not None:
             if raw_text_token_ids is None or len(raw_text_token_ids) != 1:
                 raise ValueError("live Qwen response requires only token 0 in prefill")
@@ -6309,6 +6328,22 @@ class PipelineEngine:
                 raise ValueError("live Qwen text tail cannot be combined with static trailing hiddens")
         if live_frame_residual_hidden_stream is not None and frame_residual_adapter is None:
             raise RuntimeError("live response hidden requires a loaded frame residual adapter")
+
+        frame_residual_span_cursor: SpanAlignedSpeechCursor | None = None
+        if (
+            frame_residual_response_hidden is not None
+            and frame_residual_response_texts is not None
+        ):
+            frame_residual_span_cursor = SpanAlignedSpeechCursor(
+                generation_id=int(generation_id or 0),
+            )
+            for token_index, token_text in enumerate(frame_residual_response_texts):
+                frame_residual_span_cursor.append(
+                    token_id=token_index,
+                    token_text=token_text,
+                    hidden=frame_residual_response_hidden[:, token_index : token_index + 1, :],
+                )
+            frame_residual_span_cursor.close()
 
         def talk_stopped() -> bool:
             context_cancelled = (
@@ -6572,11 +6607,13 @@ class PipelineEngine:
         past_kv = out_pfx.past_key_values
         if talk_context is not None:
             talk_context.qwen_kv = past_kv
-        ack_initial_text = getattr(live_qwen_text_stream, "ack_initial_token", None)
-        if callable(ack_initial_text):
+        consume_initial_text = getattr(live_qwen_text_stream, "consume_initial_token", None)
+        if not callable(consume_initial_text):
+            consume_initial_text = getattr(live_qwen_text_stream, "ack_initial_token", None)
+        if callable(consume_initial_text):
             # The initial ID is now in the successful dynamic Qwen prefill;
-            # only this point commits its source Gemma packet to the cursor.
-            ack_initial_text()
+            # this releases FIFO decode pressure, but does not move the PCM ACK.
+            consume_initial_text()
         native_executor = None
         if native_v2_talker:
             # The native context is private to this response.  It imports the
@@ -6654,6 +6691,14 @@ class PipelineEngine:
                     response_states,
                     getattr(live_state, "producer_event", None),
                 )
+            elif frame_residual_span_cursor is not None:
+                selected = frame_residual_span_cursor.select(
+                    generation_step,
+                    generation_id=int(generation_id or 0),
+                    segment_id=0,
+                )
+                response_states = selected.span.hidden
+                live_tail_hold = bool(selected.tail_hold)
             if adapter is None or response_states is None:
                 return query
             if live_state is not None:
@@ -6698,7 +6743,7 @@ class PipelineEngine:
                     live_state.qwen_token_id, live_state.packet_token_index,
                     live_state.packet_token_count, bool(live_state.tail_hold),
                 )
-            if live_state is not None:
+            if live_state is not None or frame_residual_span_cursor is not None:
                 base_query = query.detach().clone()
                 conditioned, tail_hold = _apply_live_frame_residual(
                     adapter,
@@ -7428,11 +7473,17 @@ class PipelineEngine:
             if talk_context is not None:
                 talk_context.qwen_kv = past_kv
             if live_text_token_pending and live_qwen_text_stream is not None:
-                ack_trailing_text = getattr(live_qwen_text_stream, "ack_trailing_token", None)
-                if callable(ack_trailing_text):
+                consume_trailing_text = getattr(
+                    live_qwen_text_stream, "consume_trailing_token", None
+                )
+                if not callable(consume_trailing_text):
+                    consume_trailing_text = getattr(
+                        live_qwen_text_stream, "ack_trailing_token", None
+                    )
+                if callable(consume_trailing_text):
                     # Keep the packet head and its cursor in flight until Qwen
-                    # has actually committed this text ID through Q1.
-                    ack_trailing_text()
+                    # has actually ingested this text ID through Q1; PCM ACK is separate.
+                    consume_trailing_text()
             last_h = q1_hidden
             frame_id += 1
 
