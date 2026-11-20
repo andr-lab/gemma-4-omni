@@ -1,0 +1,156 @@
+# RICHIESTA DIAGNOSI ARCHITETTURALE E CONTRATTI: GPT 6.1 SOL (MEDIUM EFFORT)
+
+## 1. Stato del Sistema e Contesto di Esecuzione
+Siamo nella pipeline full-duplex omni per Gemma 4 su host Mondaini (NVIDIA GeForce RTX 3090 24GB VRAM, Docker container `gemma4-speech-s2s-readyframes-20261102`).
+Abbiamo implementato la tua precedente architettura di ammissione cooperativa a quanti (`compute_quantum` con condition `_dispatch_idle`, `_inflight_sessions` e `admit_listener` distribuito per ogni singolo step GPU in `engine.py`), verificata con 122/122 test unitari superati in Docker.
+
+Abbiamo eseguito la suite di accettazione a 3 run consecutive (`python3 tools/run_acceptance_suite.py --runs 3 --container gemma4-speech-s2s-readyframes-20261102 --execution docker`).
+
+### Risultato Clave:
+- **Run 3 è COMPLETAMENTE VERDE (PASS):**
+  - `overall_status: PASS`
+  - `evidence_gaps: []`
+  - `errors: []`
+  - Tutti i 4 turni completati regolarmente (risposta lunga da ~55s con streaming continuo, barge-in / YIELD con rollback causale, memory follow-up, closure).
+  - Telemetria VRAM post-drain verificata e bounded (crescita VRAM allocated e reserved rigorosamente entro i budget).
+  - Tutti gli ACK gap e TTFT entro le soglie di accettazione!
+
+Tuttavia, prima di Run 3:
+- **Run 1 ha fallito** durante il barge-in / revisione per un errore di ciclo di vita nel decoder nativo:
+  `RuntimeError: native generation session failed; close it before reuse`
+- **Run 2 ha fallito** per un singolo picco di ACK gap al frame finale della richiesta lunga:
+  `EvidenceError: long response microphone ACK gap 182.3ms reached the 160.0ms limit` (Frame 1128: gap 182.27 ms).
+
+Per soddisfare il requisito di **3 esecuzioni consecutive PASS**, dobbiamo comprendere ed eliminare deterministicamente queste due fragilità.
+
+---
+
+## 2. Errore 1 (Run 1): Ciclo di Vita di `UnifiedNativeDecoder` durante Revisione / Cancellazione
+
+### 2.1 Traceback Esatto
+Dall'estratto di `server.log` (linee 4310-4320) di Run 1:
+```
+Traceback (most recent call last):
+  File "/workspace/duplex_kernel/server.py", line 9798, in produce_response
+    result = await future
+  File "/opt/conda/lib/python3.11/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/workspace/duplex_kernel/server.py", line 9649, in infer_ws
+    result = run_response(...)
+  File "/workspace/duplex_kernel/server.py", line 2782, in run_response
+    return _server_response_run_response(...)
+  File "/workspace/duplex_kernel/server_response_runtime.py", line 2553, in run_response
+    think = resume()
+  File "/workspace/duplex_kernel/server_unified_thinker.py", line 1187, in run_controller_to_completion
+    step = advance_controller(lambda _progress: False)
+  File "/workspace/duplex_kernel/server_unified_thinker.py", line 1176, in advance_controller
+    return asyncio.run(session_decoder.advance(...))
+  File "/workspace/duplex_kernel/unified_native_decoder.py", line 503, in advance
+    decoder, state = self._live()
+  File "/workspace/duplex_kernel/unified_native_decoder.py", line 250, in _live
+    raise RuntimeError("native generation session failed; close it before reuse")
+RuntimeError: native generation session failed; close it before reuse
+```
+
+### 2.2 Analisi del Meccanismo
+In `unified_native_decoder.py`:
+- Linea 760-762:
+  ```python
+  except BaseException:
+      self._failed = True
+      raise
+  ```
+- Linee 249-250 (`_live`):
+  ```python
+  if self._failed:
+      raise RuntimeError("native generation session failed; close it before reuse")
+  ```
+- Linea 501-503 (`advance`):
+  ```python
+  if self._final_step is not None:
+      return self._replay_terminal_step()
+  decoder, state = self._live()
+  ```
+
+In `server_unified_thinker.py` (linee 1257-1270):
+```python
+if not callable(candidate_ready_when):
+    try:
+        while True:
+            step = advance_controller(lambda _progress: False)
+            handoff = handoff_adopted_session()
+            if handoff is not None:
+                return handoff
+            if step.status in {NativeDecodeSessionStatus.DONE, NativeDecodeSessionStatus.CANCELLED}:
+                return finish_decoded(step.result)
+    except BaseException as exc:
+        handoff = handoff_adopted_session(exc)
+        if handoff is not None:
+            return handoff
+        raise
+```
+E in `handoff_adopted_session(exc)`:
+```python
+adopted_controller = unified_branch.get("_adopted_native_session_controller")
+if isinstance(adopted_controller, dict):
+    resume = adopted_controller.get("run_to_completion")
+    if callable(resume):
+        result = resume()
+```
+Se `advance_controller` lancia un'eccezione (ad es. per cancellazione, timeout o abort), `self._failed` viene impostato a `True`.
+Quando poi `handoff_adopted_session` o `server_response_runtime.py:2553` chiama `resume()` (ossia `run_controller_to_completion`), questo invoca nuovamente `advance_controller(lambda _progress: False)`.
+Poiché `self._failed` è `True` e `self._final_step` non è stato impostato come terminale (perché l'eccezione è stata sollevata prima di `_terminate`), `advance()` richiama `_live()`, che solleva `RuntimeError: native generation session failed; close it before reuse`, provocando la rottura catastrofica della connessione WebSocket con `INFERENCE_ERROR`.
+
+### 2.3 Domanda per Sol su Errore 1:
+Come deve essere strutturato il contratto di chiusura, finalizzazione e handoff di `UnifiedNativeDecoderSession` e `run_controller_to_completion` affinché:
+1. Una sessione di decodifica nativa che subisce una cancellazione o eccezione non rimanga in uno stato intermedio "zombie" (`_failed = True` ma priva di `_final_step`)?
+2. `run_controller_to_completion()` o `resume()` sia idempotente e non tenti mai di richiamare `advance()` su una sessione già fallita o cancellata, restituendo invece un risultato coerente di cancellazione/revisione (`revision_handoff: True`) senza mandare in crash il server?
+
+---
+
+## 3. Errore 2 (Run 2): Picco ACK Gap di 182.3 ms sul Frame 1128 (Ultimo Frame Audio)
+
+### 3.1 Dati Empirici
+In Run 2:
+- Totale frame audio della richiesta lunga: **1129 frame** (da `local_frame_id = 0` a `local_frame_id = 1128`).
+- Tutti i frame intermedi da 0 a 1127 hanno registrato ACK gap inferiori alla soglia (compreso il frame 664 che in passato dava 161.9 ms e ora è sceso a ~134 ms).
+- **Solo la transizione tra frame 1127 e frame 1128** ha registrato:
+  `Gap 182.27ms between Frame 1127 and Frame 1128`
+
+### 3.2 Cronologia di Frame 1127 e 1128 (`events.jsonl`)
+- `22:16:48.648057`: Frame 1127 inviato dal client (`input_frame_sent`).
+- `22:16:48.701079`: Frame 1127 consumato dal server (`input_audio_buffer.consumed`).
+- `22:16:48.703760`: Frame 1127 ACK ricevuto dal client (`input_frame_ack_received`).
+- `22:16:48.729745`: Frame 1128 inviato dal client (`input_frame_sent`).
+- `22:16:48.883349`: Frame 1128 consumato dal server (`input_audio_buffer.consumed`).
+- `22:16:48.885612`: Frame 1128 ACK ricevuto dal client (`input_frame_ack_received`).
+
+Il delta tra l'ACK di 1127 e l'ACK di 1128 è `48.885612 - 48.703760` = **181.85 ms** (nel report registrato come **182.3 ms**).
+
+### 3.3 Scomposizione Telemetrica di Frame 1128
+Dal payload di `input_audio_buffer.consumed` di frame 1128:
+- `server_listener_queue_ms`: **117.568 ms** (il tempo trascorso in coda sul server prima dell'inizio del compute del batch).
+- `listener_batch_compute_ms`: **111.071 ms** (contro i ~25-45 ms dei frame normali).
+  - `listener_batch_frontend_encode_ms`: **22.689 ms** (normale: ~1.6 ms)
+  - `listener_batch_mel_prepare_ms`: **21.332 ms** (normale: ~0.8 ms)
+  - `listener_batch_native_submit_ms`: **24.254 ms** (normale: ~12.0 ms)
+  - `listener_batch_native_cuda_ms`: **23.330 ms** (normale: ~12.4 ms)
+  - `listener_batch_control6_policy_ms`: **2.912 ms** (normale: ~1.6 ms)
+  - `scheduler_commit_state_lock_hold_ms`: **5.535 ms** (normale: ~0.8 ms)
+- Subito dopo il frame 1128, il flusso audio in ingresso termina e il sistema transita alla risposta Thinker/Talker.
+- In Run 3, invece, questo picco non si è verificato e tutti i frame (incluso il frame 1128) sono stati processati ampiamente sotto i 160 ms.
+
+### 3.4 Domanda per Sol su Errore 2:
+1. Perché sul frame 1128 `mel_prepare_ms` (CPU/mel frontend) è salito da 0.8 ms a 21.3 ms e `native_cuda_ms` da 12 ms a 23 ms? È imputabile a contesa CPU/GIL per l'avvio della transizione di fine stream/endpointing, o al Talker che stava completando il drain precedente o preparando lo step successivo?
+2. Perché `server_listener_queue_ms` è salito a 117 ms?
+3. Come possiamo isolare e proteggere la latenza di processing e di emissione dell'ACK sul confine di fine stream/inizio risposta affinché l'ACK gap rimanga stabilmente $< 140$ ms anche durante le transizioni di turno?
+
+---
+
+## 4. Output Richiesto da Sol
+Fornisci:
+1. Diagnosi architetturale rigorosa e formale per ciascuno dei due difetti.
+2. Specifiche di contratto e codice per la bonifica di entrambi i punti:
+   - Bonifica del ciclo di vita e della resilienza in `unified_native_decoder.py` e `server_unified_thinker.py` per le cancellazioni/revisioni.
+   - Bonifica o disaccoppiamento dell'emissione ACK per prevenire picchi oltre 160 ms sui frame boundary di transizione.
+3. Elenco esatto dei file da modificare e criteri di verifica per garantire 3 run consecutive PASS.

@@ -1,0 +1,65 @@
+# RICHIESTA DIAGNOSI ARCHITETTURALE E CONTRATTO: GPT 6.1 SOL (MEDIUM EFFORT)
+
+## 1. Contesto Operativo e Stato
+Siamo nella pipeline full-duplex omni per Gemma 4 su GPU NVIDIA RTX 3090 (24GB VRAM, host `mondaini`).
+Stiamo validando `PLAN.md` tramite la suite di accettazione end-to-end (`tools/run_acceptance_suite.py --runs 1 --container gemma4-speech-s2s-readyframes-20261102 --execution docker`).
+
+Nello smoke run precedente:
+- `on_decoded_text_flush` e `on_dynamic_prefill_model_entry` sono stati implementati e verificati con successo.
+- Il Turn 1 (risposta lunga a `long_request`) è stato generato e riprodotto completamente:
+  - Campioni audio validati: > 960.000 campioni (55.77 secondi di riproduzione).
+  - Tasti e frontiere rispettati.
+  - La connessione WebSocket ha inviato frame microfonici continui durante la riproduzione.
+- Tuttavia, la run è fallita al termine del Turno 1 con l'eccezione:
+  `WebSocket/runtime error: EvidenceError: long response input ACK ratio 97.742% is below 99.0% (606/620)`
+
+## 2. Evidenza Empirica Misurata
+Dall'ispezione deterministica di `events.jsonl` e dei timestamp:
+- `playout_started_ns`: 6420388322298951
+- `playout_completed_ns`: 6420444092295612
+- `final_observation_ns`: 6420444137461247 (arrivo di `response.unified_native_finalized`)
+- Differenza tra `final_observation_ns` e `playout_completed_ns`: soli **45.16 ms**!
+- Frame inviati durante la riproduzione (`window_sends`): **620 frame** (frame ID da 347 a 966). Il frame 966 è stato inviato esattamente a `playout_completed_ns`.
+- Frame riconosciuti con ACK prima di `final_observation_ns`: **606 frame**.
+- Frame mancanti al check: **14 frame** (frame da 953 a 966).
+- Causa fisica: i frame 953-966 sono stati inviati negli ultimi ~1000 ms di riproduzione. Poiché il server elabora i frame a tick di 80 ms, gli ACK per questi ultimi frame erano in volo sulla rete / in coda di elaborazione al momento in cui è arrivato `response.unified_native_finalized` (appena 45 ms dopo il termine della riproduzione audio).
+- Tutti i 954 frame fin lì inviati hanno ricevuto regolare ACK monotono e sequenziale; nessuno è andato perduto.
+
+## 3. Codice Esistente in `tools/real_dialogue_simulator.py`
+In `_long_response_input_window_metrics` (righe 150-153):
+```python
+# ACK delivery can trail the playout boundary. Count it through the
+# final observation, but only for frames whose send overlapped playback.
+if playout_started_ns <= received_ns <= final_observation_ns and frame_id in window_sends:
+    acked_ids.add(frame_id)
+```
+
+In `_complete_fixture` (righe 1894-1896):
+```python
+if record.done_event is not None:
+    await self._wait_playback_drain(record, self.args.playback_timeout_s)
+    await self._await_response_finalizer(record)
+```
+E subito dopo, in `_run_scenario` (riga 2029):
+```python
+long_done.long_response_input_window = _long_response_input_window_metrics(
+    pcm_samples=long_done.audio_samples,
+    first_audio_ns=int(long_done.first_audio_ns),
+    done_ns=long_done.done_ns,
+    playout_started_ns=int(long_done.playout_started_ns),
+    playout_completed_ns=int(long_done.playout_completed_ns),
+    final_observation_ns=int(long_done.final_observation_ns),
+    input_frame_sends=self.input_frame_sends,
+    input_frame_acks=self.input_frame_acks,
+    fifo_peak_samples=self.playback_queue_peak_samples,
+    metrics_sink=long_done.long_response_input_window,
+)
+```
+Nota: `_await_response_finalizer` imposta `record.final_observation_ns = int(received_ns)`.
+Poiché la sintesi sul server termina prima della fine della riproduzione audio (a causa del buffer FIFO client), `response.unified_native_finalized` arriva al client quasi simultaneamente a `playout_completed_ns` (+45 ms).
+Il simulatore valuta immediatamente `_long_response_input_window_metrics` senza attendere che gli ACK dei frame inviati durante la finestra di playout (che arrivano con una latenza normale di ~200-500 ms) arrivino a destinazione.
+
+## 4. Domande per GPT 6.1 Sol
+1. Qual è il contratto corretto di sincronizzazione e grazia temporale per consentire il recapito degli ACK dei frame inviati durante la riproduzione prima di validare `_long_response_input_window_metrics`?
+2. Dovremmo aggiungere un'attesa asincrona mirata in `_complete_fixture` o prima della validazione della finestra (ad es. attendere che `input_frame_acks` contenga tutti i frame di `window_sends`, o fino a un timeout di grazia di 1.5-2.0s, aggiornando `final_observation_ns`)?
+3. Come deve essere strutturata la modifica in `tools/real_dialogue_simulator.py` garantendo che rispetti sia il contratto di continuo ascolto a 80 ms, sia i requisiti di certificazione senza introdurre allentamenti arbitrari dei gate?

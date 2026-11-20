@@ -1,0 +1,77 @@
+# SPECIFICA OPERATIVA PER GPT-6 LUNA (MAX REASONING EFFORT)
+## Riferimento: tools/sol_diagnosis_output_5.md
+
+### Obiettivo
+Risolvere deterministicamente i due problemi isolati da GPT 6.1 Sol:
+1. Ciclo di vita terminale completo e idempotente in `UnifiedNativeDecoderSession` (`duplex_kernel/unified_native_decoder.py`), con gestione sicura in `server_unified_thinker.py` e `server_response_runtime.py`.
+2. Garanzia di ordine e disaccoppiamento dell'emissione ACK `input_audio_buffer.consumed` rispetto a lavori differibili di transizione di turno in `duplex_kernel/server.py`.
+
+---
+
+### Task 1: Terminal Lifecycle e Idempotenza in `duplex_kernel/unified_native_decoder.py`
+
+1. **Stato Terminale Esplicito (`_TerminalOutcome` o `_final_step` esteso):**
+   - Attualmente `_final_step` registra solo passi normali terminati (`NativeDecodeSessionStatus.DONE`, `CANCELLED`).
+   - Se `advance()` intercetta `BaseException as exc` nel blocco live:
+     - Distinguere cancellazione attesa (`_is_expected_cancel(exc)` o `asyncio.CancelledError` o `self._cancel_requested`) da errore reale.
+     - Se cancellazione attesa: registrare `_final_step` come `NativeDecodeSessionStatus.CANCELLED` con `error=None` (o `str(exc)`).
+     - Se errore reale: registrare un esito terminale `FAILED` contenente l'eccezione originaria `exc` (`self._fatal_error = exc`, `self._failed = True`).
+     - Eseguire il cleanup sicuro una sola volta (`self._request_safe_cleanup_once()`).
+   - **All'ingresso di `advance()`:**
+     - Se `self._final_step is not None`:
+       - Se `_final_step.status == FAILED` (o se `self._failed and self._fatal_error is not None`): rilanciare l'eccezione originale `raise self._fatal_error` (oppure restituire lo step FAILED), **SENZA chiamare `self._live()`** e senza sollevare `RuntimeError("native generation session failed; close it before reuse")`.
+       - Se `_final_step.status in {DONE, CANCELLED}`: restituire `self._replay_terminal_step()`.
+     - `self._live()` viene chiamato **solo** se la sessione non è ancora terminale (`self._final_step is None`).
+2. **Proprietà e Chiusura Idempotente (`close()`):**
+   - `close()` deve essere safe da chiamare più volte.
+   - Non deve sovrascrivere o cancellare l'esito terminale già registrato.
+
+---
+
+### Task 2: Controller Idempotente e Handoff Sicuro in `duplex_kernel/server_unified_thinker.py`
+
+1. **`run_controller_to_completion()` idempotente:**
+   - Se `controller["done"]` è `True`: restituire immediatamente `dict(controller["final_result"])`.
+   - Se il decoder sottostante ha `_final_step` o `_failed`:
+     - Se terminale per cancellazione: marcare `controller["done"] = True`, costruire `controller["final_result"] = finish_decoded(step.result)` e restituire senza ulteriori loop.
+     - Se terminale per errore: salvare l'errore e rilanciarlo coerentemente, marcando `controller["done"] = True`.
+   - Se `advance_controller` lancia un'eccezione:
+     - Marcare `controller["done"] = True`.
+     - Non rilanciare `advance_controller` in un loop cieco!
+2. **`handoff_adopted_session(exc)`:**
+   - Verificare che `adopted_controller` non sia la stessa istanza del controller cedente fallito.
+   - Se `adopted_controller` è identico al controller corrente o se la sua sessione è fallita/chiusa, NON chiamare `run_to_completion()` su di esso.
+   - Restituire `revision_handoff: True` solo se l'adozione è effettiva, coerente e non fallita. Se fallita o assente, propagare l'errore originale o restituire l'esito CANCELLED previsto dal protocollo.
+
+---
+
+### Task 3: Chiamanti in `duplex_kernel/server_response_runtime.py` e `duplex_kernel/server.py`
+
+1. In `server_response_runtime.py:2553`:
+   - Proteggere la chiamata `think = resume()`:
+     ```python
+     if callable(resume):
+         try:
+             think = resume()
+             think["revision_handoff"] = True
+         except Exception as exc:
+             logger.warning("adopted controller resume failed: %s", exc)
+             # fallback al last adopted think se presente, altrimenti propagare
+             adopted_think = unified_branch.get("_last_adopted_think")
+             if isinstance(adopted_think, Mapping):
+                 think = dict(adopted_think)
+                 think["revision_handoff"] = True
+             else:
+                 raise
+     ```
+2. In `server.py`:
+   - Verificare che l'emissione dell'ACK `input_audio_buffer.consumed` avvenga immediatamente dopo il commit dello stato listener, e che nessuna operazione differibile o prefill pesante del Thinker/Talker venga eseguita prima dell'accodamento dell'evento ACK nel WebSocket writer.
+
+---
+
+### Criteri di Verifica
+- Nessuna regressione sui 122 test esistenti.
+- Test unitari mirati per:
+  1. `UnifiedNativeDecoderSession`: eccezione reale -> `advance()` successivo rilancia l'errore originale, non `native generation session failed; close it before reuse`.
+  2. `UnifiedNativeDecoderSession`: cancellazione -> `advance()` successivo restituisce `CANCELLED` in modo idempotente.
+  3. `run_controller_to_completion`: chiamate ripetute su sessione fallita o cancellata non sollevano `RuntimeError`.

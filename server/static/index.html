@@ -321,7 +321,7 @@
         <section class="side-card">
           <h3>Sessione</h3>
           <div class="status-line"><span>Connessione</span><span id="sessionStatus">Apertura WebSocket</span></div>
-          <div class="status-line"><span>Frame in attesa</span><span id="pendingStatus">0 / 3</span></div>
+          <div class="status-line"><span>Frame in attesa</span><span id="pendingStatus">0 / 16</span></div>
           <div class="status-line"><span>Pacchetti audio</span><span id="packetStatus">0</span></div>
         </section>
       </aside>
@@ -332,8 +332,11 @@
   <script>
     "use strict";
     const TARGET_RATE = 16000;
-    const DEFAULT_INPUT_CAPACITY_FRAMES = 3;
+    const DEFAULT_INPUT_CAPACITY_FRAMES = 16;
+    const MAX_LOCAL_QUEUE_FRAMES = 80;
+    const MAX_UNACKED_WAIT_MS = 3500;
     const MAX_SOCKET_BUFFERED_BYTES = 12 * 1024;
+    const MAX_PLAYBACK_AHEAD_SECONDS = 4.0;
     const MAX_AUDIO_PACKET_B64 = 512 * 1024;
     const MAX_MESSAGES = 80;
     const audioWorkletSource = `
@@ -462,8 +465,12 @@
       droppedFrames: 0, packetCount: 0, activeResponseId: null,
       activeGenerationId: null, cancelledResponses: new Set(),
       seenPacketIds: new Set(), outputNodes: new Map(), playbackNextTime: 0,
-      expectedSampleBySegment: new Map(), transcripts: new Map(),
+      expectedSampleBySegment: new Map(), playbackSegments: new Map(),
+      clientAckSegmentOrder: [], clientConsumedPcmSequence: 0, transcripts: new Map(),
+      playbackAckTimer: null, playbackAckPollingSuppressed: false,
       activeUtteranceId: null, outputTextNode: null, outputTextResponseId: null,
+      activeResponseAction: null, activeResponseInputUtteranceId: null,
+      activeResponseTimelineFrameId: null,
       transcriptEnabled: null, seenAckFrames: new Set(), messageSequence: 0,
       lastCapturedFrameId: 0, sessionFrameOffset: 0,
       playbackGain: null, playbackMuted: false, playbackVolume: 1
@@ -574,6 +581,21 @@
       state.outputTextNode = nodes.content;
       state.outputTextResponseId = responseId;
     }
+    function discardEmptyAssistantMessage(responseId) {
+      const id = String(responseId || "");
+      if (!id) return false;
+      const bubble = ui.messages.querySelector(
+        '.message.agent[data-response-id="' + CSS.escape(id) + '"]'
+      );
+      if (!bubble || bubble.querySelector(".message-content")?.textContent.trim()) return false;
+      bubble.remove();
+      if (state.outputTextResponseId === id) {
+        state.outputTextNode = null;
+        state.outputTextResponseId = null;
+      }
+      if (!ui.messages.querySelector(".message")) ui.empty.hidden = false;
+      return true;
+    }
     function discardDeferredAssistantPlaceholder(responseId) {
       const id = String(responseId || "");
       if (!id) return;
@@ -595,6 +617,9 @@
         state.activeGenerationId = null;
         state.outputTextNode = null;
         state.outputTextResponseId = null;
+        state.activeResponseAction = null;
+        state.activeResponseInputUtteranceId = null;
+        state.activeResponseTimelineFrameId = null;
         state.playbackNextTime = 0;
       }
       ui.playbackStatus.textContent = state.outputNodes.size ? "In riproduzione" : "In attesa";
@@ -728,7 +753,12 @@
         state.playbackGain.gain.value = state.playbackMuted ? 0 : state.playbackVolume;
         state.playbackGain.connect(state.playbackContext.destination);
       }
+      ensurePlaybackAckTimer();
       return state.playbackContext;
+    }
+    function ensurePlaybackAckTimer() {
+      if (state.playbackAckPollingSuppressed || state.playbackAckTimer !== null) return;
+      state.playbackAckTimer = window.setInterval(() => flushCompletedConsumptionAcks(), 50);
     }
     function updateOutputAudioControls() {
       const muted = state.playbackMuted || state.playbackVolume <= 0;
@@ -752,49 +782,106 @@
     function flushPlayback(responseId = null) {
       for (const [node, meta] of state.outputNodes) {
         if (responseId === null || meta.responseId === responseId) {
+          meta.cancelled = true;
           try { node.onended = null; node.stop(); } catch (_) {}
           try { node.disconnect(); } catch (_) {}
           state.outputNodes.delete(node);
         }
       }
+      if (responseId === null) {
+        state.playbackSegments.clear();
+        state.clientAckSegmentOrder.length = 0;
+      } else {
+        for (const [key, segment] of state.playbackSegments) {
+          if (segment.responseId === responseId) state.playbackSegments.delete(key);
+        }
+        state.clientAckSegmentOrder = state.clientAckSegmentOrder.filter((key) => {
+          const parts = key.split("|");
+          return parts[0] !== responseId;
+        });
+      }
       if (responseId === null || responseId === state.activeResponseId) {
         state.playbackNextTime = 0;
-        state.expectedSampleBySegment.clear();
+        if (responseId === null) state.expectedSampleBySegment.clear();
+        else {
+          for (const key of state.expectedSampleBySegment.keys()) {
+            if (key.startsWith(responseId + "|")) state.expectedSampleBySegment.delete(key);
+          }
+        }
       }
       ui.playbackStatus.textContent = state.outputNodes.size ? "In riproduzione" : "In attesa";
     }
     function fenceResponse(responseId, reason) {
-      if (responseId) state.cancelledResponses.add(responseId);
+      if (responseId) {
+        // Publish the exact device-clock watermark before stopping scheduled
+        // buffers; the server retains this old generation briefly for the final ACK.
+        flushCompletedConsumptionAcks({ responseId, finalize: true });
+        state.cancelledResponses.add(responseId);
+      }
       while (state.cancelledResponses.size > 256) state.cancelledResponses.delete(state.cancelledResponses.values().next().value);
       flushPlayback(responseId || null);
+      discardEmptyAssistantMessage(responseId);
       if (!responseId || state.activeResponseId === responseId) {
         state.activeResponseId = null;
         state.activeGenerationId = null;
         state.outputTextNode = null;
         state.outputTextResponseId = null;
+        state.activeResponseAction = null;
+        state.activeResponseInputUtteranceId = null;
+        state.activeResponseTimelineFrameId = null;
       }
       if (reason) setResponse(reason, "warn");
     }
     function enqueueAudio(event) {
       const responseId = event.response_id;
       if (typeof responseId !== "string" || responseId !== state.activeResponseId || state.cancelledResponses.has(responseId)) return false;
-      const generationId = event.generation_id == null ? "" : String(event.generation_id);
+      const generationValue = event.generation_id;
+      const packetId = event.packet_id;
+      const segmentId = event.speaker_segment_id;
+      const startSample = event.start_sample;
+      const endSample = event.end_sample;
+      if (!Number.isSafeInteger(generationValue) || generationValue < 0 ||
+          !Number.isSafeInteger(packetId) || packetId < 0 ||
+          event.sequence !== packetId || typeof segmentId !== "string" || !segmentId ||
+          !Number.isSafeInteger(startSample) || startSample < 0 ||
+          !Number.isSafeInteger(endSample) || endSample <= startSample) {
+        throw new Error("Identità o intervallo del pacchetto PCM incompleto.");
+      }
+      const generationId = String(generationValue);
       if (state.activeGenerationId === null) state.activeGenerationId = generationId;
-      else if (generationId && generationId !== state.activeGenerationId) {
-        flushPlayback(responseId);
-        state.activeGenerationId = generationId;
-      } else if (generationId && !state.activeGenerationId) state.activeGenerationId = generationId;
-      const packetKey = [responseId, generationId, String(event.packet_id ?? "")].join("|");
+      else if (generationId !== state.activeGenerationId) {
+        throw new Error("Il generation_id del pacchetto non coincide con la risposta attiva.");
+      }
+      const packetKey = [responseId, generationId, String(packetId)].join("|");
       if (event.packet_id != null && state.seenPacketIds.has(packetKey)) return false;
       const wav = parseWavBase64(event.delta);
       const statedRate = Number(event.sample_rate);
-      if (statedRate && statedRate !== wav.sampleRate) throw new Error("Il sample rate del WAV non coincide con il protocollo.");
+      if (statedRate !== 24000 || statedRate !== wav.sampleRate) throw new Error("Il sample rate del WAV non coincide con il protocollo.");
       const sampleRate = wav.sampleRate;
-      const segmentKey = responseId + "|" + generationId + "|" + String(event.speaker_segment_id ?? "");
-      const startSample = Number.isInteger(event.start_sample) ? event.start_sample : null;
-      const endSample = Number.isInteger(event.end_sample) ? event.end_sample : null;
+      const segmentKey = responseId + "|" + generationId + "|" + segmentId;
       const expected = state.expectedSampleBySegment.get(segmentKey);
-      if (startSample !== null && expected !== undefined && startSample < expected) return false;
+      if (startSample !== (expected === undefined ? 0 : expected)) {
+        throw new Error("Intervallo PCM duplicato, discontinuo o fuori ordine.");
+      }
+      if (endSample - startSample !== wav.samples.length) {
+        throw new Error("L'intervallo PCM non coincide con la lunghezza del WAV.");
+      }
+      let segment = state.playbackSegments.get(segmentKey);
+      if (!segment) {
+        segment = {
+          responseId, generationId, segmentId, startSample,
+          endSample, packetIds: new Set(), playedPacketIds: new Set(),
+          playbackPackets: [], marker: null,
+          lastAckedEndSample: startSample, finalAckSent: false
+        };
+        state.playbackSegments.set(segmentKey, segment);
+        state.clientAckSegmentOrder.push(segmentKey);
+      } else {
+        if (segment.marker || segment.endSample !== startSample) {
+          throw new Error("Il pacchetto PCM è successivo al marker o non contiguo.");
+        }
+        segment.endSample = endSample;
+      }
       const context = ensurePlaybackContext();
       if (context.state === "suspended") context.resume().catch(() => {});
       const buffer = context.createBuffer(1, wav.samples.length, sampleRate);
@@ -802,7 +889,7 @@
       const now = context.currentTime;
       const gapSamples = startSample !== null && expected !== undefined ? Math.max(0, startSample - expected) : 0;
       const startAt = Math.max(now + 0.035, state.playbackNextTime) + gapSamples / sampleRate;
-      if (startAt + buffer.duration - now > 4.0) {
+      if (startAt + buffer.duration - now > MAX_PLAYBACK_AHEAD_SECONDS) {
         fenceResponse(responseId, "Playback in ritardo");
         showError("Il playback ha accumulato oltre quattro secondi. Ho svuotato l’audio in coda per evitare una risposta ormai fuori tempo.");
         return false;
@@ -810,21 +897,153 @@
       const source = context.createBufferSource();
       source.buffer = buffer;
       source.connect(state.playbackGain || context.destination);
-      const meta = { responseId, generationId, startAt };
+      const playbackPacket = {
+        packetKey, startSample, endSample, startAt,
+        duration: buffer.duration, sampleRate, completed: false
+      };
+      segment.playbackPackets.push(playbackPacket);
+      const meta = { responseId, generationId, segmentKey, packetKey, playbackPacket, startAt, cancelled: false };
       state.outputNodes.set(source, meta);
+      segment.packetIds.add(packetKey);
       source.onended = () => {
         state.outputNodes.delete(source);
         try { source.disconnect(); } catch (_) {}
+        if (!meta.cancelled && !state.cancelledResponses.has(responseId) &&
+            state.activeResponseId === responseId && state.activeGenerationId === generationId) {
+          const completedSegment = state.playbackSegments.get(segmentKey);
+          if (completedSegment) {
+            playbackPacket.completed = true;
+            completedSegment.playedPacketIds.add(packetKey);
+            window.setTimeout(() => flushCompletedConsumptionAcks(), 0);
+          }
+        }
         ui.playbackStatus.textContent = state.outputNodes.size ? "In riproduzione" : "Pronta";
       };
       source.start(startAt);
       state.playbackNextTime = startAt + buffer.duration;
-      if (startSample !== null && endSample !== null) state.expectedSampleBySegment.set(segmentKey, endSample);
+      state.expectedSampleBySegment.set(segmentKey, endSample);
       if (event.packet_id != null) state.seenPacketIds.add(packetKey);
       state.packetCount++;
       ui.packetStatus.textContent = String(state.packetCount);
       ui.playbackStatus.textContent = "In riproduzione · " + sampleRate.toLocaleString("it-IT") + " Hz";
       return true;
+    }
+
+    function handleAudioSegmentDone(event) {
+      const responseId = event.response_id;
+      const generationValue = event.generation_id;
+      const segmentId = event.speaker_segment_id;
+      const startSample = event.start_sample;
+      const endSample = event.end_sample;
+      if (typeof responseId !== "string" || responseId !== state.activeResponseId ||
+          state.cancelledResponses.has(responseId)) return false;
+      if (!Number.isSafeInteger(generationValue) || generationValue < 0 ||
+          String(generationValue) !== state.activeGenerationId ||
+          typeof segmentId !== "string" || !segmentId ||
+          !Number.isSafeInteger(startSample) || startSample < 0 ||
+          !Number.isSafeInteger(endSample) || endSample <= startSample ||
+          event.sample_rate !== 24000) {
+        throw new Error("Marker PCM con identità o intervallo incompleto.");
+      }
+      const key = [responseId, String(generationValue), segmentId].join("|");
+      const segment = state.playbackSegments.get(key);
+      if (!segment || segment.startSample !== startSample || segment.endSample !== endSample ||
+          state.expectedSampleBySegment.get(key) !== endSample) {
+        throw new Error("Marker PCM non corrispondente ai pacchetti schedulati.");
+      }
+      if (segment.marker) return false;
+      segment.marker = { responseId, generationId: generationValue, segmentId, startSample, endSample };
+      flushCompletedConsumptionAcks();
+      return true;
+    }
+
+    function playbackConsumedEndSample(segment, now) {
+      let cursor = segment.startSample;
+      for (const packet of segment.playbackPackets) {
+        if (packet.startSample !== cursor) break;
+        const packetLength = packet.endSample - packet.startSample;
+        const elapsed = now - packet.startAt;
+        const playedSamples = packet.completed
+          ? packetLength
+          : Math.max(0, Math.min(packetLength, Math.floor(elapsed * packet.sampleRate)));
+        cursor += playedSamples;
+        if (playedSamples < packetLength) break;
+      }
+      return cursor;
+    }
+    function sendClientConsumedPcmAck(segment, endSample, final) {
+      const socket = state.socket;
+      if (!socket || socket.readyState !== WebSocket.OPEN || segment.finalAckSent) return false;
+      if (!final && endSample <= segment.lastAckedEndSample) return false;
+      const sequence = state.clientConsumedPcmSequence;
+      const acknowledgement = {
+        type: "client_consumed_pcm",
+        ack_version: 2,
+        response_id: segment.responseId,
+        generation_id: Number(segment.generationId),
+        speaker_segment_id: segment.segmentId,
+        start_sample: segment.startSample,
+        end_sample: endSample,
+        sample_rate: 24000,
+        sequence,
+        consumption_semantics: "logical_client_device_buffer",
+        final: Boolean(final)
+      };
+      try {
+        socket.send(JSON.stringify(acknowledgement));
+      } catch (_) {
+        return false;
+      }
+      state.clientConsumedPcmSequence = sequence + 1;
+      segment.lastAckedEndSample = endSample;
+      if (final) segment.finalAckSent = true;
+      return true;
+    }
+    function flushCompletedConsumptionAcks({ responseId = null, finalize = false } = {}) {
+      if (!state.clientAckSegmentOrder.length) {
+        if (state.playbackAckTimer !== null) {
+          window.clearInterval(state.playbackAckTimer);
+          state.playbackAckTimer = null;
+        }
+        return;
+      }
+      const now = state.playbackContext ? state.playbackContext.currentTime : 0;
+      for (let index = 0; index < state.clientAckSegmentOrder.length;) {
+        const key = state.clientAckSegmentOrder[index];
+        const segment = state.playbackSegments.get(key);
+        if (!segment) {
+          state.clientAckSegmentOrder.splice(index, 1);
+          continue;
+        }
+        if (responseId !== null && segment.responseId !== responseId) {
+          index++;
+          continue;
+        }
+        if (!finalize && (
+            state.cancelledResponses.has(segment.responseId) ||
+            state.activeResponseId !== segment.responseId ||
+            state.activeGenerationId !== segment.generationId)) {
+          index++;
+          continue;
+        }
+        const consumedEnd = Math.max(
+          segment.lastAckedEndSample,
+          playbackConsumedEndSample(segment, now)
+        );
+        const complete = Boolean(
+          segment.marker && segment.packetIds.size > 0 &&
+          segment.playedPacketIds.size === segment.packetIds.size &&
+          consumedEnd === segment.endSample
+        );
+        const final = Boolean(finalize || complete);
+        const sent = sendClientConsumedPcmAck(segment, consumedEnd, final);
+        if (final && sent) {
+          state.clientAckSegmentOrder.splice(index, 1);
+          state.playbackSegments.delete(key);
+          continue;
+        }
+        index++;
+      }
     }
 
     function updatePendingStatus() {
@@ -837,7 +1056,8 @@
         ? " · ACK p50/p95/max " + summary.p50Ms.toFixed(0) + "/" + summary.p95Ms.toFixed(0) + "/" + summary.maxMs.toFixed(0) + " ms"
         : "";
       const waitLabel = oldest === null ? "" : " · oldest " + oldest.toFixed(0) + " ms";
-      ui.pendingStatus.textContent = retained + " / " + state.inputCapacityFrames +
+      const queueLabel = state.queuedInputFrames.length ? " (" + state.queuedInputFrames.length + " in coda)" : "";
+      ui.pendingStatus.textContent = state.pendingFrames + " / " + state.inputCapacityFrames + queueLabel +
         " · max " + state.ackHighWaterFrames + ackLabel + waitLabel +
         (state.droppedFrames ? " · " + state.droppedFrames + " scartati" : "");
       updateWorkletGate();
@@ -861,10 +1081,10 @@
       state.queuedInputFrames.length = 0;
       state.pendingFrames = 0;
       state.pendingSentFrames.length = 0;
-      showError("Ingresso fermato al limite di " + state.inputCapacityFrames + " frame: " + retained +
-        " trattenuti, oldest ACK " + (oldest === null ? "n/d" : oldest.toFixed(0) + " ms") +
+      showError("Ingresso fermato al limite di backpressure: " + retained +
+        " frame trattenuti, oldest ACK " + (oldest === null ? "n/d" : oldest.toFixed(0) + " ms") +
         ", ACK p95/max " + (summary.p95Ms === null ? "n/d" : summary.p95Ms.toFixed(0) + "/" + summary.maxMs.toFixed(0) + " ms") +
-        ". L’audio non inviato è stato fermato, non scartato in silenzio.");
+        ". L’audio non inviato è stato fermato.");
       setListener("Ingresso fermato · buffer pieno", "Backpressure prolungata", "warn");
       stopMicrophone(false);
       if (state.socket && state.socket.readyState === WebSocket.OPEN) {
@@ -907,11 +1127,15 @@
         return;
       }
       state.lastCapturedFrameId++;
-      if (state.pendingFrames + state.queuedInputFrames.length >= state.inputCapacityFrames) {
+      const oldestWaitMs = state.pendingSentFrames.length
+        ? Math.max(0, performance.now() - state.pendingSentFrames[0].sentAtMs)
+        : 0;
+      if (state.queuedInputFrames.length >= MAX_LOCAL_QUEUE_FRAMES || oldestWaitMs > MAX_UNACKED_WAIT_MS) {
         failInputBackpressure();
         return;
       }
       state.queuedInputFrames.push(new Int16Array(samples));
+      state.ackHighWaterFrames = Math.max(state.ackHighWaterFrames, state.pendingFrames + state.queuedInputFrames.length);
       pumpInputQueue();
     }
     function updateMeter(level) {
@@ -943,10 +1167,11 @@
         socket.send(JSON.stringify({
           type: "session.update",
           session: {
+            instructions: "Sei un assistente vocale intelligente e disponibile. Rispondi all'utente in italiano in modo chiaro, naturale e conciso. Non ripetere la domanda o la frase dell'utente, ma dialoga e rispondi direttamente alla sua richiesta.",
             auto_response: true,
             voice: "gemma",
             voice_conditioning_mode: "x_vector_only",
-            turn_policy: "duplex_control6",
+            turn_policy: "gemma_native_control6",
             input_audio_buffer_acknowledgements: true,
             input_audio_transcription: false
           }
@@ -1008,7 +1233,7 @@
           ui.sessionStatus.textContent = "Sessione " + String(event.session_id || "pronta").slice(0, 12);
           break;
         case "session.updated":
-          if (event.voice_conditioning_mode !== "x_vector_only" || event.turn_policy !== "duplex_control6") {
+          if (event.voice_conditioning_mode !== "x_vector_only" || (!["duplex_control6", "gemma_native_control6"].includes(event.turn_policy))) {
             state.socketReady = false;
             state.queuedInputFrames.length = 0;
             state.pendingFrames = 0;
@@ -1016,7 +1241,7 @@
             updatePendingStatus();
             const reason = event.voice_conditioning_mode !== "x_vector_only"
               ? "Il server non ha confermato il profilo voce x_vector_only."
-              : "Il server non ha confermato la policy duplex_control6.";
+              : "Il server non ha confermato la policy di turno.";
             showError(reason + " Il microfono resta fermo.");
             setListener("Sessione non pronta", "Handshake runtime rifiutato", "warn");
             stopMicrophone(false);
@@ -1069,20 +1294,28 @@
           if (state.activeResponseId && state.activeResponseId !== event.response_id) fenceResponse(state.activeResponseId, "Risposta sostituita");
           state.activeResponseId = String(event.response_id || "");
           state.activeGenerationId = null;
+          state.outputTextNode = null;
+          state.outputTextResponseId = null;
+          state.activeResponseAction = String(event.effective_action || event.action || "").trim().toUpperCase();
+          state.activeResponseInputUtteranceId = event.input_utterance_id || null;
+          state.activeResponseTimelineFrameId = toTimelineFrameId(event.input_first_frame_id);
           state.cancelledResponses.delete(state.activeResponseId);
           state.seenPacketIds.clear();
           state.expectedSampleBySegment.clear();
           state.playbackNextTime = 0;
-          makeAssistantMessage(
-            state.activeResponseId,
-            event.input_utterance_id || null,
-            toTimelineFrameId(event.input_first_frame_id)
-          );
           setResponse("Gemma sta rispondendo", "active");
           break;
         case "response.output_text.delta":
           if (event.response_id === state.activeResponseId && !state.cancelledResponses.has(event.response_id) &&
-              typeof event.delta === "string" && state.outputTextNode) {
+              typeof event.delta === "string" && event.delta.length > 0 &&
+              state.activeResponseAction !== "BACKCHANNEL") {
+            if (!state.outputTextNode || state.outputTextResponseId !== event.response_id) {
+              makeAssistantMessage(
+                state.activeResponseId,
+                state.activeResponseInputUtteranceId,
+                state.activeResponseTimelineFrameId
+              );
+            }
             state.outputTextNode.textContent += event.delta;
             scrollMessages();
           }
@@ -1094,11 +1327,24 @@
             showError("Non riesco a leggere il pacchetto WAV del server: " + error.message);
           }
           break;
+        case "response.audio.segment_done":
+          try { handleAudioSegmentDone(event); }
+          catch (error) {
+            fenceResponse(event.response_id, "Marker audio non valido");
+            showError("Il marker del segmento audio non corrisponde al playback: " + error.message);
+          }
+          break;
         case "response.cancelled":
-          fenceResponse(String(event.response_id || state.activeResponseId || ""), "Risposta interrotta");
+          if (event.reason === "backchannel_rejected") {
+            const rejectedResponseId = String(event.response_id || "");
+            fenceResponse(rejectedResponseId, "");
+          } else {
+            fenceResponse(String(event.response_id || state.activeResponseId || ""), "Risposta interrotta");
+          }
           break;
         case "response.done":
           if (event.response_id === state.activeResponseId) {
+            discardEmptyAssistantMessage(event.response_id);
             if (event.status === "deferred_until_endpoint") {
               discardDeferredAssistantPlaceholder(event.response_id);
               setResponse("Aspetto la fine della frase", "active");
@@ -1348,10 +1594,12 @@
         state.messageSequence = 0;
         handleTranscriptEvent({ type: "input_audio_transcription.partial", utterance_id: "ui-order-u2", revision: 1, transcript: "seconda frase", first_frame_id: 20, last_frame_id: 25 });
         handleRealtimeEvent({ type: "response.created", response_id: "ui-order-r2", input_utterance_id: "ui-order-u2", input_first_frame_id: 20 });
+        handleRealtimeEvent({ type: "response.output_text.delta", response_id: "ui-order-r2", delta: "seconda risposta" });
         state.activeResponseId = null;
         state.outputTextNode = null;
         state.outputTextResponseId = null;
         handleRealtimeEvent({ type: "response.created", response_id: "ui-order-r1", input_utterance_id: "ui-order-u1", input_first_frame_id: 10 });
+        handleRealtimeEvent({ type: "response.output_text.delta", response_id: "ui-order-r1", delta: "prima risposta" });
         handleTranscriptEvent({ type: "input_audio_transcription.partial", utterance_id: "ui-order-u1", revision: 1, transcript: "prima frase arrivata in ritardo", first_frame_id: 10, last_frame_id: 15 });
         const ordered = Array.from(ui.messages.querySelectorAll(".message"));
         const orderIds = ordered.map((node) => node.dataset.utteranceId || node.dataset.responseId);
@@ -1359,25 +1607,108 @@
           "le bolle seguono i frame sorgente anche quando il transcript arriva dopo response.created");
         ui.messages.querySelectorAll(".message").forEach((node) => node.remove());
         ui.empty.hidden = false;
+        state.activeResponseId = null;
+        state.outputTextNode = null;
+        state.outputTextResponseId = null;
+        handleRealtimeEvent({ type: "response.created", response_id: "ui-backchannel", action: "BACKCHANNEL" });
+        assert(!ui.messages.querySelector('[data-response-id="ui-backchannel"]'),
+          "response.created BACKCHANNEL non crea una bolla assistant vuota");
+        handleRealtimeEvent({ type: "response.done", response_id: "ui-backchannel", status: "no_speech", audio_samples: 0 });
+        assert(!ui.messages.querySelector('[data-response-id="ui-backchannel"]'),
+          "una BACKCHANNEL terminata senza testo o audio non lascia una bolla orfana");
+        handleRealtimeEvent({ type: "response.created", response_id: "ui-cancelled-empty", action: "SPEAK" });
+        handleRealtimeEvent({ type: "response.cancelled", response_id: "ui-cancelled-empty" });
+        assert(!ui.messages.querySelector('[data-response-id="ui-cancelled-empty"]'),
+          "una risposta cancellata senza testo o audio non lascia una bolla assistant vuota");
+        state.activeResponseId = null;
+        state.outputTextNode = null;
+        state.outputTextResponseId = null;
         state.transcripts.clear();
         state.activeUtteranceId = null;
         markTranscriptNotice(false);
         state.cancelledResponses.clear();
         state.seenPacketIds.clear();
         state.outputNodes.clear();
+        state.playbackSegments.clear();
+        state.clientAckSegmentOrder.length = 0;
+        state.expectedSampleBySegment.clear();
         state.activeResponseId = "ui-self-test";
         state.activeGenerationId = null;
         state.playbackNextTime = 0;
-        const played = enqueueAudio({ type: "response.audio.delta", response_id: "ui-self-test", generation_id: 1, speaker_segment_id: "s1", packet_id: "p1", start_sample: 0, end_sample: 2400, sample_rate: 24000, delta: encodeTestWav() });
+        state.playbackAckPollingSuppressed = true;
+        const socketSnapshot = state.socket;
+        const ackSequenceSnapshot = state.clientConsumedPcmSequence;
+        state.clientConsumedPcmSequence = 0;
+        const consumedAcks = [];
+        state.socket = { readyState: WebSocket.OPEN, send: (value) => consumedAcks.push(JSON.parse(value)) };
+        const played = enqueueAudio({ type: "response.audio.delta", response_id: "ui-self-test", generation_id: 1, speaker_segment_id: "s1", packet_id: 101, sequence: 101, start_sample: 0, end_sample: 2400, sample_rate: 24000, delta: encodeTestWav() });
         assert(played && state.outputNodes.size === 1, "packet WAV schedulato in AudioContext a 24 kHz");
         if (state.playbackContext.state === "suspended") await state.playbackContext.resume();
         assert(state.playbackContext.state === "running", "AudioContext di uscita attivo dopo un gesto utente");
+        const segmentMarker = { type: "response.audio.segment_done", response_id: "ui-self-test", generation_id: 1, speaker_segment_id: "s1", start_sample: 0, end_sample: 2400, sample_rate: 24000 };
+        assert(handleAudioSegmentDone(segmentMarker) && consumedAcks.length === 0,
+          "il marker arrivato prima di onended resta in attesa del consumo del buffer");
+        const scheduledNode = Array.from(state.outputNodes.keys())[0];
+        scheduledNode.onended();
+        flushCompletedConsumptionAcks();
+        assert(consumedAcks.length === 1 && consumedAcks[0].type === "client_consumed_pcm" &&
+          consumedAcks[0].ack_version === 2 && consumedAcks[0].final === true &&
+          consumedAcks[0].response_id === "ui-self-test" && consumedAcks[0].generation_id === 1 &&
+          consumedAcks[0].speaker_segment_id === "s1" && consumedAcks[0].start_sample === 0 &&
+          consumedAcks[0].end_sample === 2400 && consumedAcks[0].sequence === 0 &&
+          consumedAcks[0].consumption_semantics === "logical_client_device_buffer",
+          "l'ACK canonico porta identità e range completi solo dopo onended");
+        const playedBeforeMarker = enqueueAudio({ type: "response.audio.delta", response_id: "ui-self-test", generation_id: 1, speaker_segment_id: "s2", packet_id: 102, sequence: 102, start_sample: 0, end_sample: 2400, sample_rate: 24000, delta: encodeTestWav() });
+        assert(playedBeforeMarker, "secondo segmento WAV accettato per verificare il marker tardivo");
+        const lateMarkerNode = Array.from(state.outputNodes.keys())[0];
+        lateMarkerNode.onended();
+        flushCompletedConsumptionAcks();
+        assert(consumedAcks.length === 2 && consumedAcks[1].final === false &&
+          consumedAcks[1].end_sample === 2400,
+          "la progressione PCM viene ACKata anche prima del marker di segmento");
+        const markerAfterEnded = { type: "response.audio.segment_done", response_id: "ui-self-test", generation_id: 1, speaker_segment_id: "s2", start_sample: 0, end_sample: 2400, sample_rate: 24000 };
+        assert(handleAudioSegmentDone(markerAfterEnded) && consumedAcks.length === 3 &&
+          consumedAcks[2].speaker_segment_id === "s2" && consumedAcks[2].sequence === 2 &&
+          consumedAcks[2].final === true,
+          "il marker arrivato dopo onended chiude il segmento con l'ACK finale");
+        const partialSegment = {
+          startSample: 100,
+          playbackPackets: [{
+            startSample: 100, endSample: 200, startAt: 1,
+            duration: 100 / 24000, sampleRate: 24000, completed: false
+          }]
+        };
+        assert(playbackConsumedEndSample(partialSegment, 1 + 25.9 / 24000) === 125,
+          "il watermark parziale segue il clock AudioContext a campioni interi");
+        let staleGenerationRejected = false;
+        try {
+          enqueueAudio({ type: "response.audio.delta", response_id: "ui-self-test", generation_id: 2, speaker_segment_id: "stale", packet_id: 103, sequence: 103, start_sample: 0, end_sample: 2400, sample_rate: 24000, delta: encodeTestWav() });
+        } catch (_) { staleGenerationRejected = true; }
+        assert(staleGenerationRejected, "un generation_id stantio non entra nel playback corrente");
+        const queuedForCancel = enqueueAudio({ type: "response.audio.delta", response_id: "ui-self-test", generation_id: 1, speaker_segment_id: "s3", packet_id: 104, sequence: 104, start_sample: 0, end_sample: 2400, sample_rate: 24000, delta: encodeTestWav() });
+        const queuedCancelNode = Array.from(state.outputNodes.keys())[0];
+        assert(queuedForCancel && consumedAcks.length === 3, "audio in coda non riceve progress ACK prima del consumo");
         toggleOutputMute();
         assert(state.playbackGain.gain.value === 0, "il controllo silenzia l’uscita senza toccare il microfono");
         setOutputVolume(0.5);
         assert(state.playbackGain.gain.value === 0.5 && !state.playbackMuted, "volume risposta regolabile e aggiornato sul gain node");
         fenceResponse("ui-self-test", "Fence di prova");
-        assert(state.outputNodes.size === 0 && state.cancelledResponses.has("ui-self-test"), "cancellazione svuota playback e alza il fence");
+        assert(state.outputNodes.size === 0 && state.cancelledResponses.has("ui-self-test") &&
+          queuedCancelNode.onended === null && consumedAcks.length === 4 &&
+          consumedAcks[3].ack_version === 2 && consumedAcks[3].final === true &&
+          consumedAcks[3].sequence === 3,
+          "cancellazione ACKa il watermark parziale, incluso zero, prima di svuotare il playback");
+        const zeroFinalSegment = {
+          responseId: "ui-self-test", generationId: "1", segmentId: "zero",
+          startSample: 40, lastAckedEndSample: 40, finalAckSent: false
+        };
+        assert(sendClientConsumedPcmAck(zeroFinalSegment, 40, true) &&
+          consumedAcks[4].start_sample === 40 && consumedAcks[4].end_sample === 40 &&
+          consumedAcks[4].final === true && consumedAcks[4].sequence === 4,
+          "ACK finale di cancellazione ammette un watermark vuoto alla start sample originale");
+        state.socket = socketSnapshot;
+        state.clientConsumedPcmSequence = ackSequenceSnapshot;
+        state.playbackAckPollingSuppressed = false;
         const late = enqueueAudio({ type: "response.audio.delta", response_id: "ui-self-test", generation_id: 1, packet_id: "late", sample_rate: 24000, delta: encodeTestWav() });
         assert(!late && state.outputNodes.size === 0, "audio tardivo respinto dopo la cancellazione");
         state.activeResponseId = "ui-no-speech";
@@ -1399,6 +1730,7 @@
         ui.testOutput.style.color = "var(--mint)";
         setResponse("Componenti verificati", "good");
       } catch (error) {
+        state.playbackAckPollingSuppressed = false;
         results.push("FAIL · " + error.message);
         ui.testOutput.textContent = results.join("\n");
         ui.testOutput.style.color = "var(--danger)";
@@ -1413,6 +1745,7 @@
     window.addEventListener("beforeunload", () => {
       if (state.reconnectTimer) clearTimeout(state.reconnectTimer);
       stopMicrophone(true);
+      flushCompletedConsumptionAcks({ finalize: true });
       flushPlayback();
       if (state.socket && state.socket.readyState < WebSocket.CLOSING) state.socket.close(1000, "pagina chiusa");
     });

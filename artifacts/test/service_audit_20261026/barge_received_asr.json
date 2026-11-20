@@ -1,0 +1,19 @@
+{
+  "source": "/workspace/artifacts/test/service_audit_20261026/barge_isolated/response_resp_0e89f366ebb8_received.wav",
+  "device": "cpu",
+  "vad_filter": true,
+  "model": "faster-whisper-small",
+  "transcript": " La Backpressor nello Streaming Audio si riferisce La Backpressor nello Streaming Audio si riferisci al meccanismo attraverso il quale un componente, come il client che riproduce l'audio, comunica un altro componente, come il server che lo produce, la capacità di elaborazione.",
+  "segments": [
+    {
+      "start": 0.24,
+      "end": 29.56,
+      "text": " La Backpressor nello Streaming Audio si riferisce"
+    },
+    {
+      "start": 29.56,
+      "end": 30.08,
+      "text": " La Backpressor nello Streaming Audio si riferisci al meccanismo attraverso il quale un componente, come il client che riproduce l'audio, comunica un altro componente, come il server che lo produce, la capacità di elaborazione."
+    }
+  ]
+}

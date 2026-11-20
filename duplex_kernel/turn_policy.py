@@ -75,11 +75,13 @@ class PolicyInput:
     # Stable shared-listener row generation, distinct from the websocket/turn
     # generation used for assistant response cancellation.
     native_listener_generation: int | None = None
-    # True only after the scheduler verifies exact-zero user and self-reference PCM.
+    # Legacy input metadata, ignored for hidden validation and head scoring.
     native_control_no_input_tick: bool = False
     # Stable identity for the currently unanswered user turn. Unlike the
     # response generation, this stays constant while a response is prepared.
     user_turn_onset_frame_id: int | None = None
+    user_endpoint_onset_frame_id: int | None = None
+    user_endpoint_frame_id: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.peer_turn_active, bool):
@@ -90,6 +92,14 @@ class PolicyInput:
             or self.user_turn_onset_frame_id < 0
         ):
             raise ValueError("user_turn_onset_frame_id must be a non-negative integer or None")
+        for name in ("user_endpoint_onset_frame_id", "user_endpoint_frame_id"):
+            value = getattr(self, name)
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 0
+            ):
+                raise ValueError(f"{name} must be a non-negative integer or None")
 
 
 @dataclass(frozen=True)

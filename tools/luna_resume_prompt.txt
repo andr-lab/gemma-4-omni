@@ -1,0 +1,3 @@
+Riprendi dal punto in cui ti sei interrotto per spegnimento del computer.
+Controlla il diff attuale dei file modificati (duplex_kernel/server.py, docs/ARCHITECTURE.md, tools/run_acceptance_suite.py), completa le modifiche mancanti richieste da tools/luna_shared_listener_spec.txt, esegui i test unitari (pytest tests/kernel/test_shared_listener_tick_dispatcher.py tests/kernel/test_listener_microbatch_worker.py tests/test_duplex_kernel_contract.py) e la compilazione py_compile dei file modificati.
+Riporta un riassunto finale dettagliato di quanto implementato e verificato.

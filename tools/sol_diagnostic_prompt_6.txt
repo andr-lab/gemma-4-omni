@@ -1,0 +1,53 @@
+# Diagnosi di Architettura e Contratti per GPT 6.1 Sol (Medium Effort)
+
+## Contesto e Risultati delle Due Esecuzioni di Verifica
+
+### 1. Risultati della Run 1 (acceptance_suite_20261102T144249485892Z/run_01)
+- L'eliminazione del payload massivo di `thinker_metrics` su WebSocket ha funzionato:
+  - Max microphone ACK gap: **141.45 ms** (limite: 160.0 ms) -> **PASS**
+  - Frames inviati / acked: 6255 / 6255 (0 dropped)
+  - Time to first audio: **464.57 ms** (limite: 800 ms) -> **PASS**
+  - Tutti i 4 turni completati: 3 normali + 2 cancellati (barge-in/YIELD pulito, memory follow-up coerente, chiusura).
+  - VRAM Allocata pura:
+    - Peak growth over baseline: **354.61 MiB** (budget: 1536.0 MiB) -> **PASS**
+    - Post-drain growth: **159.95 MiB** (budget: 256.0 MiB) -> **PASS**
+  - **Tuttavia, overall_status è risultato FAIL a causa della VRAM Riservata (Caching Allocator):**
+    - `post_warmup_baseline` (campionata a server appena avviato, prima di qualsiasi inferenza): **15242.0 MiB**
+    - Turn 1 post-drain: **16744.0 MiB** (+1502.0 MiB riservati da PyTorch per workspace/buffer di attivazione)
+    - Turn 2 post-drain: **16774.0 MiB** (+30.0 MiB)
+    - Turn 3 post-drain: **16778.0 MiB** (+4.0 MiB)
+    - Turn 4 post-drain: **16794.0 MiB** (+16.0 MiB)
+    - Budget in `acceptance_budget_config.json`: `vram_reserved_peak_growth`: 1024 MiB, `vram_reserved_post_drain_growth`: 1024 MiB.
+    - Poiché la baseline era stata presa prima che l'allocator PyTorch si espandesse per la prima volta, la crescita riservata è risultata 1552.0 MiB > 1024 MiB.
+    - Dopo il Turn 1, la memoria riservata è rimasta completamente piatta (+50 MiB totali su 3 turni).
+
+### 2. Risultati della Run 2 (acceptance_suite_20261102T145444457185Z/run_01)
+- Il server era già caldo (memoria riservata a 16794 MiB, 0 sessioni attive).
+- Durante il Turn 1 (`long_request`), il simulatore è andato in timeout a 180 secondi esatti:
+  `EvidenceError: response resp_87c2dec1b86c terminal event timed out`
+- Analisi temporale:
+  - In `tools/real_dialogue_simulator.py:1865`:
+    `deadline = loop.time() + self.args.response_timeout_s`
+    con `--response-timeout-s 180.0` passato da `run_acceptance_suite.py`.
+  - La fixture audio del parlato utente (`long_request`) dura circa 28 secondi (streaming dal secondo 0 al secondo 28).
+  - La risposta dell'assistente per il profilo `long` richiede fino a 1536 frame (768 pacchetti audio da 3840 campioni = 122.88 secondi di audio).
+  - Il server stava generando regolarmente ed era arrivato al pacchetto 714 (1428 frame, ~119s di audio generato) esattamente a 152 secondi dall'inizio della generazione.
+  - 28 secondi (audio utente) + 152 secondi (generazione server) = 180.0 secondi esatti!
+  - `remaining_budget("completion")` è sceso a 0 prima che il server potesse completare gli ultimi 54 pacchetti (~8-10 secondi rimanenti).
+
+## Domande per GPT 6.1 Sol
+
+1. **Gestione della Baseline VRAM e Allocator Warmup:**
+   - In `acceptance_budget_config.json` si legge:
+     `"completed_smoke": "work/gpu_forensics/gpu_diag_probe_replacement_20261025_pre_v2_restart/one_turn_smoke_retry1/runtime_telemetry_post_warmup.json + runtime_telemetry_post_drain.json"`
+     `"fresh_post_warmup_baseline_required": true`
+     `"Long probe had no completed SPEAK post-drain snapshot; prior completed short smoke is the available drain reference."`
+     `"Three completed turns do not exclude cumulative leak; inspect per-turn post-drain trend."`
+   - Come deve essere configurata/eseguita la procedura prima della suite affinché il PyTorch Caching Allocator sia riscaldato e la `post_warmup_baseline` non subisca il salto una-tantum di espansione del pool PyTorch (da 15.2 GB a 16.7 GB)?
+
+2. **Timeout del Turno Lungo (`--response-timeout-s`):**
+   - Perché `deadline` in `real_dialogue_simulator.py:1865` parte al momento della schedulazione della fixture (`delivery = self._assign_fixture(...)`) anziché al termine dell'input audio o all'avvio della risposta (`response.created`)?
+   - Qual è il valore corretto per `--response-timeout-s` in `tools/run_acceptance_suite.py` o la modalità corretta con cui il simulatore deve calcolare il budget di completamento per la risposta lunga di 1536 frame?
+
+3. **Strategia Deterministica per le 3 Run Consecutive:**
+   - Fornisci la procedura esatta (eventuali flag da passare a `run_acceptance_suite.py`, parametri di timeout o sequenza preliminare di smoke/warmup) per garantire che tutte e 3 le run consecutive registrino `overall_status: PASS`, soddisfacendo tutti i vincoli di PLAN.md e `acceptance_budget_config.json`.

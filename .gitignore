@@ -46,6 +46,9 @@ samples_*/
 
 # Large local conversation replay trace
 /artifacts/conversation_quality_20261014/microbatch_shadow_replay_n1_20261014/generation_domain_fix/events.jsonl
+scratch/
+work/
+
 
 
 # Large generated conversation replay logs kept local

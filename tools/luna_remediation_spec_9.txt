@@ -1,0 +1,84 @@
+# Task Specification for GPT-6 Luna (xhigh reasoning effort)
+
+## Objective
+Fix acoustic frame budget ceiling for long responses in `duplex_kernel/engine.py` and ensure cooperative listener compute quantum is wired into live SAY streaming worker in `duplex_kernel/server_response_runtime.py`.
+
+## Background & Evidence
+1. During acceptance suite testing of `LONG_RESPONSE_PROFILE`, the long response (~55s of speech) crashed with:
+   `RuntimeError: live SAY exhausted ARIA_MAX_FRAMES before Qwen text EOS and tail drain`
+   Root cause: In `duplex_kernel/engine.py:6111-6126` and `7058-7064`, `live_frame_cap` was clamped to `min(ARIA_MAX_FRAMES, configured_max_frames)` where `ARIA_MAX_FRAMES = 512`, and `apply_diagnostic_frame_budget` was called with `absolute_max_frames=ARIA_MAX_FRAMES`. When `max_frames=1536` (`LONG_RESPONSE_MAX_CODEC_FRAMES`), the budget was truncated to 512 frames (~40.96s), crashing when the thinker had not yet emitted text EOS.
+2. In `duplex_kernel/server_response_runtime.py`, `listener_compute_quantum` is passed to standard non-live talker calls (`talker_admission_kwargs`), but was omitted from `talker_kwargs` in `live_say_talker_worker` (lines ~1064 and ~1217), preventing cooperative GPU yielding during live streaming and causing listener step spikes.
+
+## Detailed Requirements
+
+### File 1: `duplex_kernel/engine.py`
+1. In `_estimate_talker_frame_budget`:
+   Update signature to accept `max_frames: int | None = None`.
+   When `short_streaming` is False:
+   ```python
+   hard_cap = (
+       ARIA_MAX_FRAMES
+       if max_frames is None
+       else min(ARIA_HARD_MAX_FRAMES, max(ARIA_MAX_FRAMES, int(max_frames)))
+   )
+   frame_budget = min(
+       hard_cap,
+       max(
+           int(min_frames),
+           int(spoken_units * ARIA_FRAMES_PER_WORD) + ARIA_OVERHEAD_FRAMES,
+       ),
+   )
+   ```
+2. In `PipelineEngine.talk`:
+   Calculate `configured_max_frames` and `effective_absolute_max_frames`:
+   ```python
+   if max_frames is not None:
+       configured_max_frames = int(max_frames)
+       if configured_max_frames <= 0:
+           raise ValueError("max_frames must be positive when provided")
+       configured_max_frames = min(configured_max_frames, ARIA_HARD_MAX_FRAMES)
+       if metrics is not None:
+           metrics["configured_max_frames"] = configured_max_frames
+   else:
+       configured_max_frames = ARIA_MAX_FRAMES
+
+   effective_absolute_max_frames = min(
+       ARIA_HARD_MAX_FRAMES,
+       max(ARIA_MAX_FRAMES, configured_max_frames),
+   )
+   ```
+   Pass `max_frames=configured_max_frames` to `_estimate_talker_frame_budget(...)`.
+   Call `apply_diagnostic_frame_budget(..., absolute_max_frames=effective_absolute_max_frames)`.
+   Set `live_frame_cap = configured_max_frames`.
+   Set `live_eos_frame_cap = live_frame_cap`.
+   If `diagnostic_max_frames is not None`:
+       `live_eos_frame_cap = min(live_eos_frame_cap, int(diagnostic_max_frames))`.
+3. In the live text stream loop inside `talk` (around line 7040-7065):
+   Pass `max_frames=configured_max_frames` to `_estimate_talker_frame_budget`.
+   Call `apply_diagnostic_frame_budget(live_text_budget, diagnostic_max_frames=diagnostic_max_frames, absolute_max_frames=effective_absolute_max_frames)`.
+   Keep `live_text_budget = min(live_frame_cap, live_text_budget)`.
+   If `live_text_budget > T_gen`:
+       `T_gen = live_text_budget`.
+
+### File 2: `duplex_kernel/server_response_runtime.py`
+1. Early in `run_response` (around lines 450-455):
+   Ensure `listener_admission_wait = request.get("_listener_admission_wait")` and `listener_compute_quantum = request.get("_listener_compute_quantum")` are defined and available to closure scopes.
+2. In `live_say_talker_worker`:
+   In both `talker_kwargs` dicts (around line 1064 for closed-unit and around line 1217 for live streaming):
+   Add:
+   ```python
+   "listener_compute_quantum": (
+       listener_compute_quantum
+       if callable(listener_compute_quantum)
+       else None
+   ),
+   ```
+
+### File 3: `tests/kernel/test_long_response_profile.py`
+Add regression test:
+Verify that `PipelineEngine.talk` with `max_frames=1536` allows `live_frame_cap` and `live_text_budget` to extend beyond 512 frames up to 1536 frames when `live_qwen_text_stream` has observed token count > 512.
+
+## Verification
+Run:
+`python -m pytest tests/kernel/test_long_response_profile.py tests/kernel/test_talker_eos.py tests/kernel/test_backchannel_frame_budget.py -q`
+Ensure 100% tests PASS.

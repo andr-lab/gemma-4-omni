@@ -156,9 +156,14 @@ class AudioTimelineReconstructor:
         self.cancelled_packet_count = 0
         self._lock = threading.Lock()
 
-    def cancel_response(self, response_id: str) -> None:
+    def cancel_response(
+        self,
+        response_id: Optional[str] = None,
+        generation_id: Optional[int] = None,
+    ) -> None:
         with self._lock:
-            self.cancelled_responses.add(response_id)
+            if response_id is not None:
+                self.cancelled_responses.add(str(response_id))
 
     def add_packet(
         self,
@@ -742,9 +747,12 @@ class DialogueOrchestrator:
                 "input_active": False,
                 "input_frame_id": 0,
                 "frames_consumed": 0,
+                "last_consumed_frame_id": None,
                 "ingress_acks_observed": False,
                 "ingress_sample_cursor": 0,
                 "playback_samples_consumed": 0,
+                "playback_clock_samples": 0,
+                "playback_clock_max_lateness_ms": 0.0,
                 "active_responses": set(),
                 "response_generations": {},
                 "responses": {},
@@ -907,6 +915,18 @@ class DialogueOrchestrator:
                         frame_id = int(state["input_frame_id"])
                         ingress_start = int(state["ingress_sample_cursor"])
                         ingress_end = ingress_start + FRAME_SAMPLES_16K
+                        if source == "scenario_audio" and step_id:
+                            step_timing = state["step_schedule"].setdefault(step_id, {})
+                            if step_timing.get("first_ingress_frame_id") is None:
+                                step_timing["first_ingress_frame_id"] = frame_id
+                            step_timing["last_ingress_frame_id"] = frame_id
+                            frame_rms = float(np.sqrt(np.mean(
+                                np.asarray(frame, dtype=np.float64) ** 2
+                            )))
+                            if frame_rms >= 0.001:
+                                if step_timing.get("first_speech_ingress_frame_id") is None:
+                                    step_timing["first_speech_ingress_frame_id"] = frame_id
+                                step_timing["last_speech_ingress_frame_id"] = frame_id
                         if is_correction_first_sample:
                             # Snapshot the old playback tail and put the correction frame
                             # on the wire under the same event fence. A cancel cannot
@@ -923,6 +943,12 @@ class DialogueOrchestrator:
                         else:
                             await ws.send(json.dumps(message))
                             sent_ns = time.monotonic_ns()
+                        if (
+                            source == "scenario_audio"
+                            and step_id
+                            and frame_rms >= 0.001
+                        ):
+                            step_timing["last_speech_ingress_sent_ns"] = sent_ns
                         state["input_frame_id"] = frame_id + 1
                         state["ingress_sample_cursor"] = ingress_end
                         next_input_frame_deadline = sent_ns / 1e9 + max(
@@ -1009,6 +1035,10 @@ class DialogueOrchestrator:
                         state["step_schedule"][step.step_id] = {
                             **schedule,
                             "actual_start_ns": step_start_ns,
+                            "first_ingress_frame_id": None,
+                            "last_ingress_frame_id": None,
+                            "first_speech_ingress_frame_id": None,
+                            "last_speech_ingress_frame_id": None,
                         }
                         self.event_logger.log(
                             "streaming_input_step_started",
@@ -1052,6 +1082,87 @@ class DialogueOrchestrator:
                             state["commit_timestamps_ns"].append(commit_ns)
                             state["pending_committed_steps"][step.step_id] = commit_ns
                             state["step_schedule"][step.step_id]["commit_ns"] = commit_ns
+                            step_start_ns = int(
+                                state["step_schedule"][step.step_id]["actual_start_ns"]
+                            )
+                            unassociated_responses = [
+                                response
+                                for response in state["responses"].values()
+                                if response.get("input_step_id") is None
+                                and int(response.get("created_ns", 0)) >= step_start_ns
+                            ]
+                            if unassociated_responses:
+                                response = max(
+                                    unassociated_responses,
+                                    key=lambda item: int(item.get("created_ns", 0)),
+                                )
+                                response_id = str(response["response_id"])
+                                response["input_step_id"] = step.step_id
+                                state["response_pending_steps"][response_id] = step.step_id
+                                last_speech_frame = state["step_schedule"][step.step_id].get(
+                                    "last_speech_ingress_frame_id"
+                                )
+                                if response.get("input_last_frame_id") is not None:
+                                    response["covers_step_last_speech_frame"] = (
+                                        None if last_speech_frame is None
+                                        else int(response["input_last_frame_id"])
+                                        >= int(last_speech_frame)
+                                    )
+                                elif response.get("terminal_ns") is not None:
+                                    last_speech_sent_ns = state["step_schedule"][step.step_id].get(
+                                        "last_speech_ingress_sent_ns"
+                                    )
+                                    response["covers_step_last_speech_frame"] = (
+                                        None if last_speech_sent_ns is None
+                                        else int(response["terminal_ns"])
+                                        >= int(last_speech_sent_ns)
+                                    )
+                            for response_id, response in state["responses"].items():
+                                if (
+                                    response.get("input_step_id") == step.step_id
+                                    and response.get("input_last_frame_id") is not None
+                                ):
+                                    last_speech_frame = state["step_schedule"][step.step_id].get(
+                                        "last_speech_ingress_frame_id"
+                                    )
+                                    response["covers_step_last_speech_frame"] = (
+                                        None if last_speech_frame is None
+                                        else int(response["input_last_frame_id"])
+                                        >= int(last_speech_frame)
+                                    )
+                                elif (
+                                    response.get("input_step_id") == step.step_id
+                                    and response.get("terminal_ns") is not None
+                                ):
+                                    last_speech_sent_ns = state["step_schedule"][
+                                        step.step_id
+                                    ].get("last_speech_ingress_sent_ns")
+                                    response["covers_step_last_speech_frame"] = (
+                                        None if last_speech_sent_ns is None
+                                        else int(response["terminal_ns"])
+                                        >= int(last_speech_sent_ns)
+                                    )
+                                if (
+                                    response.get("input_step_id") == step.step_id
+                                    and response.get("first_audio_delta_ns") is not None
+                                ):
+                                    state["pending_committed_steps"].pop(step.step_id, None)
+                                    self.event_logger.log(
+                                        "committed_turn_first_audio_available",
+                                        speaker="assistant",
+                                        details={
+                                            "step_id": step.step_id,
+                                            "commit_ns": commit_ns,
+                                            "response_id": response_id,
+                                            "first_audio_delta_received_ns": response[
+                                                "first_audio_delta_ns"
+                                            ],
+                                            "audio_preceded_commit": int(
+                                                response["first_audio_delta_ns"]
+                                            ) < commit_ns,
+                                        },
+                                    )
+                                    break
                             self.event_logger.log(
                                 "input_audio_buffer_commit_sent",
                                 speaker="user",
@@ -1077,12 +1188,33 @@ class DialogueOrchestrator:
                     producer_finished.set()
 
             async def playback_reader() -> None:
+                playback_clock_origin_ns = time.monotonic_ns()
+                playback_tick_index = 0
+                playback_tick_numerator = FRAME_SAMPLES_24K * 1_000_000_000
                 while not stop_tasks.is_set():
-                    tick_start = time.monotonic()
+                    deadline_ns = playback_clock_origin_ns + (
+                        playback_tick_index * playback_tick_numerator
+                    ) // SAMPLE_RATE_OUTPUT
+                    remaining_ns = deadline_ns - time.monotonic_ns()
+                    if remaining_ns > 0:
+                        await asyncio.sleep(remaining_ns / 1_000_000_000)
+                    if stop_tasks.is_set():
+                        break
+                    observed_ns = time.monotonic_ns()
+                    lateness_ms = max(0.0, (observed_ns - deadline_ns) / 1_000_000.0)
+                    state["playback_clock_max_lateness_ms"] = max(
+                        float(state["playback_clock_max_lateness_ms"]), lateness_ms
+                    )
+                    state["playback_clock_samples"] = int(
+                        playback_tick_index * FRAME_SAMPLES_24K
+                    )
                     outdata = np.zeros(FRAME_SAMPLES_24K, dtype=np.float32)
                     copied = playback.read_into(outdata)
+                    state["playback_clock_samples"] = int(
+                        (playback_tick_index + 1) * FRAME_SAMPLES_24K
+                    )
                     if copied:
-                        now_ns = time.monotonic_ns()
+                        now_ns = observed_ns
                         state["playback_samples_consumed"] += copied
                         cumulative = int(state["playback_samples_consumed"])
                         consumed_segments = shadow_consume(copied, now_ns)
@@ -1094,6 +1226,12 @@ class DialogueOrchestrator:
                                 "cumulative_consumed_samples": cumulative,
                                 "sample_rate": SAMPLE_RATE_OUTPUT,
                                 "callback_samples": FRAME_SAMPLES_24K,
+                                "playback_clock_sample_position": int(
+                                    playback_tick_index * FRAME_SAMPLES_24K
+                                ),
+                                "playback_clock_deadline_ns": int(deadline_ns),
+                                "playback_clock_observed_ns": int(observed_ns),
+                                "playback_clock_lateness_ms": float(lateness_ms),
                                 "consumption_semantics": "logical_client_device_buffer",
                                 "consumed_segments": consumed_segments,
                             },
@@ -1103,8 +1241,12 @@ class DialogueOrchestrator:
                             first_pcm_consumed.set()
                         for ack in playback.drain_client_consumed_pcm_acks():
                             await ack_queue.put(ack)
-                    elapsed = time.monotonic() - tick_start
-                    await asyncio.sleep(max(0.0, self.config.frame_pacing_s - elapsed))
+                    observed_ns = time.monotonic_ns()
+                    playback_tick_index = max(
+                        playback_tick_index + 1,
+                        ((observed_ns - playback_clock_origin_ns) * SAMPLE_RATE_OUTPUT)
+                        // playback_tick_numerator + 1,
+                    )
 
             async def ack_sender() -> None:
                 while not stop_tasks.is_set() or not ack_queue.empty():
@@ -1142,8 +1284,7 @@ class DialogueOrchestrator:
                 while not stop_tasks.is_set():
                     await asyncio.sleep(self.config.frame_pacing_s)
                     if (
-                        (state["pending_committed_steps"] or state["active_responses"]
-                         or playback.pending_samples > 0)
+                        (state["pending_committed_steps"] or state["active_responses"])
                         and not state["input_active"]
                     ):
                         pending_turns = state["pending_committed_steps"]
@@ -1183,8 +1324,24 @@ class DialogueOrchestrator:
                     completion_ready = (
                         producer_finished.is_set()
                         and state["last_commit_ns"] is not None
-                        and state["last_terminal_ns"] is not None
-                        and state["last_terminal_ns"] >= state["last_commit_ns"]
+                        and all(
+                            any(
+                                response.get("input_step_id") == step_id
+                                and response.get("first_audio_delta_ns") is not None
+                                and response.get("terminal_ns") is not None
+                                and (
+                                    response.get("covers_step_last_speech_frame") is True
+                                    or (
+                                        response.get("covers_step_last_speech_frame") is None
+                                        and int(response["terminal_ns"])
+                                        >= int(step_timing["commit_ns"])
+                                    )
+                                )
+                                for response in state["responses"].values()
+                            )
+                            for step_id, step_timing in state["step_schedule"].items()
+                            if step_timing.get("commit_ns") is not None
+                        )
                         and not state["active_responses"]
                         and playback.pending_samples == 0
                         and ack_queue.empty()
@@ -1192,6 +1349,35 @@ class DialogueOrchestrator:
                     )
                     if completion_ready:
                         state["stop_reason"] = "response_terminal"
+                        break
+                    incomplete_coverage_step = next(
+                        (
+                            step_id
+                            for step_id, step_timing in state["step_schedule"].items()
+                            if step_timing.get("commit_ns") is not None
+                            and step_timing.get("last_speech_ingress_frame_id") is not None
+                            and state["last_consumed_frame_id"] is not None
+                            and int(state["last_consumed_frame_id"])
+                            >= int(step_timing["last_speech_ingress_frame_id"])
+                            and any(
+                                response.get("input_step_id") == step_id
+                                and response.get("first_audio_delta_ns") is not None
+                                and response.get("terminal_ns") is not None
+                                and response.get("covers_step_last_speech_frame") is False
+                                for response in state["responses"].values()
+                            )
+                        ),
+                        None,
+                    )
+                    if (
+                        producer_finished.is_set()
+                        and incomplete_coverage_step is not None
+                        and not state["active_responses"]
+                        and playback.pending_samples == 0
+                        and ack_queue.empty()
+                    ):
+                        state["stop_reason"] = "incomplete_input_coverage"
+                        state["incomplete_input_coverage_step_id"] = incomplete_coverage_step
                         break
                     if (
                         producer_finished.is_set()
@@ -1249,12 +1435,58 @@ class DialogueOrchestrator:
                                 "audio_packets": [],
                             })
                             response["created_ns"] = received_ns
+                        if response_id in state["response_pending_steps"]:
+                            response["input_step_id"] = state["response_pending_steps"][response_id]
                             state["response_generations"].setdefault(response_id, set())
                         response["created_after_commit_ns"] = next(
                             (commit_ns for commit_ns in reversed(state["commit_timestamps_ns"])
                              if commit_ns <= received_ns),
                             None,
                         )
+                        first_input_frame_id = msg.get("input_first_frame_id")
+                        last_input_frame_id = msg.get("input_last_frame_id")
+                        if (
+                            isinstance(first_input_frame_id, int)
+                            and not isinstance(first_input_frame_id, bool)
+                            and isinstance(last_input_frame_id, int)
+                            and not isinstance(last_input_frame_id, bool)
+                            and first_input_frame_id <= last_input_frame_id
+                        ):
+                            response["input_first_frame_id"] = first_input_frame_id
+                            response["input_last_frame_id"] = last_input_frame_id
+                            matching_steps = []
+                            for step_id, step_timing in state["step_schedule"].items():
+                                first_step_frame = step_timing.get("first_ingress_frame_id")
+                                last_step_frame = step_timing.get("last_ingress_frame_id")
+                                if first_step_frame is None or last_step_frame is None:
+                                    continue
+                                overlap_start = max(first_input_frame_id, int(first_step_frame))
+                                overlap_end = min(last_input_frame_id, int(last_step_frame))
+                                if overlap_start <= overlap_end:
+                                    matching_steps.append((overlap_end - overlap_start + 1, step_id))
+                            if matching_steps:
+                                _overlap, input_step_id = max(matching_steps)
+                                response["input_step_id"] = input_step_id
+                                last_speech_frame = state["step_schedule"][input_step_id].get(
+                                    "last_speech_ingress_frame_id"
+                                )
+                                response["covers_step_last_speech_frame"] = (
+                                    None if last_speech_frame is None
+                                    else last_input_frame_id >= int(last_speech_frame)
+                                )
+                                state["response_pending_steps"][response_id] = input_step_id
+                        if response_id not in state["response_pending_steps"]:
+                            pending_commits = [
+                                (step_id, int(commit_ns))
+                                for step_id, commit_ns in state["pending_committed_steps"].items()
+                                if int(commit_ns) <= received_ns
+                            ]
+                            if pending_commits:
+                                pending_step_id, _pending_commit_ns = max(
+                                    pending_commits, key=lambda item: item[1]
+                                )
+                                state["response_pending_steps"][response_id] = pending_step_id
+                                response["input_step_id"] = pending_step_id
                         if state["first_response_created_ns"] is None:
                             state["first_response_created_ns"] = received_ns
                     elif mtype == "speaker.segment.opened":
@@ -1283,6 +1515,11 @@ class DialogueOrchestrator:
                                     pending_commits, key=lambda item: item[1]
                                 )
                                 state["response_pending_steps"][packet.response_id] = pending_step_id
+                                state["responses"].setdefault(packet.response_id, {
+                                    "response_id": packet.response_id,
+                                    "text": "",
+                                    "audio_packets": [],
+                                })["input_step_id"] = pending_step_id
                         if pending_step_id in state["pending_committed_steps"]:
                             pending_commit_ns = state["pending_committed_steps"].pop(pending_step_id)
                             self.event_logger.log(
@@ -1363,6 +1600,25 @@ class DialogueOrchestrator:
                             })
                             response["text"] += str(msg.get("delta", ""))
                     elif mtype == "response.done":
+                        response = state["responses"].setdefault(str(response_id or ""), {
+                            "response_id": str(response_id or ""),
+                            "text": "",
+                            "audio_packets": [],
+                        })
+                        response["terminal_ns"] = received_ns
+                        response["terminal_type"] = "response.done"
+                        step_id = response.get("input_step_id")
+                        if (
+                            step_id in state["step_schedule"]
+                            and response.get("input_last_frame_id") is None
+                        ):
+                            last_speech_sent_ns = state["step_schedule"][step_id].get(
+                                "last_speech_ingress_sent_ns"
+                            )
+                            response["covers_step_last_speech_frame"] = (
+                                None if last_speech_sent_ns is None
+                                else received_ns >= int(last_speech_sent_ns)
+                            )
                         if response_id:
                             async with event_lock:
                                 playback.complete_response(str(response_id))
@@ -1385,6 +1641,13 @@ class DialogueOrchestrator:
                             )
                         if response_id:
                             response_key = str(response_id)
+                            response = state["responses"].setdefault(response_key, {
+                                "response_id": response_key,
+                                "text": "",
+                                "audio_packets": [],
+                            })
+                            response["terminal_ns"] = received_ns
+                            response["terminal_type"] = mtype
                             known_generations = state["response_generations"].get(response_key, set())
                             if generation_id is None:
                                 known_generations.clear()
@@ -1408,6 +1671,9 @@ class DialogueOrchestrator:
                     elif mtype == "input_audio_buffer.consumed":
                         state["ingress_acks_observed"] = True
                         state["frames_consumed"] = state.get("frames_consumed", 0) + 1
+                        consumed_frame_id = msg.get("frame_id")
+                        if isinstance(consumed_frame_id, int) and not isinstance(consumed_frame_id, bool):
+                            state["last_consumed_frame_id"] = consumed_frame_id
                         frame_consumed_event.set()
                         self.event_logger.log(
                             "input_audio_frame_consumed",
@@ -1567,6 +1833,7 @@ class DialogueOrchestrator:
         result = {
             "status": (
                 "COMPLETED" if state["stop_reason"] == "response_terminal"
+                else "FAILED" if state["stop_reason"] == "incomplete_input_coverage"
                 else "INCOMPLETE" if state["stop_reason"] == "quiet_timeout"
                 else "FAILED" if (
                     state["stop_reason"] == "max_duration"
@@ -1613,6 +1880,8 @@ class DialogueOrchestrator:
             },
             "ingress_frames_sent": int(state["input_frame_id"]),
             "logical_pcm_samples_consumed": int(state["playback_samples_consumed"]),
+            "playback_clock_samples": int(state["playback_clock_samples"]),
+            "playback_clock_max_lateness_ms": float(state["playback_clock_max_lateness_ms"]),
             "wav_files": {key: str(path) for key, path in wav_files.items()},
             "events_jsonl": str(self.output_dir / "dialogue_events.jsonl"),
         }

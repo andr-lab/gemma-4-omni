@@ -11,7 +11,7 @@ import copy
 import os
 import unicodedata
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 
 AUDIO_RESPONSE_PROTOCOL_V2 = "heard_action_say_v2"
@@ -63,6 +63,14 @@ class AudioResponseProtocolError(ValueError):
     def __init__(self, reason: str) -> None:
         self.reason = str(reason)
         super().__init__(f"audio response protocol v2 rejected: {self.reason}")
+
+
+@dataclass(frozen=True)
+class AudioResponseFallbackProposal:
+    """A fallback token whose protocol effects commit only after execution."""
+
+    token_id: int
+    on_executed: Callable[[], Any]
 
 
 def resolve_audio_response_protocol(environ: Mapping[str, str] | None = None) -> str:
@@ -900,6 +908,7 @@ class AudioResponseV2Collector:
         text: str,
         *,
         terminal: bool,
+        count_rejection: bool = True,
         max_say_words: int | None = None,
         max_heard_tokens: int | None = None,
         max_action_tokens: int | None = None,
@@ -967,10 +976,12 @@ class AudioResponseV2Collector:
             complete = terminal or preview.phase in {"closing_brace", "done"}
             if complete:
                 if candidate not in self._backchannel_say_phrases:
-                    self.backchannel_say_lexicon_rejections += 1
+                    if count_rejection:
+                        self.backchannel_say_lexicon_rejections += 1
                     return False
             elif not any(phrase.startswith(candidate) for phrase in self._backchannel_say_phrases):
-                self.backchannel_say_lexicon_rejections += 1
+                if count_rejection:
+                    self.backchannel_say_lexicon_rejections += 1
                 return False
         return preview.failure_reason is None and not preview.cancelled
 
@@ -1494,7 +1505,8 @@ class AudioResponseV2ActionConstraint:
         rejected_candidates: list[tuple[int, str, bool]],
         *,
         budget: dict[str, int],
-    ) -> int | None:
+        proposal: bool = False,
+    ) -> int | AudioResponseFallbackProposal | None:
         """Close a capped JSON string only at a validated, safe boundary."""
         parser = collector.parser
         if (
@@ -1527,7 +1539,11 @@ class AudioResponseV2ActionConstraint:
             )
             if not safe_boundary:
                 for _token_id, text, terminal in rejected_candidates:
-                    if terminal or not text or not collector.is_valid_next_text(text, terminal=False):
+                    if terminal or not text or not collector.is_valid_next_text(
+                        text,
+                        terminal=False,
+                        count_rejection=not proposal,
+                    ):
                         continue
                     preview = copy.deepcopy(parser)
                     try:
@@ -1554,6 +1570,26 @@ class AudioResponseV2ActionConstraint:
         if preview.phase == parser.phase:
             return None
 
+        if proposal:
+            token_id = quote_ids[0]
+            phase = parser.phase
+
+            def commit_closure() -> bool:
+                if collector._cancelled or collector._finished:
+                    return False
+                if collector.parser.phase != phase:
+                    raise AudioResponseProtocolError("bounded_closure_state_changed")
+                self.bounded_output = True
+                if phase == "heard_value":
+                    collector.heard_truncated = True
+                elif phase == "say_value":
+                    collector.say_truncated = True
+                if self._force_text('"', kind="structure") != token_id:
+                    raise AudioResponseProtocolError("bounded_closure_token_changed")
+                return True
+
+            return AudioResponseFallbackProposal(token_id, commit_closure)
+
         self.bounded_output = True
         if parser.phase == "heard_value":
             collector.heard_truncated = True
@@ -1577,7 +1613,8 @@ class AudioResponseV2ActionConstraint:
         rejected_candidates: list[tuple[int, str, bool]],
         *,
         max_say_words: int = 4,
-    ) -> int | None:
+        proposal: bool = False,
+    ) -> int | AudioResponseFallbackProposal | None:
         """Close a bounded BACKCHANNEL only at a proven next-word boundary.
 
         This is a last-resort structural token used after the decoder has
@@ -1621,6 +1658,23 @@ class AudioResponseV2ActionConstraint:
 
         if not rejected_candidates:
             return None
+        if proposal:
+            token_ids = self._encode_roundtrippable(
+                '"',
+                reason="json_structure_tokenization_not_roundtrippable",
+            )
+
+            def commit_closure() -> bool:
+                if collector._cancelled or collector._finished:
+                    return False
+                if collector.parser.phase != "say_value":
+                    raise AudioResponseProtocolError("bounded_closure_state_changed")
+                self.bounded_output = True
+                if self._force_text('"', kind="structure") != token_ids[0]:
+                    raise AudioResponseProtocolError("bounded_closure_token_changed")
+                return True
+
+            return AudioResponseFallbackProposal(token_ids[0], commit_closure)
         self.bounded_output = True
         return self._force_text('"', kind="structure")
 
@@ -1823,6 +1877,7 @@ __all__ = [
     "AUDIO_RESPONSE_V2_MAX_HEARD_TOKENS",
     "AUDIO_RESPONSE_V2_MAX_NEW_TOKENS",
     "AUDIO_RESPONSE_V2_MAX_SAY_TOKENS",
+    "AudioResponseFallbackProposal",
     "AudioResponseV2ActionConstraint",
     "AudioResponseProtocolError",
     "AudioResponseV2Collector",

@@ -19,6 +19,8 @@ from duplex_kernel.listener_microbatch_frontend import (
     MEL_WINDOW_ROWS,
     ListenerMicrobatchAudioFrontend,
     PreparedListenerAudioBatch,
+    _snapshot_mel_history,
+    _user_mel_window,
 )
 from duplex_kernel.microbatch_contract import (
     ListenerFrame,
@@ -207,6 +209,53 @@ def _runtime_states_and_batch(
 def _production_extractor() -> Any:
     backend = SimpleNamespace(feature_extractor=_RealMelFixture())
     return lambda wave, tail: GemmaAudioTowerBackend._extract_single_frame(backend, wave, tail)
+
+
+def test_user_mel_window_validates_current_and_concatenates_only_needed_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import duplex_kernel.listener_microbatch_frontend as frontend_module
+
+    history = tuple(
+        np.full((8, 128), frame, dtype=np.float32) for frame in range(64)
+    )
+    current = np.full((8, 128), 99, dtype=np.float32)
+    validation_names: list[str] = []
+    original_validate = frontend_module._validate_mel_rows
+
+    def record_validation(value: np.ndarray, name: str) -> np.ndarray:
+        validation_names.append(name)
+        return original_validate(value, name)
+
+    concatenated_shapes: list[tuple[tuple[int, ...], ...]] = []
+    original_concatenate = np.concatenate
+
+    def record_concatenate(values: Any, *args: Any, **kwargs: Any) -> np.ndarray:
+        arrays = tuple(values)
+        concatenated_shapes.append(tuple(array.shape for array in arrays))
+        return original_concatenate(arrays, *args, **kwargs)
+
+    monkeypatch.setattr(frontend_module, "_validate_mel_rows", record_validation)
+    monkeypatch.setattr(frontend_module.np, "concatenate", record_concatenate)
+
+    actual = _user_mel_window(history, current, mel_window_rows=32)
+
+    assert validation_names == ["current user Mel"]
+    assert concatenated_shapes[0] == ((8, 128),) * 3
+    assert actual.shape == (32, 128)
+    np.testing.assert_array_equal(actual[:24], np.concatenate(history[-3:], axis=0))
+    np.testing.assert_array_equal(actual[24:], current)
+
+
+def test_snapshot_mel_history_keeps_validated_array_references() -> None:
+    frames = tuple(np.full((8, 128), index, dtype=np.float32) for index in range(4))
+
+    snapshot = _snapshot_mel_history(frames, max_frames=4)
+
+    assert len(snapshot) == len(frames)
+    assert all(actual is expected for actual, expected in zip(snapshot, frames, strict=True))
+    with pytest.raises(ValueError, match="exactly 8 finite rows of 128 bins"):
+        _snapshot_mel_history((np.zeros((7, 128), dtype=np.float32),), max_frames=1)
 
 
 def test_audio_tower_batch_cuda_span_is_distinct_from_replay_sum() -> None:
@@ -560,6 +609,62 @@ def test_encoder_failure_does_not_commit_any_frontend_state(
             np.testing.assert_array_equal(actual, expected)
         for actual, expected in zip(state.assistant_mel_history, snapshot[3], strict=True):
             np.testing.assert_array_equal(actual, expected)
+
+
+def test_frontend_preserves_pre_streaming_setup_error_when_cleanup_is_needed(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_signature: RuntimeSignature,
+    capability: NativeBatchCapability,
+) -> None:
+    _, batch, states = _runtime_states_and_batch(1, runtime_signature, capability)
+    frontend = ListenerMicrobatchAudioFrontend(
+        _AudioTower(), _production_extractor(), device="cpu", dtype=torch.float32
+    )
+    original = ValueError("injected CUDA timing setup failure")
+
+    def fail_before_stream_batch_exists():
+        raise original
+
+    monkeypatch.setattr(frontend, "_cuda_event_pair", fail_before_stream_batch_exists)
+
+    with pytest.raises(ValueError, match="injected CUDA timing setup failure") as caught:
+        frontend.encode_batch(batch, states)
+
+    assert caught.value is original
+    assert frontend._active_manifest_id is None
+    assert frontend._poisoned is True
+
+
+def test_frontend_abort_failure_does_not_mask_encoder_contract_error(
+    runtime_signature: RuntimeSignature,
+    capability: NativeBatchCapability,
+) -> None:
+    class _AbortFails:
+        optimize_cuda = False
+
+        def prepare_batch(self, *_args, **_kwargs):
+            return SimpleNamespace(
+                soft_tokens=torch.zeros((1, 1, 1), dtype=torch.float32),
+                raw_tokens=torch.zeros((1, 2, 3), dtype=torch.float32),
+                execution_mode="eager",
+                abort=lambda: (_ for _ in ()).throw(ValueError("abort cleanup failed")),
+                _committed=False,
+            )
+
+    _, batch, states = _runtime_states_and_batch(1, runtime_signature, capability)
+    frontend = ListenerMicrobatchAudioFrontend(
+        _AudioTower(),
+        _production_extractor(),
+        device="cpu",
+        dtype=torch.float32,
+        streaming_audio_tower=_AbortFails(),
+    )
+
+    with pytest.raises(RuntimeError, match="streaming audio tower did not return \[N,2,1536\]"):
+        frontend.encode_batch(batch, states)
+
+    assert frontend._active_manifest_id is None
+    assert frontend._poisoned is True
 
 
 def test_invalid_second_row_output_fails_without_partial_state_commit(

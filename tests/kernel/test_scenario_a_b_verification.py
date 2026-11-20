@@ -7,6 +7,7 @@ import wave
 import numpy as np
 import pytest
 import torch
+from tokenizers import Tokenizer, models, pre_tokenizers
 
 from client import duplex_dialogue_harness
 from client.duplex_dialogue_harness import (
@@ -80,6 +81,10 @@ class ConversationalGemmaEngine:
         self.forwarded_embeds: list[dict[str, Any]] = []
         self.ephemeral_backchannel_calls: list[dict[str, Any]] = []
         self.special_tokens_generated: list[str] = []
+        self.tokenizer = Tokenizer(models.WordLevel(
+            {"[UNK]": 0, "Capisco.": 1}, unk_token="[UNK]"
+        ))
+        self.tokenizer.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
 
     def embed_tokens(self, token_ids: tuple[int, ...]) -> torch.Tensor:
         return torch.zeros((1, len(token_ids), 1536), dtype=torch.float32)
@@ -102,17 +107,21 @@ class ConversationalGemmaEngine:
         *,
         session_id: Any,
         start_kv_pos: int,
-        max_tokens: int = 2,
-    ) -> tuple[list[int], torch.Tensor]:
+        max_tokens: int = 6,
+    ) -> dict[str, Any]:
         self.ephemeral_backchannel_calls.append({
             "session_id": session_id,
             "start_kv_pos": start_kv_pos,
             "max_tokens": max_tokens,
         })
         # Generate 2 backchannel tokens, e.g. "Capisco." / "Sì."
-        bc_tokens = [10901, 10902][:max_tokens]
+        bc_tokens = [1][:max_tokens]
         bc_hiddens = torch.ones((1, len(bc_tokens), 1536), dtype=torch.float32)
-        return bc_tokens, bc_hiddens
+        return {
+            "gen_ids": bc_tokens,
+            "hidden": bc_hiddens,
+            "terminal_reason": "eos",
+        }
 
 
 class PlayoutSpeaker:
@@ -265,8 +274,8 @@ def test_scenario_b_ephemeral_backchannel_preserves_kv_cache() -> None:
     # Ephemeral backchannel executes
     bc_tokens, bc_hiddens = manager.handle_ephemeral_backchannel(session.session_id)
 
-    # Criterion 1: Emits 1-2 token backchannel ("Capisco.") to speaker without closing user audio
-    assert bc_tokens is not None and len(bc_tokens) == 2
+    # Criterion 1: Emits the original validated source token without closing user audio.
+    assert bc_tokens is not None and len(bc_tokens) == 1
     assert len(speaker.enqueued_bc_tts) == 1
     assert speaker.enqueued_bc_tts[0][0] == bc_tokens
 

@@ -1,0 +1,73 @@
+{
+  "status": "ok",
+  "process_id": 1,
+  "sampled_at_monotonic_ns": 5816607485644888,
+  "cuda_allocator": {
+    "status": "available",
+    "device": "cuda:0",
+    "allocated_bytes": 15800845312,
+    "reserved_bytes": 17691574272,
+    "peak_allocated_bytes": 16121617408,
+    "peak_reserved_bytes": 17691574272,
+    "sampled_at_monotonic_ns": 5816607485644888
+  },
+  "sessions": [
+    {
+      "session_id": "f9d146d440c54801867a4a995a496ad3",
+      "response_id": "resp_bd973218086d",
+      "generation_id": 4,
+      "speaker_segment_id": "seg_74c5d684c8da",
+      "active_response": true,
+      "response_cancel_notified": false,
+      "kv_cache_position": 1026,
+      "kv_cache_source": "listener_microbatch_worker.session_state.cache_position",
+      "listener_worker_snapshot_status": "available",
+      "branches": [
+        {
+          "response_id": "resp_115d016b0dbf",
+          "generation_id": 1,
+          "speaker_segment_id": "seg_53f4f6cc5bd9",
+          "matches_current_generation": false,
+          "playback_cancelled": true,
+          "finalized": true,
+          "ended_response": true,
+          "finalizer_task_done": false,
+          "finalizer_task_status": "not_scheduled",
+          "client_consumed_pcm_sequence": -1,
+          "client_consumed_segments": [],
+          "playback_segments": [],
+          "spoken_prefix_exclusive_cursor": 159,
+          "kv_cache_position": 0,
+          "kv_cache_source": "session.kv_cache.current_position",
+          "playback_pending": false
+        },
+        {
+          "response_id": "resp_bd973218086d",
+          "generation_id": 2,
+          "speaker_segment_id": "seg_74c5d684c8da",
+          "matches_current_generation": false,
+          "playback_cancelled": true,
+          "finalized": false,
+          "ended_response": false,
+          "finalizer_task_done": false,
+          "finalizer_task_status": "not_scheduled",
+          "client_consumed_pcm_sequence": -1,
+          "client_consumed_segments": [],
+          "playback_segments": [
+            {
+              "speaker_segment_id": "seg_74c5d684c8da",
+              "start_sample": 0,
+              "end_sample": null,
+              "emitted_end_sample": 418560,
+              "done_emitted": false
+            }
+          ],
+          "spoken_prefix_exclusive_cursor": 865,
+          "kv_cache_position": 0,
+          "kv_cache_source": "session.kv_cache.current_position",
+          "playback_pending": false
+        }
+      ]
+    }
+  ]
+}

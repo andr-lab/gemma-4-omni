@@ -1,0 +1,46 @@
+# Task Spec per GPT-6 Luna (xhigh): Eliminazione payload cumulativo thinker_metrics su WebSocket realtime e timing diagnostico ACK
+
+## 1. Obiettivo e Diagnosi (da tools/sol_diagnosis_output_3.md)
+Nei run 2 e 3 della suite di accettazione a 3 run, il Turn 1 (risposta lunga > 120s) è fallito con:
+`WebSocket/runtime error: EvidenceError: long response microphone ACK gap 172.2ms (e 184.9ms) reached the 160.0ms limit`
+L'indagine di GPT 6.1 Sol ha isolato la causa radice:
+Al completamento della generazione del Thinker durante la risposta lunga, il server emette l'evento WebSocket `response.thinker_metrics`.
+Questo evento serializzava e inviava sul WebSocket realtime l'intero profilo cumulativo per-token: `append_steps` (444 elementi) e `sampling_steps` (889 elementi), generando un payload JSON compatto di **520–541 KB**!
+Mentre Starlette serializza sincronicamente mezzo megabyte sull'event loop tenendo `ws_send_lock` e il client `real_dialogue_simulator.py` legge, parsa ricorsivamente e fa `flush()` sincrono su disco nel suo receiver loop (~37 ms), gli ACK `input_audio_buffer.consumed` del microfono rimangono bloccati in coda sul WebSocket, accumulando un gap di 172-185 ms.
+
+## 2. Requisiti di Implementazione (TDD)
+
+### A. Proiezione Lightweight in `duplex_kernel/server_speech_ack.py`
+1. In `duplex_kernel/server_speech_ack.py`, implementare una funzione di proiezione esplicita, ad es. `_project_realtime_thinker_metrics(values: Mapping[str, Any]) -> dict[str, Any]`:
+   - Conservare `policy_decision_at_ns` e tutti i campi scalari/metadati di primo livello.
+   - In `unified_native_profile`:
+     - Conservare tutti i campi scalari e timestamp (es. `token0_forward_submit_ns`, `token0_forward_return_ns`, `thinker_prefill_*`, `thinker_decode_*`, `clock_source`, ecc.).
+     - Conservare gli aggregati numerici / conteggi:
+       - `append_steps_count = len(native_profile["append_steps"])` (se presente)
+       - `sampling_steps_count = len(native_profile["sampling_steps"])` (se presente)
+     - **ESCLUDERE** dal payload WebSocket le liste massive `append_steps` e `sampling_steps`.
+   - In `thinker_runtime_metrics`: conservare scalari e riepiloghi, senza strutture per-token non limitate.
+   - La dimensione JSON UTF-8 dell'evento proiettato deve essere **strettamente inferiore a 8 KiB** (tipicamente 1-2 KiB), anche con migliaia di token generati.
+2. In `_publish_thinker_metrics_event`:
+   - `update_runtime_metrics(response_id, "thinker_metrics", metrics)` DEVE CONTINUARE a ricevere il dizionario completo originale `metrics` per i consumatori interni di diagnostica locale.
+   - Solo il payload inviato a `send_event(...)` deve usare la versione proiettata `_project_realtime_thinker_metrics(metrics)`.
+   - Preservare rigorosamente il generation fence e la gestione della cancellazione.
+
+### B. Misure diagnostiche per il dispatch degli ACK WebSocket
+1. In `duplex_kernel/server.py` o negli helper di invio ACK (`input_audio_buffer.consumed`):
+   - Aggiungere timestamp e durate scalari dove rilevante: ad es. tempo di attesa per acquisire `ws_send_lock` prima dell'invio dell'ACK (`server_ack_lock_wait_ms`), senza alterare `server_ack_queue_ms` già esistente né rompere la retrocompatibilità.
+
+### C. Test Unitari in `tests/kernel/test_unified_kv_server_gate.py`
+1. Aggiungere test unitari che costruiscono un profilo Thinker con almeno 500 append e 1.000 sampling steps:
+   - Verificare che `_publish_thinker_metrics_event`:
+     1. Invia a `send_event` un payload con JSON UTF-8 < 8 KiB.
+     2. Conserva tutti i timestamp scalari di `token0`, `policy_decision_at_ns`, `append_steps_count`, `sampling_steps_count`.
+     3. Non include le liste `append_steps` e `sampling_steps` nell'evento WebSocket.
+     4. Passa a `update_runtime_metrics` il profilo completo originale con tutte le liste intatte.
+     5. Rispetta la cancellazione (se cancellato prima, `send_event` non viene chiamato e restituisce `False`).
+
+### D. Verifica e Documentazione
+1. Esegui la suite unitaria:
+   `python -m pytest tests/kernel/test_unified_kv_server_gate.py tests/kernel/test_shared_listener_tick_dispatcher.py tests/kernel/test_listener_microbatch_worker.py tests/test_duplex_kernel_contract.py`
+2. Esegui `python -m py_compile` su tutti i file modificati.
+3. Aggiorna `docs/ARCHITECTURE.md` spiegando la separazione tra la telemetria realtime leggera sul WebSocket (< 8 KiB) e il profiling dettagliato offline/interno, e il significato delle nuove metriche scalari di invio ACK.

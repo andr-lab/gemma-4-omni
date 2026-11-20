@@ -87,7 +87,7 @@ def test_native_abi_has_a_distinct_recurrent_audio_q1_import_and_step() -> None:
 def test_native_joint_prefix_transitions_to_audio_q1_without_cache_reimport() -> None:
     implementation = _source("native/qwen_talker/qwen_talker.cu")
     adapter = _source("duplex_kernel/native_qwen_talker.py")
-    future_prefix = _source("duplex_kernel/future_prefix.py")
+    talker_step = _source("duplex_kernel/engine_talker_step.py")
 
     audio_step = implementation.split("extern \"C\" int qwen_talker_step_audio_async", 1)[1].split(
         "extern \"C\" void qwen_talker_destroy", 1
@@ -100,7 +100,11 @@ def test_native_joint_prefix_transitions_to_audio_q1_without_cache_reimport() ->
     assert "ctx->mode = qwen_execution_mode::recurrent_audio_q1" in audio_step
     assert "visible_prefix_position = ctx->audio_start - 1u" in audio_step
     assert "def step_audio_async(" in adapter
-    assert "self._native_qwen.step_audio_async(" in future_prefix
+    native_step = talker_step.split("def _native_talker_q1_step_impl", 1)[1].split(
+        "def _qwen_q1_forward_impl", 1
+    )[0]
+    assert "executor.step_audio_async(inputs_embeds)" in native_step
+    assert "import_dynamic_cache_async" not in native_step
     assert "joint_q2_mode" in terminal_step
     assert "ctx->mode == qwen_execution_mode::recurrent_audio_q1" in terminal_step
 
@@ -373,6 +377,38 @@ def test_live_native_q1_import_reserves_bounded_capacity_for_growing_text_budget
         live_qwen_text_stream=None,
         live_frame_cap=512,
     ) == 57
+
+
+@pytest.mark.parametrize("capacity", [1, 2, 5])
+def test_engine_accepts_any_positive_response_talk_context_capacity(capacity: int) -> None:
+    engine = PipelineEngine(
+        device="cpu",
+        controller_guided_talk_contexts=capacity,
+    )
+
+    assert engine.controller_guided_talk_contexts == capacity
+
+
+def test_engine_defaults_to_one_response_talk_context() -> None:
+    engine = PipelineEngine(device="cpu")
+
+    assert engine.controller_guided_talk_contexts == 1
+
+
+@pytest.mark.parametrize("capacity", [True, -1, 0])
+def test_engine_rejects_invalid_response_talk_context_capacity(capacity) -> None:
+    with pytest.raises(ValueError, match="controller_guided_talk_contexts"):
+        PipelineEngine(device="cpu", controller_guided_talk_contexts=capacity)
+
+
+def test_requested_native_q1_graph_cannot_fall_back_to_eager() -> None:
+    engine = PipelineEngine.__new__(PipelineEngine)
+    engine._talker_native_audio_q1_graph_requested = True
+
+    with pytest.raises(engine_module._NativeTalkerDecodeError, match="failed before readiness"):
+        engine._set_native_talker_q1_fallback(RuntimeError("capture did not complete"))
+
+    assert not hasattr(engine, "talker_q1_native_status")
 
 
 def test_live_frame_residual_preserves_only_global_frame_zero_and_uses_exact_packet_hidden() -> None:

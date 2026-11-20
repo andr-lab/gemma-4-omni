@@ -856,9 +856,19 @@ class _FixedBatchAdapter(NativeControl6LoRA):
         self.fixed_logits = torch.tensor(logits, dtype=torch.float32)
         self.forward_calls = 0
 
-    def forward(self, normalized_hidden: torch.Tensor, *, phase_t=None) -> torch.Tensor:
+    def forward(
+        self,
+        normalized_hidden: torch.Tensor,
+        *,
+        phase_t=None,
+        defer_cuda_input_finite_check: bool = False,
+    ) -> torch.Tensor:
         del phase_t
-        if not torch.isfinite(normalized_hidden).all():
+        if type(defer_cuda_input_finite_check) is not bool:
+            raise TypeError("defer_cuda_input_finite_check must be a bool")
+        if not (defer_cuda_input_finite_check and normalized_hidden.is_cuda) and not torch.isfinite(
+            normalized_hidden
+        ).all():
             raise ValueError("normalized_hidden contains non-finite values")
         self.forward_calls += 1
         rows = normalized_hidden.shape[0]
@@ -869,10 +879,22 @@ class _RecordingBatchAdapter(_FixedBatchAdapter):
     def __init__(self, logits: list[list[float]]) -> None:
         super().__init__(logits)
         self.seen_hidden: torch.Tensor | None = None
+        self.defer_cuda_input_finite_checks: list[bool] = []
 
-    def forward(self, normalized_hidden: torch.Tensor, *, phase_t=None) -> torch.Tensor:
+    def forward(
+        self,
+        normalized_hidden: torch.Tensor,
+        *,
+        phase_t=None,
+        defer_cuda_input_finite_check: bool = False,
+    ) -> torch.Tensor:
         self.seen_hidden = normalized_hidden.detach().clone()
-        return super().forward(normalized_hidden, phase_t=phase_t)
+        self.defer_cuda_input_finite_checks.append(defer_cuda_input_finite_check)
+        return super().forward(
+            normalized_hidden,
+            phase_t=phase_t,
+            defer_cuda_input_finite_check=defer_cuda_input_finite_check,
+        )
 
 
 class _NonfiniteLogitAdapter(_FixedBatchAdapter):
@@ -883,17 +905,33 @@ class _NonfiniteLogitAdapter(_FixedBatchAdapter):
         return torch.full((rows, len(ACTIONS)), float("nan"), device=normalized_hidden.device)
 
 
+@pytest.mark.parametrize(
+    ("fused_modes", "simulate_cuda", "expected_defer"),
+    [
+        ((False, False), False, False),
+        ((True, True), False, False),
+        ((True, True), True, True),
+        ((True, False), True, False),
+        ((False, False), True, False),
+    ],
+)
 def test_mixed_native_output_views_apply_one_head_forward_to_per_session_turn_contexts(
     runtime_signature: RuntimeSignature,
     capability: NativeBatchCapability,
+    monkeypatch: pytest.MonkeyPatch,
+    fused_modes: tuple[bool, bool],
+    simulate_cuda: bool,
+    expected_defer: bool,
 ) -> None:
     logits = [[-5.0] * len(ACTIONS) for _ in range(2)]
     logits[0][ACTIONS.index("SPEAK")] = 9.0
     logits[1][ACTIONS.index("SPEAK")] = 8.0
     adapter = _RecordingBatchAdapter(logits)
     policies = tuple(
-        GemmaNativeControl6Policy(adapter, checkpoint_path="cpu-test.pt")
-        for _ in range(2)
+        GemmaNativeControl6Policy(
+            adapter, checkpoint_path="cpu-test.pt", fused_readback=fused_modes[index],
+        )
+        for index in range(2)
     )
     coordinator = _coordinator(runtime_signature, capability, session_count=2)
     turn_generations = (101, 202)
@@ -943,10 +981,25 @@ def test_mixed_native_output_views_apply_one_head_forward_to_per_session_turn_co
     batch_policy = GemmaNativeControl6BatchPolicy(
         adapter, checkpoint_path="cpu-test.pt", capture_debug_inputs=True,
     )
+    with monkeypatch.context() as cuda_mock:
+        if simulate_cuda:
+            original_is_cuda = torch.Tensor.is_cuda
 
-    decisions = batch_policy.step_native_output_views(sources, contexts)
+            def report_batched_policy_hidden_as_cuda(tensor: torch.Tensor) -> bool:
+                if tuple(tensor.shape) == (2, HIDDEN_WIDTH):
+                    return True
+                return bool(original_is_cuda.__get__(tensor, torch.Tensor))
+
+            cuda_mock.setattr(
+                torch.Tensor,
+                "is_cuda",
+                property(report_batched_policy_hidden_as_cuda),
+            )
+
+        decisions = batch_policy.step_native_output_views(sources, contexts)
 
     assert adapter.forward_calls == 1
+    assert adapter.defer_cuda_input_finite_checks == [expected_defer]
     assert len({id(context.policy) for context in contexts}) == 2
     assert [decision.generation_id for decision in decisions] == list(turn_generations)
     assert [decision.diagnostics["native_control6_hysteresis_count"] for decision in decisions] == [1, 1]
@@ -1253,10 +1306,13 @@ def test_native_output_entry_rejects_caller_hidden_and_reordered_output_rows(
 
 
 @pytest.mark.parametrize("batch_size", [1, 2, 4])
+@pytest.mark.parametrize("simulate_cuda", [False, True])
 def test_raw_control6_scores_use_one_real_native_q0_batch_and_preserve_single_policy(
     runtime_signature: RuntimeSignature,
     capability: NativeBatchCapability,
     batch_size: int,
+    simulate_cuda: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     coordinator = _coordinator(runtime_signature, capability, session_count=batch_size)
     for index in range(batch_size):
@@ -1282,10 +1338,22 @@ def test_raw_control6_scores_use_one_real_native_q0_batch_and_preserve_single_po
         def __init__(self, rows: torch.Tensor) -> None:
             super().__init__(rows, rank=4)
             self.forward_calls = 0
+            self.defer_cuda_input_finite_checks: list[bool] = []
 
-        def forward(self, hidden: torch.Tensor, *, phase_t=None) -> torch.Tensor:
+        def forward(
+            self,
+            hidden: torch.Tensor,
+            *,
+            phase_t=None,
+            defer_cuda_input_finite_check: bool = False,
+        ) -> torch.Tensor:
             self.forward_calls += 1
-            return super().forward(hidden, phase_t=phase_t)
+            self.defer_cuda_input_finite_checks.append(defer_cuda_input_finite_check)
+            return super().forward(
+                hidden,
+                phase_t=phase_t,
+                defer_cuda_input_finite_check=defer_cuda_input_finite_check,
+            )
 
     torch.manual_seed(442)
     base_rows = torch.randn((len(ACTIONS), HIDDEN_WIDTH), dtype=torch.float32) * 0.01
@@ -1298,10 +1366,26 @@ def test_raw_control6_scores_use_one_real_native_q0_batch_and_preserve_single_po
         batch_adapter, checkpoint_path="cpu-native-control6.pt"
     )
 
-    snapshots = batch_policy.score_raw_batch(native_output, manifest)
+    with monkeypatch.context() as cuda_mock:
+        if simulate_cuda:
+            original_is_cuda = torch.Tensor.is_cuda
+
+            def report_raw_batch_hidden_as_cuda(tensor: torch.Tensor) -> bool:
+                if tuple(tensor.shape) == (batch_size, HIDDEN_WIDTH):
+                    return True
+                return bool(original_is_cuda.__get__(tensor, torch.Tensor))
+
+            cuda_mock.setattr(
+                torch.Tensor,
+                "is_cuda",
+                property(report_raw_batch_hidden_as_cuda),
+            )
+
+        snapshots = batch_policy.score_raw_batch(native_output, manifest)
 
     assert len(snapshots) == batch_size
     assert batch_adapter.forward_calls == 1
+    assert batch_adapter.defer_cuda_input_finite_checks == [simulate_cuda]
     assert batch_policy.forward_call_count == 1
     assert all(isinstance(item, NativeControl6RawScoreSnapshot) for item in snapshots)
     for index, (row, snapshot) in enumerate(zip(manifest.rows, snapshots, strict=True)):
@@ -1338,7 +1422,7 @@ def test_raw_control6_scores_use_one_real_native_q0_batch_and_preserve_single_po
     single_policy = GemmaNativeControl6Policy(
         single_adapter, checkpoint_path="cpu-native-control6.pt"
     )
-    legal_sets = [tuple(ACTIONS), (ACTIONS[0], ACTIONS[2]), (ACTIONS[1], ACTIONS[4]), (ACTIONS[2],)]
+    legal_sets = [tuple(ACTIONS), (ACTIONS[0], ACTIONS[2]), (ACTIONS[0], ACTIONS[4]), (ACTIONS[2],)]
     for index, (row, snapshot) in enumerate(zip(manifest.rows, snapshots, strict=True)):
         state = _policy_input(
             row.session_id,

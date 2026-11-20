@@ -1,0 +1,63 @@
+# Diagnosi Architetturale e Strategia di Risoluzione: Microphone ACK Gap (1567.4ms) durante Long Response
+
+Sei GPT-6.1 Sol (medium reasoning effort), consulente architetturale senior per il sistema Gemma-4 Full-Duplex Omni Pipeline.
+Il tuo compito è analizzare a fondo la situazione attuale, identificare la causa radice del fallimento e fornire una diagnosi precisa e una specifica di implementazione dettagliata che verrà affidata ai worker operativi GPT-6 Luna Max.
+
+---
+
+## 1. Stato Attuale del Sistema e Risultati Osservati
+Durante l'esecuzione della suite di accettazione (`tools/run_acceptance_suite.py --runs 1`) su host `mondaini` (RTX 3090 24GB):
+- **Turn 1 (Long Response)**:
+  - Generazione e playout audio hanno avuto successo completo: 284 token generati, 2.745.600 campioni PCM a 24kHz (114,4 secondi di parlato), `client_consumed_pcm` ACK inviato dal client e accettato dal server (`status: accepted`).
+  - Il finalizzatore nativo unificato ha completato regolarmente senza alcun errore (`unified_native_finalizer: status: completed`, tempo di drain 0.368 ms). L'errore fatale `CONTROL6_CONTEXT_UNAVAILABLE` è stato completamente debellato.
+- **Tuttavia, il run è fallito con**:
+  `EvidenceError: long response microphone ACK gap 1567.4ms reached the 160.0ms limit`
+
+---
+
+## 2. Dati Empirici della Traccia di Eventi
+Dall'analisi della sequenza temporale di `events.jsonl`:
+```
+[5997032689713267] input_audio_buffer.consumed -> frame 1099
+[5997032689713267] input_frame_ack_received -> frame 1099 (latenza 658.3ms)
+[5997032693349455] duplex_control6.decision ->   
+[5997032694625406] response.audio.delta -> resp_fe18df32780c  
+[5997032769887922] input_audio_buffer.append -> frame 1100
+[5997032852192471] input_audio_buffer.append -> frame 1101
+[5997032934536411] input_audio_buffer.append -> frame 1102
+[5997033016312771] input_audio_buffer.append -> frame 1103
+[5997033098548360] input_audio_buffer.append -> frame 1104
+[5997033180161328] input_audio_buffer.append -> frame 1105
+[5997033261387980] input_audio_buffer.append -> frame 1106
+... circa 1000ms di pausa nell'elaborazione del listener ...
+[5997034257129189] input_audio_buffer.consumed -> frame 1100
+[5997034257129189] input_frame_ack_received -> frame 1100 (latenza 2143.2ms)
+```
+Tra la ricezione dell'ACK del frame 1099 e la ricezione dell'ACK del frame 1100 sono trascorsi **1567.42 ms** (superando la soglia di 160ms imposta dal simulatore in `_long_response_input_window_metrics`).
+In quel lasso di tempo il client continuava ad inviare frame audio via WebSocket (`input_audio_buffer.append`), ma il server/listener non ha emesso `input_audio_buffer.consumed` per 1.5 secondi!
+
+---
+
+## 3. Prescrizioni Contrattuali da PLAN.md
+Da PLAN.md:
+- **Patch 3 — Rendere cooperativi owner, transizioni e drain**:
+  - "Misurare separatamente attesa owner, attesa lock, lavoro GPU, completamento listener e attesa invio ACK."
+  - "Vietare attese di Future o callback sotto il lock di transizione."
+  - "Dare precedenza ai tick listener pronti fra operazioni testuali native."
+  - "Trasformare il drain in un'operazione owner riprendibile: un frame Q2 per quantum, poi possibilità di servire un tick listener."
+- **Sezione 4 — Riparazione delle verifiche**:
+  - "Distinguere ritardo del task sender da attesa causata dalla backpressure, senza eliminare il controllo di continuità."
+  - "Mantenere FIFO playout a 96000 campioni/4 s, in-flight massimo client a 15, timeout input a 3,5 s e gap massimo input a 160 ms."
+
+---
+
+## 4. Richiesta per GPT-6.1 Sol
+1. **Diagnosi Causale**:
+   - Quale componente ha bloccato il consumo dell'input microfonico per 1.5s attorno a frame 1100?
+   - È il Thinker lock / prefill chunk / generazione token che ha monopolizzato il thread o la GPU senza cedere il passo al listener?
+   - O è il microbatch worker o la shared listener queue che è rimasta bloccata dietro a una sincronizzazione o a un buffer pieno?
+   - Qual è il ruolo del calcolo di `max_ack_gap_ms` nel simulatore rispetto a `window_backpressure_waits`?
+
+2. **Strategia Risolutiva e Specifica Tecnica**:
+   - Definisci le modifiche esatte da apportare nel kernel (es. `server.py`, `listener_microbatch_worker.py`, `shared_listener_scheduler.py`, `real_dialogue_simulator.py`).
+   - Fornisci istruzioni deterministiche, file per file e funzione per funzione, che i worker GPT-6 Luna Max possano implementare direttamente per eliminare questo stallo e far passare tutte le 3 run di accettazione.

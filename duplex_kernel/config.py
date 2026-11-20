@@ -98,9 +98,9 @@ def listener_pair_lock_handoff_flag(value: str | None = None) -> bool:
 
 
 def native_control6_fused_readback_flag(value: str | None = None) -> bool:
-    """Resolve the proof-only single-transfer Control6 score readback flag."""
+    """Resolve the single-transfer Control6 score readback flag, enabled by default."""
     configured = (
-        os.environ.get(NATIVE_CONTROL6_FUSED_READBACK_ENV, "0")
+        os.environ.get(NATIVE_CONTROL6_FUSED_READBACK_ENV, "1")
         if value is None else value
     )
     normalized = str(configured).strip()
@@ -215,9 +215,11 @@ CODEC_GLOB = os.path.join(WORKSPACE, ".hf_cache/models--Qwen--Qwen3-TTS-Tokenize
 # ---------------------------------------------------------------------------
 # Talker pacing: retain full Italian SAY text while keeping acoustic output bounded.
 ARIA_FRAMES_PER_WORD = float(os.environ.get("GEMMA4_ARIA_FRAMES_PER_WORD", 7.0))
-ARIA_OVERHEAD_FRAMES = int(os.environ.get("GEMMA4_ARIA_OVERHEAD_FRAMES", 50))
+ARIA_OVERHEAD_FRAMES = int(os.environ.get("GEMMA4_ARIA_OVERHEAD_FRAMES", 24))
 ARIA_MIN_FRAMES = 48
 ARIA_MAX_FRAMES = 512
+# Explicit long-response profiles may raise the bounded frame budget to this cap.
+ARIA_HARD_MAX_FRAMES = 1536
 ARIA_BACKCHANNEL_FRAMES_PER_WORD = 4.8
 ARIA_BACKCHANNEL_OVERHEAD_FRAMES = 16
 ARIA_BACKCHANNEL_MAX_FRAMES = 80
@@ -243,6 +245,13 @@ if not 2 <= CODE2WAV_DECODE_FRAMES <= 4:
     raise ValueError(
         "GEMMA4_OMNI_CODE2WAV_DECODE_FRAMES deve essere tra 2 e 4"
     )
+
+_CODE2WAV_GRAPH_SETTING = os.environ.get(
+    "GEMMA4_OMNI_CODE2WAV_GRAPH", "0"
+).strip()
+if _CODE2WAV_GRAPH_SETTING not in {"0", "1"}:
+    raise ValueError("GEMMA4_OMNI_CODE2WAV_GRAPH must be exactly '0' or '1'")
+CODE2WAV_GRAPH_ENABLED = _CODE2WAV_GRAPH_SETTING == "1"
 
 _CODE2WAV_GRAPH_FAMILY_SETTING = os.environ.get(
     "GEMMA4_OMNI_CODE2WAV_GRAPH_FAMILY", "0"

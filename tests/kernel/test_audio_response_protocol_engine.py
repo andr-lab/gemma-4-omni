@@ -9,6 +9,7 @@ import torch
 
 import duplex_kernel.engine as engine_module
 from duplex_kernel.audio_response_protocol import (
+    AUDIO_RESPONSE_PROTOCOL_V2,
     AudioResponseProtocolError,
     AudioResponseV2ActionConstraint,
     AudioResponseV2Collector,
@@ -21,12 +22,77 @@ class _AudioThinker:
     def __init__(self) -> None:
         self.model = self
         self.generation_config = SimpleNamespace(eos_token_id=3)
-        self.config = SimpleNamespace(eos_token_id=3)
+        self.config = SimpleNamespace(
+            eos_token_id=3,
+            text_config=SimpleNamespace(
+                pad_token_id=0,
+                final_logit_softcapping=None,
+                hidden_size_per_layer_input=0,
+            ),
+        )
+        self.config.get_text_config = lambda: self.config.text_config
+        self._audio_prefill_sequence_length = 0
+
+    def get_audio_features(self, input_features, input_features_mask, *, return_dict):
+        assert return_dict is True
+        assert input_features.ndim == 3
+        assert input_features_mask.shape == input_features.shape[:2]
+        pooler_output = input_features[..., :1].expand(-1, -1, 4).contiguous()
+        return SimpleNamespace(
+            pooler_output=pooler_output,
+            attention_mask=input_features_mask.bool(),
+        )
 
     def get_placeholder_mask(self, *, input_ids):
         audio = input_ids == 99
         empty = torch.zeros_like(audio)
         return empty, empty, audio
+
+    def get_input_embeddings(self):
+        return lambda input_ids: torch.nn.functional.one_hot(
+            input_ids.remainder(4), num_classes=4
+        ).to(dtype=torch.float32)
+
+    def create_masks_for_generate(
+        self,
+        config,
+        inputs_embeds,
+        attention_mask,
+        past_key_values,
+        position_ids,
+    ):
+        del config, past_key_values, position_ids
+        sequence_length = int(inputs_embeds.shape[1])
+        causal_mask = torch.ones(
+            (sequence_length, sequence_length),
+            dtype=torch.bool,
+            device=inputs_embeds.device,
+        ).tril()
+        return {
+            "full_attention": (
+                causal_mask.view(1, 1, sequence_length, sequence_length)
+                & attention_mask.to(dtype=torch.bool)[:, None, None, :]
+            )
+        }
+
+    def language_model(self, *, inputs_embeds, **_kwargs):
+        self._audio_prefill_sequence_length = int(inputs_embeds.shape[1])
+        return SimpleNamespace(
+            last_hidden_state=inputs_embeds,
+            hidden_states=(inputs_embeds,),
+            past_key_values=object(),
+        )
+
+    def lm_head(self, hidden_states):
+        # Match this fixture's normal prefill policy while keeping a multi-token
+        # prompt shape, as the native fake thinker uses current == -1 there.
+        sequence_length = max(2, self._audio_prefill_sequence_length)
+        input_ids = torch.zeros(
+            (hidden_states.shape[0], sequence_length),
+            dtype=torch.long,
+            device=hidden_states.device,
+        )
+        return self(input_ids=input_ids).logits[:, -1:, :]
 
     def __call__(self, *, input_ids, **_kwargs):
         logits = torch.zeros((1, input_ids.shape[1], 5), dtype=torch.float32)
@@ -47,8 +113,7 @@ class _Tokenizer:
 
     @staticmethod
     def decode(token_ids, *, skip_special_tokens):
-        del skip_special_tokens
-        vocabulary = {2: "{", 3: "", 4: "Capito"}
+        vocabulary = {2: "{", 3: "" if skip_special_tokens else "<eos>", 4: "Capito"}
         return "".join(vocabulary[int(token_id)] for token_id in token_ids)
 
 
@@ -135,10 +200,9 @@ class _CompoundBoundaryThinker(_AudioThinker):
 class _CompoundBoundaryTokenizer(_Tokenizer):
     @staticmethod
     def decode(token_ids, *, skip_special_tokens):
-        assert skip_special_tokens
         vocabulary = {
             2: "{",
-            3: "",
+            3: "" if skip_special_tokens else "<eos>",
             4: "unused",
             6: '"heard":"Marco',
             7: '"',
@@ -213,9 +277,10 @@ class _BoundedBackchannelTokenizer(_Tokenizer):
 
     @classmethod
     def decode(cls, token_ids, *, skip_special_tokens):
-        assert skip_special_tokens
         return "".join(
-            " cinque" if 20 <= int(token_id) <= 83 else cls._vocabulary[int(token_id)]
+            " cinque" if 20 <= int(token_id) <= 83
+            else "<eos>" if int(token_id) == 3 and not skip_special_tokens
+            else cls._vocabulary[int(token_id)]
             for token_id in token_ids
         )
 
@@ -271,8 +336,11 @@ class _BackchannelLexiconTokenizer(_Tokenizer):
 
     @classmethod
     def decode(cls, token_ids, *, skip_special_tokens):
-        assert skip_special_tokens
-        return "".join(cls._vocabulary[int(token_id)] for token_id in token_ids)
+        return "".join(
+            "<eos>" if int(token_id) == 3 and not skip_special_tokens
+            else cls._vocabulary[int(token_id)]
+            for token_id in token_ids
+        )
 
     @classmethod
     def encode(cls, text, *, add_special_tokens):
@@ -346,8 +414,11 @@ class _BackchannelPoolTokenizer(_Tokenizer):
 
     @classmethod
     def decode(cls, token_ids, *, skip_special_tokens):
-        assert skip_special_tokens
-        return "".join(cls._vocabulary[int(token_id)] for token_id in token_ids)
+        return "".join(
+            "<eos>" if int(token_id) == 3 and not skip_special_tokens
+            else cls._vocabulary[int(token_id)]
+            for token_id in token_ids
+        )
 
     @classmethod
     def encode(cls, text, *, add_special_tokens):
@@ -372,6 +443,7 @@ def _engine() -> PipelineEngine:
     engine = PipelineEngine.__new__(PipelineEngine)
     engine.device = "cpu"
     engine.dtype = torch.float32
+    engine.audio_response_protocol = AUDIO_RESPONSE_PROTOCOL_V2
     engine.thinker = _AudioThinker()
     engine._thinker_audio_forward_active = threading.Event()
     engine._thinker_audio_prefill_lock_hold_max_ms = 0.0
@@ -463,6 +535,7 @@ def test_audio_response_constraint_overrides_next_token_after_native_prefix_and_
         [1, 99],
         max_new_tokens=2,
         temperature=0.0,
+        repetition_penalty=1.0,
         action="BACKCHANNEL",
         input_audio=_audio_input(),
         on_generated_token=constrain_after_json_opener,
@@ -495,6 +568,7 @@ def test_action_logit_probe_captures_raw_argmax_before_dfa_override() -> None:
         [1, 99],
         max_new_tokens=2,
         temperature=0.0,
+        repetition_penalty=1.0,
         input_audio=_audio_input(),
         on_generated_token=constrain_after_json_opener,
         on_action_logits_probe=probes.append,

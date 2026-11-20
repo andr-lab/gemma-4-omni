@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import torch
+import pytest
 from fastapi.testclient import TestClient
 from types import SimpleNamespace
 import numpy as np
@@ -16,6 +17,11 @@ from duplex_kernel.server import (
 )
 from duplex_kernel.session import SessionManager
 from duplex_kernel.turn_policy import NoOpPolicy
+
+
+@pytest.fixture(autouse=True)
+def _select_v2_response_protocol(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DUPLEX_AUDIO_RESPONSE_PROTOCOL", AUDIO_RESPONSE_PROTOCOL_V2)
 
 
 class _Tokenizer:
@@ -143,6 +149,7 @@ class _V2Engine:
         assert candidate_callback(3, "", True)
         result = {
             "text": target,
+            "protocol_text": target,
             "hidden": torch.full((1, 1, 4), -99.0),
             "prompt_len": 5,
             "gen_ids": [100, 101, 102],
@@ -208,6 +215,7 @@ def test_v2_runtime_only_returns_says_text_and_v9_hidden_after_json_validation(m
                 {"role": "user", "content": "trascrizione corrente da non ripetere nel prompt"},
             ],
             "modalities": ["text", "audio"],
+            "max_tokens": 128,
             "_direct_audio_pcm": [0.1] * 1280,
         },
     )
@@ -255,6 +263,7 @@ def test_v2_runtime_rejects_incomplete_json_before_v9_or_talker(monkeypatch) -> 
                 {"role": "user", "content": "trascrizione corrente da non ripetere nel prompt"},
             ],
             "modalities": ["text", "audio"],
+            "max_tokens": 128,
             "_direct_audio_pcm": [0.1] * 1280,
         },
     )
@@ -286,6 +295,7 @@ def test_experimental_v9_uses_prefill_audio_snapshot_and_validated_say_anchor(mo
                 {"role": "user", "content": "testo corrente privato"},
             ],
             "modalities": ["text", "audio"],
+            "max_tokens": 128,
             "_direct_audio_pcm": [0.1] * 1280,
         },
     )
@@ -322,6 +332,7 @@ def test_v2_empty_first_codec_frame_returns_typed_no_speech_without_history_comm
                 {"role": "user", "content": "audio corrente"},
             ],
             "modalities": ["text", "audio"],
+            "max_tokens": 128,
             "_direct_audio_pcm": [0.1] * 1280,
         },
     )

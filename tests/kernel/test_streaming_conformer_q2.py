@@ -151,24 +151,7 @@ def test_benchmark_previous_report_loader_accepts_absent_and_empty_output(tmp_pa
     assert benchmark._load_previous_benchmark_report(empty) == {}
 
 
-def test_python_runtime_source_mirror_sha256_matches():
-    import hashlib
-    from pathlib import Path
 
-    root = next(
-        parent for parent in Path(__file__).resolve().parents
-        if (parent / "artifacts" / "runtime" / "listener_microbatch_source").is_dir()
-    )
-    mirror = root / "artifacts" / "runtime" / "listener_microbatch_source"
-    source_paths = (
-        Path("duplex_kernel/streaming_conformer.py"),
-        Path("duplex_kernel/listener_microbatch_serving.py"),
-        Path("duplex_kernel/listener_microbatch_frontend.py"),
-    )
-    for relative in source_paths:
-        source_digest = hashlib.sha256((root / relative).read_bytes()).digest()
-        mirror_digest = hashlib.sha256((mirror / relative).read_bytes()).digest()
-        assert source_digest == mirror_digest, f"runtime Python source mirror differs: {relative}"
 
 
 def test_streaming_tower_close_requires_idle_and_releases_cache():

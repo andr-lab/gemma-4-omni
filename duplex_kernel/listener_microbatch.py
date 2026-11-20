@@ -254,6 +254,9 @@ class ListenerMicrobatchCoordinator:
                 logical_q_len=frame.logical_q_len,
                 ephemeral_reason=frame.ephemeral_reason,
                 queue_audio_for_next_turn=frame.queue_audio_for_next_turn,
+                queue_epoch=frame.queue_epoch,
+                queue_audio_reason=frame.queue_audio_reason,
+                queue_audio_onset_frame_id=frame.queue_audio_onset_frame_id,
             ))
             rows_frames.append(frame)
 

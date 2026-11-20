@@ -7,7 +7,9 @@ import queue
 import random
 import threading
 import time
+import wave
 from concurrent.futures import Future
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -17,15 +19,19 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from duplex_kernel.listener import GemmaListener
+from duplex_kernel.live_say import LiveSayCancelled
 from duplex_kernel.action_conditioning import action_control_marker_text
 from duplex_kernel.engine import _estimate_talker_frame_budget
 from duplex_kernel.response_talk_context import ResponseTalkContextPool
 from duplex_kernel.audio_response_protocol import (
     AUDIO_RESPONSE_PROTOCOL_V2,
     AUDIO_RESPONSE_PROTOCOL_V2_SYSTEM,
+    AUDIO_RESPONSE_V2_MAX_NEW_TOKENS,
+    AudioResponseV2ActionConstraint,
     CONTROLLER_GUIDED_SAY_V1,
     format_audio_response_v2_target,
 )
+from duplex_kernel.server_response_runtime import _response_generation_max_new_tokens
 import duplex_kernel.server as server_module
 from duplex_kernel.server import (
     _CausalUserSpeechTracker,
@@ -48,6 +54,8 @@ from duplex_kernel.session import DuplexSession, SessionManager
 from duplex_kernel.scheduler import VirtualFrameClock
 from duplex_kernel.turn_policy import (
     ControlAction,
+    ControlState,
+    GateEvent,
     NoOpPolicy,
     PolicyDecision,
     ProvisionalFramePolicy,
@@ -57,6 +65,93 @@ from duplex_kernel.turn_policy import (
 FRAME_SAMPLES = 1280
 MAX_REALTIME_PENDING_SAMPLES = server_module.USER_SAMPLE_RATE * 30
 ASYNC_TEST_SAFETY_TIMEOUT_S = 5.0
+
+
+async def _receive_json_message(ws):
+    message = await asyncio.wait_for(
+        ws._send_rx.receive(), timeout=ASYNC_TEST_SAFETY_TIMEOUT_S
+    )
+    ws._raise_on_close(message)
+    if message.get("type") != "websocket.send" or message.get("text") is None:
+        raise AssertionError(f"messaggio WebSocket inatteso: {message!r}")
+    return json.loads(message["text"])
+
+
+def _summarize_receive_events(events):
+    useful_fields = (
+        "type",
+        "action",
+        "effective_action",
+        "frame_id",
+        "response_id",
+        "accepted",
+        "rejection_reason",
+        "reason",
+        "error",
+    )
+    return [
+        {key: event[key] for key in useful_fields if key in event}
+        for event in list(events)[-12:]
+    ]
+
+
+def _receive_json(ws, *, obtained=()):
+    try:
+        return ws.portal.call(_receive_json_message, ws)
+    except TimeoutError as exc:
+        raise AssertionError(
+            "timeout in attesa di un evento WebSocket dopo "
+            f"{ASYNC_TEST_SAFETY_TIMEOUT_S:.1f}s; ultimi eventi ottenuti: "
+            f"{_summarize_receive_events(obtained)!r}"
+        ) from exc
+
+
+def _ack_final_audio_segment_v2(
+    ws,
+    segment: dict[str, object],
+    *,
+    sequence: int = 0,
+) -> None:
+    ws.send_json({
+        "type": "client_consumed_pcm",
+        "ack_version": 2,
+        "response_id": segment["response_id"],
+        "generation_id": segment["generation_id"],
+        "speaker_segment_id": segment["speaker_segment_id"],
+        "start_sample": segment["start_sample"],
+        "end_sample": segment["end_sample"],
+        "sample_rate": segment["sample_rate"],
+        "sequence": sequence,
+        "consumption_semantics": "logical_client_device_buffer",
+        "final": True,
+    })
+
+
+def test_v2_generation_budget_precedes_legacy_private_backchannel_cap() -> None:
+    assert _response_generation_max_new_tokens(
+        response_v2_enabled=True,
+        private_backchannel_active=True,
+        backchannel_action=True,
+        requested_max_tokens=AUDIO_RESPONSE_V2_MAX_NEW_TOKENS + 1,
+    ) == AUDIO_RESPONSE_V2_MAX_NEW_TOKENS
+    assert _response_generation_max_new_tokens(
+        response_v2_enabled=False,
+        private_backchannel_active=True,
+        backchannel_action=True,
+        requested_max_tokens=64,
+    ) == 6
+    assert _response_generation_max_new_tokens(
+        response_v2_enabled=False,
+        private_backchannel_active=False,
+        backchannel_action=True,
+        requested_max_tokens=64,
+    ) == 6
+    assert _response_generation_max_new_tokens(
+        response_v2_enabled=False,
+        private_backchannel_active=False,
+        backchannel_action=False,
+        requested_max_tokens=37,
+    ) == 37
 
 
 def test_realtime_inference_error_has_terminal_response_done_event() -> None:
@@ -220,6 +315,7 @@ class _Backend:
 class _Tokenizer:
     def __init__(self) -> None:
         self.seen_messages: list[list[dict[str, str]]] = []
+        self.decoded_values: dict[tuple[int, ...], str] = {}
 
     def apply_chat_template(self, messages, **_kwargs):
         self.seen_messages.append([dict(message) for message in messages])
@@ -227,6 +323,9 @@ class _Tokenizer:
 
     def __call__(self, _text, **_kwargs):
         return {"input_ids": np.array([[1]], dtype=np.int64)}
+
+    def decode(self, token_ids, **_kwargs):
+        return self.decoded_values.get(tuple(int(value) for value in token_ids), "")
 
 
 class _QwenTextTokenizer:
@@ -241,25 +340,31 @@ class _QwenTextTokenizer:
             ),
         )
 
-    def __call__(self, text, *, return_offsets_mapping=False):
+    def __call__(self, text, *, add_special_tokens=True, return_offsets_mapping=False):
         prefix = "<|im_start|>assistant\n"
         suffix = "<|im_end|>\n<|im_start|>assistant\n"
-        assert text.startswith(prefix) and text.endswith(suffix)
-        raw = text[len(prefix):-len(suffix)]
+        has_assistant_template = text.startswith(prefix) and text.endswith(suffix)
+        raw = text[len(prefix):-len(suffix)] if has_assistant_template else text
         raw_ids = [1000 + ord(char) for char in raw]
-        raw_offsets = [
-            (len(prefix) + index, len(prefix) + index + 1)
-            for index in range(len(raw))
-        ]
-        ids = [0, 1, 2] + raw_ids + [20, 21, 22, 23, 24]
-        offsets = [(0, 0)] * 3 + raw_offsets + [(0, 0)] * 5
+        offset_base = len(prefix) if has_assistant_template else 0
+        raw_offsets = [(offset_base + index, offset_base + index + 1) for index in range(len(raw))]
+        if has_assistant_template:
+            ids = [0, 1, 2] + raw_ids + [20, 21, 22, 23, 24]
+            offsets = [(0, 0)] * 3 + raw_offsets + [(0, 0)] * 5
+        else:
+            ids = raw_ids
+            offsets = raw_offsets
         result = {"input_ids": ids}
         if return_offsets_mapping:
             result["offset_mapping"] = offsets
         return result
 
     def decode(self, ids, **_kwargs):
-        return "".join(chr(int(token_id) - 1000) for token_id in ids)
+        return "".join(
+            chr(int(token_id) - 1000)
+            for token_id in ids
+            if int(token_id) >= 1000
+        )
 
 
 class _QwenTextProcessor:
@@ -306,6 +411,7 @@ class _Engine:
         self.talk_calls: list[tuple[str, object]] = []
         self.think_text_override: str | None = None
         self.think_text_chunks: list[str] | None = None
+        self.think_terminal_reason: str | None = None
         self.talk_started = threading.Event()
         self.release_talk = threading.Event()
         if not block_talk:
@@ -324,6 +430,7 @@ class _Engine:
         self.think_min_new_tokens.append(int(min_new_tokens))
         text = self.think_text_override or f"reply {len(self.think_calls)}"
         generated_ids = [101 + 2 * (len(self.think_calls) - 1), 102 + 2 * (len(self.think_calls) - 1)]
+        self.tokenizer.decoded_values[tuple(generated_ids)] = text
         if on_token_id is not None:
             for token_id in generated_ids:
                 on_token_id(token_id)
@@ -331,8 +438,10 @@ class _Engine:
             for chunk in self.think_text_chunks or [text]:
                 on_text_chunk(chunk, None, 1)
         return {
-            "text": text, "hidden": np.zeros((1, 1, 4), dtype=np.float32),
+            "text": text, "protocol_text": text,
+            "hidden": np.zeros((1, 1, 4), dtype=np.float32),
             "prompt_len": 1, "gen_ids": generated_ids,
+            "terminal_reason": self.think_terminal_reason,
         }
 
     def v9_prefix(self, hidden, prompt_len):
@@ -426,31 +535,64 @@ class _TurnHeadRuntimeStub:
         self.hidden_calls.clear()
 
 
+def _speech_like_pcm(sample_count: int, peak: int) -> np.ndarray:
+    if peak == 0:
+        return np.zeros(sample_count, dtype="<i2")
+    sample_index = np.arange(sample_count, dtype=np.float64)
+    tone = float(abs(int(peak))) * np.sin(2.0 * np.pi * 200.0 * sample_index / 16_000.0)
+    return np.rint(tone).astype("<i2")
+
+
 def _send_pcm(ws, frames: int = 1) -> None:
-    pcm = np.full(frames * FRAME_SAMPLES, 4096, dtype="<i2").tobytes()
+    pcm = _speech_like_pcm(frames * FRAME_SAMPLES, 4096).tobytes()
     ws.send_json({"type": "input_audio_buffer.append", "audio": base64.b64encode(pcm).decode("ascii")})
 
 
 def _send_pcm_level(ws, value: int) -> None:
-    pcm = np.full(FRAME_SAMPLES, value, dtype="<i2").tobytes()
+    pcm = _speech_like_pcm(FRAME_SAMPLES, value).tobytes()
     ws.send_json({"type": "input_audio_buffer.append", "audio": base64.b64encode(pcm).decode("ascii")})
 
 
-def _receive_until(ws, event_type: str, *, limit: int = 30) -> list[dict[str, object]]:
+def _send_fixture_voice_frame(ws) -> None:
+    voice = np.load(
+        Path(__file__).resolve().parents[1] / "fixtures" / "weak_voice_16khz_frame.npy",
+        allow_pickle=False,
+    )
+    pcm = np.rint(np.clip(voice * 0.02, -1.0, 1.0) * 32768.0).astype("<i2").tobytes()
+    ws.send_json({"type": "input_audio_buffer.append", "audio": base64.b64encode(pcm).decode("ascii")})
+
+
+def _receive_until(
+    ws,
+    event_type: str,
+    *,
+    limit: int = 30,
+    on_event=None,
+) -> list[dict[str, object]]:
     events = []
     for _ in range(limit):
-        event = ws.receive_json()
+        event = _receive_json(ws, obtained=events)
         events.append(event)
+        if callable(on_event):
+            on_event(event)
         if event.get("type") == event_type:
             return events
     raise AssertionError(f"evento {event_type!r} non ricevuto; ottenuti: {events!r}")
 
 
-def _receive_until_any(ws, event_types: set[str], *, limit: int = 30) -> list[dict[str, object]]:
+def _receive_until_any(
+    ws,
+    event_types: set[str],
+    *,
+    limit: int = 30,
+    on_event=None,
+) -> list[dict[str, object]]:
     events = []
     for _ in range(limit):
-        event = ws.receive_json()
+        event = _receive_json(ws, obtained=events)
         events.append(event)
+        if callable(on_event):
+            on_event(event)
         if event.get("type") in event_types:
             return events
     raise AssertionError(f"nessuno degli eventi {event_types!r} ricevuto; ottenuti: {events!r}")
@@ -459,7 +601,7 @@ def _receive_until_any(ws, event_types: set[str], *, limit: int = 30) -> list[di
 def _receive_action_decision(ws, action: str, *, limit: int = 30) -> dict[str, object]:
     events = []
     for _ in range(limit):
-        event = ws.receive_json()
+        event = _receive_json(ws, obtained=events)
         events.append(event)
         if event.get("type") == "duplex_control6.decision" and event.get("action") == action:
             return event
@@ -484,17 +626,194 @@ def test_session_created_records_canonical_listener_prime_cost() -> None:
         time.sleep(0.005)
 
     engine.listener = SimpleNamespace(prime_steady_state=prime_steady_state)
-    client = TestClient(create_app(engine, SessionManager()))
+    sessions = SessionManager()
+    client = TestClient(create_app(engine, sessions))
 
     with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-        created = ws.receive_json()
+        created = _receive_json(ws)
         assert created["type"] == "session.created"
+        session = sessions.all()[0]
+        assert created["voice"] == session.voice
+        expected_conditioning_mode = (
+            session.voice_conditioning.get("mode")
+            if isinstance(session.voice_conditioning, dict)
+            else getattr(session.voice_conditioning, "mode", None)
+        )
+        assert created["voice_conditioning_mode"] == expected_conditioning_mode
         assert len(prime_calls) == 1
         listener_metrics = created["runtime_metrics"]["listener"]
         assert listener_metrics["canonical_prime_calls"] == 1
         assert listener_metrics["canonical_prime_succeeded"] is True
         assert listener_metrics["canonical_prime_ms"] >= 4.0
         ws.send_json({"type": "session.close"})
+
+
+def test_health_skips_gpu_resident_frame_residual_scale_readback() -> None:
+    class _GPUResidentAdapter:
+        architecture_id = "response_hidden_q1_input_residual_v1"
+        _parameters = {"scale_logit": SimpleNamespace(device=SimpleNamespace(type="cuda"))}
+
+        @property
+        def scale(self):
+            pytest.fail("/health must not evaluate a CUDA-backed scale property")
+
+    engine = SimpleNamespace(
+        loaded=True,
+        frame_residual_adapter_enabled=True,
+        frame_residual_adapter=_GPUResidentAdapter(),
+    )
+
+    with TestClient(create_app(engine, SessionManager())) as client:
+        response = client.get("/health")
+
+    assert response.status_code == 200
+    health = response.json()
+    assert health["status"] == "ok"
+    adapter = health["frame_residual_adapter"]
+    assert adapter["learned_scale"] is None
+    assert adapter["learned_scale_status"] == "not_sampled_cpu_only"
+    assert adapter["status"] == "unobserved"
+
+
+def test_health_marks_nonfinite_cpu_frame_residual_scale_fatal() -> None:
+    adapter = SimpleNamespace(
+        architecture_id="response_hidden_q1_input_residual_v1",
+        _parameters={"scale_logit": torch.tensor(float("nan"))},
+        max_scale=1.0,
+    )
+    engine = SimpleNamespace(
+        loaded=True,
+        frame_residual_adapter_enabled=True,
+        frame_residual_adapter=adapter,
+    )
+
+    with TestClient(create_app(engine, SessionManager())) as client:
+        response = client.get("/health")
+
+    assert response.status_code == 200
+    health = response.json()
+    assert health["status"] == "fatal"
+    assert health["frame_residual_adapter"]["status"] == "fatal"
+    assert health["frame_residual_adapter"]["learned_scale"] is None
+
+
+def test_runtime_telemetry_is_opt_in_and_reads_only_allocator_bookkeeping(monkeypatch) -> None:
+    telemetry_session = SimpleNamespace(
+        session_id="telemetry-session",
+        _generation_lock=threading.RLock(),
+        response_id="telemetry-response",
+        session_generation_id=7,
+        speaker_segment_id="telemetry-segment",
+        active_response=False,
+        response_cancel_notified=False,
+        kv_cache=SimpleNamespace(current_position=91),
+        _playback_ack_branches_lock=threading.RLock(),
+        _playback_ack_branches={
+            "telemetry-response": {
+                "response_id": "telemetry-response",
+                "session_generation_id": 7,
+                "speaker_segment_id": "telemetry-segment",
+                "playback_segments": {},
+                "playback_cancelled": False,
+                "finalized": False,
+                "ended_response": False,
+                "client_consumed_segments": (),
+                "spoken_prefix_exclusive_cursor": 92,
+                "spoken_prefix_lock": threading.Lock(),
+            },
+        },
+    )
+
+    class _TelemetrySessions:
+        def all(self):
+            return [telemetry_session]
+
+    monkeypatch.setenv("DUPLEX_RUNTIME_TELEMETRY", "0")
+    monkeypatch.setattr(server_module.torch.cuda, "is_initialized", lambda: True)
+    monkeypatch.setattr(server_module.torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(server_module.torch.cuda, "memory_allocated", lambda _device: 100)
+    monkeypatch.setattr(server_module.torch.cuda, "memory_reserved", lambda _device: 200)
+    monkeypatch.setattr(server_module.torch.cuda, "max_memory_allocated", lambda _device: 300)
+    monkeypatch.setattr(server_module.torch.cuda, "max_memory_reserved", lambda _device: 400)
+    monkeypatch.setattr(
+        server_module.torch.cuda,
+        "synchronize",
+        lambda *_args, **_kwargs: pytest.fail("telemetry must not synchronize CUDA"),
+    )
+    with TestClient(create_app(_Engine(), _TelemetrySessions())) as client:
+        disabled = client.get("/debug/runtime-telemetry")
+        assert disabled.status_code == 404
+
+        monkeypatch.setenv("DUPLEX_RUNTIME_TELEMETRY", "1")
+        response = client.get(
+            "/debug/runtime-telemetry?session_id=telemetry-session&response_id=telemetry-response"
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["cuda_allocator"] == {
+        "status": "available",
+        "device": "cuda:0",
+        "allocated_bytes": 100,
+        "reserved_bytes": 200,
+        "peak_allocated_bytes": 300,
+        "peak_reserved_bytes": 400,
+        "sampled_at_monotonic_ns": payload["sampled_at_monotonic_ns"],
+    }
+    branch = payload["sessions"][0]["branches"][0]
+    assert branch["response_id"] == "telemetry-response"
+    assert branch["generation_id"] == 7
+    assert branch["kv_cache_position"] == 91
+    assert branch["spoken_prefix_exclusive_cursor"] == 92
+
+
+def test_realtime_listener_startup_failure_closes_the_new_session(monkeypatch) -> None:
+    monkeypatch.setenv(server_module._LISTENER_MICROBATCH_ENABLED_ENV, "1")
+
+    class _FailedWorker:
+        def start(self):
+            future = Future()
+            future.set_exception(RuntimeError("injected listener startup failure"))
+            return future
+
+        def stop(self, *, drain):
+            assert drain is False
+            future = Future()
+            future.set_result(SimpleNamespace(status="failed"))
+            return future
+
+    monkeypatch.setattr(
+        server_module,
+        "make_listener_microbatch_worker",
+        lambda *_args, **_kwargs: _FailedWorker(),
+    )
+    sessions = SessionManager()
+    client = TestClient(create_app(_Engine(), sessions))
+
+    with pytest.raises(RuntimeError, match="injected listener startup failure"):
+        with client.websocket_connect("/v1/realtime?duplex=1") as ws:
+            _receive_json(ws)
+
+    assert sessions.all() == []
+
+
+def test_realtime_cuda_stream_startup_failure_closes_the_new_session(monkeypatch) -> None:
+    monkeypatch.setenv(server_module._LISTENER_MICROBATCH_ENABLED_ENV, "0")
+    monkeypatch.setattr(server_module.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(server_module.torch.cuda, "current_device", lambda: 0)
+
+    def fail_stream(*, device):
+        raise RuntimeError(f"injected CUDA stream allocation failure on {device}")
+
+    monkeypatch.setattr(server_module.torch.cuda, "Stream", fail_stream)
+    sessions = SessionManager()
+    client = TestClient(create_app(_Engine(), sessions))
+
+    with pytest.raises(RuntimeError, match="injected CUDA stream allocation failure"):
+        with client.websocket_connect("/v1/realtime?duplex=1") as ws:
+            _receive_json(ws)
+
+    assert sessions.all() == []
 
 
 def test_root_route_serves_the_same_origin_realtime_ui() -> None:
@@ -512,7 +831,7 @@ def test_native_partial_asr_is_opt_in_and_emits_revisioned_snapshots(monkeypatch
     client = TestClient(create_app(engine, sessions))
 
     with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-        assert ws.receive_json()["type"] == "session.created"
+        assert _receive_json(ws)["type"] == "session.created"
         ws.send_json({
             "type": "session.update",
             "session": {
@@ -522,14 +841,14 @@ def test_native_partial_asr_is_opt_in_and_emits_revisioned_snapshots(monkeypatch
                 "input_audio_buffer_acknowledgements": True,
             },
         })
-        updated = ws.receive_json()
+        updated = _receive_json(ws)
         assert updated["type"] == "session.updated"
         assert updated["input_audio_transcription_enabled"] is True
 
         def send_frame_and_wait_ack(frame_id: int, level: int) -> None:
             _send_pcm_level(ws, level)
             for _ in range(80):
-                event = ws.receive_json()
+                event = _receive_json(ws)
                 if (
                     event.get("type") == "input_audio_buffer.consumed"
                     and event.get("frame_id") == frame_id
@@ -565,19 +884,19 @@ def test_native_partial_asr_session_opt_in_is_off_unless_gpu_gate_is_enabled(mon
     client = TestClient(create_app(_Engine(), SessionManager()))
 
     with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-        assert ws.receive_json()["type"] == "session.created"
+        assert _receive_json(ws)["type"] == "session.created"
         ws.send_json({
             "type": "session.update",
             "session": {"input_audio_transcription": True},
         })
-        updated = ws.receive_json()
+        updated = _receive_json(ws)
         assert updated["type"] == "session.updated"
         assert updated["input_audio_transcription_enabled"] is False
         ws.send_json({
             "type": "session.update",
             "session": {"input_audio_transcription": "true"},
         })
-        error = ws.receive_json()
+        error = _receive_json(ws)
         assert error["type"] == "error"
         assert error["error"]["code"] == "INVALID_SESSION_UPDATE"
         ws.send_json({"type": "session.close"})
@@ -586,22 +905,26 @@ def test_native_partial_asr_session_opt_in_is_off_unless_gpu_gate_is_enabled(mon
 def test_native_partial_asr_keeps_latest_snapshot_while_backchannel_is_active(monkeypatch) -> None:
     monkeypatch.setenv(server_module.NATIVE_PARTIAL_ASR_ENV, "1")
     engine = _Engine(hidden_size=2048, block_talk=True)
+    engine.think_text_override = "Capito."
+    engine.think_terminal_reason = "eos"
     sessions = _AcceleratedSchedulerSessionManager()
     client = TestClient(create_app(engine, sessions))
 
     try:
         with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-            assert ws.receive_json()["type"] == "session.created"
+            assert _receive_json(ws)["type"] == "session.created"
+            session_id = sessions.all()[0].session_id
             ws.send_json({
                 "type": "session.update",
                 "session": {
                     "turn_policy": "scripted",
                     "scripted_actions": ["BACKCHANNEL"] + ["LISTEN"] * 100,
+                    "auto_response": True,
                     "input_audio_transcription": True,
                     "input_audio_buffer_acknowledgements": True,
                 },
             })
-            assert ws.receive_json()["type"] == "session.updated"
+            assert _receive_json(ws)["type"] == "session.updated"
 
             _send_pcm_level(ws, 4096)
             first_events = _receive_until(ws, "response.created", limit=80)
@@ -616,7 +939,7 @@ def test_native_partial_asr_keeps_latest_snapshot_while_backchannel_is_active(mo
             for frame_id in range(1, 13):
                 _send_pcm_level(ws, 4096)
                 for _ in range(80):
-                    event = ws.receive_json()
+                    event = _receive_json(ws)
                     if (
                         event.get("type") == "input_audio_buffer.consumed"
                         and event.get("frame_id") == frame_id
@@ -647,7 +970,7 @@ def test_native_partial_asr_keeps_latest_snapshot_while_backchannel_is_active(mo
             for frame_id in range(13, 23):
                 _send_pcm_level(ws, 0)
                 for _ in range(80):
-                    event = ws.receive_json()
+                    event = _receive_json(ws)
                     if (
                         event.get("type") == "input_audio_buffer.consumed"
                         and event.get("frame_id") == frame_id
@@ -667,6 +990,7 @@ def test_native_partial_asr_keeps_latest_snapshot_while_backchannel_is_active(mo
             ws.send_json({"type": "session.close"})
     finally:
         engine.release_talk.set()
+    assert session_id not in server_module.active_duplex_sessions
 
 
 def test_mode_b_continuous_silence_over_30s_keeps_ack_and_recent_voice() -> None:
@@ -675,7 +999,7 @@ def test_mode_b_continuous_silence_over_30s_keeps_ack_and_recent_voice() -> None
     client = TestClient(create_app(engine, sessions))
 
     with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-        assert ws.receive_json()["type"] == "session.created"
+        assert _receive_json(ws)["type"] == "session.created"
         ws.send_json({
             "type": "session.update",
             "session": {
@@ -684,7 +1008,7 @@ def test_mode_b_continuous_silence_over_30s_keeps_ack_and_recent_voice() -> None
                 "input_audio_buffer_acknowledgements": True,
             },
         })
-        assert ws.receive_json()["type"] == "session.updated"
+        assert _receive_json(ws)["type"] == "session.updated"
         session = sessions.all()[0]
 
         # 30 seconds of silence followed by two voiced frames must remain a
@@ -692,7 +1016,7 @@ def test_mode_b_continuous_silence_over_30s_keeps_ack_and_recent_voice() -> None
         # window and still ends with the actual voice samples.
         def receive_frame_ack(expected_frame_id: int) -> None:
             for _ in range(80):
-                event = ws.receive_json()
+                event = _receive_json(ws)
                 assert event.get("type") != "error", event
                 if (
                     event.get("type") == "input_audio_buffer.consumed"
@@ -708,7 +1032,10 @@ def test_mode_b_continuous_silence_over_30s_keeps_ack_and_recent_voice() -> None
         with session._pending_audio_lock:
             pending = session.pending_audio.copy()
         assert pending.size == MAX_REALTIME_PENDING_SAMPLES
-        assert np.all(pending[-2 * FRAME_SAMPLES:] == np.float32(4096 / 32768))
+        expected_recent_voice = (
+            _speech_like_pcm(2 * FRAME_SAMPLES, 4096).astype(np.float32) / 32768.0
+        )
+        np.testing.assert_array_equal(pending[-2 * FRAME_SAMPLES:], expected_recent_voice)
         ws.send_json({"type": "session.close"})
 
 
@@ -718,7 +1045,7 @@ def test_mode_a_append_larger_than_30s_still_fails_closed() -> None:
     client = TestClient(create_app(engine, sessions))
 
     with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-        assert ws.receive_json()["type"] == "session.created"
+        assert _receive_json(ws)["type"] == "session.created"
         pcm = np.zeros(MAX_REALTIME_PENDING_SAMPLES + FRAME_SAMPLES, dtype="<i2").tobytes()
         ws.send_json({
             "type": "input_audio_buffer.append",
@@ -736,7 +1063,7 @@ def test_mode_b_single_append_larger_than_30s_still_fails_closed() -> None:
     client = TestClient(create_app(engine, sessions))
 
     with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-        assert ws.receive_json()["type"] == "session.created"
+        assert _receive_json(ws)["type"] == "session.created"
         ws.send_json({
             "type": "session.update",
             "session": {
@@ -745,7 +1072,7 @@ def test_mode_b_single_append_larger_than_30s_still_fails_closed() -> None:
                 "input_audio_buffer_acknowledgements": True,
             },
         })
-        assert ws.receive_json()["type"] == "session.updated"
+        assert _receive_json(ws)["type"] == "session.updated"
         pcm = np.zeros(MAX_REALTIME_PENDING_SAMPLES + FRAME_SAMPLES, dtype="<i2").tobytes()
         ws.send_json({
             "type": "input_audio_buffer.append",
@@ -764,7 +1091,7 @@ def test_opt_in_ingress_ack_tracks_listener_consumption_with_v9_conditioning() -
     client = TestClient(create_app(engine, sessions))
 
     with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-        assert ws.receive_json()["type"] == "session.created"
+        assert _receive_json(ws)["type"] == "session.created"
         ws.send_json({
             "type": "session.update",
             "session": {
@@ -772,14 +1099,14 @@ def test_opt_in_ingress_ack_tracks_listener_consumption_with_v9_conditioning() -
                 "input_audio_buffer_acknowledgements": True,
             },
         })
-        assert ws.receive_json()["type"] == "session.updated"
+        assert _receive_json(ws)["type"] == "session.updated"
         session = sessions.all()[0]
         received: list[dict[str, object]] = []
         receive_error: list[BaseException] = []
 
         def receive_two_acks() -> None:
             try:
-                received.extend([ws.receive_json(), ws.receive_json()])
+                received.extend([_receive_json(ws), _receive_json(ws)])
             except BaseException as exc:
                 receive_error.append(exc)
 
@@ -822,7 +1149,7 @@ def test_opt_in_conditioning_ack_is_separate_and_follows_v9_publication(monkeypa
 
     try:
         with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-            assert ws.receive_json()["type"] == "session.created"
+            assert _receive_json(ws)["type"] == "session.created"
             ws.send_json({
                 "type": "session.update",
                 "session": {
@@ -831,7 +1158,7 @@ def test_opt_in_conditioning_ack_is_separate_and_follows_v9_publication(monkeypa
                     "input_audio_buffer_conditioning_acknowledgements": True,
                 },
             })
-            updated = ws.receive_json()
+            updated = _receive_json(ws)
             assert updated["type"] == "session.updated"
             assert updated["input_audio_buffer_conditioning_acknowledgements"] is True
             _send_pcm(ws)
@@ -870,10 +1197,10 @@ def test_opt_in_ingress_ack_uses_input_frame_when_listener_has_no_output() -> No
     original_step = engine.listener.step
     calls = 0
 
-    def warmup_without_output(pcm, reference, state):
+    def warmup_without_output(pcm, reference, state, *args, **kwargs):
         nonlocal calls
         calls += 1
-        output = original_step(pcm, reference, state)
+        output = original_step(pcm, reference, state, *args, **kwargs)
         # The first consumed frame advances the frontend but has no published
         # feature/query output yet. Its input-frame acknowledgement must still
         # be sent exactly once, including the valid frame ID zero.
@@ -882,7 +1209,7 @@ def test_opt_in_ingress_ack_uses_input_frame_when_listener_has_no_output() -> No
     engine.listener.step = warmup_without_output
 
     with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-        assert ws.receive_json()["type"] == "session.created"
+        assert _receive_json(ws)["type"] == "session.created"
         ws.send_json({
             "type": "session.update",
             "session": {
@@ -891,13 +1218,13 @@ def test_opt_in_ingress_ack_uses_input_frame_when_listener_has_no_output() -> No
                 "input_audio_buffer_acknowledgements": True,
             },
         })
-        assert ws.receive_json()["type"] == "session.updated"
+        assert _receive_json(ws)["type"] == "session.updated"
 
         acknowledgements: list[int] = []
         for expected in (0, 1):
             _send_pcm(ws)
             for _ in range(40):
-                event = ws.receive_json()
+                event = _receive_json(ws)
                 if event.get("type") == "error":
                     raise AssertionError(f"listener warmup should not fail the session: {event!r}")
                 if event.get("type") == "input_audio_buffer.consumed":
@@ -994,26 +1321,28 @@ def test_audio_ingress_overload_fails_closed_without_playing_stale_frames() -> N
     client = TestClient(create_app(engine, sessions))
 
     with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-        assert ws.receive_json()["type"] == "session.created"
+        assert _receive_json(ws)["type"] == "session.created"
         session = sessions.all()[0]
         _send_pcm(ws)
         assert engine.listener_started.wait(timeout=1.0)
         try:
-            # Hold the listener on one in-flight frame, fill all three queued
-            # slots, then offer one more frame. Old behavior acknowledges the
+            # Hold the listener on one in-flight frame, fill the configured
+            # queue capacity, then offer one more frame. Old behavior acknowledges the
             # barrier while silently building an ever older mic queue.
-            _send_pcm(ws, frames=3)
+            queued_capacity = session.audio_ingress.max_frames
+            _send_pcm(ws, frames=queued_capacity)
             _send_pcm(ws)
             ws.send_json({"type": "session.update", "session": {}})
-            overload = ws.receive_json()
+            overload = _receive_json(ws)
             assert overload["type"] == "error"
             assert overload["error"]["code"] == "INPUT_AUDIO_OVERLOAD"
             assert session.audio_ingress.stats()["dropped_input_frames"] == 1
             with pytest.raises(WebSocketDisconnect) as disconnected:
-                ws.receive_json()
+                _receive_json(ws)
             assert disconnected.value.code == 1013
         finally:
             engine.release_listener.set()
+            sessions.close(session.session_id)
 
 
 def test_committed_audio_is_transcribed_off_scheduler_and_history_has_real_user_text() -> None:
@@ -1035,7 +1364,7 @@ def test_committed_audio_is_transcribed_off_scheduler_and_history_has_real_user_
     client = TestClient(create_app(engine, sessions))
 
     with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-        assert ws.receive_json()["type"] == "session.created"
+        assert _receive_json(ws)["type"] == "session.created"
         session = sessions.all()[0]
         _send_pcm(ws, frames=2)
         ws.send_json({"type": "input_audio_buffer.commit"})
@@ -1071,13 +1400,29 @@ def test_committed_audio_is_transcribed_off_scheduler_and_history_has_real_user_
         ws.send_json({"type": "session.close"})
 
 
-def test_scripted_speak_action_starts_transcription_and_response_worker() -> None:
+def test_scripted_speak_action_starts_transcription_and_response_worker(monkeypatch) -> None:
     engine = _Engine()
+    event_order: list[tuple[str, int | None]] = []
+    original_put = server_module._SchedulerEventBuffer.put_nowait
+
+    def observe_event_queue(self, event):
+        if event.get("type") == "input_audio_buffer.consumed":
+            event_order.append(("ack_queued", int(event["frame_id"])))
+        return original_put(self, event)
+
+    monkeypatch.setattr(server_module._SchedulerEventBuffer, "put_nowait", observe_event_queue)
+    original_think = engine.think
+
+    def observe_thinker_start(*args, **kwargs):
+        event_order.append(("think_started", None))
+        return original_think(*args, **kwargs)
+
+    engine.think = observe_thinker_start
     sessions = SessionManager()
     client = TestClient(create_app(engine, sessions))
 
     with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-        assert ws.receive_json()["type"] == "session.created"
+        assert _receive_json(ws)["type"] == "session.created"
         ws.send_json({
             "type": "session.update",
             "session": {
@@ -1087,7 +1432,19 @@ def test_scripted_speak_action_starts_transcription_and_response_worker() -> Non
                 "input_audio_buffer_acknowledgements": True,
             },
         })
-        assert ws.receive_json()["type"] == "session.updated"
+        assert _receive_json(ws)["type"] == "session.updated"
+        session = sessions.all()[0]
+        original_listener_step = session.listener.step
+        committed_frames = 0
+
+        def observe_listener_commit(pcm, reference, state, **kwargs):
+            nonlocal committed_frames
+            result = original_listener_step(pcm, reference, state, **kwargs)
+            event_order.append(("listener_committed", committed_frames))
+            committed_frames += 1
+            return result
+
+        session.listener.step = observe_listener_commit
         _send_pcm(ws)
         first_speak = _receive_action_decision(ws, "SPEAK")
         assert first_speak["frame_id"] == 0
@@ -1145,6 +1502,10 @@ def test_scripted_speak_action_starts_transcription_and_response_worker() -> Non
                         f"responses={[e for e in events if str(e.get('type', '')).startswith('response.')]}"
                     ) from exc
         assert any(event.get("type") == "response.done" for event in events), events
+        listener_commit_index = event_order.index(("listener_committed", 10))
+        ack_queue_index = event_order.index(("ack_queued", 10))
+        think_start_index = event_order.index(("think_started", None))
+        assert listener_commit_index < ack_queue_index < think_start_index
 
         assert engine.transcription_started.is_set()
         assert len(engine.transcriptions) == 1
@@ -1190,7 +1551,7 @@ def test_auto_response_false_preserves_pending_audio_on_policy_speak() -> None:
     client = TestClient(create_app(engine, sessions))
 
     with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-        assert ws.receive_json()["type"] == "session.created"
+        assert _receive_json(ws)["type"] == "session.created"
         ws.send_json({
             "type": "session.update",
             "session": {
@@ -1200,7 +1561,7 @@ def test_auto_response_false_preserves_pending_audio_on_policy_speak() -> None:
                 "input_audio_buffer_acknowledgements": True,
             },
         })
-        assert ws.receive_json()["type"] == "session.updated"
+        assert _receive_json(ws)["type"] == "session.updated"
         session = sessions.all()[0]
 
         _send_pcm(ws)
@@ -1279,6 +1640,21 @@ def test_realtime_v2_talker_uses_validated_say_prefix_and_keeps_listener_ticks(
     monkeypatch.setenv("DUPLEX_DIRECT_AUDIO_CANDIDATE", "1")
     monkeypatch.setenv("DUPLEX_AUDIO_RESPONSE_PROTOCOL", AUDIO_RESPONSE_PROTOCOL_V2)
     monkeypatch.setenv("DUPLEX_CONTROLLER_GUIDED_SAY_V1", "0")
+    original_preflight = AudioResponseV2ActionConstraint.preflight_generation_budget
+    observed_preflight_budgets: list[int] = []
+
+    def capture_v2_preflight_budget(self, collector, **kwargs):
+        max_new_tokens = int(kwargs["max_new_tokens"])
+        observed_preflight_budgets.append(max_new_tokens)
+        expected_budget = AUDIO_RESPONSE_V2_MAX_NEW_TOKENS
+        assert max_new_tokens == expected_budget
+        return original_preflight(self, collector, **kwargs)
+
+    monkeypatch.setattr(
+        AudioResponseV2ActionConstraint,
+        "preflight_generation_budget",
+        capture_v2_preflight_budget,
+    )
     monkeypatch.setattr(
         server_module,
         "resolve_voice_conditioning",
@@ -1326,7 +1702,16 @@ def test_realtime_v2_talker_uses_validated_say_prefix_and_keeps_listener_ticks(
 
     engine.tokenizer.encode = encode_fragment
     engine.tokenizer.decode = decode_fragment
-    say_text = "Capito." if response_action == "BACKCHANNEL" else "Ciao, ti ascolto."
+    duplicate_v2_source_tokens = bool(
+        adapter_enabled
+        and cancel_during_talker is None
+        and response_action == "SPEAK"
+    )
+    say_text = (
+        "haha" if duplicate_v2_source_tokens
+        else "Capito." if response_action == "BACKCHANNEL"
+        else "Ciao, ti ascolto."
+    )
     heard_text = "" if response_action == "BACKCHANNEL" else "ho detto ciao"
     target = format_audio_response_v2_target(
         heard=heard_text,
@@ -1335,7 +1720,11 @@ def test_realtime_v2_talker_uses_validated_say_prefix_and_keeps_listener_ticks(
     )
     say_start = target.index('"say":"') + len('"say":"')
     say_end = target.rfind('"')
-    response_fragments = [target[:say_start], target[say_start:say_end], target[say_end:]]
+    response_fragments = (
+        [target[:say_start], "ha", "ha", target[say_end:]]
+        if duplicate_v2_source_tokens
+        else [target[:say_start], target[say_start:say_end], target[say_end:]]
+    )
     say_hidden = torch.full((1, 1, 1536), 22.0)
     engine.say_hidden_seen = None
     engine.talker_prefix_seen = None
@@ -1349,15 +1738,28 @@ def test_realtime_v2_talker_uses_validated_say_prefix_and_keeps_listener_ticks(
 
     def think(_ids, *, on_generated_token=None, **_kwargs):
         assert callable(on_generated_token)
-        for index, (fragment, value) in enumerate(zip(response_fragments, (11.0, 22.0, 33.0), strict=True)):
-            on_generated_token(index, 100 + index, fragment, torch.full((1, 1, 1536), value))
+        token_ids = (
+            (100, 101, 101, 102)
+            if duplicate_v2_source_tokens
+            else (100, 101, 102)
+        )
+        values = (
+            (11.0, 22.0, 22.0, 33.0)
+            if duplicate_v2_source_tokens
+            else (11.0, 22.0, 33.0)
+        )
+        for index, (fragment, token_id, value) in enumerate(
+            zip(response_fragments, token_ids, values, strict=True)
+        ):
+            on_generated_token(index, token_id, fragment, torch.full((1, 1, 1536), value))
         return {
             "text": target,
             "protocol_text": target,
             "hidden": torch.full((1, 1, 1536), -99.0),
             "prompt_len": 5,
-            "gen_ids": [100, 101, 102],
+            "gen_ids": list(token_ids),
             "runtime_metrics": {},
+            "terminal_reason": "eos",
         }
 
     def v9_prefix(hidden, prompt_len):
@@ -1386,9 +1788,42 @@ def test_realtime_v2_talker_uses_validated_say_prefix_and_keeps_listener_ticks(
         if adapter_enabled:
             assert kwargs.get("talk_context") is not None
             assert engine.response_talk_context_pool.active_count == 1
+        live_qwen_text_stream = kwargs.get("live_qwen_text_stream")
         callback = kwargs.get("on_audio_chunk")
+        if live_qwen_text_stream is not None:
+            # Model a successful Qwen prefill/forward for every source token.
+            # Final response history is eligible only after those tokens also
+            # receive PCM coverage and the client ACKs the emitted segment.
+            live_qwen_text_stream.consume_initial_token()
+            while True:
+                token_id = live_qwen_text_stream.take_trailing_token(
+                    timeout_s=ASYNC_TEST_SAFETY_TIMEOUT_S,
+                )
+                if token_id is None:
+                    break
+                live_qwen_text_stream.consume_trailing_token()
+            assert live_qwen_text_stream.codec_eos_allowed
+            span_cursor = live_qwen_text_stream.fifo.span_cursor
+            assert span_cursor is not None
+            audio_frame_count = max(
+                (int(span.end_frame) for span in span_cursor.frame_spans),
+                default=0,
+            )
+            assert audio_frame_count > 0
+            kwargs["metrics"]["generated_cb0_frames"] = audio_frame_count
+            kwargs["metrics"]["eos_detected"] = True
+        else:
+            text_prefill_complete = kwargs.get("on_text_input_prefill_complete")
+            if callable(text_prefill_complete):
+                # The one-shot Talker calls this only after its full dynamic
+                # text prefill has returned successfully.
+                text_prefill_complete()
+            audio_frame_count = 1
+            kwargs["metrics"]["generated_cb0_frames"] = audio_frame_count
+            kwargs["metrics"]["eos_detected"] = True
         if callback is not None:
-            callback(np.full(1920, 0.1, dtype=np.float32))
+            for _ in range(audio_frame_count):
+                callback(np.full(1920, 0.1, dtype=np.float32))
         engine.talker_started.set()
         if not engine.release_talker.wait(timeout=3.0):
             raise TimeoutError("v2 realtime talker was not released")
@@ -1440,7 +1875,7 @@ def test_realtime_v2_talker_uses_validated_say_prefix_and_keeps_listener_ticks(
     client = TestClient(create_app(engine, sessions))
 
     with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-        assert ws.receive_json()["type"] == "session.created"
+        assert _receive_json(ws)["type"] == "session.created"
         ws.send_json({
             "type": "session.update",
             "session": {
@@ -1460,10 +1895,21 @@ def test_realtime_v2_talker_uses_validated_say_prefix_and_keeps_listener_ticks(
                 "audio_history_archive_cpu": cpu_archive_case,
             },
         })
-        session_updated = ws.receive_json()
+        session_updated = _receive_json(ws)
         assert session_updated["type"] == "session.updated"
+        session = sessions.all()[0]
+        acknowledged_v2_branches: dict[str, dict[str, object]] = {}
+
+        def acknowledge_v2_segment(event: dict[str, object]) -> None:
+            if event.get("type") != "response.audio.segment_done":
+                return
+            _ack_final_audio_segment_v2(ws, event)
+            branch = session._playback_ack_branches.get(str(event["response_id"]))
+            if isinstance(branch, dict):
+                acknowledged_v2_branches[str(event["response_id"])] = branch
+
         if cpu_archive_case:
-            assert session_updated["audio_history_archive_cpu_enabled"] is True
+            assert session_updated["audio_history_archive_cpu_enabled"] is False
         observed_events: list[dict[str, object]] = []
         _send_pcm(ws)
         first_decision = None
@@ -1482,14 +1928,14 @@ def test_realtime_v2_talker_uses_validated_say_prefix_and_keeps_listener_ticks(
             )
         else:
             for _ in range(30):
-                event = ws.receive_json()
+                event = _receive_json(ws)
                 observed_events.append(event)
                 if event.get("type") == "duplex_control6.decision" and event.get("action") == wake_action:
                     first_decision = event
                     break
         if first_decision is None:
             for _ in range(30):
-                event = ws.receive_json()
+                event = _receive_json(ws)
                 observed_events.append(event)
                 if event.get("type") == "duplex_control6.decision" and event.get("action") == wake_action:
                     first_decision = event
@@ -1542,7 +1988,12 @@ def test_realtime_v2_talker_uses_validated_say_prefix_and_keeps_listener_ticks(
                 return
             assert engine.talker_started.wait(timeout=2.0), "SPEAK endpoint deferred was not dispatched"
             engine.release_talker.set()
-            second_done_events = _receive_until(ws, "response.done", limit=60)
+            second_done_events = _receive_until(
+                ws,
+                "response.done",
+                limit=60,
+                on_event=acknowledge_v2_segment,
+            )
             observed_events.extend(second_done_events)
             assert len(processor_audio_snapshots) == 2
             endpoint_audio = processor_audio_snapshots[-1]
@@ -1565,9 +2016,10 @@ def test_realtime_v2_talker_uses_validated_say_prefix_and_keeps_listener_ticks(
             )
             assert second_done["runtime_metrics"]["audio_response_protocol"]["first_thinker_token_id"] == 100
             session = sessions.all()[0]
-            assert [message.get("role") for message in session.history[-2:]] == ["user", "assistant"]
-            assert session.history[-2]["content"] == "ho detto ciao"
-            assert session.history[-1]["content"] == "Ciao, ti ascolto."
+            assert _wait_for(lambda: session.history[-2:] == [
+                {"role": "user", "content": "ho detto ciao"},
+                {"role": "assistant", "content": "Ciao, ti ascolto."},
+            ], timeout=6.0)
             ws.send_json({"type": "session.close"})
             return
         for expected_frame_id in range(
@@ -1623,9 +2075,30 @@ def test_realtime_v2_talker_uses_validated_say_prefix_and_keeps_listener_ticks(
             session.stop_requested = True
         engine.release_talker.set()
         terminal_event = "response.done" if cancel_during_talker is None else "response.cancelled"
-        events = _receive_until_any(ws, {"response.done", "response.cancelled"})
+        events = _receive_until_any(
+            ws,
+            {"response.done", "response.cancelled"},
+            on_event=(
+                lambda event: (
+                    acknowledge_v2_segment(event)
+                    if cancel_during_talker is None
+                    and event.get("type") == "response.audio.segment_done"
+                    else None
+                )
+            ),
+        )
         observed_events.extend(events)
         assert events[-1]["type"] == terminal_event
+        if cancel_during_talker is True:
+            completion_event = _receive_until(ws, "response.runtime_metrics")[-1]
+            completion = completion_event["runtime_metrics"]["response_completion"]
+            assert completion_event["response_id"] == events[-1]["response_id"]
+            assert completion_event["finish_reason"] == "cancelled"
+            assert completion["finish_reason"] == "cancelled"
+            assert completion["tokens_generated"] == 3
+            assert completion["codec_frames_produced"] >= 1
+            assert isinstance(completion["cancellation_reason"], str)
+            assert "audio" not in completion_event and "delta" not in completion_event
         assert engine.stop_check_after_cancel is (cancel_during_talker is False)
         assert engine.talker_kwargs_seen is not None
         if adapter_enabled:
@@ -1641,7 +2114,7 @@ def test_realtime_v2_talker_uses_validated_say_prefix_and_keeps_listener_ticks(
             ws.send_json({"type": "session.close"})
             return
         session = sessions.all()[0]
-        assert _wait_for(lambda: session.pending_audio_history_archive is None)
+        assert _wait_for(lambda: session.pending_audio_history_archive is None, timeout=6.0)
         assert archive_asr_calls == []
         selected = next(event for event in observed_events if event.get("type") == "response.action_selected")
         assert selected["wake_action"] == "SPEAK"
@@ -1671,16 +2144,83 @@ def test_realtime_v2_talker_uses_validated_say_prefix_and_keeps_listener_ticks(
         assert '"heard"' not in visible_text and '"action"' not in visible_text
         expected_user_history = [] if response_action == "BACKCHANNEL" else ["ho detto ciao"]
         if cpu_archive_case:
-            assert len(cpu_archive_calls) == 1
-            assert np.array_equal(cpu_archive_calls[0], processor_audio_snapshots[0])
-            expected_user_history = ["trascrizione CPU del turno reale"]
+            assert cpu_archive_calls == []
         assert [message["content"] for message in session.history if message.get("role") == "user"] == expected_user_history
         expected_assistant_history = (
             [say_text]
             if cancel_during_talker is None
             else []
         )
-        assert [message["content"] for message in session.history if message.get("role") == "assistant"] == expected_assistant_history
+        assistant_history = [
+            message["content"]
+            for message in session.history
+            if message.get("role") == "assistant"
+        ]
+        if cancel_during_talker is None:
+            ack_branch = acknowledged_v2_branches.get(str(response_done["response_id"]))
+            assert ack_branch is not None
+            segment_id = next(
+                event["speaker_segment_id"] for event in observed_events
+                if event.get("type") == "response.audio.segment_done"
+                and event.get("response_id") == response_done["response_id"]
+            )
+            assert _wait_for(
+                lambda: segment_id in ack_branch.get("client_consumed_segments", ()),
+                timeout=1.0,
+            ), {
+                "ack_sequence": ack_branch.get("client_consumed_pcm_sequence"),
+                "consumed_segments": ack_branch.get("client_consumed_segments"),
+                "segment_id": segment_id,
+            }
+            assert _wait_for(
+                lambda: ack_branch.get("deferred_acoustic_history_committed") is True,
+                timeout=1.0,
+            )
+            if adapter_enabled and response_action == "SPEAK":
+                ledger = session.get_response_event_ledger(str(response_done["response_id"]))
+                assert ledger is not None
+                projection = ledger.project()
+                source_rows = projection.source_tokens
+                expected_source_rows = (
+                    [(101, "ha"), (101, "ha")]
+                    if duplicate_v2_source_tokens
+                    else [(101, say_text)]
+                )
+                assert [(row["token_id"], row["text_piece"]) for row in source_rows] == expected_source_rows
+                source_sequences = [int(row["source_token_seq"]) for row in source_rows]
+                assert len(source_sequences) == len(set(source_sequences))
+                assert all(row.get("physical_kv_cursor") is None for row in source_rows)
+                assert projection.confirmed_exclusive_kv_cursor is None
+                assert ack_branch.get("spoken_prefix_exclusive_cursor") is None
+                assert ack_branch.get("spoken_prefix_kv_position") is None
+                assert ack_branch.get("client_consumed_prefix_exclusive_cursor") is None
+                assert projection.tts_consumed_source_seq == source_rows[-1]["source_token_seq"]
+                closed_rows = ack_branch["playback_segments"][segment_id]["token_packets"]
+                assert [
+                    (row["token_id"], row["text_piece"], row["source_token_seq"])
+                    for row in closed_rows
+                ] == [
+                    (row["token_id"], row["text_piece"], row["source_token_seq"])
+                    for row in source_rows
+                ]
+        assert assistant_history == expected_assistant_history, {
+            "assistant_history": assistant_history,
+            "acknowledged_segments": (
+                None
+                if cancel_during_talker is not None
+                else ack_branch.get("client_consumed_segments")
+            ),
+            "client_consumed_prefix_text": (
+                None
+                if cancel_during_talker is not None
+                else ack_branch.get("client_consumed_prefix_text")
+            ),
+            "deferred_acoustic_history_committed": (
+                None
+                if cancel_during_talker is not None
+                else ack_branch.get("deferred_acoustic_history_committed")
+            ),
+        }
         direct_prompt = engine.tokenizer.seen_messages[-1]
         assert "Stiamo organizzando una cena con amici." in direct_prompt[0]["content"]
         assert direct_prompt[0]["content"].endswith(AUDIO_RESPONSE_PROTOCOL_V2_SYSTEM)
@@ -1807,11 +2347,16 @@ def test_controller_guided_vocal_actions_start_live_qwen_and_keep_plain_prefill(
                 assert not engine.first_pcm_callback.is_set(), "private BACKCHANNEL must buffer text until Thinker EOS"
                 assert not engine.talker_entered.is_set(), "private BACKCHANNEL started Qwen before Thinker EOS"
         engine.thinker_returned.set()
+        generated_ids = tuple(token_id for token_id, _ in observed_token_pieces)
+        if generated_ids:
+            engine.tokenizer.decoded_values[generated_ids] = "".join(
+                token_text for _token_id, token_text in observed_token_pieces
+            )
         return {
             "text": "".join(token_text for _token_id, token_text in observed_token_pieces),
             "hidden": say_hidden,
             "hidden_prompt_len": 3,
-            "gen_ids": [token_id for token_id, _ in observed_token_pieces],
+            "gen_ids": list(generated_ids),
             "runtime_metrics": {},
             "terminal_reason": terminal_reason,
         }
@@ -1878,6 +2423,9 @@ def test_controller_guided_vocal_actions_start_live_qwen_and_keep_plain_prefill(
             engine.first_pcm_callback.set()
         engine.talk_started.set()
         consumed = []
+        # The runtime reserves token 0 for dynamic prefill before invoking
+        # talk(); acknowledge that reservation before consuming the suffix.
+        live_qwen_text_stream.consume_initial_token()
         while True:
             assert not engine._thinker_lock.locked(), "Thinker priority lock held while waiting for Qwen text"
             assert not engine._talker_lock.locked(), "Talker lock held while waiting for Qwen text"
@@ -1886,8 +2434,12 @@ def test_controller_guided_vocal_actions_start_live_qwen_and_keep_plain_prefill(
             if token_id is None:
                 break
             consumed.append(token_id)
+            live_qwen_text_stream.consume_trailing_token()
         assert consumed.count(9999) == 1
         assert live_qwen_text_stream.codec_eos_allowed
+        talk_metrics = kwargs.get("metrics")
+        if isinstance(talk_metrics, dict):
+            talk_metrics["eos_detected"] = bool(terminal_reason == "eos")
         if action in {"AUTO_COMMIT_THEN_SPEAK", "MANUAL"} and say_text:
             assert engine.allow_talker_finish.wait(timeout=ASYNC_TEST_SAFETY_TIMEOUT_S)
         engine.live_tail_tokens_seen = consumed
@@ -1902,8 +2454,31 @@ def test_controller_guided_vocal_actions_start_live_qwen_and_keep_plain_prefill(
     client = TestClient(create_app(engine, sessions))
 
     with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-        assert ws.receive_json()["type"] == "session.created"
+        assert _receive_json(ws)["type"] == "session.created"
         seen_events: list[dict[str, object]] = []
+        acknowledged_segments: set[str] = set()
+        acknowledgement_branches: dict[str, dict[str, object]] = {}
+        acknowledgement_sequence = 0
+
+        def acknowledge_completed_segment(event: dict[str, object]) -> None:
+            nonlocal acknowledgement_sequence
+            if event.get("type") != "response.audio.segment_done":
+                return
+            segment_id = str(event["speaker_segment_id"])
+            if segment_id in acknowledged_segments:
+                return
+            acknowledged_segments.add(segment_id)
+            _ack_final_audio_segment_v2(
+                ws,
+                event,
+                sequence=acknowledgement_sequence,
+            )
+            branch = sessions.all()[0]._playback_ack_branches.get(
+                str(event["response_id"])
+            )
+            if isinstance(branch, dict):
+                acknowledgement_branches[str(event["response_id"])] = branch
+            acknowledgement_sequence += 1
 
         def receive_until_test(target: str, *, limit: int = 80, allow_errors: bool = False):
             received = []
@@ -1925,6 +2500,7 @@ def test_controller_guided_vocal_actions_start_live_qwen_and_keep_plain_prefill(
                 event = json.loads(message["text"])
                 received.append(event)
                 seen_events.append(event)
+                acknowledge_completed_segment(event)
                 if event.get("type") == "error" and not allow_errors:
                     raise AssertionError(f"realtime error while waiting for {target}: {event!r}")
                 if event.get("type") == target:
@@ -1944,6 +2520,7 @@ def test_controller_guided_vocal_actions_start_live_qwen_and_keep_plain_prefill(
                 event = json.loads(message["text"])
                 received.append(event)
                 seen_events.append(event)
+                acknowledge_completed_segment(event)
             return received
 
         session_config = {"input_audio_buffer_acknowledgements": True}
@@ -1962,7 +2539,7 @@ def test_controller_guided_vocal_actions_start_live_qwen_and_keep_plain_prefill(
                 "scripted_actions": [action],
             })
         ws.send_json({"type": "session.update", "session": session_config})
-        assert ws.receive_json()["type"] == "session.updated"
+        assert _receive_json(ws)["type"] == "session.updated"
         _send_pcm(ws)
         first_consumed = receive_until_test("input_audio_buffer.consumed")[-1]
         assert first_consumed["frame_id"] == 0
@@ -2082,6 +2659,13 @@ def test_controller_guided_vocal_actions_start_live_qwen_and_keep_plain_prefill(
         assert engine.v9_prefix_calls == 0
         assert any(event.get("type") == "response.audio.delta" for event in events) == bool(say_text)
         if say_text:
+            if any(event.get("type") == "response.done" for event in events):
+                visible_text = "".join(
+                    str(event.get("delta", ""))
+                    for event in seen_events
+                    if event.get("type") == "response.output_text.delta"
+                )
+                assert visible_text == say_text
             assert engine.token_2_callback_seen.is_set() is (action != "BACKCHANNEL")
             assert engine.pcm_preceded_thinker_return is (action != "BACKCHANNEL")
             if action == "BACKCHANNEL":
@@ -2103,6 +2687,81 @@ def test_controller_guided_vocal_actions_start_live_qwen_and_keep_plain_prefill(
             assert engine.live_tail_tokens_seen[-1] == 9999
             response_done = next(event for event in events if event.get("type") == "response.done")
             assert response_done["runtime_metrics"]["audio_response_protocol"]["first_thinker_token_id"] == 101
+            ack_branch = acknowledgement_branches.get(str(response_done["response_id"]))
+            assert ack_branch is not None
+            segment_id = next(
+                event["speaker_segment_id"] for event in seen_events
+                if event.get("type") == "response.audio.segment_done"
+                and event.get("response_id") == response_done["response_id"]
+            )
+            assert _wait_for(
+                lambda: segment_id in ack_branch.get("client_consumed_segments", ()),
+                timeout=1.0,
+            ), {
+                "ack_sequence": ack_branch.get("client_consumed_pcm_sequence"),
+                "consumed_segments": ack_branch.get("client_consumed_segments"),
+                "segment_id": segment_id,
+                "playback_cancelled": ack_branch.get("playback_cancelled"),
+            }
+            if say_text:
+                ledger = ack_branch["response_event_ledger"]
+                projection = ledger.project()
+                source_rows = tuple(projection.source_tokens)
+                assert tuple(
+                    (int(row["token_id"]), str(row["text_piece"]))
+                    for row in source_rows
+                ) == tuple(emitted_token_pieces)
+                assert all(row["physical_kv_cursor"] is None for row in source_rows)
+                assert ledger.source_frontier_snapshot()["tts_consumed_source_seq"] == (
+                    len(emitted_token_pieces) - 1
+                )
+                assert projection.text_status == "completed", projection
+                assert projection.confirmed_text == say_text
+            if action != "BACKCHANNEL" and say_text:
+                session = sessions.all()[0]
+                pending_archive = session.pending_audio_history_archive
+                assert isinstance(pending_archive, dict)
+                assert pending_archive["assistant_text"] == say_text
+                assert pending_archive["assistant_status"] == "completed"
+                assert pending_archive["assistant_finalized"] is True
+                assert pending_archive["transcript"] is None
+                assert not any(
+                    message.get("role") == "assistant"
+                    and message.get("content") == say_text
+                    for message in session.history
+                )
+                assert session.complete_audio_history_archive(
+                    int(pending_archive["archive_id"]),
+                    "fixture input transcript",
+                    asr_provenance={"source": "test_fixture"},
+                )
+            history_committed = _wait_for(
+                lambda: (
+                    sessions.all()[0].history
+                    and sessions.all()[0].history[-1]
+                    == {"role": "assistant", "content": say_text}
+                ),
+                timeout=6.0,
+            )
+            assert history_committed, {
+                "history": sessions.all()[0].history,
+                "pending_audio_history_archive": sessions.all()[0].pending_audio_history_archive,
+                "deferred_acoustic_history_commit": ack_branch.get(
+                    "deferred_acoustic_history_commit"
+                ),
+                "deferred_acoustic_history_committed": ack_branch.get(
+                    "deferred_acoustic_history_committed"
+                ),
+                "playback_drained": ack_branch.get("playback_drained"),
+                "playback_drain_failure": ack_branch.get("playback_drain_failure"),
+                "client_consumed_pcm_sequence": ack_branch.get(
+                    "client_consumed_pcm_sequence"
+                ),
+                "client_consumed_segments": ack_branch.get("client_consumed_segments"),
+                "deferred_playback_finalizer_done": getattr(
+                    ack_branch.get("deferred_playback_finalizer"), "done", lambda: None
+                )(),
+            }
             assert engine.talker_exited.is_set(), "Talker worker must exit before response.done"
             talker_metrics = response_done["runtime_metrics"]["talker"]
             assert "live_say_consumer_started_before_thinker_return" in talker_metrics, talker_metrics
@@ -2126,7 +2785,6 @@ def test_controller_guided_vocal_actions_start_live_qwen_and_keep_plain_prefill(
                     if event.get("type") == "response.action_selected"
                 )
                 assert isinstance(selected.get("policy_decision_at_ns"), int)
-            assert sessions.all()[0].history[-1] == {"role": "assistant", "content": say_text}
             assert _wait_for(
                 lambda: not any(
                     thread.name.startswith("controller-guided-say-")
@@ -2148,7 +2806,7 @@ def test_controller_guided_vocal_actions_start_live_qwen_and_keep_plain_prefill(
             assert len(processor_audio_snapshots) == 1
             np.testing.assert_array_equal(
                 processor_audio_snapshots[0],
-                np.full(FRAME_SAMPLES, 4096 / 32768.0, dtype=np.float32),
+                _speech_like_pcm(FRAME_SAMPLES, 4096).astype(np.float32) / 32768.0,
             )
         assert talk_context_pool.active_count == 0
         ws.send_json({"type": "session.close"})
@@ -2156,6 +2814,8 @@ def test_controller_guided_vocal_actions_start_live_qwen_and_keep_plain_prefill(
 
 def test_speak_intent_survives_backchannel_until_fresh_causal_endpoint() -> None:
     engine = _Engine(hidden_size=2048, block_talk=True, block_transcription=True)
+    engine.think_text_override = "Capito."
+    engine.think_terminal_reason = "eos"
     sessions = SessionManager()
     client = TestClient(create_app(engine, sessions))
     observed: list[dict[str, object]] = []
@@ -2165,7 +2825,7 @@ def test_speak_intent_survives_backchannel_until_fresh_causal_endpoint() -> None
             for event in observed:
                 if predicate(event):
                     return event
-            observed.append(ws.receive_json())
+            observed.append(_receive_json(ws, obtained=observed))
         raise AssertionError(f"evento atteso non ricevuto; ultimi eventi={observed[-12:]!r}")
 
     def send_frame(frame_id: int, value: int) -> None:
@@ -2177,16 +2837,17 @@ def test_speak_intent_survives_backchannel_until_fresh_causal_endpoint() -> None
 
     try:
         with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-            assert ws.receive_json()["type"] == "session.created"
+            assert _receive_json(ws)["type"] == "session.created"
             ws.send_json({
                 "type": "session.update",
                 "session": {
                     "turn_policy": "scripted",
                     "scripted_actions": ["BACKCHANNEL", "SPEAK", "LISTEN"],
+                    "auto_response": True,
                     "input_audio_buffer_acknowledgements": True,
                 },
             })
-            assert ws.receive_json()["type"] == "session.updated"
+            assert _receive_json(ws)["type"] == "session.updated"
 
             send_frame(0, 4096)
             backchannel = receive_until(
@@ -2222,6 +2883,35 @@ def test_speak_intent_survives_backchannel_until_fresh_causal_endpoint() -> None
                 lambda event: event.get("type") == "response.done"
                 and event.get("response_id") == backchannel.get("response_id")
             )
+            backchannel_segment = next(
+                event for event in observed
+                if event.get("type") == "response.audio.segment_done"
+                and event.get("response_id") == backchannel.get("response_id")
+            )
+            ws.send_json({
+                "type": "client_consumed_pcm",
+                "response_id": backchannel_segment["response_id"],
+                "generation_id": backchannel_segment["generation_id"],
+                "speaker_segment_id": backchannel_segment["speaker_segment_id"],
+                "start_sample": backchannel_segment["start_sample"],
+                "end_sample": backchannel_segment["end_sample"],
+                "sample_rate": backchannel_segment["sample_rate"],
+                "sequence": 0,
+                "consumption_semantics": "logical_client_device_buffer",
+            })
+            # Session response teardown resets a scripted policy to its first
+            # action. Install the next-turn SPEAK action explicitly so this
+            # test exercises the retained deferred intent after the backchannel.
+            ws.send_json({
+                "type": "session.update",
+                "session": {
+                    "turn_policy": "scripted",
+                    "scripted_actions": ["SPEAK"],
+                    "auto_response": True,
+                    "input_audio_buffer_acknowledgements": True,
+                },
+            })
+            assert _receive_json(ws, obtained=observed)["type"] == "session.updated"
 
             # A non-voiced, nonzero dispatch frame makes future-frame leakage
             # visible: the committed SPEAK input must end at endpoint 20.
@@ -2232,7 +2922,7 @@ def test_speak_intent_survives_backchannel_until_fresh_causal_endpoint() -> None
             )
             assert engine.transcription_started.wait(timeout=1.0)
             assert created["action"] == "SPEAK"
-            assert created["intent_source_frame_id"] == 1
+            assert created["intent_source_frame_id"] == 1, observed[-24:]
             assert created["intent_endpoint_frame_id"] == 20
             assert len(engine.transcriptions) == 1
             snapshot = engine.transcriptions[0]
@@ -2259,23 +2949,24 @@ def test_barge_in_during_asr_fences_transcript_and_prevents_ghost_audio() -> Non
     client = TestClient(create_app(engine, sessions))
 
     with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-        assert ws.receive_json()["type"] == "session.created"
+        assert _receive_json(ws)["type"] == "session.created"
         ws.send_json({
             "type": "session.update",
             # Keep SPEAK selected until the two-frame input reaches its quiet
             # endpoint, then HARD_STOP the ASR/response generation.
             "session": {
+                "auto_response": True,
                 "turn_policy": "scripted",
                 "scripted_actions": ["SPEAK"] * 12 + ["HARD_STOP"],
                 "input_audio_buffer_acknowledgements": True,
             },
         })
-        assert ws.receive_json()["type"] == "session.updated"
+        assert _receive_json(ws)["type"] == "session.updated"
         session = sessions.all()[0]
         for frame_id, level in enumerate([4096, 4096] + [0] * 10):
             _send_pcm_level(ws, level)
             for _ in range(80):
-                event = ws.receive_json()
+                event = _receive_json(ws)
                 if (
                     event.get("type") == "input_audio_buffer.consumed"
                     and event.get("frame_id") == frame_id
@@ -2287,7 +2978,7 @@ def test_barge_in_during_asr_fences_transcript_and_prevents_ghost_audio() -> Non
         assert engine.transcription_started.wait(timeout=2.0)
         _send_pcm_level(ws, 4096)
         for _ in range(80):
-            event = ws.receive_json()
+            event = _receive_json(ws)
             if event.get("type") == "input_audio_buffer.consumed" and event.get("frame_id") == 12:
                 break
             assert event.get("type") != "error", event
@@ -2303,7 +2994,12 @@ def test_barge_in_during_asr_fences_transcript_and_prevents_ghost_audio() -> Non
         assert session.stale_session_mutations == 0
         ws.send_json({"type": "session.update", "session": {}})
         after_cancel = _receive_until(ws, "session.updated")
-        assert [event["type"] for event in after_cancel] == ["session.updated"]
+        assert after_cancel[-1]["type"] == "session.updated"
+        assert all(
+            event.get("type") == "response.runtime_metrics"
+            and event.get("response_id") == events[-1]["response_id"]
+            for event in after_cancel[:-1]
+        )
         ws.send_json({"type": "session.close"})
 
 
@@ -2313,7 +3009,7 @@ def test_bounded_two_turn_audio_dialogue_keeps_transcripts_and_assistant_history
     client = TestClient(create_app(engine, sessions))
 
     with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-        assert ws.receive_json()["type"] == "session.created"
+        assert _receive_json(ws)["type"] == "session.created"
         session = sessions.all()[0]
         for _ in range(2):
             _send_pcm(ws)
@@ -2328,7 +3024,11 @@ def test_bounded_two_turn_audio_dialogue_keeps_transcripts_and_assistant_history
             {"role": "user", "content": "recognized turn 2"},
             {"role": "assistant", "content": "reply 2"},
         ]
-        assert [message["content"] for message in engine.tokenizer.seen_messages[-1]] == [
+        assert [
+            message["content"]
+            for message in engine.tokenizer.seen_messages[-1]
+            if message.get("role") in {"user", "assistant"}
+        ] == [
             "recognized turn 1",
             "reply 1",
             "recognized turn 2",
@@ -2347,7 +3047,7 @@ def test_raw_asr_transcript_is_never_returned_in_runtime_metrics(monkeypatch, tr
     client = TestClient(create_app(engine, sessions))
 
     with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-        assert ws.receive_json()["type"] == "session.created"
+        assert _receive_json(ws)["type"] == "session.created"
         _send_pcm(ws)
         ws.send_json({"type": "input_audio_buffer.commit"})
         events = _receive_until(ws, "response.done")
@@ -2361,11 +3061,13 @@ def test_raw_asr_transcript_is_never_returned_in_runtime_metrics(monkeypatch, tr
 
 def test_backchannel_action_generates_contextual_thinker_ack_without_asr() -> None:
     engine = _Engine(hidden_size=2048)
+    engine.think_terminal_reason = "eos"
+    engine.think_text_override = "Capito."
     sessions = SessionManager()
     client = TestClient(create_app(engine, sessions))
 
     with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-        assert ws.receive_json()["type"] == "session.created"
+        assert _receive_json(ws)["type"] == "session.created"
         ws.send_json({
             "type": "session.update",
             "session": {
@@ -2374,15 +3076,17 @@ def test_backchannel_action_generates_contextual_thinker_ack_without_asr() -> No
                 "auto_response": True,
             },
         })
-        assert ws.receive_json()["type"] == "session.updated"
-        _send_pcm(ws)
+        assert _receive_json(ws)["type"] == "session.updated"
+        session = sessions.all()[0]
+        instructions_before_response = session.instructions
+        _send_fixture_voice_frame(ws)
         events = _receive_until(ws, "response.done")
 
         assert engine.transcriptions == [], "BACKCHANNEL must not transcribe the unfinished input utterance"
         assert engine.think_calls == ["think"], "BACKCHANNEL must invoke Gemma Thinker"
-        assert engine.think_max_new_tokens == [2]
+        assert engine.think_max_new_tokens == [6]
         assert engine.think_min_new_tokens == [0]
-        assert engine.talk_calls and engine.talk_calls[0][0] == "reply 1"
+        assert engine.talk_calls and engine.talk_calls[0][0] == "Capito."
         assert any(event.get("type") == "response.audio.delta" for event in events)
         action_system = next(
             message["content"] for message in engine.tokenizer.seen_messages[-1]
@@ -2393,18 +3097,19 @@ def test_backchannel_action_generates_contextual_thinker_ack_without_asr() -> No
             "role": "user",
             "content": "",
         }
-        session = sessions.all()[0]
-        assert session.instructions == ""
-        assert session.history == [{"role": "assistant", "content": "reply 1"}]
+        assert session.instructions == instructions_before_response
+        assert session.history == [{"role": "assistant", "content": "Capito."}]
         terminal = next(event for event in events if event.get("type") == "response.done")
         generation_trace = terminal["runtime_metrics"]["generation_trace"]
         assert generation_trace["conditioned_action"] == "BACKCHANNEL"
-        assert generation_trace["thinker_token_ids"] == [101, 102]
+        assert generation_trace["thinker_token_ids"] == []
+        assert terminal["runtime_metrics"]["controller_backchannel_decode"]["status"] == "validated"
         ws.send_json({"type": "session.close"})
 
 
 def test_private_control_event_echo_split_across_text_chunks_is_rejected_before_talker() -> None:
     engine = _Engine(hidden_size=2048)
+    engine.think_terminal_reason = "eos"
     marker = action_control_marker_text("REPLAN")
     engine.think_text_override = marker + " Va bene."
     engine.think_text_chunks = [marker[:17], marker[17:] + " Va bene."]
@@ -2412,17 +3117,27 @@ def test_private_control_event_echo_split_across_text_chunks_is_rejected_before_
     client = TestClient(create_app(engine, sessions))
 
     with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-        assert ws.receive_json()["type"] == "session.created"
+        assert _receive_json(ws)["type"] == "session.created"
         ws.send_json({
             "type": "session.update",
             "session": {
                 "turn_policy": "scripted",
-                "scripted_actions": ["BACKCHANNEL"],
+                "scripted_actions": ["LISTEN"] * 10 + ["SPEAK"],
                 "auto_response": True,
             },
         })
-        assert ws.receive_json()["type"] == "session.updated"
-        _send_pcm(ws)
+        assert _receive_json(ws)["type"] == "session.updated"
+        for frame_id in range(10):
+            if frame_id == 0:
+                _send_fixture_voice_frame(ws)
+            else:
+                _send_pcm_level(ws, 0)
+            decision = _receive_action_decision(ws, "LISTEN")
+            assert decision["frame_id"] == frame_id
+        _send_pcm_level(ws, 0)
+        speak = _receive_action_decision(ws, "SPEAK")
+        assert speak["frame_id"] == 10
+        assert speak["accepted"] is True
         events = _receive_until_any(ws, {"response.cancelled", "response.done"})
 
         errors = [event for event in events if event.get("type") == "error"]
@@ -2435,7 +3150,9 @@ def test_private_control_event_echo_split_across_text_chunks_is_rejected_before_
         assert not engine.talk_calls, "an echoed internal event must be rejected before Qwen Talker"
         assert not any(event.get("type") == "response.audio.delta" for event in events)
         assert not any(marker in str(event.get("delta", "")) for event in events)
-        assert not sessions.all()[0].history
+        assert sessions.all()[0].history == [
+            {"role": "user", "content": "recognized turn 1"}
+        ]
         trace = events[-1]["runtime_metrics"]["generation_trace"]
         assert trace["raw_text"] == marker + " Va bene."
         assert trace["outcome"] == "private_control_leak"
@@ -2465,6 +3182,7 @@ def test_replan_cancels_stream_and_returns_to_listening_without_rendering_replan
         text,
         h_pfx,
         *,
+        on_audio_chunk=None,
         on_audio_chunk_with_horizon=None,
         **_kwargs,
     ):
@@ -2472,17 +3190,19 @@ def test_replan_cancels_stream_and_returns_to_listening_without_rendering_replan
         wav = np.full(4 * 1920, 0.1, dtype=np.float32)
         if on_audio_chunk_with_horizon is not None:
             on_audio_chunk_with_horizon(wav, 10)
+        elif on_audio_chunk is not None:
+            on_audio_chunk(wav)
         engine.talk_started.set()
         if not engine.release_talk.wait(timeout=3.0):
             raise TimeoutError("test talk worker was not released")
         return wav
 
-    engine.talk_stateful = talk_with_streamable_packet
+    engine.talk = talk_with_streamable_packet
     sessions = SessionManager()
     client = TestClient(create_app(engine, sessions))
 
     with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-        assert ws.receive_json()["type"] == "session.created"
+        assert _receive_json(ws)["type"] == "session.created"
         scripted_actions = ["LISTEN"] * 10 + ["SPEAK", "REPLAN", "REPLAN"]
         scripted_actions += ["CONTINUE", "CONTINUE", "REPLAN"] + ["CONTINUE"] * 7
         ws.send_json({
@@ -2490,9 +3210,10 @@ def test_replan_cancels_stream_and_returns_to_listening_without_rendering_replan
             "session": {
                 "turn_policy": "scripted",
                 "scripted_actions": scripted_actions,
+                "auto_response": True,
             },
         })
-        assert ws.receive_json()["type"] == "session.updated"
+        assert _receive_json(ws)["type"] == "session.updated"
         session = sessions.all()[0]
         invalidation_reasons: list[tuple[str, bool, int, int]] = []
         original_invalidate = session.invalidate_generation
@@ -2605,6 +3326,7 @@ def test_replan_cancels_pending_renderer_before_first_pcm() -> None:
         text,
         h_pfx,
         *,
+        on_audio_chunk=None,
         on_audio_chunk_with_horizon=None,
         **_kwargs,
     ):
@@ -2615,22 +3337,25 @@ def test_replan_cancels_pending_renderer_before_first_pcm() -> None:
         wav = np.full(4 * 1920, 0.1, dtype=np.float32)
         if on_audio_chunk_with_horizon is not None:
             on_audio_chunk_with_horizon(wav, 10)
+        elif on_audio_chunk is not None:
+            on_audio_chunk(wav)
         audio_callback_attempted.set()
         if not finish_talk.wait(timeout=3.0):
             raise TimeoutError("test talk worker was not finished")
         return wav
 
-    engine.talk_stateful = talk_without_early_pcm
+    engine.talk = talk_without_early_pcm
     actions = ["LISTEN"] * 10 + ["SPEAK"] + ["REPLAN"] * 20
     try:
         with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-            assert ws.receive_json()["type"] == "session.created"
+            assert _receive_json(ws)["type"] == "session.created"
             ws.send_json({"type": "session.update", "session": {
                 "turn_policy": "scripted",
                 "scripted_actions": actions,
+                "auto_response": True,
                 "input_audio_buffer_acknowledgements": True,
             }})
-            assert ws.receive_json()["type"] == "session.updated"
+            assert _receive_json(ws)["type"] == "session.updated"
             for frame_id in range(10):
                 _send_pcm_level(ws, 4096 if frame_id == 0 else 0)
                 decision = _receive_action_decision(ws, "LISTEN")
@@ -2671,21 +3396,32 @@ def test_quiet_tail_replan_is_rejected_while_original_response_worker_is_live() 
     client = TestClient(create_app(engine, sessions))
 
     with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-        assert ws.receive_json()["type"] == "session.created"
+        assert _receive_json(ws)["type"] == "session.created"
         ws.send_json({
             "type": "session.update",
-            "session": {"turn_policy": "scripted", "scripted_actions": ["SPEAK", "REPLAN"]},
+            "session": {
+                "turn_policy": "scripted",
+                "scripted_actions": ["LISTEN"] * 10 + ["SPEAK", "REPLAN"],
+                "auto_response": True,
+            },
         })
-        assert ws.receive_json()["type"] == "session.updated"
+        assert _receive_json(ws)["type"] == "session.updated"
         session = sessions.all()[0]
         _send_pcm_level(ws, 4096)
+        first_listen = _receive_action_decision(ws, "LISTEN")
+        assert first_listen["frame_id"] == 0
+        for expected_frame_id in range(1, 10):
+            _send_pcm_level(ws, 0)
+            listen = _receive_action_decision(ws, "LISTEN")
+            assert listen["frame_id"] == expected_frame_id
+        _send_pcm_level(ws, 0)
+        speak = _receive_action_decision(ws, "SPEAK")
+        assert speak["frame_id"] == 10
+        assert speak["accepted"] is True
         first_events = _receive_until(ws, "response.created")
         first_response_id = first_events[-1]["response_id"]
-        first_speak = next(
-            event for event in first_events
-            if event.get("type") == "duplex_control6.decision" and event.get("action") == "SPEAK"
-        )
-        assert first_speak["frame_id"] == 0
+        first_speak = speak
+        assert first_speak["frame_id"] == 10
         assert first_speak["accepted"] is True
         assert engine.transcription_started.wait(timeout=1.0)
         first_generation = session.session_generation_id
@@ -2696,9 +3432,9 @@ def test_quiet_tail_replan_is_rejected_while_original_response_worker_is_live() 
         _send_pcm_level(ws, 20)
         assert _wait_for(lambda: session.listener_state.listener_input_frames >= 2)
         quiet_replan = _receive_action_decision(ws, "REPLAN")
-        assert quiet_replan["frame_id"] == 1
+        assert quiet_replan["frame_id"] == 11
         assert quiet_replan["confidence"] > 0.0
-        assert quiet_replan["accepted"] is False
+        assert quiet_replan["accepted"] is False, quiet_replan
         assert quiet_replan["rejection_reason"] == "no_new_user_audio"
         assert session.session_generation_id == first_generation
         assert session.active_response is True
@@ -2732,12 +3468,12 @@ def test_text_response_create_keeps_existing_user_content_without_unnecessary_as
     client = TestClient(create_app(engine, sessions))
 
     with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-        assert ws.receive_json()["type"] == "session.created"
+        assert _receive_json(ws)["type"] == "session.created"
         ws.send_json({
             "type": "conversation.item.create",
             "item": {"role": "user", "content": "text turn"},
         })
-        assert ws.receive_json()["type"] == "conversation.item.created"
+        assert _receive_json(ws)["type"] == "conversation.item.created"
         ws.send_json({"type": "response.create"})
         _receive_until(ws, "response.done")
 
@@ -2772,7 +3508,7 @@ def test_empty_audio_transcription_does_not_create_a_ghost_ciao_response() -> No
     client = TestClient(create_app(engine, sessions))
 
     with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-        assert ws.receive_json()["type"] == "session.created"
+        assert _receive_json(ws)["type"] == "session.created"
         _send_pcm(ws)
         ws.send_json({"type": "input_audio_buffer.commit"})
         events = _receive_until(ws, "response.cancelled")
@@ -2822,12 +3558,12 @@ def test_session_update_fails_explicitly_when_turnhead_checkpoint_is_missing(mon
     client = TestClient(create_app(engine, sessions))
 
     with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-        assert ws.receive_json()["type"] == "session.created"
+        assert _receive_json(ws)["type"] == "session.created"
         session = sessions.all()[0]
         # This is the former silent-fallback path: auto_response with no explicit
         # turn_policy must now reject an unavailable default TurnHead.
         ws.send_json({"type": "session.update", "session": {"auto_response": True}})
-        error = ws.receive_json()
+        error = _receive_json(ws)
 
         assert error["type"] == "error"
         assert error["error"]["code"] == "INVALID_SESSION_UPDATE"
@@ -2842,7 +3578,7 @@ def test_session_update_fails_explicitly_when_turnhead_checkpoint_is_missing(mon
             "type": "session.update",
             "session": {"auto_response": True, "turn_policy": "turnhead"},
         })
-        explicit_error = ws.receive_json()
+        explicit_error = _receive_json(ws)
         assert explicit_error["type"] == "error"
         assert "TurnDynamics checkpoint unavailable" in explicit_error["error"]["message"]
         assert session.auto_response is False
@@ -2855,17 +3591,24 @@ def test_session_update_preflights_p7_voice_before_opening_audio_gate(monkeypatc
         tcfg=SimpleNamespace(hidden_size=4),
         default_voice_conditioning=None,
     )
-    monkeypatch.setattr(
-        server_module,
-        "resolve_voice_conditioning",
-        lambda *_args, **_kwargs: {"task_type": ["Base"]},
-    )
+    resolutions = 0
+
+    def resolve_startup_then_invalid_update(*_args, **_kwargs):
+        nonlocal resolutions
+        resolutions += 1
+        if resolutions == 1:
+            return {"mode": "x_vector_only", "speaker_embedding": torch.ones(4)}
+        return {"task_type": ["Base"]}
+
+    monkeypatch.setattr(server_module, "resolve_voice_conditioning", resolve_startup_then_invalid_update)
     sessions = SessionManager()
     client = TestClient(create_app(engine, sessions))
 
     with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-        assert ws.receive_json()["type"] == "session.created"
+        assert _receive_json(ws)["type"] == "session.created"
         session = sessions.all()[0]
+        initial_voice_conditioning = session.voice_conditioning
+        assert initial_voice_conditioning["mode"] == "x_vector_only"
         ws.send_json({
             "type": "session.update",
             "session": {
@@ -2875,12 +3618,12 @@ def test_session_update_preflights_p7_voice_before_opening_audio_gate(monkeypatc
                 "input_audio_buffer_acknowledgements": True,
             },
         })
-        event = ws.receive_json()
+        event = _receive_json(ws)
         assert event["type"] == "error"
         assert event["error"]["code"] == "VOICE_CONDITIONING_ERROR"
         assert event["error"]["terminal"] is True
         assert session.auto_response is False
-        assert session.voice_conditioning is None
+        assert session.voice_conditioning is initial_voice_conditioning
         ws.send_json({"type": "session.close"})
 
 
@@ -2896,7 +3639,7 @@ def test_session_update_echoes_validated_p7_voice_mode(monkeypatch) -> None:
     client = TestClient(create_app(engine, sessions))
 
     with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-        assert ws.receive_json()["type"] == "session.created"
+        assert _receive_json(ws)["type"] == "session.created"
         ws.send_json({
             "type": "session.update",
             "session": {
@@ -2906,7 +3649,7 @@ def test_session_update_echoes_validated_p7_voice_mode(monkeypatch) -> None:
                 "input_audio_buffer_acknowledgements": True,
             },
         })
-        updated = ws.receive_json()
+        updated = _receive_json(ws)
         assert updated["type"] == "session.updated"
         assert updated["voice"] == "gemma"
         assert updated["voice_conditioning_mode"] == "x_vector_only"
@@ -2933,7 +3676,7 @@ def test_voice_conditioning_ablation_keeps_session_unconditioned(monkeypatch) ->
     client = TestClient(create_app(engine, sessions))
 
     with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-        assert ws.receive_json()["type"] == "session.created"
+        assert _receive_json(ws)["type"] == "session.created"
         ws.send_json({
             "type": "session.update",
             "session": {
@@ -2942,7 +3685,7 @@ def test_voice_conditioning_ablation_keeps_session_unconditioned(monkeypatch) ->
                 "voice_conditioning_mode": "x_vector_only",
             },
         })
-        updated = ws.receive_json()
+        updated = _receive_json(ws)
         assert updated["type"] == "session.updated"
         assert updated["voice_conditioning_mode"] is None
         assert sessions.all()[0].voice_conditioning is None
@@ -3006,12 +3749,12 @@ def test_turnhead_does_not_treat_unprojected_listener_hidden_as_v9(monkeypatch) 
     client = TestClient(create_app(engine, sessions))
 
     with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-        assert ws.receive_json()["type"] == "session.created"
+        assert _receive_json(ws)["type"] == "session.created"
         ws.send_json({
             "type": "session.update",
             "session": {"auto_response": True, "turn_policy": "turnhead"},
         })
-        assert ws.receive_json()["type"] == "session.updated"
+        assert _receive_json(ws)["type"] == "session.updated"
         session = sessions.all()[0]
         _send_pcm(ws)
 
@@ -3025,6 +3768,7 @@ def test_turnhead_does_not_treat_unprojected_listener_hidden_as_v9(monkeypatch) 
 def test_turnhead_policy_speak_barge_in_wires_v9_hidden_and_generation_fences(monkeypatch) -> None:
     monkeypatch.setattr("duplex_kernel.turnhead_adapter.TurnHeadRuntime", _TurnHeadRuntimeStub)
     monkeypatch.setattr(server_module, "TURNHEAD_CKPT", "stub")
+    monkeypatch.setattr(server_module, "_NATIVE_CONTROL6_TRACE_ENABLED", True)
     engine = _Engine(hidden_size=4, block_transcription=True)
     engine.default_turn_policy_factory = None
     engine.v9_stream = _V9StreamStub()
@@ -3035,7 +3779,7 @@ def test_turnhead_policy_speak_barge_in_wires_v9_hidden_and_generation_fences(mo
     client = TestClient(create_app(engine, sessions))
 
     with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-        assert ws.receive_json()["type"] == "session.created"
+        assert _receive_json(ws)["type"] == "session.created"
         session = sessions.all()[0]
         default_policy = session.turn_policy
         assert default_policy.loaded is True
@@ -3043,9 +3787,10 @@ def test_turnhead_policy_speak_barge_in_wires_v9_hidden_and_generation_fences(mo
             "type": "session.update",
             "session": {"auto_response": True, "turn_policy": "turnhead"},
         })
-        assert ws.receive_json()["type"] == "session.updated"
+        assert _receive_json(ws)["type"] == "session.updated"
         policy = session.turn_policy
         assert policy is default_policy, "the demo update must reuse the already-loaded session head"
+        policy.runtime._checkpoint = "always-speak"
         policy_inputs = []
         policy_hidden_updates = []
         original_step = policy.step
@@ -3063,9 +3808,25 @@ def test_turnhead_policy_speak_barge_in_wires_v9_hidden_and_generation_fences(mo
         policy.step = record_policy_input
         policy.runtime.set_thinker_hidden = record_policy_hidden
 
-        _send_pcm(ws)
+        _send_fixture_voice_frame(ws)
+        first_speak = _receive_action_decision(ws, "SPEAK")
+        assert first_speak["frame_id"] == 0
+        assert first_speak["accepted"] is False
+        assert first_speak["rejection_reason"] == "speech_endpoint_pending"
+        for expected_frame_id in range(1, 11):
+            _send_pcm_level(ws, 0)
+            decision = _receive_action_decision(ws, "SPEAK")
+            assert decision["frame_id"] == expected_frame_id
+            assert decision["accepted"] is False
+            assert decision["rejection_reason"] == (
+                "deferred_speak_dispatched"
+                if expected_frame_id == 10
+                else "speech_endpoint_pending"
+            )
         assert engine.transcription_started.wait(timeout=1.0)
-        _send_pcm(ws)
+        policy.runtime._checkpoint = "stub"
+        policy.runtime.decisions = 1
+        _send_fixture_voice_frame(ws)
         events = _receive_until(ws, "response.cancelled")
         engine.release_transcription.set()
 
@@ -3074,17 +3835,19 @@ def test_turnhead_policy_speak_barge_in_wires_v9_hidden_and_generation_fences(mo
         assert not engine.think_calls and not engine.talk_calls
         assert events[-1]["reason"] == "hard_stop"
         assert len(policy_inputs) >= 2
-        first_input, second_input = policy_inputs[:2]
+        first_input = policy_inputs[0]
+        second_input = next(policy_input for policy_input in policy_inputs if policy_input.speaker_active)
         assert first_input.speaker_active is False
         assert second_input.speaker_active is True
         assert second_input.generation_id > first_input.generation_id
-        assert policy.runtime.predictions[:2] == ["SPEAK", "BARGE_IN"]
+        assert policy.runtime.predictions[0] == "SPEAK"
+        assert policy.runtime.predictions[-1] == "BARGE_IN"
         assert len(policy_hidden_updates) >= 2
-        first_hidden, second_hidden = policy_hidden_updates[:2]
+        first_hidden, second_hidden = policy_hidden_updates[0], policy_hidden_updates[-1]
         assert tuple(first_hidden.shape) == (1, 2048)
         assert tuple(second_hidden.shape) == (1, 2048)
         assert float(first_hidden[0, 0]) == 1.0
-        assert float(second_hidden[0, 0]) == 2.0
+        assert float(second_hidden[0, 0]) == float(second_input.frame_id + 1)
         assert session.session_generation_id >= 2
         assert session.stale_session_mutations == 0
         assert engine.v9_stream.calls >= 2
@@ -3107,17 +3870,19 @@ def test_empty_asr_turn_applies_frame_cooldown_without_vad(monkeypatch) -> None:
     client = TestClient(create_app(engine, sessions))
 
     with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-        assert ws.receive_json()["type"] == "session.created"
+        assert _receive_json(ws)["type"] == "session.created"
         ws.send_json({
             "type": "session.update",
             "session": {"auto_response": True, "turn_policy": "turnhead"},
         })
-        assert ws.receive_json()["type"] == "session.updated"
+        assert _receive_json(ws)["type"] == "session.updated"
         session = sessions.all()[0]
 
         silence = np.zeros(FRAME_SAMPLES, dtype="<i2").tobytes()
         ws.send_json({"type": "input_audio_buffer.append", "audio": base64.b64encode(silence).decode("ascii")})
-        _receive_until(ws, "response.done")
+        ws.send_json({"type": "input_audio_buffer.commit"})
+        empty_response = _receive_until(ws, "response.cancelled")
+        assert empty_response[-1]["reason"] == "empty_transcript"
         assert len(engine.transcriptions) == 1
 
         ws.send_json({"type": "input_audio_buffer.append", "audio": base64.b64encode(silence).decode("ascii")})
@@ -3222,10 +3987,15 @@ def test_cancel_before_first_thinker_token_returns_cancelled_result() -> None:
     from duplex_kernel.engine import PipelineEngine
 
     output = SimpleNamespace(logits=torch.tensor([[[0.0, 1.0]]]))
+    sampler = SimpleNamespace(
+        eos_token_ids={1},
+        sample_initial=lambda *_args: (torch.tensor([0]), None, None),
+    )
     engine = SimpleNamespace(
         _run_thinker_prefill=lambda *_args, **_kwargs: (
             output, [torch.zeros((1, 1, 4))], None, torch.ones((1, 1), dtype=torch.long),
         ),
+        build_thinker_sampler=lambda **_kwargs: sampler,
         thinker_prefill_chunk_tokens=16,
         tokenizer=SimpleNamespace(eos_token_id=1),
         device="cpu",
@@ -3242,8 +4012,12 @@ def test_cancel_before_first_thinker_token_returns_cancelled_result() -> None:
 
 def test_control6_skips_policy_when_listener_result_belongs_to_stale_generation(monkeypatch) -> None:
     class _StrictControlPolicy:
+        policy_id = "duplex_control6"
+        requires_acoustic_phase = True
+
         def __init__(self) -> None:
             self.inputs = []
+            self.runtime = {}
 
         def step(self, state):
             self.inputs.append(state)
@@ -3260,6 +4034,9 @@ def test_control6_skips_policy_when_listener_result_belongs_to_stale_generation(
             pass
 
     monkeypatch.setattr(server_module, "DuplexControl6Policy", _StrictControlPolicy)
+    # The fake policy is not in is_controller6_policy()'s concrete class tuple;
+    # enable decision tracing so this fixture can observe its LISTEN decision.
+    monkeypatch.setattr(server_module, "_NATIVE_CONTROL6_TRACE_ENABLED", True)
     engine = _Engine()
     policy = _StrictControlPolicy()
     engine.default_turn_policy_factory = lambda: policy
@@ -3267,20 +4044,31 @@ def test_control6_skips_policy_when_listener_result_belongs_to_stale_generation(
     client = TestClient(create_app(engine, sessions))
 
     with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-        assert ws.receive_json()["type"] == "session.created"
+        assert _receive_json(ws)["type"] == "session.created"
         session = sessions.all()[0]
         listener_calls = 0
 
-        def listener_step(_pcm, _reference, _state):
+        def listener_step(_pcm, _reference, state, *, allow_silence_skip=False):
+            del allow_silence_skip
             nonlocal listener_calls
             listener_calls += 1
             frame_id = listener_calls - 1
+            # GemmaListener.step commits each observed PCM frame to its causal
+            # user history before publishing output; the acoustic Control6
+            # fixture must preserve that contract as well.
+            with state._lock:
+                state.user_pcm_history.append(
+                    np.array(_pcm, dtype=np.float32, copy=True)
+                )
             if listener_calls == 1:
                 # Model concurrent failed-response cleanup while the current
                 # native listener frame is being processed.
                 session.invalidate_generation("test_worker_cleanup_race")
             return SimpleNamespace(
                 frame_id=frame_id,
+                source_frame_id=frame_id,
+                source_available_at_ns=time.monotonic_ns(),
+                fresh=True,
                 listener_state_version=frame_id + 1,
                 finite=True,
                 gemma_hidden_t=torch.zeros((1, 4)),
@@ -3297,6 +4085,8 @@ def test_control6_skips_policy_when_listener_result_belongs_to_stale_generation(
         assert policy.inputs == [], "a listener result invalidated mid-step must not reach Control6"
 
         _send_pcm(ws)
+        assert _wait_for(lambda: listener_calls >= 2), "second listener frame was not evaluated"
+        assert _wait_for(lambda: len(policy.inputs) == 1), "fresh listener frame did not reach Control6"
         decision = _receive_action_decision(ws, "LISTEN")
         assert decision["accepted"] is True
         assert len(policy.inputs) == 1
@@ -3331,6 +4121,7 @@ def test_v2_response_bundle_defaults_to_control6_and_reports_loaded_head(monkeyp
         "runtime_abi": {},
     }
     monkeypatch.setenv("DUPLEX_DIRECT_AUDIO_CANDIDATE", "1")
+    monkeypatch.setenv("DUPLEX_AUDIO_RESPONSE_PROTOCOL", AUDIO_RESPONSE_PROTOCOL_V2)
     monkeypatch.setattr(server_module, "DuplexControl6Policy", _ControlPolicy)
     engine = _Engine()
     engine.audio_response_protocol = AUDIO_RESPONSE_PROTOCOL_V2
@@ -3350,7 +4141,7 @@ def test_v2_response_bundle_defaults_to_control6_and_reports_loaded_head(monkeyp
     client = TestClient(create_app(engine, sessions))
 
     with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-        created = ws.receive_json()
+        created = _receive_json(ws)
         assert created["type"] == "session.created"
         assert created["turn_policy"] == "duplex_control6"
         assert created["policy_id"] == "duplex_control6"
@@ -3369,8 +4160,8 @@ def test_v2_response_bundle_defaults_to_control6_and_reports_loaded_head(monkeyp
                 "turn_policy": "duplex_control6",
             },
         })
-        loaded = ws.receive_json()
-        updated = ws.receive_json()
+        loaded = _receive_json(ws)
+        updated = _receive_json(ws)
         assert loaded["type"] == "model_loaded"
         assert loaded["policy_id"] == "duplex_control6"
         assert loaded["control_head_architecture"] == "native_phase_fusion_mlp"
@@ -3420,13 +4211,14 @@ def test_v2_explicit_turnhead_selection_is_preserved(monkeypatch) -> None:
         "head": SimpleNamespace(architecture="native_phase_fusion_mlp", input_dim=1540),
         "control_head": "/bundle/control_head.pt",
     }
-    client = TestClient(create_app(engine, SessionManager()))
+    sessions = SessionManager()
+    client = TestClient(create_app(engine, sessions))
 
     with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-        created = ws.receive_json()
+        created = _receive_json(ws)
         assert created["turn_policy"] == "duplex_control6"
         ws.send_json({"type": "session.update", "session": {"turn_policy": "turnhead"}})
-        updated = ws.receive_json()
+        updated = _receive_json(ws)
         assert updated["type"] == "session.updated"
         assert updated["turn_policy"] == "turnhead"
         assert updated["policy_id"] == "turnhead"
@@ -3451,7 +4243,7 @@ def test_v2_does_not_select_control6_when_bundle_head_is_not_loaded(monkeypatch)
     client = TestClient(create_app(engine, sessions))
 
     with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-        created = ws.receive_json()
+        created = _receive_json(ws)
         assert created["type"] == "session.created"
         assert created["turn_policy"] == "none"
         assert not isinstance(sessions.all()[0].turn_policy, server_module.DuplexControl6Policy)
@@ -3487,22 +4279,22 @@ def test_v2_invalid_explicit_turn_policy_is_rejected_without_fallback(monkeypatc
     client = TestClient(create_app(engine, sessions))
 
     with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-        assert ws.receive_json()["turn_policy"] == "duplex_control6"
+        assert _receive_json(ws)["turn_policy"] == "duplex_control6"
         ws.send_json({"type": "session.update", "session": {"turn_policy": "mystery_policy"}})
-        error = ws.receive_json()
+        error = _receive_json(ws)
         assert error["type"] == "error"
         assert error["error"]["code"] == "INVALID_SESSION_UPDATE"
         assert "turn_policy non valida" in error["error"]["message"]
         assert isinstance(sessions.all()[0].turn_policy, _ControlPolicy)
 
 
-def test_realtime_ui_explicitly_requests_duplex_control6_policy() -> None:
+def test_realtime_ui_explicitly_requests_gemma_native_control6_policy() -> None:
     from pathlib import Path
 
     html = (Path(__file__).parents[2] / "server" / "static" / "index.html").read_text(encoding="utf-8")
     update_start = html.index('type: "session.update"')
     update_end = html.index("});", update_start)
-    assert 'turn_policy: "duplex_control6"' in html[update_start:update_end]
+    assert 'turn_policy: "gemma_native_control6"' in html[update_start:update_end]
 
 
 def test_response_worker_failure_preserves_current_listener_frame_ack(monkeypatch) -> None:
@@ -3541,24 +4333,25 @@ def test_response_worker_failure_preserves_current_listener_frame_ack(monkeypatc
 
     try:
         with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-            assert ws.receive_json()["type"] == "session.created"
+            assert _receive_json(ws)["type"] == "session.created"
             ws.send_json({
                 "type": "session.update",
                 "session": {
                     "turn_policy": "scripted",
                     "scripted_actions": ["BACKCHANNEL", "LISTEN"],
+                    "auto_response": True,
                     "input_audio_buffer_acknowledgements": True,
                 },
             })
-            assert ws.receive_json()["type"] == "session.updated"
+            assert _receive_json(ws)["type"] == "session.updated"
             session = sessions.all()[0]
             original_step = session.listener.step
             listener_calls = 0
 
-            def block_second_listener_frame(pcm, reference, state):
+            def block_second_listener_frame(pcm, reference, state, **kwargs):
                 nonlocal listener_calls
                 listener_calls += 1
-                output = original_step(pcm, reference, state)
+                output = original_step(pcm, reference, state, **kwargs)
                 if listener_calls == 2:
                     listener_frame_blocked.set()
                     if not release_listener_frame.wait(timeout=2.0):
@@ -3566,7 +4359,15 @@ def test_response_worker_failure_preserves_current_listener_frame_ack(monkeypatc
                 return output
 
             session.listener.step = block_second_listener_frame
-            _send_pcm(ws)
+            voiced_pcm = (
+                4096 * np.sin(
+                    2.0 * np.pi * 220.0 * np.arange(FRAME_SAMPLES) / server_module.USER_SAMPLE_RATE
+                )
+            ).astype("<i2").tobytes()
+            ws.send_json({
+                "type": "input_audio_buffer.append",
+                "audio": base64.b64encode(voiced_pcm).decode("ascii"),
+            })
             assert response_started.wait(timeout=1.0)
             _send_pcm(ws)
             assert listener_frame_blocked.wait(timeout=1.0)
@@ -3589,6 +4390,10 @@ def test_response_worker_failure_preserves_current_listener_frame_ack(monkeypatc
 def test_listen_keeps_active_pcm_stream_and_yield_stops_talker(monkeypatch) -> None:
     monkeypatch.delenv("DUPLEX_DIRECT_AUDIO_CANDIDATE", raising=False)
     engine = _Engine(hidden_size=2048)
+    # Punctuation would trigger the structural BACKCHANNEL stop callback and
+    # must now be rejected; this fixture models a natural EOS instead.
+    engine.think_text_override = "Certo"
+    engine.think_terminal_reason = "eos"
     talk_started = threading.Event()
     release_talker = threading.Event()
     late_chunk_emitted = threading.Event()
@@ -3600,7 +4405,7 @@ def test_listen_keeps_active_pcm_stream_and_yield_stops_talker(monkeypatch) -> N
             on_audio_chunk(wav)
             on_audio_chunk(wav)  # advance the causal playout horizon so PCM is actually released
         talk_started.set()
-        if not release_talker.wait(timeout=3.0):
+        if not release_talker.wait(timeout=10.0):
             raise TimeoutError("test backchannel talker was not released")
         if on_audio_chunk is not None and not session.stop_requested:
             on_audio_chunk(wav)
@@ -3613,18 +4418,24 @@ def test_listen_keeps_active_pcm_stream_and_yield_stops_talker(monkeypatch) -> N
 
     try:
         with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-            assert ws.receive_json()["type"] == "session.created"
+            assert _receive_json(ws)["type"] == "session.created"
             ws.send_json({
                 "type": "session.update",
                 "session": {
+                    "auto_response": True,
                     "turn_policy": "scripted",
-                    "scripted_actions": ["BACKCHANNEL", "LISTEN", "YIELD"],
+                    "scripted_actions": ["BACKCHANNEL", "LISTEN"] + ["LISTEN"] * 12 + ["YIELD"] * 8,
                 },
             })
-            assert ws.receive_json()["type"] == "session.updated"
+            assert _receive_json(ws)["type"] == "session.updated"
             session = sessions.all()[0]
             _send_pcm(ws)
-            assert talk_started.wait(timeout=1.0), "BACKCHANNEL must reach the speaker while the user is speaking"
+            backchannel = _receive_action_decision(ws, "BACKCHANNEL")
+            assert backchannel["accepted"] is True
+            assert talk_started.wait(timeout=1.0), (
+                "BACKCHANNEL must reach the speaker while the user is speaking; "
+                f"think_calls={engine.think_calls!r}, session_metrics={session.runtime_metrics!r}"
+            )
             assert session.control_state.value == "BACKCHANNELING"
             audio_events = _receive_until(ws, "response.audio.delta")
             assert audio_events[-1]["type"] == "response.audio.delta"
@@ -3642,24 +4453,54 @@ def test_listen_keeps_active_pcm_stream_and_yield_stops_talker(monkeypatch) -> N
             # onset so the server's causal YIELD admission gate accepts it.
             for _ in range(12):
                 _send_pcm_level(ws, 0)
-                _receive_action_decision(ws, "YIELD")
+                _receive_action_decision(ws, "LISTEN")
             yielded = None
+            yield_rejections = []
+            yield_events: list[dict[str, object]] = []
             for _ in range(8):
                 _send_pcm(ws)
-                candidate = _receive_action_decision(ws, "YIELD")
+                frame_events = []
+                for _ in range(30):
+                    frame_event = _receive_json(ws, obtained=frame_events)
+                    frame_events.append(frame_event)
+                    if (
+                        frame_event.get("type") == "duplex_control6.decision"
+                        and frame_event.get("action") == "YIELD"
+                    ):
+                        break
+                else:
+                    raise AssertionError(
+                        f"decisione YIELD non ricevuta; ottenuti: {frame_events!r}"
+                    )
+                yield_events.extend(frame_events)
+                candidate = frame_event
                 if candidate["accepted"]:
                     yielded = candidate
                     break
-            assert yielded is not None, 'YIELD should stop active Talker after a fresh user onset'
+                yield_rejections.append(candidate.get("rejection_reason"))
+            if yielded is None:
+                release_talker.set()
+            assert yielded is not None, (
+                "YIELD should stop active Talker after a fresh user onset; "
+                f"rejections={yield_rejections!r}"
+            )
             assert session.stop_requested is True
             assert session.stop_reason == "YIELD"
             assert session.session_generation_id == generation_before_listen
 
             release_talker.set()
-            terminal = _receive_until_any(ws, {"response.done", "response.cancelled"})
-            assert terminal[-1]["type"] == "response.done"
+            terminal = [
+                event for event in yield_events
+                if event.get("type") in {"response.done", "response.cancelled"}
+            ]
+            if not terminal:
+                terminal = _receive_until_any(ws, {"response.done", "response.cancelled"})
+            assert terminal[-1]["type"] == "response.cancelled"
+            assert terminal[-1]["reason"] == "yield"
+            assert not any(event.get("type") == "response.audio.delta" for event in terminal)
             assert not late_chunk_emitted.is_set(), "YIELD must stop future Talker PCM"
-            # YIELD drains PCM accepted before the boundary; the blocked Talker callback above proves no later chunk was produced.
+            # The accepted YIELD fences even queued PCM; the blocked Talker
+            # callback also proves that no later chunk was produced.
             assert _wait_for(lambda: not session.active_response)
             assert session.scheduler.is_running
     finally:
@@ -3672,12 +4513,16 @@ def test_backchannel_requires_recent_voiced_input() -> None:
     client = TestClient(create_app(engine, sessions))
 
     with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-        assert ws.receive_json()["type"] == "session.created"
+        assert _receive_json(ws)["type"] == "session.created"
         ws.send_json({
             "type": "session.update",
-            "session": {"turn_policy": "scripted", "scripted_actions": ["BACKCHANNEL", "BACKCHANNEL"]},
+            "session": {
+                "turn_policy": "scripted",
+                "scripted_actions": ["BACKCHANNEL", "BACKCHANNEL"],
+                "auto_response": True,
+            },
         })
-        assert ws.receive_json()["type"] == "session.updated"
+        assert _receive_json(ws)["type"] == "session.updated"
         session = sessions.all()[0]
 
         # Near-zero PCM is still a real input frame, but it is not evidence of
@@ -3686,10 +4531,10 @@ def test_backchannel_requires_recent_voiced_input() -> None:
         quiet_backchannel = _receive_action_decision(ws, "BACKCHANNEL")
         assert quiet_backchannel["frame_id"] == 0
         assert quiet_backchannel["accepted"] is False
-        assert quiet_backchannel["rejection_reason"] == "no_recent_user_audio"
+        assert quiet_backchannel["rejection_reason"] == "no_peer_speech_event"
         assert engine.think_calls == []
 
-        _send_pcm_level(ws, 4096)
+        _send_fixture_voice_frame(ws)
         voiced_backchannel = _receive_action_decision(ws, "BACKCHANNEL")
         assert voiced_backchannel["frame_id"] == 1
         assert voiced_backchannel["accepted"] is True
@@ -3714,6 +4559,90 @@ def test_yield_requires_emitted_audio_and_post_watermark_user_voice() -> None:
         emitted_audio_frames=2,
         has_post_watermark_voice=True,
     ) is None
+
+
+def test_active_replan_requires_voice_after_response_start_before_first_pcm() -> None:
+    assert server_module._control6_transition_rejection(
+        ControlAction.REPLAN,
+        active_for_causal_gate=True,
+        emitted_audio_frames=0,
+        has_post_watermark_voice=False,
+        has_post_response_voice=False,
+    ) == "no_new_user_audio"
+
+    assert server_module._control6_transition_rejection(
+        ControlAction.REPLAN,
+        active_for_causal_gate=True,
+        emitted_audio_frames=0,
+        has_post_watermark_voice=True,
+        has_post_response_voice=True,
+    ) is None
+
+    assert server_module._control6_transition_rejection(
+        ControlAction.REPLAN,
+        active_for_causal_gate=True,
+        emitted_audio_frames=2,
+        has_post_watermark_voice=False,
+        has_post_response_voice=True,
+    ) is None
+
+
+def test_yield_v1_gate_cancels_and_drains_queued_output() -> None:
+    audio_queue: queue.Queue[object] = queue.Queue()
+    text_queue: queue.Queue[object] = queue.Queue()
+    for item in ("audio-1", "audio-2"):
+        audio_queue.put_nowait(item)
+    text_queue.put_nowait("queued text")
+    output_cancel = threading.Event()
+    cancel_reason: dict[str, str | None] = {"value": None}
+    stopped = threading.Event()
+    playout_cancelled: list[tuple[int, str]] = []
+    packetizer_cancelled: list[tuple[int, str]] = []
+
+    class _SegmentBuffer:
+        def __init__(self, calls):
+            self.calls = calls
+
+        def cancel_segment(self, *, generation_id, speaker_segment_id):
+            self.calls.append((generation_id, speaker_segment_id))
+
+    event = GateEvent(
+        action=ControlAction.YIELD,
+        accepted=True,
+        previous_state=ControlState.SPEAKING,
+        next_state=ControlState.LISTENING,
+        stop_synthesis=True,
+        flush_audio_buffer=False,
+        generation_id=7,
+        speaker_segment_id="speaker-7",
+    )
+    session = SimpleNamespace(
+        is_generation_current=lambda **_kwargs: True,
+    )
+
+    result = server_module.apply_speaker_gate_event(
+        event,
+        engine=object(),
+        playout=_SegmentBuffer(playout_cancelled),
+        packetizer=_SegmentBuffer(packetizer_cancelled),
+        audio_queue=audio_queue,
+        text_queue=text_queue,
+        synthesis_active=True,
+        session=session,
+        expected_generation_id=7,
+        stop_generation=stopped.set,
+        output_cancel=output_cancel,
+        cancel_reason=cancel_reason,
+    )
+
+    assert result["accepted"] is True
+    assert result["drained"] == 3
+    assert output_cancel.is_set()
+    assert cancel_reason["value"] == "yield"
+    assert stopped.is_set()
+    assert audio_queue.empty() and text_queue.empty()
+    assert playout_cancelled == [(7, "speaker-7")]
+    assert packetizer_cancelled == [(7, "speaker-7")]
 
 
 def _pending_pcm_test_branch(response_id: str, generation_id: int) -> dict[str, object]:
@@ -3792,6 +4721,48 @@ def test_pending_pcm_from_prior_generation_drives_yield_until_exact_ack() -> Non
         emitted_audio_frames=0,
         has_post_watermark_voice=True,
     ) == "assistant_audio_not_started"
+
+
+def test_complete_pcm_ack_remains_valid_after_response_done_until_generation_replaced() -> None:
+    session = DuplexSession("ack-after-done")
+    token = session.begin_response("response-ack-after-done")
+    branch = _pending_pcm_test_branch(
+        token.response_id,
+        token.session_generation_id,
+    )
+    branch["speaker_segment_id"] = token.speaker_segment_id
+    branch["playback_segments"][token.speaker_segment_id] = branch[
+        "playback_segments"
+    ].pop("seg-1")
+    segment = branch["playback_segments"][token.speaker_segment_id]
+    segment.update({
+        "speaker_segment_id": token.speaker_segment_id,
+        "generation_id": token.session_generation_id,
+    })
+    acknowledgement = {
+        "type": "client_consumed_pcm",
+        "response_id": token.response_id,
+        "generation_id": token.session_generation_id,
+        "speaker_segment_id": token.speaker_segment_id,
+        "start_sample": 0,
+        "end_sample": 1920,
+        "sample_rate": 24000,
+        "sequence": 1,
+        "consumption_semantics": "logical_client_device_buffer",
+    }
+
+    # response.done calls end_response, which clears active state but keeps the
+    # identity live while the natural client playback ACK is still pending.
+    session.end_response(token)
+    assert session.active_response is False
+    assert session.is_generation_current(token)
+    with branch["spoken_prefix_lock"]:
+        assert _record_client_consumed_pcm(branch, acknowledgement) is True
+
+    # A replacement generation retires that identity and fences its late ACK.
+    replacement = session.begin_response("response-replacement")
+    assert not session.is_generation_current(token)
+    assert session.is_generation_current(replacement)
 
 
 def test_native_yield_gate_reconciles_only_matching_pending_pcm_branch() -> None:
@@ -3900,6 +4871,8 @@ def test_manual_v2_yield_claims_pending_pcm_cancel_at_worker_boundary() -> None:
         assert terminals == ["response.cancelled"]
         assert branch["playback_cancelled"] is True
         assert session.response_cancel_notified is True
+        first_cancel_deadline = branch["playback_ack_final_deadline_monotonic"]
+        assert isinstance(first_cancel_deadline, (int, float))
 
         duplicate = server_module._claim_pending_yielded_v2_pcm_cancel(
             session,
@@ -3910,6 +4883,7 @@ def test_manual_v2_yield_claims_pending_pcm_cancel_at_worker_boundary() -> None:
         )
         assert duplicate == "already_notified"
         assert terminals == ["response.cancelled"]
+        assert branch["playback_ack_final_deadline_monotonic"] == first_cancel_deadline
 
         stale_session = SimpleNamespace(
             _generation_lock=threading.RLock(),
@@ -3956,9 +4930,29 @@ def test_manual_v2_yield_claims_pending_pcm_cancel_at_worker_boundary() -> None:
             generation_id=63,
             speaker_segment_id="seg-1",
         )
-        assert acked == "acknowledged"
-        assert acked_session.response_cancel_notified is False
-        assert acked_branch.get("playback_cancelled") is not True
+        assert acked == "claimed"
+        assert acked_session.response_cancel_notified is True
+        assert acked_branch["playback_cancelled"] is True
+        assert acked_branch["client_consumed_segments"] == ("seg-1",)
+
+        empty_session = SimpleNamespace(
+            _generation_lock=threading.RLock(),
+            response_id="empty-v2-response",
+            session_generation_id=64,
+            response_cancel_notified=False,
+        )
+        empty_branch = _pending_pcm_test_branch("empty-v2-response", 64)
+        empty_branch["playback_segments"] = {}
+        empty = server_module._claim_pending_yielded_v2_pcm_cancel(
+            empty_session,
+            empty_branch,
+            response_id="empty-v2-response",
+            generation_id=64,
+            speaker_segment_id="seg-1",
+        )
+        assert empty == "claimed"
+        assert empty_session.response_cancel_notified is True
+        assert empty_branch["playback_cancelled"] is True
 
     asyncio.run(exercise())
 
@@ -3974,6 +4968,33 @@ def test_manual_v2_yield_cancels_pending_pcm_before_response_done(monkeypatch) -
             "mode": "x_vector_only",
             "speaker_embedding": torch.ones(4),
         },
+    )
+    packet_release_started = threading.Event()
+    release_packet_after_yield = threading.Event()
+    packet_call_lock = threading.Lock()
+    packet_call_count = 0
+    release_pcm_packet_then_ack = server_module._release_pcm_packet_then_ack
+
+    async def pause_second_pcm_packet(packet, *, validate=None, release, acknowledge):
+        nonlocal packet_call_count
+        with packet_call_lock:
+            packet_call_count += 1
+            call_number = packet_call_count
+        if call_number == 2:
+            packet_release_started.set()
+            if not await asyncio.to_thread(release_packet_after_yield.wait, 10.0):
+                raise TimeoutError("manual V2 test packet release was not resumed")
+        return await release_pcm_packet_then_ack(
+            packet,
+            validate=validate,
+            release=release,
+            acknowledge=acknowledge,
+        )
+
+    monkeypatch.setattr(
+        server_module,
+        "_release_pcm_packet_then_ack",
+        pause_second_pcm_packet,
     )
 
     class _AudioProcessor:
@@ -4072,7 +5093,7 @@ def test_manual_v2_yield_cancels_pending_pcm_before_response_done(monkeypatch) -
 
     try:
         with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-            assert ws.receive_json()["type"] == "session.created"
+            assert _receive_json(ws)["type"] == "session.created"
             ws.send_json({
                 "type": "session.update",
                 "session": {
@@ -4082,7 +5103,7 @@ def test_manual_v2_yield_cancels_pending_pcm_before_response_done(monkeypatch) -
                     "input_audio_buffer_acknowledgements": True,
                 },
             })
-            assert ws.receive_json()["type"] == "session.updated"
+            assert _receive_json(ws)["type"] == "session.updated"
             session = sessions.all()[0]
 
             def receive_with_timeout(timeout: float = 2.0) -> dict[str, object]:
@@ -4093,6 +5114,8 @@ def test_manual_v2_yield_cancels_pending_pcm_before_response_done(monkeypatch) -
                 if message.get("type") != "websocket.send":
                     raise AssertionError(f"websocket closed: {message!r}")
                 return json.loads(message["text"])
+
+            yield_events: list[dict[str, object]] = []
 
             def send_frame_and_wait_for_action(
                 action: str,
@@ -4113,6 +5136,8 @@ def test_manual_v2_yield_cancels_pending_pcm_before_response_done(monkeypatch) -
                             f"frame {frame_id} timed out waiting for {action}; events={seen_events!r}"
                         ) from exc
                     seen_events.append(event)
+                    if action == "YIELD":
+                        yield_events.append(event)
                     if event.get("type") == "error":
                         engine.release_talker.set()
                         raise AssertionError(f"frame {frame_id} realtime error: {event!r}")
@@ -4157,6 +5182,9 @@ def test_manual_v2_yield_cancels_pending_pcm_before_response_done(monkeypatch) -
                     audio = event
                     break
             assert audio is not None, "manual V2 response emitted no PCM"
+            assert packet_release_started.wait(timeout=2.0), (
+                "manual V2 response did not dequeue a second packet before YIELD"
+            )
             response_id = str(created["response_id"])
             assert audio["response_id"] == response_id
 
@@ -4177,17 +5205,25 @@ def test_manual_v2_yield_cancels_pending_pcm_before_response_done(monkeypatch) -
             assert session.stop_requested is True
             assert session.stop_reason == ControlAction.YIELD.value
             engine.release_talker.set()
+            release_packet_after_yield.set()
 
-            terminal = []
-            for _ in range(30):
-                event = receive_with_timeout()
-                terminal.append(event)
-                if event.get("type") in {"response.cancelled", "response.done"}:
-                    break
-            else:
-                raise AssertionError(f"worker did not terminate: {terminal!r}")
+            terminal = [
+                event for event in yield_events
+                if event.get("type") in {"response.cancelled", "response.done"}
+            ]
+            if not terminal:
+                for _ in range(30):
+                    event = receive_with_timeout()
+                    terminal.append(event)
+                    if event.get("type") == "error":
+                        raise AssertionError(f"manual response failed after YIELD: {event!r}")
+                    if event.get("type") in {"response.cancelled", "response.done"}:
+                        break
+                else:
+                    raise AssertionError(f"worker did not terminate: {terminal!r}")
             assert terminal[-1]["type"] == "response.cancelled", terminal
             assert terminal[-1]["response_id"] == response_id
+            assert _wait_for(lambda: engine.stop_check_after_yield is True)
             assert engine.stop_check_after_yield is True
             assert not any(
                 event.get("type") == "response.done"
@@ -4218,9 +5254,88 @@ def test_manual_v2_yield_cancels_pending_pcm_before_response_done(monkeypatch) -
                 and event.get("response_id") == response_id
                 for event in terminal
             ), terminal
+
+            ack_start = int(audio["start_sample"])
+            ack_end = int(audio["end_sample"])
+            progress_end = ack_start + max(1, (ack_end - ack_start) // 2)
+            assert ack_start < progress_end < ack_end
+            original_record_client_consumed_pcm = server_module._record_client_consumed_pcm
+            late_ack_processed = threading.Event()
+            late_ack_results = []
+
+            def record_late_progress_ack(ack_branch, acknowledgement):
+                accepted = original_record_client_consumed_pcm(
+                    ack_branch, acknowledgement
+                )
+                if (
+                    acknowledgement.get("response_id") == response_id
+                    and acknowledgement.get("sequence") == 1
+                ):
+                    segment = ack_branch["playback_segments"][
+                        acknowledgement["speaker_segment_id"]
+                    ]
+                    late_ack_results.append({
+                        "accepted": accepted,
+                        "sequence": ack_branch.get("client_consumed_pcm_sequence"),
+                        "consumed_end": segment.get("client_consumed_end_sample"),
+                        "client_consumed_final": segment.get("client_consumed_final"),
+                        "emitted_end": segment.get("emitted_end_sample"),
+                        "ack_end": acknowledgement.get("end_sample"),
+                        "cancelled": ack_branch.get("playback_cancelled"),
+                        "deadline": ack_branch.get(
+                            "playback_ack_final_deadline_monotonic"
+                        ),
+                    })
+                    late_ack_processed.set()
+                return accepted
+
+            monkeypatch.setattr(
+                server_module,
+                "_record_client_consumed_pcm",
+                record_late_progress_ack,
+            )
+            ws.send_json({
+                "type": "client_consumed_pcm",
+                "ack_version": 2,
+                "response_id": response_id,
+                "generation_id": int(audio["generation_id"]),
+                "speaker_segment_id": str(audio["speaker_segment_id"]),
+                "start_sample": ack_start,
+                "end_sample": progress_end,
+                "sample_rate": int(audio["sample_rate"]),
+                "sequence": 1,
+                "consumption_semantics": "logical_client_device_buffer",
+                "final": False,
+            })
+            ack_deadline = time.monotonic() + 2.0
+            while not late_ack_processed.is_set() and time.monotonic() < ack_deadline:
+                try:
+                    event = receive_with_timeout(
+                        min(0.05, ack_deadline - time.monotonic())
+                    )
+                except TimeoutError:
+                    continue
+                if event.get("type") == "error":
+                    raise AssertionError(
+                        "progressive ACK after response.cancelled was rejected: "
+                        f"{event!r}; tracker state={late_ack_results!r}"
+                    )
+            assert late_ack_processed.is_set(), "server did not process the late progressive ACK"
+            assert len(late_ack_results) == 1
+            result = late_ack_results[0]
+            assert result["accepted"] is True
+            assert result["sequence"] == 1
+            assert result["consumed_end"] == progress_end
+            assert result["client_consumed_final"] is False
+            assert result["emitted_end"] == ack_end
+            assert result["ack_end"] == progress_end
+            assert result["cancelled"] is True
+            assert isinstance(result["deadline"], (int, float))
+            assert result["deadline"] >= time.monotonic()
             ws.send_json({"type": "session.close"})
     finally:
         engine.release_talker.set()
+        release_packet_after_yield.set()
 
 
 def test_playback_finalizer_waits_for_ack_without_blocking_receiver_and_cancel_wakes() -> None:
@@ -4249,11 +5364,42 @@ def test_playback_finalizer_waits_for_ack_without_blocking_receiver_and_cancel_w
         assert pending["client_consumed_segments"] == ("seg-1",)
 
         cancelled = _pending_pcm_test_branch("response-cancel", 52)
+        cancelled_segment = cancelled["playback_segments"]["seg-1"]
+        cancelled_segment["emitted_pcm_packets"] = [{
+            "start_sample": 0,
+            "end_sample": 1920,
+            "pcm": np.zeros(1920, dtype=np.float32),
+        }]
         cancel_waiter = asyncio.create_task(_wait_for_response_playback_drain(cancelled))
         await asyncio.sleep(0)
+        cancel_woke = asyncio.Event()
+        def wake_cancel_waiter() -> None:
+            cancel_woke.set()
+            cancelled["playback_ack_event"].set()
+
+        cancelled["playback_ack_wakeup"] = wake_cancel_waiter
         _cancel_response_branch_playback(cancelled)
+        await asyncio.wait_for(cancel_woke.wait(), timeout=0.2)
+        await asyncio.sleep(0)
+        assert not cancel_waiter.done(), "cancellation must retain the late final-ACK window"
+        final_ack = {
+            "type": "client_consumed_pcm",
+            "ack_version": 2,
+            "response_id": "response-cancel",
+            "generation_id": 52,
+            "speaker_segment_id": "seg-1",
+            "start_sample": 0,
+            "end_sample": 1920,
+            "sample_rate": 24000,
+            "sequence": 0,
+            "consumption_semantics": "logical_client_device_buffer",
+            "final": True,
+        }
+        with cancelled["spoken_prefix_lock"]:
+            assert _record_client_consumed_pcm(cancelled, final_ack) is True
+        cancelled["playback_ack_event"].set()
         await asyncio.wait_for(cancel_waiter, timeout=0.2)
-        assert cancelled["client_consumed_segments"] == ()
+        assert cancelled["client_consumed_segments"] == ("seg-1",)
 
         no_pcm = {
             "response_id": "response-empty",
@@ -4266,15 +5412,85 @@ def test_playback_finalizer_waits_for_ack_without_blocking_receiver_and_cancel_w
     asyncio.run(exercise())
 
 
+def test_playback_drain_timeout_recovers_by_finalizing_only_acknowledged_prefix() -> None:
+    async def exercise() -> None:
+        branch = _pending_pcm_test_branch("response-drain-timeout", 54)
+        branch["playback_segments"]["seg-2"] = {
+            "response_id": "response-drain-timeout",
+            "generation_id": 54,
+            "speaker_segment_id": "seg-2",
+            "start_sample": 1920,
+            "end_sample": 3840,
+            "emitted_end_sample": 3840,
+            "sample_rate": 24000,
+            "done_emitted": True,
+            "token_packets": (),
+        }
+        branch["spoken_prefix_token_ids"] = (101, 102)
+        branch["spoken_prefix_text"] = "Ciao."
+        branch["spoken_prefix_exclusive_cursor"] = 22
+        ack = {
+            "type": "client_consumed_pcm",
+            "response_id": "response-drain-timeout",
+            "generation_id": 54,
+            "speaker_segment_id": "seg-1",
+            "start_sample": 0,
+            "end_sample": 1920,
+            "sample_rate": 24000,
+            "sequence": 1,
+            "consumption_semantics": "logical_client_device_buffer",
+        }
+        with branch["spoken_prefix_lock"]:
+            assert _record_client_consumed_pcm(branch, ack) is True
+        session = SimpleNamespace(active_response=True)
+        finalizer_history_flags: list[bool] = []
+        reported_failures: list[str] = []
+
+        async def finalize(*, history_committed: bool) -> None:
+            finalizer_history_flags.append(history_committed)
+            session.active_response = False
+
+        async def record_failure(_error: Exception, failure: str) -> None:
+            reported_failures.append(failure)
+
+        task = asyncio.create_task(server_module._finalize_after_playback_drain(
+            branch,
+            wait_for_drain=lambda value: _wait_for_response_playback_drain(
+                value, timeout_s=0.001
+            ),
+            finalize=finalize,
+            record_drain_failure=record_failure,
+        ))
+        drain_error = await asyncio.wait_for(task, timeout=0.2)
+
+        assert isinstance(drain_error, RuntimeError)
+        assert "timed out" in str(drain_error)
+        assert finalizer_history_flags == [False]
+        assert not session.active_response
+        assert reported_failures == [branch["playback_drain_failure"]]
+        assert branch["client_consumed_segments"] == ("seg-1",)
+        assert branch["spoken_prefix_token_ids"] == (101, 102)
+        assert _response_branch_has_pending_pcm(branch) is True
+
+    asyncio.run(exercise())
+
+
 def test_response_audio_watermark_and_sent_frames_share_one_causality_snapshot() -> None:
     policy_lock = threading.Lock()
     admission = _ResponseAudioAdmissionState()
     tracker = _CausalUserSpeechTracker(endpoint_quiet_frames=8)
-    voiced = np.full(FRAME_SAMPLES, 0.04, dtype=np.float32)
+    voiced = np.load(
+        Path(__file__).resolve().parents[1]
+        / "fixtures"
+        / "weak_voice_16khz_frame.npy",
+        allow_pickle=False,
+    ) * 0.25
 
     with policy_lock:
         admission.update_input_frame_locked(40)
+        admission.reset_locked()
         assert admission.snapshot_locked(tracker) == (0, False)
+        assert admission.has_post_response_voice_locked(tracker) is False
         admission.mark_audio_sent_locked(2)
         assert admission.input_watermark == 40
         assert admission.snapshot_locked(tracker) == (2, False)
@@ -4282,13 +5498,21 @@ def test_response_audio_watermark_and_sent_frames_share_one_causality_snapshot()
         # sees either the pre-send pair or the coherent sent-frame pair.
         tracker.observe(41, voiced)
         assert admission.snapshot_locked(tracker) == (2, True)
+        assert admission.has_post_response_voice_locked(tracker) is True
+        admission.update_input_frame_locked(41)
         admission.reset_locked()
         assert admission.snapshot_locked(tracker) == (0, False)
+        assert admission.has_post_response_voice_locked(tracker) is False
 
 
 def test_causal_voice_tracker_defers_endpoint_and_distinguishes_new_onset() -> None:
     tracker = _CausalUserSpeechTracker(endpoint_quiet_frames=10)
-    voiced = np.full(FRAME_SAMPLES, 0.04, dtype=np.float32)
+    voiced = np.load(
+        Path(__file__).resolve().parents[1]
+        / "fixtures"
+        / "weak_voice_16khz_frame.npy",
+        allow_pickle=False,
+    ) * 0.25
     silence = np.zeros(FRAME_SAMPLES, dtype=np.float32)
 
     assert tracker.observe(0, voiced) == (True, False)
@@ -4315,6 +5539,307 @@ def test_causal_voice_tracker_defers_endpoint_and_distinguishes_new_onset() -> N
     assert tracker.observe(16, voiced) == (True, False)
     assert tracker.run_onset_frame_id == 16
     assert tracker.has_onset_after(15) is True
+
+
+def test_causal_voice_tracker_separates_room_noise_and_weak_real_voice() -> None:
+    vocalized = np.load(
+        Path(__file__).resolve().parents[1]
+        / "fixtures"
+        / "weak_voice_16khz_frame.npy",
+        allow_pickle=False,
+    )
+    unvoiced = np.load(
+        Path(__file__).resolve().parents[1]
+        / "fixtures"
+        / "unvoiced_speech_16khz_20ms.npy",
+        allow_pickle=False,
+    )
+    assert vocalized.shape == (server_module.POLICY_FRAME_SAMPLES,)
+    assert unvoiced.shape == (server_module.USER_SAMPLE_RATE * 20 // 1000,)
+
+    # Noise spans the requested RMS range and must not create an utterance.
+    for seed, noise_rms in enumerate((0.0015, 0.0020, 0.0025)):
+        rng = np.random.default_rng(seed)
+        tracker = _CausalUserSpeechTracker(endpoint_quiet_frames=3)
+        for frame_id in range(12):
+            noise = rng.normal(0.0, noise_rms, vocalized.size).astype(np.float32)
+            assert tracker.observe(frame_id, noise) == (False, False)
+        assert tracker.voice_run_active is False
+        assert tracker.noise_floor_rms == pytest.approx(noise_rms, abs=0.00015)
+
+        weak_voice = vocalized * 0.01 + rng.normal(
+            0.0, noise_rms, vocalized.size
+        ).astype(np.float32)
+        onset, endpoint = tracker.observe(12, weak_voice)
+        assert (onset, endpoint) == (True, False)
+        assert tracker.voice_run_active is True
+        assert tracker.noise_floor_rms == pytest.approx(noise_rms, abs=0.00015)
+
+        for frame_id in (13, 14):
+            assert tracker.observe(
+                frame_id,
+                rng.normal(0.0, noise_rms, vocalized.size).astype(np.float32),
+            ) == (False, False)
+        assert tracker.observe(
+            15,
+            rng.normal(0.0, noise_rms, vocalized.size).astype(np.float32),
+        ) == (False, True)
+        assert tracker.voice_run_active is False
+
+    # A changing room floor must be learned from quiet rows only, without a
+    # transient noise step becoming an utterance.
+    variable_floor = _CausalUserSpeechTracker(endpoint_quiet_frames=3)
+    rng = np.random.default_rng(73)
+    noise_levels = (0.0015,) * 2 + (0.0020,) * 2 + (0.0025,) * 8
+    for frame_id, noise_rms in enumerate(noise_levels):
+        assert variable_floor.observe(
+            frame_id,
+            rng.normal(0.0, noise_rms, vocalized.size).astype(np.float32),
+        ) == (False, False)
+    assert variable_floor.voice_run_active is False
+    assert variable_floor.noise_floor_rms == pytest.approx(0.0025, abs=0.00015)
+
+    # A weak phrase can start on the first frame; onset audio is never learned
+    # into the floor. The frame comes from the existing real speech inputs.
+    fresh = _CausalUserSpeechTracker(endpoint_quiet_frames=3)
+    rng = np.random.default_rng(44)
+    first_voice = vocalized * 0.01 + rng.normal(
+        0.0, 0.0015, vocalized.size
+    ).astype(np.float32)
+    assert fresh.observe(0, first_voice) == (True, False)
+    assert fresh.noise_floor_rms == pytest.approx(
+        fresh.INITIAL_NOISE_FLOOR_RMS
+    )
+
+    # A real 20 ms unvoiced speech onset remains detectable without pitch
+    # periodicity when surrounded by the calibrated room noise.
+    fricative_tracker = _CausalUserSpeechTracker(endpoint_quiet_frames=3)
+    rng = np.random.default_rng(17)
+    for frame_id in range(12):
+        fricative_tracker.observe(
+            frame_id,
+            rng.normal(0.0, 0.002, vocalized.size).astype(np.float32),
+        )
+    fricative_frame = rng.normal(0.0, 0.002, vocalized.size).astype(np.float32)
+    fricative_frame[:unvoiced.size] += unvoiced * 0.5
+    _, pitch_corr, flatness, high_to_mid, envelope_ratio = (
+        fricative_tracker._voice_features(fricative_frame)
+    )
+    assert pitch_corr < fricative_tracker.VOICED_AUTOCORRELATION
+    assert flatness > fricative_tracker.VOICED_SPECTRAL_FLATNESS
+    assert high_to_mid >= fricative_tracker.FRICATIVE_HIGH_TO_MID_RATIO
+    assert envelope_ratio >= fricative_tracker.FRICATIVE_ENVELOPE_RATIO
+    assert fricative_tracker.observe(12, fricative_frame) == (True, False)
+
+
+def test_causal_voice_tracker_handles_full_real_phrase_with_variable_noise_floor() -> None:
+    phrase_path = (
+        Path(__file__).resolve().parents[1]
+        / "fixtures"
+        / "real_phrase_it_16khz.wav"
+    )
+    with wave.open(str(phrase_path), "rb") as phrase_file:
+        assert phrase_file.getnchannels() == 1
+        assert phrase_file.getsampwidth() == 2
+        assert phrase_file.getframerate() == server_module.USER_SAMPLE_RATE
+        phrase = (
+            np.frombuffer(phrase_file.readframes(phrase_file.getnframes()), dtype="<i2")
+            .astype(np.float32)
+            / 32768.0
+        )
+    assert phrase.size > server_module.USER_SAMPLE_RATE
+    phrase_frames = np.pad(
+        phrase,
+        (0, (-phrase.size) % server_module.POLICY_FRAME_SAMPLES),
+    ).reshape(-1, server_module.POLICY_FRAME_SAMPLES)
+
+    for seed, room_noise_rms in enumerate((0.0015, 0.0020, 0.0025), start=100):
+        rng = np.random.default_rng(seed)
+        tracker = _CausalUserSpeechTracker(endpoint_quiet_frames=10)
+        for frame_id in range(4):
+            assert tracker.observe(
+                frame_id,
+                rng.normal(
+                    0.0,
+                    room_noise_rms,
+                    server_module.POLICY_FRAME_SAMPLES,
+                ).astype(np.float32),
+            ) == (False, False)
+        assert tracker.voice_run_active is False
+
+        onsets = []
+        endpoint_count = 0
+        active_frames = 0
+        for offset, clean_frame in enumerate(phrase_frames, start=4):
+            noisy_frame = clean_frame * 0.02 + rng.normal(
+                0.0,
+                room_noise_rms,
+                server_module.POLICY_FRAME_SAMPLES,
+            ).astype(np.float32)
+            onset, endpoint = tracker.observe(offset, noisy_frame)
+            if onset:
+                onsets.append(offset)
+            endpoint_count += int(endpoint)
+            active_frames += int(tracker.voice_run_active)
+        assert onsets, f"full phrase was missed at room RMS {room_noise_rms}"
+        assert active_frames >= 10
+        assert tracker.noise_floor_rms == pytest.approx(room_noise_rms, abs=0.0002)
+
+        for offset in range(10):
+            _, endpoint = tracker.observe(
+                4 + len(phrase_frames) + offset,
+                rng.normal(
+                    0.0,
+                    room_noise_rms,
+                    server_module.POLICY_FRAME_SAMPLES,
+                ).astype(np.float32),
+            )
+            endpoint_count += int(endpoint)
+        for offset in range(10, 16):
+            _, endpoint = tracker.observe(
+                4 + len(phrase_frames) + offset,
+                rng.normal(
+                    0.0,
+                    room_noise_rms,
+                    server_module.POLICY_FRAME_SAMPLES,
+                ).astype(np.float32),
+            )
+            endpoint_count += int(endpoint)
+        assert endpoint_count == 1
+        assert tracker.voice_run_active is False
+        assert tracker.speech_complete is True
+
+
+def test_tracker_voice_flag_does_not_change_canonical_q2_contract() -> None:
+    from duplex_kernel.server_unified_templates import _unified_listener_frame_contract
+
+    tracker = _CausalUserSpeechTracker(endpoint_quiet_frames=3)
+    noise = np.random.default_rng(6).normal(
+        0.0, 0.002, server_module.POLICY_FRAME_SAMPLES
+    ).astype(np.float32)
+    assert tracker.observe(0, noise) == (False, False)
+    assert _unified_listener_frame_contract(
+        noise,
+        assistant_audio_queue_open=False,
+        user_input_pending=False,
+        voice_active=tracker.voice_run_active,
+    ) == (2, None, False)
+
+    tracker_voice = np.load(
+        Path(__file__).resolve().parents[1]
+        / "fixtures"
+        / "weak_voice_16khz_frame.npy",
+        allow_pickle=False,
+    ) * 0.02
+    assert tracker.observe(1, tracker_voice) == (True, False)
+    assert _unified_listener_frame_contract(
+        tracker_voice,
+        assistant_audio_queue_open=False,
+        user_input_pending=False,
+        voice_active=tracker.voice_run_active,
+    ) == (2, None, False)
+
+
+def test_causal_voice_tracker_learns_stationary_high_rms_noise_without_onsets() -> None:
+    tracker = _CausalUserSpeechTracker(endpoint_quiet_frames=3)
+    rng = np.random.default_rng(20261030)
+
+    for frame_id in range(100):
+        noise = rng.normal(
+            0.0,
+            0.02,
+            server_module.POLICY_FRAME_SAMPLES,
+        ).astype(np.float32)
+        assert tracker.observe(frame_id, noise) == (False, False)
+        assert tracker.voice_run_active is False
+
+    assert tracker.noise_floor_rms == pytest.approx(0.02, abs=0.001)
+
+
+def test_causal_voice_tracker_does_not_treat_impulses_as_voice_or_noise_floor() -> None:
+    tracker = _CausalUserSpeechTracker(endpoint_quiet_frames=3)
+    rng = np.random.default_rng(18)
+    clean_tracker = _CausalUserSpeechTracker(endpoint_quiet_frames=3)
+
+    for frame_id in range(12):
+        frame = rng.normal(
+            0.0,
+            0.0015,
+            server_module.POLICY_FRAME_SAMPLES,
+        ).astype(np.float32)
+        clean_frame = frame.copy()
+        if frame_id in {0, 4, 8}:
+            frame[400] = 0.9
+        assert tracker.observe(frame_id, frame) == (False, False)
+        assert tracker.voice_run_active is False
+        assert clean_tracker.observe(frame_id, clean_frame) == (False, False)
+
+    assert tracker.noise_floor_rms == pytest.approx(clean_tracker.noise_floor_rms)
+
+
+def test_causal_voice_tracker_floor_tracks_variable_noise_through_sparse_impulses() -> None:
+    levels = (0.0015,) * 2 + (0.0020,) * 2 + (0.0025,) * 8
+    tracker = _CausalUserSpeechTracker(endpoint_quiet_frames=3)
+    clean_tracker = _CausalUserSpeechTracker(endpoint_quiet_frames=3)
+    rng = np.random.default_rng(73)
+
+    for frame_id, noise_rms in enumerate(levels):
+        clean_frame = rng.normal(
+            0.0, noise_rms, server_module.POLICY_FRAME_SAMPLES
+        ).astype(np.float32)
+        frame = clean_frame.copy()
+        if frame_id in {0, 4, 8}:
+            frame[[100, 400, 1200]] = (0.9, -0.8, 0.7)
+        assert tracker.observe(frame_id, frame) == (False, False)
+        assert clean_tracker.observe(frame_id, clean_frame) == (False, False)
+        assert tracker.voice_run_active is False
+
+    assert tracker.noise_floor_rms == pytest.approx(0.0025, abs=0.00015)
+    assert tracker.noise_floor_rms == pytest.approx(
+        clean_tracker.noise_floor_rms,
+        abs=0.00002,
+    )
+
+
+def test_causal_voice_tracker_learns_loud_stationary_noise_with_sparse_impulses() -> None:
+    tracker = _CausalUserSpeechTracker(endpoint_quiet_frames=3)
+    clean_tracker = _CausalUserSpeechTracker(endpoint_quiet_frames=3)
+    rng = np.random.default_rng(20261030)
+
+    for frame_id in range(20):
+        clean_frame = rng.normal(
+            0.0, 0.02, server_module.POLICY_FRAME_SAMPLES
+        ).astype(np.float32)
+        frame = clean_frame.copy()
+        if frame_id in {0, 4, 8, 12}:
+            frame[[100, 400, 1200]] = (0.9, -0.8, 0.7)
+        assert tracker.observe(frame_id, frame) == (False, False)
+        assert clean_tracker.observe(frame_id, clean_frame) == (False, False)
+
+    assert tracker.voice_run_active is False
+    assert tracker.noise_floor_rms == pytest.approx(0.02, abs=0.001)
+    assert tracker.noise_floor_rms == pytest.approx(
+        clean_tracker.noise_floor_rms,
+        abs=0.0001,
+    )
+
+
+def test_causal_voice_tracker_raw_voice_path_preserves_fricative_when_mad_is_zero() -> None:
+    unvoiced = np.load(
+        Path(__file__).resolve().parents[1]
+        / "fixtures"
+        / "unvoiced_speech_16khz_20ms.npy",
+        allow_pickle=False,
+    )
+    tracker = _CausalUserSpeechTracker(endpoint_quiet_frames=3)
+    frame = np.zeros(server_module.POLICY_FRAME_SAMPLES, dtype=np.float32)
+    frame[:unvoiced.size] += unvoiced * 0.25
+
+    assert tracker._robust_noise_rms(frame) == 0.0
+    assert tracker.observe(0, frame) == (True, False)
+    assert tracker.noise_floor_rms == pytest.approx(
+        tracker.INITIAL_NOISE_FLOOR_RMS
+    )
 
 
 def test_deferred_native_speak_is_fenced_to_original_utterance_on_new_onset() -> None:
@@ -4542,11 +6067,10 @@ def test_output_queue_backpressure_timeout_identifies_saturated_queue() -> None:
     assert output_queue.get_nowait() == "older"
 
 
-def test_session_voice_enforcement_uses_training_default_through_response_resolution(monkeypatch, tmp_path) -> None:
+def test_session_voice_enforcement_uses_training_default_through_response_resolution(monkeypatch) -> None:
     engine = _Engine()
     engine.enforce_v9_training_voice = True
-    reference_path = tmp_path / "reference.wav"
-    reference_path.write_bytes(b"same training reference")
+    reference_path = Path(__file__).resolve().parents[2] / "artifacts" / "voices" / "reference.wav"
     training_default = {
         "mode": "x_vector_only",
         "speaker_embedding": torch.ones(4),
@@ -4558,16 +6082,22 @@ def test_session_voice_enforcement_uses_training_default_through_response_resolu
         tcfg=SimpleNamespace(hidden_size=4),
         default_voice_conditioning=training_default,
     )
-    monkeypatch.setattr(
-        server_module,
-        "resolve_voice_conditioning",
-        lambda *_args, **_kwargs: pytest.fail("enforced training voice must bypass named profiles"),
-    )
+    resolved_profiles: list[tuple[str, str | None]] = []
+
+    def resolve_matching_training_profile(voice, *, voice_style=None, **_kwargs):
+        resolved_profiles.append((voice, voice_style))
+        return {
+            "mode": "x_vector_only",
+            "speaker_embedding": torch.ones(4),
+            "ref_code": None,
+        }
+
+    monkeypatch.setattr(server_module, "resolve_voice_conditioning", resolve_matching_training_profile)
     sessions = SessionManager()
     client = TestClient(create_app(engine, sessions))
 
     with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-        assert ws.receive_json()["type"] == "session.created"
+        assert _receive_json(ws)["type"] == "session.created"
         ws.send_json({
             "type": "session.update",
             "session": {
@@ -4576,7 +6106,7 @@ def test_session_voice_enforcement_uses_training_default_through_response_resolu
                 "voice_conditioning_mode": "x_vector_only",
             },
         })
-        updated = ws.receive_json()
+        updated = _receive_json(ws)
         session = sessions.all()[0]
 
         assert updated["type"] == "session.updated"
@@ -4584,9 +6114,13 @@ def test_session_voice_enforcement_uses_training_default_through_response_resolu
         assert updated["conditioning_source"] == "training_default"
         assert updated["reference_wav_path"] == training_default["reference_wav_path"]
         assert updated["reference_wav_sha256"] == training_default["reference_wav_sha256"]
+        assert resolved_profiles == [("gemma", None), ("gemma", None)]
         assert session.voice_conditioning is not training_default
         assert session.voice_conditioning["conditioning_source"] == "training_default"
-        assert session.voice_conditioning["speaker_embedding"] is training_default["speaker_embedding"]
+        assert torch.equal(
+            session.voice_conditioning["speaker_embedding"],
+            training_default["speaker_embedding"],
+        )
         assert server_module._resolve_request_voice_conditioning(
             engine,
             session,
@@ -4594,7 +6128,7 @@ def test_session_voice_enforcement_uses_training_default_through_response_resolu
         ) is session.voice_conditioning
         session.voice_conditioning = dict(session.voice_conditioning)
         session.voice_conditioning["reference_wav_sha256"] = "0" * 64
-        with pytest.raises(ValueError, match="training default V9"):
+        with pytest.raises(ValueError, match="SHA del reference voice"):
             server_module._resolve_request_voice_conditioning(
                 engine,
                 session,
@@ -4610,6 +6144,7 @@ def test_replan_during_stream_is_control_only_and_next_speak_is_allowed() -> Non
         text,
         h_pfx,
         *,
+        on_audio_chunk=None,
         on_audio_chunk_with_horizon=None,
         **_kwargs,
     ):
@@ -4617,23 +6152,26 @@ def test_replan_during_stream_is_control_only_and_next_speak_is_allowed() -> Non
         wav = np.full(4 * 1920, 0.1, dtype=np.float32)
         if on_audio_chunk_with_horizon is not None:
             on_audio_chunk_with_horizon(wav, 10)
+        elif on_audio_chunk is not None:
+            on_audio_chunk(wav)
         engine.talk_started.set()
         if not engine.release_talk.wait(timeout=3.0):
             raise TimeoutError("test talk worker was not released")
         return wav
 
-    engine.talk_stateful = talk_with_streamable_packet
+    engine.talk = talk_with_streamable_packet
     sessions = SessionManager()
     client = TestClient(create_app(engine, sessions))
     actions = ["LISTEN"] * 10 + ["SPEAK", "REPLAN"] + ["CONTINUE"] * 20 + ["SPEAK"]
 
     with client.websocket_connect("/v1/realtime?duplex=1") as ws:
-        assert ws.receive_json()["type"] == "session.created"
+        assert _receive_json(ws)["type"] == "session.created"
         ws.send_json({"type": "session.update", "session": {
             "turn_policy": "scripted",
             "scripted_actions": actions,
+            "auto_response": True,
         }})
-        assert ws.receive_json()["type"] == "session.updated"
+        assert _receive_json(ws)["type"] == "session.updated"
         session = sessions.all()[0]
 
         for frame_id in range(10):
@@ -4663,7 +6201,7 @@ def test_replan_during_stream_is_control_only_and_next_speak_is_allowed() -> Non
         for frame_id in range(12, 22):
             _send_pcm_level(ws, 0)
             for _ in range(30):
-                event = ws.receive_json()
+                event = _receive_json(ws)
                 between_events.append(event)
                 if (
                     event.get("type") == "duplex_control6.decision"
@@ -4695,4 +6233,78 @@ def test_replan_during_stream_is_control_only_and_next_speak_is_allowed() -> Non
         assert next_speak["accepted"] is True, next_speak
         assert next_speak_events[-1]["type"] == "response.created", next_speak_events
         assert _wait_for(lambda: len(engine.talk_calls) == 2)
+        ws.send_json({"type": "session.close"})
+
+
+def test_live_say_cancelled_during_yield_is_clean_and_websocket_accepts_next_turn() -> None:
+    engine = _Engine()
+    thinker_waiting = threading.Event()
+    think_invocations = 0
+    original_think = engine.think
+
+    def cancel_first_think(_ids, **kwargs):
+        nonlocal think_invocations
+        think_invocations += 1
+        if think_invocations == 1:
+            stop_check = kwargs.get("stop_check")
+            assert callable(stop_check)
+            thinker_waiting.set()
+            deadline = time.monotonic() + 3.0
+            while not stop_check():
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("test cancellation was not observed by Thinker")
+                time.sleep(0.002)
+            raise LiveSayCancelled("Live SAY stopped after YIELD")
+        return original_think(_ids, **kwargs)
+
+    engine.think = cancel_first_think
+    sessions = SessionManager()
+    client = TestClient(create_app(engine, sessions))
+
+    with client.websocket_connect("/v1/realtime?duplex=1") as ws:
+        assert _receive_json(ws)["type"] == "session.created"
+        session = sessions.all()[0]
+        ws.send_json({
+            "type": "conversation.item.create",
+            "item": {"role": "user", "content": "first turn"},
+        })
+        assert _receive_json(ws)["type"] == "conversation.item.created"
+        ws.send_json({"type": "response.create"})
+        first_response_events = _receive_until(ws, "response.created")
+        first_response_id = first_response_events[-1]["response_id"]
+        assert thinker_waiting.wait(timeout=1.0)
+
+        with session._generation_lock:
+            session.stop_reason = "YIELD"
+            session.stop_requested = True
+
+        cancellation_events = _receive_until_any(
+            ws,
+            {"response.cancelled", "error"},
+        )
+        assert not any(
+            event.get("type") == "error"
+            and event.get("error", {}).get("code") == "INFERENCE_ERROR"
+            for event in cancellation_events
+        )
+        assert cancellation_events[-1]["type"] == "response.cancelled", cancellation_events
+        assert cancellation_events[-1]["response_id"] == first_response_id
+        assert cancellation_events[-1]["reason"] == "yield"
+        assert cancellation_events[-1]["finish_reason"] == "cancelled"
+        assert _wait_for(lambda: not session.active_response)
+        assert session in sessions.all()
+        assert session.scheduler.is_running
+        assert session.scheduler.error is None
+
+        ws.send_json({
+            "type": "conversation.item.create",
+            "item": {"role": "user", "content": "next turn"},
+        })
+        assert _receive_json(ws)["type"] == "conversation.item.created"
+        ws.send_json({"type": "response.create"})
+        next_turn_events = _receive_until_any(ws, {"response.done", "error"})
+        assert next_turn_events[-1]["type"] == "response.done", next_turn_events
+        assert not any(event.get("type") == "error" for event in next_turn_events)
+        assert engine.think_calls == ["think"]
+        assert session in sessions.all()
         ws.send_json({"type": "session.close"})

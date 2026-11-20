@@ -1,0 +1,70 @@
+[AGYSTACK TASK SPECIFICATION: CONTROLLER_GUIDED_SAY_V1 UNIFIED SPEAK VALIDATION FIX]
+
+OBJECTIVE:
+Allow `CONTROLLER_GUIDED_SAY_V1` responses to be properly validated and committed in `duplex_kernel/server.py`, preventing completed SPEAK responses from being erroneously rolled back and destroyed in the unified KV cache.
+
+ROOT CAUSE:
+In `duplex_kernel/server.py` line 8415-8426:
+```python
+unified_speak_valid = bool(
+    not unified_kv_enabled
+    or (
+        action == ControlAction.SPEAK
+        and isinstance(v2_metrics, dict)
+        and v2_metrics.get("response_protocol") == AUDIO_RESPONSE_PROTOCOL_V2
+        and v2_metrics.get("status") == "valid"
+        and str(v2_metrics.get("response_action", "")).upper()
+        == ControlAction.SPEAK.value
+        and not result.get("_skip_history_commit")
+    )
+)
+```
+When running `--response-protocol controller_guided_say_v1`, `v2_metrics.get("response_protocol")` is `CONTROLLER_GUIDED_SAY_V1` ("controller_guided_say_v1") and `v2_metrics.get("status")` is `"controller_action_fixed"`.
+Because line 8420 only checked `AUDIO_RESPONSE_PROTOCOL_V2` with status `"valid"`, `unified_speak_valid` evaluated to `False`.
+This caused:
+1. `assistant_completed` evaluated to `False`.
+2. `archived_assistant` was not committed.
+3. `unified_native_branch["history_committed"]` remained `False`.
+4. When playback completed, the cache finalizer saw `history_committed == False` and rolled back the entire assistant response to turn start, erasing all generated KV tokens and leading to a desynchronization crash with `CONTROL6_CONTEXT_UNAVAILABLE` on subsequent listener ticks.
+
+REQUIRED MODIFICATIONS:
+In `duplex_kernel/server.py`:
+1. In `unified_speak_valid` (around lines 8415-8426):
+   Update the protocol check to accept either `AUDIO_RESPONSE_PROTOCOL_V2` (with status `"valid"`) OR `CONTROLLER_GUIDED_SAY_V1` (with status in `{"valid", "controller_action_fixed"}`):
+   ```python
+   unified_speak_valid = bool(
+       not unified_kv_enabled
+       or (
+           action == ControlAction.SPEAK
+           and isinstance(v2_metrics, dict)
+           and (
+               (
+                   v2_metrics.get("response_protocol") == AUDIO_RESPONSE_PROTOCOL_V2
+                   and v2_metrics.get("status") == "valid"
+               )
+               or (
+                   v2_metrics.get("response_protocol") == CONTROLLER_GUIDED_SAY_V1
+                   and v2_metrics.get("status") in {"valid", "controller_action_fixed"}
+               )
+           )
+           and str(v2_metrics.get("response_action", "")).upper()
+           == ControlAction.SPEAK.value
+           and not result.get("_skip_history_commit")
+       )
+   )
+   ```
+2. In YIELD handling (around line 8190):
+   Change:
+   `if yielded and direct_audio_v2_response:`
+   to:
+   `if yielded and (direct_audio_v2_response or controller_guided_say_response):`
+3. In cancelled/failed spoken prefix extraction (around line 8734):
+   Change:
+   `if direct_audio_v2_response and unified_native_branch is not None:`
+   to:
+   `if (direct_audio_v2_response or controller_guided_say_response) and unified_native_branch is not None:`
+
+VERIFICATION:
+Run `python -m py_compile duplex_kernel/server.py`
+Run `.venv\Scripts\python.exe -m pytest -q tests/kernel/test_client_consumed_pcm_ack.py`
+Confirm clean compilation and all 21 unit tests pass.

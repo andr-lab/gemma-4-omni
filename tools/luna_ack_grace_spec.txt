@@ -1,0 +1,68 @@
+# TASK SPECIFICATION FOR GPT-6 LUNA (MAX REASONING EFFORT)
+
+You are tasked with implementing the architectural diagnosis provided by GPT 6.1 Sol for the trailing microphone ACK grace window in `tools/real_dialogue_simulator.py`.
+
+## 1. Problem & Architectural Rationale
+In real dialogue acceptance testing on RTX 3090, Turn 1 (long response) successfully plays back 55+ seconds of audio. During playout, 620 microphone frames were sent (frame ID 347 to 966), with frame 966 sent at `playout_completed_ns`.
+Because the server finished synthesizing audio earlier while playback was still playing from the client FIFO, `response.unified_native_finalized` arrived at the client only 45 ms after `playout_completed_ns`.
+The trailing 14 frames (frames 953-966) were sent in the final ~1000 ms of playback. Because the server processes frames at 80 ms ticks, their ACKs were in flight and arrived shortly after (at +200 to +500 ms).
+However, `_long_response_input_window_metrics` immediately evaluated with `received_ns <= final_observation_ns`, prematurely cutting off these 14 valid ACKs and failing with:
+`EvidenceError: long response input ACK ratio 97.742% is below 99.0% (606/620)`
+
+## 2. Requirements & Modifications to `tools/real_dialogue_simulator.py`
+
+### A. In `_long_response_input_window_metrics`:
+1. Add parameter:
+   `input_ack_cutoff_ns: int | None = None,`
+2. Define:
+   `ack_cutoff_ns = int(input_ack_cutoff_ns) if input_ack_cutoff_ns is not None else int(final_observation_ns)`
+3. In the precondition check:
+   Replace `or final_observation_ns < playout_completed_ns` with:
+   `or ack_cutoff_ns < playout_completed_ns`
+4. In the ACK filtering loop:
+   Change:
+   `if playout_started_ns <= received_ns <= final_observation_ns and frame_id in window_sends:`
+   To:
+   `if playout_started_ns <= received_ns <= ack_cutoff_ns and frame_id in window_sends:`
+5. In the returned `metrics` dictionary, add:
+   `"input_ack_cutoff_ns": int(ack_cutoff_ns),`
+
+### B. In `_run_scenario` (around line ~2028):
+Before calling `_long_response_input_window_metrics`:
+1. Collect the set of frame IDs sent during playout:
+```python
+window_send_ids = {
+    int(item["local_frame_id"])
+    for item in self.input_frame_sends
+    if isinstance(item.get("local_frame_id"), int)
+    and not isinstance(item.get("local_frame_id"), bool)
+    and isinstance(item.get("sent_ns"), int)
+    and not isinstance(item.get("sent_ns"), bool)
+    and int(long_done.playout_started_ns) <= int(item["sent_ns"]) <= int(long_done.playout_completed_ns)
+}
+```
+2. Wait asynchronously for the in-flight ACKs of this cohort to arrive, bounded by a 2.0s grace period:
+```python
+deadline_ack = int(long_done.playout_completed_ns) + 2_000_000_000
+while time.monotonic_ns() < deadline_ack:
+    if window_send_ids.issubset(self.input_ack_ids) or self.fatal_error or self.stop_event.is_set():
+        break
+    await asyncio.sleep(0.02)
+input_ack_cutoff_ns = min(time.monotonic_ns(), deadline_ack)
+```
+3. Pass `input_ack_cutoff_ns=int(input_ack_cutoff_ns)` to `_long_response_input_window_metrics(...)`.
+
+### C. In Offline Reconstruction (around line ~3438):
+1. Extract the saved cutoff if present in the report:
+```python
+scenario_report = report.get("scenario") if isinstance(report.get("scenario"), Mapping) else {}
+reported_long_window = scenario_report.get("long_response_input_window") if isinstance(scenario_report, Mapping) else {}
+saved_cutoff = (reported_long_window or {}).get("input_ack_cutoff_ns") if isinstance(reported_long_window, Mapping) else None
+recomputed_cutoff_ns = int(saved_cutoff) if isinstance(saved_cutoff, int) and not isinstance(saved_cutoff, bool) else int(playout_completed_ns) + 2_000_000_000
+```
+2. Pass `input_ack_cutoff_ns=recomputed_cutoff_ns` into `_long_response_input_window_metrics(...)`.
+
+## 3. Verification
+Run:
+`python -m pytest tests/tools/test_real_dialogue_simulator.py -k "long_response"`
+Ensure all tests for `long_response` pass.

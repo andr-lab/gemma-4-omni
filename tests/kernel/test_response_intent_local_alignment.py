@@ -7,6 +7,7 @@ from duplex_kernel.response_intent_local import (
     build_local_response_prefix,
     build_token_char_spans,
     load_local_cursor_projector,
+    qwen_assistant_text_offsets,
     select_frame_hidden_by_qwen_cursor,
 )
 from duplex_kernel.response_intent import ResponseIntentProjector
@@ -53,13 +54,11 @@ def test_local_prefix_builder_uses_qwen_processor_ids_and_holds_tail():
             return {1: "a", 2: "b"}[int(ids[0])]
 
     class QwenTokenizer:
-        def __call__(self, text, **_kwargs):
-            prefix = "<|im_start|>assistant\n"
-            suffix = "<|im_end|>\n<|im_start|>assistant\n"
-            assert text == prefix + "ab" + suffix
-            ids = [0, 1, 2, 10, 11, 20, 21, 22, 23, 24]
-            offsets = [(0, 0)] * 3 + [(len(prefix), len(prefix) + 1), (len(prefix) + 1, len(prefix) + 2)] + [(0, 0)] * 5
-            return {"input_ids": ids, "offset_mapping": offsets}
+        def __call__(self, text, *, add_special_tokens, return_offsets_mapping):
+            assert text == "ab"
+            assert add_special_tokens is False
+            assert return_offsets_mapping is True
+            return {"input_ids": [10, 11], "offset_mapping": [(0, 1), (1, 2)]}
 
         def decode(self, ids, **_kwargs):
             return "".join({10: "a", 11: "b"}[int(value)] for value in ids)
@@ -69,7 +68,7 @@ def test_local_prefix_builder_uses_qwen_processor_ids_and_holds_tail():
 
         def __call__(self, *, text, return_tensors):
             assert return_tensors == "pt"
-            return {"input_ids": torch.tensor([self.tokenizer(text)["input_ids"]])}
+            return {"input_ids": torch.tensor([[0, 1, 2]])}
 
     projector = ResponseIntentProjector()
     with torch.no_grad():
@@ -100,16 +99,11 @@ def test_generated_response_hidden_aligns_exactly_to_qwen_raw_text_tokens():
             return {1: " a", 2: "b "}[int(ids[0])]
 
     class QwenTokenizer:
-        def __call__(self, text, **_kwargs):
-            prefix = "<|im_start|>assistant\n"
-            suffix = "<|im_end|>\n<|im_start|>assistant\n"
-            assert text == prefix + "ab" + suffix
-            ids = [0, 1, 2, 10, 11, 20, 21, 22, 23, 24]
-            offsets = [(0, 0)] * 3 + [
-                (len(prefix), len(prefix) + 1),
-                (len(prefix) + 1, len(prefix) + 2),
-            ] + [(0, 0)] * 5
-            return {"input_ids": ids, "offset_mapping": offsets}
+        def __call__(self, text, *, add_special_tokens, return_offsets_mapping):
+            assert text == "ab"
+            assert add_special_tokens is False
+            assert return_offsets_mapping is True
+            return {"input_ids": [10, 11], "offset_mapping": [(0, 1), (1, 2)]}
 
         def decode(self, ids, **_kwargs):
             return "".join({10: "a", 11: "b"}[int(token_id)] for token_id in ids)
@@ -119,7 +113,7 @@ def test_generated_response_hidden_aligns_exactly_to_qwen_raw_text_tokens():
 
         def __call__(self, *, text, return_tensors):
             assert return_tensors == "pt"
-            return {"input_ids": torch.tensor([self.tokenizer(text)["input_ids"]])}
+            return {"input_ids": torch.tensor([[0, 1, 2]])}
 
     hidden = torch.tensor([[[1.0, 3.0], [5.0, 7.0]]])
     aligned, metrics = align_generated_response_hidden_to_qwen_tokens(
@@ -133,6 +127,69 @@ def test_generated_response_hidden_aligns_exactly_to_qwen_raw_text_tokens():
     torch.testing.assert_close(aligned, hidden)
     assert metrics["qwen_raw_text_tokens"] == 2
     assert metrics["alignment"] == "character_overlap_mean"
+
+
+@pytest.mark.parametrize("text", ["\nCiao", "\n\nDue", "  Ciao", "Ciao!", "🙂"])
+def test_qwen_offsets_tokenize_direct_text_and_cover_leading_space_punctuation_and_emoji(text):
+    class DirectTextTokenizer:
+        def __init__(self, *, batched=False):
+            self.batched = batched
+            self.calls = []
+            self.decoded_pieces = {}
+
+        def __call__(self, value, *, add_special_tokens, return_offsets_mapping):
+            self.calls.append((value, add_special_tokens, return_offsets_mapping))
+            assert add_special_tokens is False
+            assert return_offsets_mapping is True
+            ids = []
+            offsets = []
+            next_id = 100
+            for index, char in enumerate(value):
+                if ord(char) > 0xFFFF:
+                    # Model a byte-level tokenization whose two byte tokens
+                    # overlap the same Python character span.
+                    ids.extend((next_id, next_id + 1))
+                    offsets.extend(((index, index + 1), (index, index + 1)))
+                    self.decoded_pieces[next_id] = ""
+                    self.decoded_pieces[next_id + 1] = char
+                    next_id += 2
+                else:
+                    ids.append(next_id)
+                    offsets.append((index, index + 1))
+                    self.decoded_pieces[next_id] = char
+                    next_id += 1
+            if self.batched:
+                ids, offsets = [ids], [offsets]
+            return {"input_ids": ids, "offset_mapping": offsets}
+
+        def decode(self, token_ids, *, skip_special_tokens, clean_up_tokenization_spaces):
+            assert skip_special_tokens is False
+            assert clean_up_tokenization_spaces is False
+            return "".join(self.decoded_pieces[int(token_id)] for token_id in token_ids)
+
+    tokenizer = DirectTextTokenizer(batched=(text == "🙂"))
+    ids, offsets = qwen_assistant_text_offsets(text, tokenizer=tokenizer)
+
+    assert tokenizer.calls == [(text, False, True)]
+    assert ids
+    assert len(ids) == len(offsets)
+    assert all(0 <= start < end <= len(text) for start, end in offsets)
+    covered = set()
+    for start, end in offsets:
+        covered.update(range(start, end))
+    assert covered == set(range(len(text)))
+
+
+def test_qwen_offsets_reject_gaps_in_direct_character_coverage():
+    class GappedTokenizer:
+        def __call__(self, text, *, add_special_tokens, return_offsets_mapping):
+            return {"input_ids": [10, 11], "offset_mapping": [(0, 1), (2, 3)]}
+
+        def decode(self, ids, **_kwargs):
+            return "abc"
+
+    with pytest.raises(ValueError, match="cover"):
+        qwen_assistant_text_offsets("abc", tokenizer=GappedTokenizer())
 
 
 def test_local_checkpoint_loader_requires_the_trained_cursor_contract(tmp_path):

@@ -1,0 +1,62 @@
+You are GPT 6.1 Sol acting as Principal Architect for the Gemma 4 Full-Duplex Omni Pipeline.
+
+### CONTEXT & SYSTEM STATUS
+We just ran an end-to-end acceptance run (`acceptance_suite_verify_10/run_01`) on the remote RTX 3090 host `mondaini` after implementing your previous architecture fixes (fused readback enabled, reactive event notification in `SharedListenerTickDispatcher`).
+The previous issue with long response ACK gaps in Turn 1 is 100% FIXED! In this run:
+- Turn 1 response (`resp_52f8f04f7109`) generated 285 tokens and 995 frames (41.5s of audio).
+- The client consumed all PCM without a single ACK gap or rejection.
+- The `unified_native_finalizer` completed cleanly (`failure_reason: null`, `status: completed`).
+
+### THE NEW BLOCKER IN RUN 01
+However, the simulator exited with:
+`EvidenceError: response resp_32d65e5f07be terminal event timed out`
+
+Here are the exact facts from our forensic analysis:
+1. Turn 1 input fixture is `work/gpu_forensics/fixtures_16k_final/long_backpressure_prompt.wav`:
+   - Duration: 27.25 seconds (340 80ms frames).
+   - Audio analysis shows the prompt is VOICED with continuous high energy (`rms > 0.02`) from frame 1 all the way to frame 330!
+   - At frame 331, silence begins (`rms = 0.00176`).
+   - Frame 336 is where the user finishes speaking and true endpoint occurs.
+
+2. At frame 281 (22.5s into the 27.25s audio), Control6 unexpectedly selected `action=SPEAK`:
+   - Native trace for frame 281:
+     `Frame 281: action=SPEAK, selected_action=SPEAK, native_action=SPEAK, prob=0.7977686524391174, early_gated=False, early_conf=0.6649484634399414, hyst_applied=SPEAK, hyst_count=1, endpoint_ready=False, endpoint_released=False`
+   - Why did it become SPEAK?
+     - `server.py:1770` instantiates `GemmaNativeControl6Policy` with `high_confidence_single_tick_threshold=float(os.environ.get("GEMMA_CONTROL6_HIGH_CONF_THRESHOLD", 0.70))`.
+     - In `_apply_hysteresis`: because `prob=0.7977 >= 0.70`, it set `required_ticks = 1`, so a single tick with `count=1` was sufficient to output SPEAK!
+     - `server.py:1769` set `early_speak_confidence_threshold=0.50`. Because `early_conf=0.6649 >= 0.50`, `early_speak_gated` evaluated to `False`!
+     - So `resp_32d65e5f07be` was created as `action=SPEAK`.
+
+3. What happened after `resp_32d65e5f07be` was created:
+   - At frame 282, action became `CONTINUE`.
+   - The user audio from `long_backpressure_prompt.wav` continued streaming (frames 282 to 330 are voiced speech).
+   - At frame 302, Control6 detected active user speech (`native_control6_user_rms: 0.0866`, `prob: 0.8406`) and fired `action=YIELD`!
+   - `resp_32d65e5f07be` was stopped after 20 tokens with `terminal_reason: "yielded_after_token"`.
+   - The server emitted `response.cancelled` and `response.unified_native_finalized`.
+   - Because generation token changed upon YIELD, `response.done` was NEVER sent for `resp_32d65e5f07be`.
+
+4. At frame 336:
+   - The user audio fixture actually ended.
+   - Control6 selected `action=SPEAK`, creating `resp_52f8f04f7109`.
+   - `resp_52f8f04f7109` spoke the full long response (285 tokens, 41.5s audio), got `response.done`, consumed all PCM, and finalized cleanly.
+
+5. What happened in `tools/real_dialogue_simulator.py`:
+   - In `_complete_fixture("long_request", "long_response_completed")`:
+     ```python
+     delivery = self._assign_fixture(fixture_key, scenario_tag)
+     record = await self._next_speaking_response(self.args.response_timeout_s)
+     record.scenario_tag = scenario_tag
+     ...
+     await self._await_response_terminal(record, want_done=True, timeout_s=self.args.response_timeout_s)
+     ```
+   - The simulator took `resp_32d65e5f07be` (the first SPEAK that appeared after starting the fixture), assigned it `scenario_tag="long_response_completed"`, and called `_await_response_terminal(want_done=True)`.
+   - Because `want_done=True` and `resp_32d65e5f07be` was cancelled via YIELD without `response.done`, `_await_response_terminal` waited for 180 seconds until timeout, ignoring `resp_52f8f04f7109`.
+
+### YOUR TASK
+Diagnose this interaction and provide clear architectural guidance:
+1. Root cause: Should Control6 have fired SPEAK at frame 281 in the first place?
+   - Look at `high_confidence_single_tick_threshold` (0.70 vs default 0.85).
+   - Look at `early_speak_confidence_threshold` (0.50 vs higher, e.g. 0.70 or 0.80).
+   - Look at `endpoint_speak_ready` and `peer_turn_active`. At frame 281, `endpoint_ready` was `False`, yet early speak fired because `early_speak_gated` was `False`. Should early speak require higher confidence or require hysteresis when user speech is ongoing?
+2. Test harness contract: In full duplex, is it possible for an early speak to be cancelled by continuous user speech, and if so, how should `real_dialogue_simulator.py` handle a cancelled response during prompt delivery? Should it wait for the next speaking response that reaches completion, or should the policy be strictly tuned so it never cuts in while the prompt is actively voiced?
+3. Actionable specifications: Give exact parameters, code contracts, and steps for GPT-6 Luna Max to implement and test.

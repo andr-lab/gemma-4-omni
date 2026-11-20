@@ -6,6 +6,8 @@ import pytest
 import torch
 
 from duplex_kernel.engine import PipelineEngine, ThinkerSampler
+from duplex_kernel.audio_response_protocol import AudioResponseFallbackProposal
+from duplex_kernel.thinker_sampler import CandidateFallbackPool
 
 
 class _Tokenizer:
@@ -70,7 +72,7 @@ def test_candidate_guard_selects_legal_top_candidate_and_uses_fallback_pool():
     sampler = _sampler(
         runtime_metrics=metrics,
         on_candidate_token=lambda token_id, _text, _terminal: token_id == 1,
-        on_candidate_fallback=lambda _rejected: [1],
+        on_candidate_fallback=lambda _rejected: CandidateFallbackPool([1], metric="action_pool"),
         best_native_logit_candidate_id=lambda candidates, logits: max(
             candidates, key=lambda candidate_id: float(logits.reshape(-1)[candidate_id])
         ),
@@ -86,11 +88,143 @@ def test_candidate_guard_selects_legal_top_candidate_and_uses_fallback_pool():
         source_logits=logits,
         generated_ids=(),
     )
+    assert "audio_response_protocol_v2_lexicon_pool_overrides" not in metrics
+    sampler.after_generated_token(
+        token_index=0,
+        token_id=selected[1],
+        token_hidden=torch.ones((1, 1, 8)),
+        generated_ids=(selected[1],),
+        source_logits=logits,
+        sampled_next=selected,
+    )
 
     assert raw_candidate[1] == 0
     assert selected[1] == 1
     assert metrics["audio_response_protocol_v2_candidate_checks"] >= 65
     assert metrics["audio_response_protocol_v2_lexicon_pool_overrides"] == 1
+    assert metrics["audio_response_protocol_v2_action_pool_overrides"] == 1
+
+
+def test_rejected_dominant_eos_is_masked_before_top_p_sampling():
+    sampler = _sampler(
+        temperature=1.0,
+        top_p=0.1,
+        on_candidate_token=lambda token_id, _text, terminal: token_id == 1 and not terminal,
+    )
+    logits = torch.tensor([[20.0, 19.0, 0.0, 0.0, 100.0, 0.0]])
+
+    sampled = sampler.sample_token(logits, ())
+    selected = sampler.select_valid_candidate(
+        sampled,
+        source_logits=logits,
+        generated_ids=(),
+    )
+
+    assert sampled[1] == 0
+    assert selected[1] == 1
+
+
+def test_generated_token_callback_updates_protocol_before_next_eos_masking():
+    events = []
+    sampler = _sampler(
+        temperature=1.0,
+        top_p=0.8,
+        on_generated_token=lambda *_args: events.append("generated") or None,
+        on_candidate_token=lambda _token_id, _text, terminal: (
+            events.append(("candidate", terminal)) or not terminal
+        ),
+    )
+    logits = torch.tensor([[0.0, 3.0, 0.0, 0.0, 100.0, 0.0]])
+
+    sampled = sampler.after_generated_token(
+        token_index=0,
+        token_id=1,
+        token_hidden=torch.ones((1, 1, 8)),
+        generated_ids=(1,),
+        source_logits=logits,
+        sample_next=lambda: sampler.sample_token(logits, (1,)),
+    )
+
+    assert sampled[1] == 1
+    assert events[0] == "generated"
+    assert ("candidate", True) in events[1:]
+
+
+def test_fallback_pool_without_native_selector_uses_highest_source_logit():
+    fallback_calls = []
+    sampler = _sampler(
+        on_candidate_token=lambda token_id, _text, _terminal: token_id in {70, 71},
+        on_candidate_fallback=lambda rejected: fallback_calls.append(rejected) or [70, 71],
+    )
+    logits = torch.full((1, 128), -20.0)
+    logits[0, 0] = 100.0
+    logits[0, 1:70] = 90.0
+    logits[0, 70] = 5.0
+    logits[0, 71] = 6.0
+    raw_candidate = sampler.sample_token(logits, ())
+
+    selected = sampler.select_valid_candidate(
+        raw_candidate,
+        source_logits=logits,
+        generated_ids=(),
+    )
+
+    assert raw_candidate[1] == 0
+    assert selected[1] == 71
+    assert fallback_calls
+
+
+def test_fallback_token_proposal_commits_only_after_execution_callback():
+    events = []
+    metrics = {}
+    sampler = _sampler(
+        runtime_metrics=metrics,
+        on_generated_token=lambda *_args: events.append("generated") or None,
+        on_candidate_token=lambda token_id, _text, _terminal: token_id == 100,
+        on_candidate_fallback=lambda _rejected: AudioResponseFallbackProposal(
+            100,
+            lambda: events.append("committed"),
+        ),
+    )
+    logits = torch.full((1, 128), -10.0)
+    logits[0, 0] = 10.0
+    raw_candidate = sampler.sample_token(logits, ())
+
+    selected = sampler.select_valid_candidate(
+        raw_candidate,
+        source_logits=logits,
+        generated_ids=(),
+    )
+
+    assert selected[1] == 100
+    assert events == []
+    assert sampler.forced_structure_overrides == 0
+    assert "audio_response_protocol_v2_bounded_closures" not in metrics
+
+    sampler.after_generated_token(
+        token_index=0,
+        token_id=100,
+        token_hidden=torch.ones((1, 1, 8)),
+        generated_ids=(100,),
+        source_logits=logits,
+        sampled_next=selected,
+    )
+
+    assert events == ["committed", "generated"]
+    assert sampler.forced_structure_overrides == 1
+    assert metrics["audio_response_protocol_v2_bounded_closures"] == 1
+
+
+def test_sampler_rejects_all_masked_or_numerically_invalid_distributions():
+    sampler = _sampler(
+        on_candidate_token=lambda _token_id, _text, _terminal: False,
+    )
+    with pytest.raises(RuntimeError, match="no finite candidate"):
+        sampler.sample_token(torch.tensor([[-torch.inf, -torch.inf, -torch.inf, -torch.inf, 2.0, 1.0]]), ())
+
+    sampler = _sampler()
+    with pytest.raises(RuntimeError, match="NaN or positive infinity"):
+        sampler.sample_token(torch.tensor([[0.0, float("nan"), 0.0, 0.0, 0.0, 0.0]]), ())
 
 
 def test_shared_pipeline_preserves_initial_force_and_generated_forced_next_order():

@@ -17,6 +17,7 @@ _SPEC.loader.exec_module(_PROTOCOL)
 AUDIO_RESPONSE_PROTOCOL_V2 = _PROTOCOL.AUDIO_RESPONSE_PROTOCOL_V2
 AUDIO_RESPONSE_PROTOCOL_V2_SYSTEM = _PROTOCOL.AUDIO_RESPONSE_PROTOCOL_V2_SYSTEM
 AudioResponseProtocolError = _PROTOCOL.AudioResponseProtocolError
+AudioResponseFallbackProposal = _PROTOCOL.AudioResponseFallbackProposal
 AudioResponseV2ActionConstraint = _PROTOCOL.AudioResponseV2ActionConstraint
 AudioResponseV2Collector = _PROTOCOL.AudioResponseV2Collector
 AudioResponseV2Parser = _PROTOCOL.AudioResponseV2Parser
@@ -461,6 +462,92 @@ def test_backchannel_fallback_closes_only_when_rejected_token_starts_a_fifth_wor
     assert collector.would_exceed_say_word_limit(" cinque", max_say_words=4)
     assert constraint.bounded_say_closure_token_id(collector, rejected) == 77
     assert constraint.bounded_output
+
+
+def test_bounded_field_closure_proposal_defers_protocol_mutations_until_execution() -> None:
+    class _QuoteTokenizer:
+        def encode(self, text, *, add_special_tokens):
+            assert add_special_tokens is False
+            assert text == '"'
+            return [77]
+
+        def decode(self, token_ids, *, skip_special_tokens):
+            assert skip_special_tokens
+            return '"' if list(token_ids) == [77] else ""
+
+    collector = AudioResponseV2Collector(expected_action="SPEAK")
+    collector.set_token_caps(heard=1, action=8, say=48)
+    collector.feed_token(
+        token_index=0,
+        token_id=10,
+        text='{"heard":"Ciao',
+        hidden=object(),
+    )
+    constraint = AudioResponseV2ActionConstraint(
+        expected_action="SPEAK",
+        tokenizer=_QuoteTokenizer(),
+        enforce_json_structure=True,
+    )
+
+    proposal = constraint.bounded_field_closure_token_id(
+        collector,
+        [(20, "!", False)],
+        budget={"heard_token_cap": 1, "action_token_cap": 8, "say_token_cap": 48},
+        proposal=True,
+    )
+
+    assert isinstance(proposal, AudioResponseFallbackProposal)
+    assert proposal.token_id == 77
+    assert not constraint.bounded_output
+    assert not collector.heard_truncated
+    assert constraint._pending_token_ids == []
+    assert constraint.forced_token_count == 0
+
+    proposal.on_executed()
+
+    assert constraint.bounded_output
+    assert collector.heard_truncated
+    assert constraint.forced_token_count == 1
+
+
+def test_fallback_proposal_does_not_count_rejected_preview_candidates() -> None:
+    class _QuoteTokenizer:
+        def encode(self, text, *, add_special_tokens):
+            assert add_special_tokens is False
+            assert text == '"'
+            return [77]
+
+        def decode(self, token_ids, *, skip_special_tokens):
+            assert skip_special_tokens
+            return '"' if list(token_ids) == [77] else ""
+
+    collector = AudioResponseV2Collector(
+        expected_action="BACKCHANNEL",
+        backchannel_say_phrases=["ciao mondo"],
+    )
+    collector.set_token_caps(heard=8, action=8, say=1)
+    collector.feed_token(
+        token_index=0,
+        token_id=10,
+        text='{"heard":"","action":"BACKCHANNEL","say":"ciao',
+        hidden=object(),
+    )
+    constraint = AudioResponseV2ActionConstraint(
+        expected_action="BACKCHANNEL",
+        tokenizer=_QuoteTokenizer(),
+        enforce_json_structure=True,
+    )
+
+    proposal = constraint.bounded_field_closure_token_id(
+        collector,
+        [(20, "!", False), (21, " mondo", False)],
+        budget={"heard_token_cap": 8, "action_token_cap": 8, "say_token_cap": 1},
+        proposal=True,
+    )
+
+    assert isinstance(proposal, AudioResponseFallbackProposal)
+    assert collector.backchannel_say_lexicon_rejections == 0
+    assert not constraint.bounded_output
 
 
 @pytest.mark.parametrize(

@@ -13,20 +13,28 @@ def estimate_token_audio_frames_80ms(text: str) -> int:
     """Estimate 80 ms CB0 frames for one token surface.
 
     This bounded text-span heuristic is neither a phonetic duration model nor
-    a claim about client playback. Alphanumeric surfaces use their character
-    count; punctuation-only surfaces assign two units to sentence marks and
-    one to other marks.
+    a claim about client playback. Letters, digits, punctuation and other
+    visible symbols use explicit weights; a leading ASCII space adds a small
+    continuation allowance.
     """
     if not isinstance(text, str):
         raise TypeError("token surface must be str")
     stripped = text.strip()
     if not stripped:
         return 1
-    alnum = sum(char.isalnum() for char in stripped)
-    alpha = alnum if alnum else sum(
-        2 if char in ".?!;:" else 1 for char in stripped
+    letters = sum(char.isalpha() for char in stripped)
+    digits = sum(char.isdigit() for char in stripped)
+    sentence_punctuation = sum(char in ".?!;:" for char in stripped)
+    other_symbols = sum(
+        not char.isalnum()
+        and not char.isspace()
+        and char not in ".?!;:"
+        for char in stripped
     )
-    return max(1, min(6, round(alpha / 1.15)))
+    weighted = letters + (3.0 * digits) + (1.5 * sentence_punctuation) + (0.75 * other_symbols)
+    if text.startswith(" ") and letters + digits > 0:
+        weighted += 0.6
+    return max(1, min(6, round(weighted / 0.95)))
 
 
 def response_state_at_cursor(

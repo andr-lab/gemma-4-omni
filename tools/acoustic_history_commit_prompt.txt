@@ -1,0 +1,75 @@
+Fix deferred acoustic history commit and spoken-prefix KV rebuild in duplex_kernel/server.py and duplex_kernel/server_unified_cache.py:
+
+### Root Cause & Problem Analysis:
+1. In Turn 1 of the full-duplex conversational acceptance suite, a long response hits the acoustic frame limit (`acoustic_limit_reached = True`), setting `defer_acoustic_history = True` and populating `unified_native_branch["deferred_acoustic_history_commit"]`.
+2. The simulator plays out and consumes 100% of emitted PCM, sending `client_consumed_pcm` ACKs for all segments.
+3. When playback drain completes, `_finalize_after_playback_drain` invokes `finalize_unified_native_cache()`.
+4. In `duplex_kernel/server.py:6888-6905`:
+   If `branch.get("deferred_acoustic_history_commit")` is a Mapping:
+   It copies consumed prefix attributes to `spoken_prefix_*`, but then UNCONDITIONALLY executes:
+   `history_committed = False` (line 6905)!
+5. Overriding `history_committed = False` forces `_finalize_unified_native_cache_branch` to invoke `rollback_and_drain()` instead of appending `close_ids` and draining audio normally!
+6. Inside `rollback_and_drain()`:
+   It rolls back the cache to `turn_start` (e.g. 797), then attempts `append_spoken_prefix_after_rewind()`.
+   However, `append_spoken_prefix_after_rewind()` immediately fails with `RuntimeError("spoken-prefix KV rebuild has no original assistant transition tokens")` because `branch["transition_token_ids"]` was initialized to `()` at lines 6680 and 6756 in `server.py` and never populated!
+7. This failure catches in `rollback_and_drain()`, rolls back again to turn start, drains audio, and raises `RuntimeError`.
+8. In `server.py:7024`, `fail_native_listener_output_health(-1, ...)` is called, poisoning listener health.
+9. On frame 1834, Control6 crashes with `CONTROL6_CONTEXT_UNAVAILABLE` ("stable queue-open Q2 fork is unusable; refusing canonical Q0 policy fallback").
+
+### Exact Required Implementation:
+1. In `duplex_kernel/server.py`:
+   a) In `unified_native_branch` initialization:
+      - Line 6680 (backchannel branch):
+        `"transition_token_ids": tuple(_build_unified_backchannel_response_suffix(engine, sess)),`
+      - Line 6756 (speech branch):
+        `"transition_token_ids": tuple(_build_unified_audio_response_suffix(engine, sess)),`
+   b) In `commit_deferred_acoustic_history()` (around line 6848):
+      - Determine if client consumption was complete:
+        ```python
+        is_complete = bool(
+            not _response_branch_has_pending_pcm(branch)
+            and branch.get("playback_cancelled") is not True
+            and int(branch.get("client_consumed_pcm_sequence", -1)) >= 0
+        )
+        if isinstance(archive_id, int):
+            committed = sess.update_audio_history_archive_assistant(
+                int(archive_id),
+                acknowledged_text,
+                status="completed" if is_complete and acknowledged_text else ("partial" if acknowledged_text else "absent"),
+                response_done_at_monotonic_ns=(
+                    int(done_at_ns) if isinstance(done_at_ns, int) else None
+                ),
+            )
+        ```
+   c) In `finalize_unified_native_cache(*, history_committed: bool)` (around lines 6888-6910):
+      - When `isinstance(branch.get("deferred_acoustic_history_commit"), Mapping)`:
+        Update `spoken_prefix_*` from `client_consumed_prefix_*`.
+        Determine if client consumption was complete:
+        ```python
+        is_complete_consumption = bool(
+            not _response_branch_has_pending_pcm(branch)
+            and branch.get("playback_cancelled") is not True
+            and int(branch.get("client_consumed_pcm_sequence", -1)) >= 0
+        )
+        if is_complete_consumption:
+            commit_deferred_acoustic_history()
+            history_committed = True
+            branch["history_committed"] = True
+        else:
+            history_committed = False
+            branch["history_committed"] = False
+        ```
+        When all audio is consumed, `history_committed = True` allows `_finalize_unified_native_cache_branch` to append `close_ids` and drain the audio queue cleanly without destructive and unnecessary rollback.
+        When consumption was interrupted (barge-in / yield / cancellation / unconsumed pcm), `history_committed = False` triggers `rollback_and_drain()`, which now correctly rebuilds using the populated `transition_token_ids`.
+
+2. In `duplex_kernel/server_unified_cache.py`:
+   - Inspect `append_spoken_prefix_after_rewind()`:
+     Verify that `transition_ids = tuple(int(value) for value in branch.get("transition_token_ids", ()))` is cleanly read and used to rebuild `(*transition_ids, *speech_ids, *tuple(close_ids))`.
+
+3. In `tests/kernel/test_client_consumed_pcm_ack.py`:
+   - Add unit tests verifying:
+     - Complete client consumption with deferred acoustic history preserves `history_committed=True` and commits archive history without rollback.
+     - Partial / interrupted client consumption triggers rollback that successfully reconstructs prefix tokens using `transition_token_ids` without raising `RuntimeError("spoken-prefix KV rebuild has no original assistant transition tokens")`.
+   - Run:
+     `python -m pytest tests/kernel/test_client_consumed_pcm_ack.py`
+     Ensure all tests pass.

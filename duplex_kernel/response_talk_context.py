@@ -208,9 +208,26 @@ class ResponseTalkLease:
 class ResponseTalkContextPool:
     """Fixed-size lease pool; it never grows or releases on cancel alone."""
 
-    def __init__(self, subtalker_graphs: list[Any], code2wav_graphs: list[Any] | None = None) -> None:
+    def __init__(
+        self,
+        subtalker_graphs: list[Any],
+        code2wav_graphs: list[Any] | None = None,
+        *,
+        admission_capacity: int | None = None,
+    ) -> None:
         if not subtalker_graphs:
             raise ValueError("response talk context pool requires at least one graph")
+        if admission_capacity is not None and (
+            isinstance(admission_capacity, bool)
+            or not isinstance(admission_capacity, int)
+            or admission_capacity < 1
+        ):
+            raise ValueError("admission_capacity must be a positive integer")
+        actual_capacity = len(subtalker_graphs)
+        if admission_capacity is not None and admission_capacity != actual_capacity:
+            raise ValueError(
+                "admission_capacity must match the number of captured SubtalkerGraph slots"
+            )
         identities = [id(graph) for graph in subtalker_graphs]
         if len(set(identities)) != len(identities):
             raise ValueError("each response talk context must own a distinct SubtalkerGraph")
@@ -222,6 +239,7 @@ class ResponseTalkContextPool:
         else:
             code2wav_graphs = [None] * len(subtalker_graphs)
         self._condition = threading.Condition()
+        self._admission_capacity = actual_capacity
         self._slots = []
         for i, graph in enumerate(subtalker_graphs):
             device = getattr(graph, "device", None)
@@ -240,7 +258,12 @@ class ResponseTalkContextPool:
 
     @property
     def capacity(self) -> int:
-        return len(self._slots)
+        return self._admission_capacity
+
+    @property
+    def admission_capacity(self) -> int:
+        """Maximum concurrent Talker responses admitted by captured slots."""
+        return self._admission_capacity
 
     @property
     def active_count(self) -> int:

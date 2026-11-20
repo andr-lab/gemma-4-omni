@@ -198,7 +198,7 @@ def test_playback_capacity_is_bounded_and_overflow_is_visible() -> None:
 
 
 def test_playback_acks_only_after_segment_done_and_full_callback_consumption() -> None:
-    playback = BoundedPCMPlayback(max_samples=4096)
+    playback = BoundedPCMPlayback(max_samples=4096, ack_version=1)
     handle_realtime_event({"type": "response.created", "response_id": "response-ack"}, playback)
     handle_realtime_event({"type": "speaker.segment.opened", "generation_id": 9}, playback)
     pcm = np.linspace(-0.5, 0.5, 1920, dtype=np.float32)
@@ -251,7 +251,7 @@ def test_playback_acks_only_after_segment_done_and_full_callback_consumption() -
 
 
 def test_segment_done_after_full_callback_queues_one_ack() -> None:
-    playback = BoundedPCMPlayback(max_samples=64)
+    playback = BoundedPCMPlayback(max_samples=64, ack_version=1)
     handle_realtime_event({"type": "response.created", "response_id": "response-late-close"}, playback)
     handle_realtime_event({"type": "speaker.segment.opened", "generation_id": 10}, playback)
     assert playback.enqueue_packet(
@@ -283,6 +283,110 @@ def test_segment_done_after_full_callback_queues_one_ack() -> None:
     assert len(ack) == 1
     assert ack[0]["end_sample"] == 8
     assert playback.drain_client_consumed_pcm_acks(current_generation_id=10) == []
+
+
+def test_v2_progress_is_cumulative_before_marker_and_final_upgrades_same_watermark() -> None:
+    playback = BoundedPCMPlayback(max_samples=64)
+    handle_realtime_event({"type": "response.created", "response_id": "response-v2-progress"}, playback)
+    handle_realtime_event({"type": "speaker.segment.opened", "generation_id": 31}, playback)
+    assert playback.enqueue_packet(
+        response_id="response-v2-progress", generation_id=31,
+        speaker_segment_id="segment-progress", packet_id=1,
+        first_frame_id=0, last_frame_id=0, start_sample=0, end_sample=12,
+        pcm=np.linspace(-0.5, 0.5, 12, dtype=np.float32), sample_rate=24_000,
+    )
+
+    assert playback.read_into(np.empty((4, 1), dtype=np.float32)) == 4
+    first = playback.drain_client_consumed_pcm_acks()[0]
+    assert first["ack_version"] == 2 and first["final"] is False
+    assert first["end_sample"] == 4
+    assert first["consumption_semantics"] == "logical_client_device_buffer"
+    assert first["response_id"] == "response-v2-progress" and first["generation_id"] == 31
+    assert playback.accept_client_consumed_pcm_ack(first)
+
+    assert playback.read_into(np.empty((8, 1), dtype=np.float32)) == 8
+    progress = playback.drain_client_consumed_pcm_acks()[0]
+    assert progress["end_sample"] == 12 and progress["final"] is False
+    assert playback.accept_client_consumed_pcm_ack(progress)
+
+    assert playback.complete_segment(
+        response_id="response-v2-progress", generation_id=31,
+        speaker_segment_id="segment-progress", start_sample=0,
+        end_sample=12, sample_rate=24_000,
+    )
+    final = playback.drain_client_consumed_pcm_acks()[0]
+    assert final["end_sample"] == 12 and final["final"] is True
+    assert final["sequence"] > progress["sequence"]
+    assert playback.accept_client_consumed_pcm_ack(final)
+
+
+def test_v2_ack_queue_coalesces_callback_progress_per_segment() -> None:
+    playback = BoundedPCMPlayback(max_samples=64)
+    playback.begin_response("response-coalesce")
+    assert playback.enqueue_packet(
+        response_id="response-coalesce", generation_id=32,
+        speaker_segment_id="segment-coalesce", packet_id=1,
+        first_frame_id=0, last_frame_id=0, start_sample=0, end_sample=16,
+        pcm=np.full(16, 0.25, dtype=np.float32), sample_rate=24_000,
+    )
+    for _ in range(12):
+        assert playback.read_into(np.empty((1, 1), dtype=np.float32)) == 1
+    assert playback.pending_ack_count == 1
+    acknowledgement = playback.drain_client_consumed_pcm_acks()[0]
+    assert acknowledgement["end_sample"] == 12 and acknowledgement["final"] is False
+    assert playback.pending_ack_count == 1
+
+
+def test_v2_cancel_emits_partial_final_deliverable_after_generation_replacement() -> None:
+    playback = BoundedPCMPlayback(max_samples=64)
+    playback.begin_response("response-cancel-old")
+    assert playback.enqueue_packet(
+        response_id="response-cancel-old", generation_id=33,
+        speaker_segment_id="segment-cancel-old", packet_id=1,
+        first_frame_id=0, last_frame_id=0, start_sample=20, end_sample=32,
+        pcm=np.full(12, 0.25, dtype=np.float32), sample_rate=24_000,
+    )
+    assert playback.read_into(np.empty((5, 1), dtype=np.float32)) == 5
+
+    assert playback.advance_generation(34)
+    assert playback.pending_samples == 0
+    final = playback.drain_client_consumed_pcm_acks(current_generation_id=34)[0]
+    assert final["generation_id"] == 33 and final["response_id"] == "response-cancel-old"
+    assert final["speaker_segment_id"] == "segment-cancel-old"
+    assert final["start_sample"] == 20 and final["end_sample"] == 25 and final["final"] is True
+    assert playback.accept_client_consumed_pcm_ack(final, current_generation_id=34)
+    assert not playback.accept_client_consumed_pcm_ack(final, current_generation_id=34)
+
+
+def test_v2_cancel_with_no_consumption_emits_zero_length_final() -> None:
+    playback = BoundedPCMPlayback(max_samples=64)
+    playback.begin_response("response-zero-final")
+    assert playback.enqueue_packet(
+        response_id="response-zero-final", generation_id=35,
+        speaker_segment_id="segment-zero-final", packet_id=1,
+        first_frame_id=0, last_frame_id=0, start_sample=7, end_sample=11,
+        pcm=np.full(4, 0.25, dtype=np.float32), sample_rate=24_000,
+    )
+    playback.cancel_response("response-zero-final")
+    final = playback.drain_client_consumed_pcm_acks()[0]
+    assert final["start_sample"] == final["end_sample"] == 7
+    assert final["final"] is True
+
+
+def test_v2_rejects_ack_that_claims_samples_not_copied_by_device_callback() -> None:
+    playback = BoundedPCMPlayback(max_samples=64)
+    playback.begin_response("response-bogus-ack")
+    assert playback.enqueue_packet(
+        response_id="response-bogus-ack", generation_id=36,
+        speaker_segment_id="segment-bogus-ack", packet_id=1,
+        first_frame_id=0, last_frame_id=0, start_sample=0, end_sample=8,
+        pcm=np.full(8, 0.25, dtype=np.float32), sample_rate=24_000,
+    )
+    assert playback.read_into(np.empty((3, 1), dtype=np.float32)) == 3
+    acknowledgement = playback.drain_client_consumed_pcm_acks()[0]
+    forged = {**acknowledgement, "end_sample": 8}
+    assert not playback.accept_client_consumed_pcm_ack(forged)
+    assert playback.accept_client_consumed_pcm_ack(acknowledgement)
 
 
 def test_async_ack_sender_is_the_only_network_emitter_for_callback_consumption() -> None:
@@ -343,7 +447,7 @@ def test_async_ack_sender_is_the_only_network_emitter_for_callback_consumption()
 
 
 def test_playback_drops_partial_segment_and_late_old_generation_ack() -> None:
-    playback = BoundedPCMPlayback(max_samples=64)
+    playback = BoundedPCMPlayback(max_samples=64, ack_version=1)
     handle_realtime_event({"type": "response.created", "response_id": "response-old"}, playback)
     handle_realtime_event({"type": "speaker.segment.opened", "generation_id": 12}, playback)
     assert playback.enqueue_packet(
@@ -406,7 +510,7 @@ def test_playback_drops_partial_segment_and_late_old_generation_ack() -> None:
 
 
 def test_yield_cancel_truncates_even_completed_response_and_fences_pending_ack() -> None:
-    playback = BoundedPCMPlayback(max_samples=64)
+    playback = BoundedPCMPlayback(max_samples=64, ack_version=1)
     handle_realtime_event({"type": "response.created", "response_id": "response-yield"}, playback)
     handle_realtime_event({"type": "speaker.segment.opened", "generation_id": 21}, playback)
     assert playback.enqueue_packet(
@@ -469,7 +573,7 @@ def test_yield_cancel_truncates_even_completed_response_and_fences_pending_ack()
 
 
 def test_response_done_closes_last_segment_as_ack_fallback() -> None:
-    playback = BoundedPCMPlayback(max_samples=64)
+    playback = BoundedPCMPlayback(max_samples=64, ack_version=1)
     handle_realtime_event({"type": "response.created", "response_id": "response-done-fallback"}, playback)
     handle_realtime_event({"type": "speaker.segment.opened", "generation_id": 23}, playback)
     assert playback.enqueue_packet(

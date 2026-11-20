@@ -19,12 +19,15 @@ REFERENCE_SHA = "a" * 64
 
 class _Processor:
     def __init__(self) -> None:
-        self.seen_text: str | None = None
+        self.seen_texts: list[str] = []
+        self.tokenizer = self
 
-    def __call__(self, *, text: str, return_tensors: str) -> dict[str, torch.Tensor]:
-        assert return_tensors == "pt"
-        self.seen_text = text
-        return {"input_ids": torch.arange(10, dtype=torch.long).view(1, -1)}
+    def __call__(self, text: str, *, add_special_tokens: bool = True) -> dict[str, list[int]]:
+        assert add_special_tokens is False
+        self.seen_texts.append(text)
+        if text == "<|im_start|>assistant\n":
+            return {"input_ids": [10, 11, 12]}
+        return {"input_ids": list(range(20, 20 + len(text)))}
 
 
 class _Embedding:
@@ -35,6 +38,14 @@ class _Embedding:
     def __call__(self, ids: torch.Tensor) -> torch.Tensor:
         self.seen_ids.append(ids.detach().clone())
         return torch.zeros((*ids.shape, self.hidden), dtype=torch.float32)
+
+
+class _MarkedEmbedding:
+    def __init__(self, offset: int) -> None:
+        self.offset = offset
+
+    def __call__(self, ids: torch.Tensor) -> torch.Tensor:
+        return (ids.float() + self.offset).unsqueeze(-1).expand(-1, -1, HIDDEN)
 
 
 class _Talker:
@@ -82,14 +93,9 @@ def test_base_prefill_uses_official_assistant_framing_and_italian_id() -> None:
 
     icl, text, bos, _ = model.build_prefill_parts("ciao")
 
-    assert processor.seen_text == (
-        "<|im_start|>assistant\n"
-        "ciao"
-        "<|im_end|>\n"
-        "<|im_start|>assistant\n"
-    )
+    assert processor.seen_texts == ["<|im_start|>assistant\n", "ciao"]
     assert icl.shape == (1, 8, HIDDEN)
-    assert text.shape == (1, 3, HIDDEN)
+    assert text.shape == (1, 5, HIDDEN)
     assert bos.shape == (1, 1, HIDDEN)
 
 
@@ -100,8 +106,63 @@ def test_live_prefill_uses_only_prefilled_raw_qwen_token_and_omits_text_eos() ->
         " ", raw_text_token_ids=[77], include_text_eos=False
     )
 
-    assert text.shape == (1, 1, HIDDEN)
+    assert text.shape == (1, 0, HIDDEN)
+    assert _processor.seen_texts == ["<|im_start|>assistant\n"]
     assert any(torch.equal(ids, torch.tensor([[77]])) for ids in model.talker.embedding.seen_ids)
+
+
+@pytest.mark.parametrize("with_voice", [False, True])
+@pytest.mark.parametrize("first_text_id", [34, 13878])
+def test_live_prefill_combines_first_text_id_with_codec_bos_as_upstream(
+    with_voice: bool, first_text_id: int
+) -> None:
+    model, _ = _model()
+    model.talker.get_text_embeddings = lambda: _MarkedEmbedding(100)
+    model.talker.get_input_embeddings = lambda: _MarkedEmbedding(1000)
+    voice = (
+        {"mode": "x_vector_only", "speaker_embedding": torch.ones(HIDDEN)}
+        if with_voice else None
+    )
+
+    icl, text, bos, pad = model.build_prefill_parts(
+        "Certo!", raw_text_token_ids=[first_text_id], include_text_eos=False,
+        voice_conditioning=voice,
+    )
+
+    assert text.shape == (1, 0, HIDDEN)
+    assert icl.shape == (1, 9 if with_voice else 8, HIDDEN)
+    assert torch.equal(bos, torch.full((1, 1, HIDDEN), first_text_id + 100 + 8 + 1000.0))
+    assert torch.equal(pad, torch.full((1, 1, HIDDEN), 3 + 100.0))
+    assert torch.cat((icl, text, bos), dim=1).shape[1] == icl.shape[1] + 1
+
+
+def test_complete_prefill_keeps_text_pad_then_text_eos_then_pad_bos() -> None:
+    model, _ = _model()
+    model.talker.get_text_embeddings = lambda: _MarkedEmbedding(100)
+    model.talker.get_input_embeddings = lambda: _MarkedEmbedding(1000)
+    _, text, bos, _ = model.build_prefill_parts("Certo!", raw_text_token_ids=[34, 13878, 0])
+
+    expected = torch.tensor([34, 13878, 0, 2], dtype=torch.float32) + 100 + 7 + 1000
+    assert torch.equal(text, expected.view(1, -1, 1).expand(-1, -1, HIDDEN))
+    assert torch.equal(bos, torch.full((1, 1, HIDDEN), 3 + 100 + 8 + 1000.0))
+
+
+def test_streaming_prefill_rejects_multiple_initial_text_ids() -> None:
+    model, _ = _model()
+    with pytest.raises(ValueError, match="exactly one text token"):
+        model.build_prefill_parts("Certo!", raw_text_token_ids=[34, 13878], include_text_eos=False)
+
+
+@pytest.mark.parametrize("text", ["\nCiao", "\n\nDue", "  Ciao", "Ciao!", "🙂"])
+def test_base_prefill_direct_text_tokens_accept_whitespace_punctuation_and_emoji(text: str) -> None:
+    model, processor = _model()
+
+    icl, text_part, bos, _pad = model.build_prefill_parts(text)
+
+    assert processor.seen_texts == ["<|im_start|>assistant\n", text]
+    assert icl.shape == (1, 8, HIDDEN)
+    assert text_part.shape == (1, len(text) + 1, HIDDEN)
+    assert bos.shape == (1, 1, HIDDEN)
 
 
 def test_base_prefill_inserts_x_vector_between_codec_prefix_and_tail() -> None:

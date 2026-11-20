@@ -9,7 +9,13 @@ from duplex_kernel.backchannel_guard import (
 
 def test_backchannel_guard_accepts_complete_short_acknowledgements() -> None:
     assert validate_backchannel_phrase("Sì") == (True, "ok", 1)
+    assert validate_backchannel_phrase("Sì.") == (True, "ok", 1)
     assert validate_backchannel_phrase("Va bene, sì.") == (True, "ok", 3)
+    assert validate_backchannel_phrase("Ho capito.") == (True, "ok", 2)
+
+
+def test_backchannel_guard_rejects_truncated_terminal_subword() -> None:
+    assert validate_backchannel_phrase("Mi sc") == (False, "truncated_subword", 2)
 
 
 def test_backchannel_guard_rejects_fifth_lexical_word_and_open_clause() -> None:

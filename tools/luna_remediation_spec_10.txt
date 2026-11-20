@@ -1,0 +1,42 @@
+# Luna Remediation Spec 10: Eliminating Listener ACK Latency Spikes (Zone 1 Lock Inversion & Zone 2 Finalization Freeze)
+
+## Context & Evidence
+In the 3-run acceptance suite (`run_acceptance_suite.py --runs 3 --container gemma4-speech-s2s-readyframes-20261102 --execution docker`), all 3 runs completed long responses (~140s, 550 chunks, TTFT 128ms, 0 backpressure wait), but each run hit a single ACK gap that exceeded the invariant limit of 160.0ms:
+- Run 1: 162.17ms at frame 412/413 (Zone 1: generation prefill/talker start)
+- Run 2: 247.48ms at frame 2059/2060 (Zone 2: turn 1 completion / finalization)
+- Run 3: 300.72ms at frame 2723/2724 (Zone 2: turn 1 completion / finalization)
+
+## Root Causes Identified
+1. **Zone 1: Lock Acquisition Inversion in `run_talker_gpu_step` (`duplex_kernel/engine.py:6147-6183`)**:
+   `run_talker_gpu_step` acquired `self._listener_priority_lock()` (holding `self._thinker_lock`) BEFORE entering `quantum_ctx = listener_compute_quantum()`. When a listener frame arrived, `_acquire_compute_permit` saw listener demand and called `self._dispatch_idle.wait(timeout=0.05)`. But because `self._thinker_lock` was already held by the Talker, the listener thread blocked waiting to acquire `model_lock.acquire_fair("listener")`! This caused an artificial 50-85ms lock freeze, making frame 413's queue wait 83.2ms and total ACK gap 162.2ms.
+   Furthermore, `code2wav_decode` (lines 6772-6776) was wrapped in `run_talker_gpu_step`, needlessly holding `self._thinker_lock` for the vocoder, which does not touch Gemma LM weights.
+
+2. **Zone 2: Quadratic JSON Pruning and Massive Payload Freeze (`duplex_kernel/server_metrics.py:656-669` and `duplex_kernel/server.py:8642`)**:
+   At response finalization, `server.py:8642` passed `runtime_metrics_event(response_id)` (~150 KB) to `_send_unified_native_finalizer_event`. In `server_metrics.py:656-669`, a `while len(json.dumps(event, ...)) > 2_048:` loop repeatedly re-serialized the entire event and all its keys with `json.dumps()` on every iteration to remove one key at a time. This blocked the asyncio event loop on the main thread for ~40-60ms right as the response finished, delaying the delivery of `input_audio_buffer.consumed` for frames 2060/2724.
+
+## Required Modifications
+
+### 1. `duplex_kernel/engine.py`:
+- In `run_talker_gpu_step` (around lines 6147-6183):
+  Invert the order so `quantum_ctx = listener_compute_quantum()` is entered FIRST.
+  Inside `with quantum_ctx as permit:`, acquire `self._listener_priority_lock()` around `result = forward()`, record completion on `permit`, and release `self._thinker_lock` in `finally:`.
+  This guarantees that waiting for a compute quantum NEVER holds `self._thinker_lock`.
+- In `decode_with_warmup_diagnostics` (around line 6772):
+  Ensure `code2wav_decode` only uses `listener_compute_quantum()` for GPU stream ordering, and does NOT hold `self._thinker_lock`.
+
+### 2. `duplex_kernel/server_metrics.py`:
+- In `_send_unified_native_finalizer_event` (lines 623-669):
+  Eliminate the quadratic `while len(json.dumps(event)) > 2048` loop.
+  Instead:
+  - If `runtime_metrics` is provided, include only compact phases or scalar metrics (e.g. `_filter_unified_native_event_metrics`).
+  - To enforce the 2048 byte limit, measure size once; if over 2048 bytes, prune oversized or non-terminal keys in a single pass (O(N)), preserving `unified_native_finalizer` and `status`.
+
+### 3. `duplex_kernel/server.py`:
+- In `server.py:8642`:
+  Do not pass the massive multi-megabyte `runtime_metrics_event(response_id)` into `_send_unified_native_finalizer_event`.
+  Instead, pass a compact delta of terminal metrics (`qwen_prefill`, `unified_native_rollback`, `unified_native_finalizer`) so the realtime event remains lightweight (<2KB) without freezing the asyncio event loop.
+
+## Verification
+- Run local pytest suite:
+  `python -m pytest tests/kernel/test_shared_listener_tick_dispatcher.py tests/kernel/test_server_consumed_ack_order.py tests/kernel/test_cooperative_drain.py tests/kernel/test_unified_controller_lifecycle.py tests/kernel/test_unified_kv_server_gate.py -q`
+- Verify that all tests pass without errors.

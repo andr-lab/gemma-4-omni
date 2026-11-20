@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import numpy as np
 import pytest
 import torch
@@ -9,7 +10,13 @@ import time
 from concurrent.futures import Future
 from types import SimpleNamespace
 
+import duplex_kernel.server_unified_thinker as unified_thinker_module
+import duplex_kernel.server_metrics as server_metrics_module
+from duplex_kernel.server_metrics import _compact_unified_native_terminal_metrics
+
 from duplex_kernel.server import (
+    _acquire_shared_transition_lock_with_timing,
+    _prewarm_unified_v1_transition_after_import,
     _controller_guided_say_generation_options,
     _build_unified_audio_response_suffix,
     _build_unified_backchannel_response_suffix,
@@ -23,6 +30,7 @@ from duplex_kernel.server import (
     _record_turn_local_vocalized_prefix,
     _require_closed_tts_codec_eos,
     _publish_thinker_metrics_event,
+    _record_server_ack_lock_wait_ms,
     _unified_end_of_turn_token_id,
     _run_unified_native_thinker,
     _refresh_unified_prefix_for_instruction_update,
@@ -34,6 +42,7 @@ from duplex_kernel.server import (
     _unified_response_owns_shared_audio_queue,
     _shared_listener_response_branch,
     _shared_listener_frame_queue_contract,
+    _shared_listener_queue_voice_activity,
     _attach_shared_listener_response_branches,
     _clear_shared_listener_response_branches,
     _validate_private_transition_chunk,
@@ -45,7 +54,819 @@ from duplex_kernel.server import (
     _backchannel_budget_without_eos,
     _publish_backchannel_tokens_after_eos,
     _snapshot_speaking_branch_context,
+    _unified_native_finalizer_event,
+    _send_unified_native_finalizer_event,
+    _filter_unified_native_event_metrics,
+    scheduler_tick_trace_metadata,
 )
+from duplex_kernel.audio_response_protocol import (
+    AUDIO_RESPONSE_PROTOCOL_V2,
+    AUDIO_RESPONSE_V2_MAX_NEW_TOKENS,
+    CONTROLLER_GUIDED_SAY_V1,
+)
+from duplex_kernel.server_response_runtime import (
+    _unified_direct_audio_cache_branch_is_live,
+    should_stream_thinker_text,
+)
+from duplex_kernel.scheduler import DuplexTick
+from duplex_kernel.unified_native_decoder import NativeDecodeSessionStatus
+
+
+@pytest.mark.parametrize(
+    ("stream_requested", "unified_native", "tts_callback", "expected"),
+    [
+        (True, True, lambda *_args: None, False),
+        (True, False, lambda *_args: None, True),
+        (True, True, None, True),
+        (False, False, lambda *_args: None, False),
+    ],
+)
+def test_unified_tts_consumption_is_the_only_thinker_text_publisher(
+    stream_requested, unified_native, tts_callback, expected
+):
+    assert should_stream_thinker_text(
+        stream_requested=stream_requested,
+        unified_native=unified_native,
+        tts_text_consumed_callback=tts_callback,
+    ) is expected
+
+
+class _DecodeBudgetWorkerMixin:
+    """Supply the no-capacity-limit reservation contract to native Thinker fakes."""
+
+    def reserve_response_decode_budget(
+        self,
+        _session_id,
+        *,
+        requested_tokens,
+        sentence_completion_tokens=0,
+        **_kwargs,
+    ):
+        future = Future()
+        future.set_result({
+            "effective_tokens": int(requested_tokens),
+            "sentence_completion_tokens": int(sentence_completion_tokens),
+            "cap_reason": None,
+            "close_reservation_tokens": 0,
+        })
+        return future
+
+    def reserve_tail_tokens(self, _session_id, *, token_count, **_kwargs):
+        future = Future()
+        future.set_result(int(token_count))
+        return future
+
+
+def test_revisioned_v1_decode_handle_is_a_live_direct_audio_cache_branch() -> None:
+    branch = {
+        "queue_open": False,
+        "revisioned_live_say": True,
+        "response_decode_handle": object(),
+    }
+
+    assert _unified_direct_audio_cache_branch_is_live(
+        branch, CONTROLLER_GUIDED_SAY_V1
+    )
+    assert _unified_direct_audio_cache_branch_is_live(
+        {"queue_open": True}, AUDIO_RESPONSE_PROTOCOL_V2
+    )
+    assert not _unified_direct_audio_cache_branch_is_live(
+        {"queue_open": False, "response_decode_handle": object()},
+        CONTROLLER_GUIDED_SAY_V1,
+    )
+    assert not _unified_direct_audio_cache_branch_is_live(
+        branch, AUDIO_RESPONSE_PROTOCOL_V2
+    )
+
+
+def test_unified_native_preflight_retry_observes_cancellation_before_retry() -> None:
+    class Worker:
+        reserve_attempts = 0
+
+        def session_state(self, _session_id):
+            future = Future()
+            future.set_result(SimpleNamespace(generation_id=12, cache_position=20))
+            return future
+
+        def reserve_response_decode_budget(self, *_args, **_kwargs):
+            self.reserve_attempts += 1
+            raise RuntimeError(
+                "response decode preflight requires a completed listener frame watermark"
+            )
+
+    checks = 0
+
+    def stop_check():
+        nonlocal checks
+        checks += 1
+        return checks >= 2
+
+    worker = Worker()
+    with pytest.raises(asyncio.CancelledError):
+        _run_unified_native_thinker(
+            SimpleNamespace(),
+            SimpleNamespace(session_id="session"),
+            {},
+            worker=worker,
+            transition_token_ids=(1, 2),
+            think_kwargs={"max_new_tokens": 1, "stop_check": stop_check},
+            generation_id=4,
+            branch={
+                "listener_generation_id": 12,
+                "cache_position": 20,
+                "turn_start_cache_position": 20,
+                "native_token_append_count": 0,
+                "client_consumed_segments": (),
+            },
+        )
+
+    assert worker.reserve_attempts == 1
+    assert checks == 2
+
+
+def test_unified_native_stop_check_precedes_worker_preflight_state_read() -> None:
+    class Worker:
+        state_reads = 0
+        reserve_attempts = 0
+
+        def session_state(self, _session_id):
+            self.state_reads += 1
+            raise AssertionError("cancelled decode must stop before native preflight")
+
+        def reserve_response_decode_budget(self, *_args, **_kwargs):
+            self.reserve_attempts += 1
+            raise AssertionError("cancelled decode must not reserve KV")
+
+    worker = Worker()
+    with pytest.raises(asyncio.CancelledError):
+        _run_unified_native_thinker(
+            SimpleNamespace(),
+            SimpleNamespace(session_id="session"),
+            {},
+            worker=worker,
+            transition_token_ids=(1,),
+            think_kwargs={"max_new_tokens": 1, "stop_check": lambda: True},
+            generation_id=4,
+            branch={"listener_generation_id": 12, "cache_position": 20},
+        )
+
+    assert worker.state_reads == worker.reserve_attempts == 0
+
+
+def test_unified_native_cancellation_after_reservation_releases_close_tail_once() -> None:
+    class Worker:
+        state_reads = 0
+        reservation_calls = 0
+        released_tail_counts: list[int] = []
+
+        def session_state(self, _session_id):
+            self.state_reads += 1
+            future = Future()
+            future.set_result(SimpleNamespace(generation_id=12, cache_position=20))
+            return future
+
+        def reserve_response_decode_budget(self, *_args, **_kwargs):
+            self.reservation_calls += 1
+            future = Future()
+            future.set_result({
+                "effective_tokens": 1,
+                "sentence_completion_tokens": 0,
+                "cap_reason": None,
+                "close_reservation_tokens": 3,
+            })
+            return future
+
+        def reserve_tail_tokens(self, _session_id, *, token_count, **_kwargs):
+            self.released_tail_counts.append(int(token_count))
+            future = Future()
+            future.set_result(int(token_count))
+            return future
+
+    checks = 0
+
+    def stop_check():
+        nonlocal checks
+        checks += 1
+        return checks >= 2
+
+    worker = Worker()
+    with pytest.raises(asyncio.CancelledError):
+        _run_unified_native_thinker(
+            SimpleNamespace(),
+            SimpleNamespace(session_id="session"),
+            {},
+            worker=worker,
+            transition_token_ids=(1,),
+            think_kwargs={"max_new_tokens": 1, "stop_check": stop_check},
+            generation_id=4,
+            branch={
+                "listener_generation_id": 12,
+                "cache_position": 20,
+                "turn_start_cache_position": 20,
+                "native_token_append_count": 0,
+                "client_consumed_segments": (),
+            },
+        )
+
+    assert worker.reservation_calls == 1
+    assert worker.released_tail_counts == [3]
+    assert worker.state_reads == 2  # Initial frontier and cleanup frontier.
+
+
+def test_active_response_returns_adopted_revision_when_its_handle_is_fenced() -> None:
+    adopted = {
+        "text": "Ciao, aggiornamento.",
+        "protocol_text": "Ciao, aggiornamento.",
+        "suffix_text": " aggiornamento.",
+        "gen_ids": [51, 52],
+        "terminal_reason": "eos",
+        "cancelled": False,
+    }
+    branch = {
+        "listener_generation_id": 12,
+        "response_id": "response-a",
+        "response_generation_id": 4,
+        "response_decode_handle": SimpleNamespace(
+            parent_session_id="session",
+            parent_generation_id=12,
+            source_cache_position=20,
+            response_id="response-a",
+            response_generation_id=4,
+            revision_id="r0",
+        ),
+        "revision_id": "r0",
+        "cache_position": 20,
+        "turn_start_cache_position": 20,
+        "native_token_append_count": 0,
+        "client_consumed_segments": (),
+    }
+
+    class Worker:
+        def session_state(self, _session_id):
+            future = Future()
+            future.set_result(SimpleNamespace(
+                generation_id=12,
+                cache_position=20,
+                valid_history_tokens=20,
+            ))
+            return future
+
+        def append_response_decode(self, *_args, **_kwargs):
+            branch["revision_id"] = "r1"
+            branch["_last_adopted_think"] = adopted
+            future = Future()
+            future.set_exception(RuntimeError("active response fork was released after adoption"))
+            return future
+
+    class Sampler:
+        eos_token_ids = {99}
+        runtime_metrics = {}
+        sample_token = staticmethod(lambda *_args: pytest.fail("sample must not run after fenced append"))
+        sample_initial = staticmethod(lambda *_args: pytest.fail("sample must not run after fenced append"))
+        select_valid_candidate = staticmethod(
+            lambda *_args, **_kwargs: pytest.fail("candidate selection must not run after fenced append")
+        )
+
+    engine = SimpleNamespace(
+        thinker=SimpleNamespace(config=SimpleNamespace(hidden_size=4)),
+        tokenizer=SimpleNamespace(decode=lambda ids, skip_special_tokens=True: ",".join(map(str, ids))),
+        device="cpu",
+        dtype=torch.float32,
+        _thinker_wrapper=SimpleNamespace(processor=object()),
+        audio_tower=object(),
+        build_thinker_sampler=lambda **_kwargs: Sampler(),
+    )
+    result = _run_unified_native_thinker(
+        engine,
+        SimpleNamespace(session_id="session"),
+        {},
+        worker=Worker(),
+        transition_token_ids=(1, 2),
+        think_kwargs={
+            "temperature": 0.0,
+            "top_p": 1.0,
+            "min_new_tokens": 0,
+            "max_new_tokens": 2,
+        },
+        generation_id=4,
+        branch=branch,
+    )
+
+    assert result["revision_handoff"] is True
+    assert result["text"] == adopted["text"]
+    assert result["gen_ids"] == adopted["gen_ids"]
+    assert "active_decode_cancelled_by_revision" in result
+
+
+def test_promoted_native_checkpoint_resumes_and_publishes_terminal_result(monkeypatch) -> None:
+    response_handle = SimpleNamespace(
+        handle_id="candidate-handle",
+        purpose="candidate_response",
+        parent_session_id="session",
+        parent_generation_id=12,
+        response_id="response-a",
+        response_generation_id=4,
+        revision_id="r1",
+        source_cache_position=20,
+    )
+    promoted_handle = SimpleNamespace(
+        **{
+            **vars(response_handle),
+            "purpose": "active_response",
+        }
+    )
+    session = SimpleNamespace(
+        session_id="session",
+        _generation_lock=threading.RLock(),
+    )
+    candidate_branch = {
+        "listener_generation_id": 12,
+        "response_id": "response-a",
+        "response_generation_id": 4,
+        "response_decode_handle": response_handle,
+        "revision_id": "r1",
+        "response_protocol": "controller_guided_say_v1",
+        "revisioned_live_say": True,
+        "cache_position": 20,
+        "turn_start_cache_position": 20,
+        "spoken_prefix_base_cursor": 20,
+        "native_token_append_count": 0,
+        "client_consumed_segments": (),
+    }
+
+    class Worker:
+        def __init__(self):
+            self.cursor = 20
+            self.appended = []
+            self.handles = []
+
+        @staticmethod
+        def _done(value):
+            future = Future()
+            future.set_result(value)
+            return future
+
+        def session_state(self, _session_id):
+            return self._done(SimpleNamespace(
+                generation_id=12,
+                cache_position=self.cursor,
+            ))
+
+        def append_response_decode(
+            self, handle, token_ids, *, expected_cache_position, generated,
+        ):
+            assert expected_cache_position == self.cursor
+            self.handles.append((handle.handle_id, handle.purpose, bool(generated)))
+            token_ids = tuple(int(value) for value in token_ids)
+            self.appended.extend(token_ids)
+            self.cursor += len(token_ids)
+            return self._done(SimpleNamespace(
+                cache_position=self.cursor,
+                token_count=len(token_ids),
+                logits=torch.zeros((1, 100)),
+                final_norm_hidden=torch.zeros((1, 1, 4)),
+                ready_event=None,
+                timings_ns={},
+            ))
+
+    worker = Worker()
+
+    class Sampler:
+        eos_token_ids = {99}
+        runtime_metrics = {}
+
+        def sample_token(self, *_args):
+            raise AssertionError("the fake session does not sample")
+
+        def sample_initial(self, *_args):
+            raise AssertionError("the fake session does not sample")
+
+        def select_valid_candidate(self, *_args, **_kwargs):
+            raise AssertionError("the fake session does not select candidates")
+
+    class FakeSession:
+        def __init__(self, forward_tokens, **options):
+            self.forward_tokens = forward_tokens
+            self.options = options
+            self.handle = options["native_handle"]
+            self.calls = 0
+            self.generated = []
+            self.native_cursor = options["native_cursor"]
+
+        @property
+        def native_handle(self):
+            return self.handle
+
+        @property
+        def generated_token_ids(self):
+            return tuple(int(token.token_id) for token in self.generated)
+
+        def validate_native_handle_adoption(self, handle):
+            assert handle.handle_id == self.handle.handle_id
+
+        def adopt_native_handle(self, handle):
+            self.validate_native_handle_adoption(handle)
+            self.handle = handle
+
+        def close(self):
+            return None
+
+        @staticmethod
+        def _token(token_id, index):
+            return SimpleNamespace(
+                token_id=token_id,
+                token_index=index,
+                token_text="A" if token_id == 11 else "B",
+                hidden=torch.full((1, 1, 4), float(token_id)),
+                packet_published_ns=100 + index,
+                kv_committed=True,
+                text_source_sequences=(),
+            )
+
+        async def _call(self, name, *args):
+            callback = self.options.get(name)
+            if callable(callback):
+                result = callback(*args)
+                if asyncio.iscoroutine(result) or isinstance(result, asyncio.Future):
+                    await result
+
+        async def advance(
+            self, *, max_committed_tokens, ready_when, stop_check,
+            producer_limit_check,
+        ):
+            assert max_committed_tokens == 8
+            assert stop_check is None or not stop_check()
+            if self.calls == 0:
+                await self.forward_tokens([5, 6, 17])
+                token = self._token(11, 0)
+                await self.forward_tokens([11])
+                self.generated.append(token)
+                await self._call("on_token_packet", token)
+                await self._call("on_token_committed", token)
+                progress = SimpleNamespace(
+                    generated_token_ids=(11,),
+                    generated_text="A",
+                    stable_text="A",
+                    source_tokens=(),
+                    source_offset=2,
+                    native_cursor=24,
+                )
+                assert ready_when(progress)
+                self.calls += 1
+                self.native_cursor = 24
+                return SimpleNamespace(
+                    status=NativeDecodeSessionStatus.READY,
+                    generated_tokens=(token,),
+                    progress=progress,
+                    native_handle=self.handle,
+                    native_cursor=self.native_cursor,
+                    source_offset=2,
+                    result=None,
+                )
+
+            assert self.handle.purpose == "active_response"
+            token = self._token(12, 1)
+            await self.forward_tokens([12])
+            self.generated.append(token)
+            await self._call("on_token_packet", token)
+            await self._call("on_token_committed", token)
+            self.calls += 1
+            self.native_cursor = 25
+            result = SimpleNamespace(
+                generated_tokens=tuple(self.generated),
+                termination_reason="eos",
+                terminal_token_id=99,
+                generated_count=3,
+                committed_count=2,
+                sampled_count=3,
+                transition_token_count=3,
+                first_logits_ready=None,
+                first_token=self.generated[0],
+                pending_token_id=None,
+                owner_action="continue_generation",
+            )
+            return SimpleNamespace(
+                status=NativeDecodeSessionStatus.DONE,
+                generated_tokens=(token,),
+                progress=SimpleNamespace(
+                    generated_token_ids=(11, 12),
+                    generated_text="AB",
+                    stable_text="AB",
+                    source_tokens=(),
+                    source_offset=3,
+                    native_cursor=25,
+                ),
+                native_handle=self.handle,
+                native_cursor=self.native_cursor,
+                source_offset=3,
+                result=result,
+            )
+
+    class FakeDecoder:
+        def __init__(self, _thinker, *, forward_tokens, sampler, **_kwargs):
+            assert sampler is not None
+            self.forward_tokens = forward_tokens
+
+        def start_session(self, **options):
+            return FakeSession(self.forward_tokens, **options)
+
+    monkeypatch.setattr(unified_thinker_module, "UnifiedNativeDecoder", FakeDecoder)
+    post_adoption_packet_indexes = []
+    callback_handoff = {"promoted": False, "offset": 1}
+
+    def packet_callback(token):
+        if callback_handoff["promoted"]:
+            post_adoption_packet_indexes.append(
+                callback_handoff["offset"] + int(token.token_index)
+            )
+
+    engine = SimpleNamespace(
+        thinker=SimpleNamespace(config=SimpleNamespace(hidden_size=4)),
+        tokenizer=SimpleNamespace(
+            decode=lambda ids, skip_special_tokens=True: "".join(
+                {17: "P", 11: "A", 12: "B"}[int(value)] for value in ids
+            ),
+        ),
+        device="cpu",
+        dtype=torch.float32,
+        _thinker_wrapper=SimpleNamespace(processor=object()),
+        audio_tower=object(),
+        build_thinker_sampler=lambda **_kwargs: Sampler(),
+    )
+    checkpoint = _run_unified_native_thinker(
+        engine,
+        session,
+        {
+            "_continuation_prefix_token_ids": (17,),
+            "_logical_source_offset": 1,
+            "_generated_budget_used": 1,
+        },
+        worker=worker,
+        transition_token_ids=(5, 6),
+        think_kwargs={
+            "temperature": 0.0,
+            "top_p": 1.0,
+            "min_new_tokens": 0,
+            "max_new_tokens": 767,
+            "on_token_packet": packet_callback,
+            "on_token_committed": lambda _token: None,
+            "_revision_candidate_ready_when": lambda progress: len(
+                progress.generated_token_ids
+            ) >= 1,
+        },
+        generation_id=4,
+        branch=candidate_branch,
+    )
+    controller = checkpoint["_native_session_controller"]
+    assert checkpoint["text"] == "A"
+    assert checkpoint["gen_ids"] == [11]
+    assert worker.appended == [5, 6, 17, 11]
+
+    target_branch = {
+        "revision_id": "r1",
+        "spoken_prefix_lock": threading.RLock(),
+        "_generated_budget_used": 2,
+        "generated_token_count": 2,
+        "sampled_generated_token_count": 2,
+        "unappended_terminal_token_count": 0,
+        "native_token_append_count": 4,
+        "cache_position": 24,
+        "_last_adopted_think": checkpoint,
+        "_adopted_native_session_controller": controller,
+    }
+    handoff = controller["handoff_state"]
+    handoff.update({
+        "promoted": True,
+        "target_branch": target_branch,
+        "token_index_offset": 1,
+    })
+    controller["promoted"] = True
+    controller["source_token_index_offset"] = 1
+    controller["handle_ref"]["value"] = promoted_handle
+    controller["session"].adopt_native_handle(promoted_handle)
+    callback_handoff["promoted"] = True
+
+    completed = controller["run_to_completion"]()
+
+    assert completed["terminal_reason"] == "eos"
+    assert completed["text"] == completed["protocol_text"] == "PAB"
+    assert completed["gen_ids"] == [11, 12]
+    assert completed["unappended_terminal_token_count"] == 1
+    assert target_branch["_last_adopted_think"] is controller["final_result"]
+    assert target_branch["_last_adopted_think"]["text"] == "PAB"
+    assert target_branch["_generated_budget_used"] == 3
+    assert target_branch["generated_token_count"] == 3
+    assert target_branch["sampled_generated_token_count"] == 4
+    assert target_branch["unappended_terminal_token_count"] == 1
+    assert target_branch["cache_position"] == 25
+    assert post_adoption_packet_indexes == [2]
+    assert worker.handles[-1] == ("candidate-handle", "active_response", True)
+
+
+def test_unified_native_preflight_retry_rejects_replaced_listener_generation() -> None:
+    class Worker:
+        reserve_attempts = 0
+        state_reads = 0
+
+        def session_state(self, _session_id):
+            self.state_reads += 1
+            future = Future()
+            generation_id = 12 if self.state_reads == 1 else 13
+            future.set_result(SimpleNamespace(generation_id=generation_id, cache_position=20))
+            return future
+
+        def reserve_response_decode_budget(self, *_args, **_kwargs):
+            self.reserve_attempts += 1
+            raise RuntimeError(
+                "response decode preflight requires a completed listener frame watermark"
+            )
+
+    worker = Worker()
+    with pytest.raises(RuntimeError, match="preflight lost its listener generation"):
+        _run_unified_native_thinker(
+            SimpleNamespace(),
+            SimpleNamespace(session_id="session"),
+            {},
+            worker=worker,
+            transition_token_ids=(1, 2),
+            think_kwargs={"max_new_tokens": 1, "stop_check": lambda: False},
+            generation_id=4,
+            branch={
+                "listener_generation_id": 12,
+                "cache_position": 20,
+                "turn_start_cache_position": 20,
+                "native_token_append_count": 0,
+                "client_consumed_segments": (),
+            },
+        )
+
+    assert worker.reserve_attempts == 1
+    assert worker.state_reads == 2
+
+
+def test_live_film_callback_configuration_disables_anticipated_transition_hidden() -> None:
+    from duplex_kernel.server_response_runtime import _configure_native_live_say_callbacks
+
+    packets = []
+    committed = []
+    packet_callback = packets.append
+    committed_callback = committed.append
+    generated = lambda *_args: pytest.fail("legacy token callback must not replace packet publication")
+    think_kwargs = {"anticipate_first_token": True, "on_generated_token": generated}
+    _configure_native_live_say_callbacks(
+        think_kwargs,
+        frame_residual_active=True,
+        packet_callback=packet_callback,
+        committed_callback=committed_callback,
+    )
+
+    assert think_kwargs["anticipate_first_token"] is False
+    assert think_kwargs["on_token_packet"] is packet_callback
+    assert think_kwargs["on_token_committed"] is committed_callback
+    assert think_kwargs["on_generated_token"] is None
+
+
+def test_ordinary_live_say_keeps_first_token_anticipation() -> None:
+    from duplex_kernel.server_response_runtime import _configure_native_live_say_callbacks
+
+    think_kwargs = {}
+    _configure_native_live_say_callbacks(
+        think_kwargs,
+        frame_residual_active=False,
+        packet_callback=lambda _packet: None,
+        committed_callback=lambda _packet: None,
+    )
+
+    assert think_kwargs["anticipate_first_token"] is True
+
+
+def test_unified_v1_prewarm_waits_for_true_prefix_import_before_policy_dispatch() -> None:
+    events: list[tuple] = []
+    loop = asyncio.new_event_loop()
+    loop_thread = threading.Thread(target=loop.run_forever, daemon=True)
+    loop_thread.start()
+
+    class Worker:
+        imported = False
+        outstanding = 1
+
+        def prepare_text_token_inputs(self, token_ids, *, protocol):
+            events.append(("prepare", tuple(token_ids), protocol))
+            future = Future()
+            future.set_result({"logical_q_len": 6, "physical_q_len": 6, "cache_size": 1, "cache_misses": 1})
+            return future
+
+        def begin_ephemeral_decode(self, session_id, *, expected_generation_id, expected_cache_position):
+            if not self.imported or self.outstanding != 0:
+                raise RuntimeError("unified native operation requires an imported true chat prefix")
+            events.append(("begin", session_id, expected_generation_id, expected_cache_position))
+            future = Future()
+            future.set_result(SimpleNamespace(cache_position=expected_cache_position, handle_id="private-q6"))
+            return future
+
+        def append_private_transition_tokens(self, private_handle, token_ids, *, expected_cache_position):
+            events.append(("native_q6", private_handle.handle_id, tuple(token_ids), expected_cache_position))
+            future = Future()
+            future.set_result(SimpleNamespace(cache_position=expected_cache_position + len(token_ids)))
+            return future
+
+        def end_ephemeral_decode(self, private_handle):
+            events.append(("end", private_handle.handle_id))
+            future = Future()
+            future.set_result(None)
+            return future
+
+    worker = Worker()
+    binding = {
+        "event_loop": loop,
+        "unified_v1_transition_prewarm_key": None,
+    }
+    output = SimpleNamespace(
+        generation_id=7,
+        state_epoch_id="epoch-q6",
+        semantic_context_revision=0,
+        semantic_prefix_len=42,
+        cache_position=42,
+    )
+    transition_ids = (100, 101, 102, 103, 104, 105)
+    try:
+        # Session setup must complete before the lazy true-prefix import; a
+        # session-open Q6 CAS would fail with the same guard as begin() above.
+        events.append(("session.created",))
+        worker.imported = True
+        worker.outstanding = 0
+        events.append(("tick_complete_true_prefix_imported", 42, 0))
+        result = _prewarm_unified_v1_transition_after_import(
+            worker,
+            binding=binding,
+            output=output,
+            session_id="session-q6",
+            transition_ids=transition_ids,
+        )
+        events.append(("policy_dispatch",))
+
+        # A normal next audio frame advances only the canonical KV cursor;
+        # it must not trigger a second Q6 roundtrip for the same prefix.
+        second_frame_output = SimpleNamespace(
+            generation_id=7,
+            state_epoch_id="epoch-q6",
+            semantic_context_revision=0,
+            semantic_prefix_len=42,
+            cache_position=44,
+        )
+        assert _prewarm_unified_v1_transition_after_import(
+            worker,
+            binding=binding,
+            output=second_frame_output,
+            session_id="session-q6",
+            transition_ids=transition_ids,
+        ) is None
+
+        # A refreshed prefix revision owns a new prewarm, still using the
+        # current canonical cursor supplied by its completed import tick.
+        refreshed_output = SimpleNamespace(
+            generation_id=7,
+            state_epoch_id="epoch-q6",
+            semantic_context_revision=1,
+            semantic_prefix_len=50,
+            cache_position=50,
+        )
+        events.append(("prefix_refresh_imported", 50, 0))
+        refreshed = _prewarm_unified_v1_transition_after_import(
+            worker,
+            binding=binding,
+            output=refreshed_output,
+            session_id="session-q6",
+            transition_ids=transition_ids,
+        )
+        events.append(("policy_dispatch_after_refresh",))
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        loop_thread.join(timeout=2.0)
+        loop.close()
+
+    assert events == [
+        ("session.created",),
+        ("tick_complete_true_prefix_imported", 42, 0),
+        ("prepare", transition_ids, "controller_guided_say_v1"),
+        ("begin", "session-q6", 7, 42),
+        ("native_q6", "private-q6", transition_ids, 42),
+        ("end", "private-q6"),
+        ("policy_dispatch",),
+        ("prefix_refresh_imported", 50, 0),
+        ("prepare", transition_ids, "controller_guided_say_v1"),
+        ("begin", "session-q6", 7, 50),
+        ("native_q6", "private-q6", transition_ids, 50),
+        ("end", "private-q6"),
+        ("policy_dispatch_after_refresh",),
+    ]
+    assert result["logical_q_len"] == result["physical_q_len"] == 6
+    assert result["canonical_cache_position"] == 42
+    assert result["private_cache_position"] == 48
+    assert result["prepare_ms"] >= 0.0
+    assert result["native_roundtrip_ms"] >= 0.0
+    assert refreshed["canonical_cache_position"] == 50
+    assert refreshed["private_cache_position"] == 56
 
 
 def test_cancelled_late_native_token_metrics_are_kept_locally_and_not_sent() -> None:
@@ -88,6 +909,143 @@ def test_cancelled_late_native_token_metrics_are_kept_locally_and_not_sent() -> 
     )]
     assert websocket_events == []
     assert fifo == fifo_before_callback
+
+
+def test_thinker_metrics_websocket_event_projects_large_native_profile() -> None:
+    append_steps = [
+        {"phase": "generated_token", "append_call_ns": 10_000 + index}
+        for index in range(501)
+    ]
+    sampling_steps = [
+        {
+            "stage": "sample_token",
+            "started_ns": 20_000 + index,
+            "finished_ns": 20_100 + index,
+            "candidate_id": index,
+        }
+        for index in range(1_001)
+    ]
+    per_token_latencies = [float(index) / 10 for index in range(1_001)]
+    values = {
+        "policy_decision_at_ns": 123_456,
+        "thinker_first_token_at_ns": 123_789,
+        "first_logits_after_decision_ms": 3.25,
+        "thinker_runtime_metrics": {
+            "thinker_decode_lock_wait_ms": 0.0,
+            "generated_token_count": 1_001,
+            "summary": {"terminal_reason": "eos", "sampled_token_count": 1_001},
+            "per_token_latencies_ms": per_token_latencies,
+        },
+        "unified_native_profile": {
+            "clock": "server monotonic_ns",
+            "token0_forward_submit_ns": 123_500,
+            "token0_forward_return_ns": 123_600,
+            "token0_append_request": {
+                "generation_id": 7,
+                "expected_cache_position": 41,
+                "append_scope_id": "resp-large-profile",
+            },
+            "first_packet_published_clock": "server monotonic_ns",
+            "append_steps": append_steps,
+            "sampling_steps": sampling_steps,
+        },
+    }
+    local_profiles: list[dict] = []
+    websocket_events: list[dict] = []
+
+    result = _publish_thinker_metrics_event(
+        values,
+        response_id="resp-large-profile",
+        policy_decision_at_ns=None,
+        session=SimpleNamespace(is_generation_current=lambda _token: True),
+        token=object(),
+        cancellation_event=threading.Event(),
+        update_runtime_metrics=lambda _rid, _phase, metric_values: local_profiles.append(
+            dict(metric_values)
+        ),
+        send_event=lambda event: websocket_events.append(event) or True,
+    )
+
+    assert result is True
+    assert local_profiles == [values]
+    assert local_profiles[0]["unified_native_profile"]["append_steps"] == append_steps
+    assert local_profiles[0]["unified_native_profile"]["sampling_steps"] == sampling_steps
+    assert local_profiles[0]["thinker_runtime_metrics"]["per_token_latencies_ms"] == per_token_latencies
+    assert len(websocket_events) == 1
+
+    event = websocket_events[0]
+    compact_utf8 = json.dumps(event, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    assert len(compact_utf8) < 8 * 1024
+    assert event["policy_decision_at_ns"] == 123_456
+    assert event["thinker_first_token_at_ns"] == 123_789
+    assert event["first_logits_after_decision_ms"] == 3.25
+    assert event["thinker_runtime_metrics"]["generated_token_count"] == 1_001
+    assert event["unified_native_profile"]["token0_forward_submit_ns"] == 123_500
+    assert event["unified_native_profile"]["token0_forward_return_ns"] == 123_600
+    assert event["unified_native_profile"]["token0_append_request"] == {
+        "generation_id": 7,
+        "expected_cache_position": 41,
+        "append_scope_id": "resp-large-profile",
+    }
+    assert event["unified_native_profile"]["append_steps_count"] == 501
+    assert event["unified_native_profile"]["sampling_steps_count"] == 1_001
+    assert "append_steps" not in event["unified_native_profile"]
+    assert "sampling_steps" not in event["unified_native_profile"]
+    assert event["thinker_runtime_metrics"]["summary"] == {
+        "terminal_reason": "eos",
+        "sampled_token_count": 1_001,
+    }
+    assert "per_token_latencies_ms" not in event["thinker_runtime_metrics"]
+
+
+def test_server_ack_lock_wait_is_additive_to_existing_queue_timing() -> None:
+    event = {
+        "type": "input_audio_buffer.consumed",
+        "server_ack_queue_ms": 4.5,
+    }
+
+    _record_server_ack_lock_wait_ms(
+        event,
+        lock_requested_ns=1_000_000,
+        lock_acquired_ns=2_234_567,
+    )
+
+    assert event["server_ack_queue_ms"] == 4.5
+    assert event["server_ack_lock_wait_ms"] == 1.235
+
+
+def test_cancelled_large_thinker_metrics_profile_is_not_sent() -> None:
+    values = {
+        "policy_decision_at_ns": 123_456,
+        "unified_native_profile": {
+            "token0_forward_return_ns": 123_600,
+            "append_steps": [{"append_call_ns": index} for index in range(501)],
+            "sampling_steps": [{"sampled_ns": index} for index in range(1_001)],
+        },
+    }
+    cancellation_event = threading.Event()
+    cancellation_event.set()
+    local_profiles: list[dict] = []
+    websocket_events: list[dict] = []
+
+    result = _publish_thinker_metrics_event(
+        values,
+        response_id="resp-cancelled-large-profile",
+        policy_decision_at_ns=None,
+        session=SimpleNamespace(is_generation_current=lambda _token: True),
+        token=object(),
+        cancellation_event=cancellation_event,
+        update_runtime_metrics=lambda _rid, _phase, metrics: local_profiles.append(
+            dict(metrics)
+        ),
+        send_event=lambda event: websocket_events.append(event) or True,
+    )
+
+    assert result is False
+    assert len(local_profiles) == 1
+    assert len(local_profiles[0]["unified_native_profile"]["append_steps"]) == 501
+    assert len(local_profiles[0]["unified_native_profile"]["sampling_steps"]) == 1_001
+    assert websocket_events == []
 
 
 def test_speaking_branch_snapshots_direct_audio_and_acoustic_state_independently() -> None:
@@ -328,8 +1286,11 @@ def _unified_instruction_refresh_fixture(instruction: str = ""):
                 qsize=0,
                 pending_samples=0,
             )
+            self.history_context_notifications = 0
+            self.history_context_notification_lock_owned = []
 
-        def update_instructions(self, value):
+        def update_instructions(self, value, *, notify_callback=True):
+            del notify_callback
             value = str(value)
             with self._generation_lock:
                 if value == self.instructions:
@@ -337,6 +1298,12 @@ def _unified_instruction_refresh_fixture(instruction: str = ""):
                 self.instructions = value
                 self.semantic_context_revision += 1
                 return True
+
+        def notify_history_context_changed(self):
+            self.history_context_notifications += 1
+            self.history_context_notification_lock_owned.append(
+                self._generation_lock._is_owned()
+            )
 
     class Dispatcher:
         def has_pending_work(self, _session_id):
@@ -358,8 +1325,11 @@ def test_unified_session_update_refreshes_190_token_prefix_to_227_before_audio(
     )
     imports = []
 
-    def make_import(_backend, token_ids):
-        importer = SimpleNamespace(token_ids=tuple(token_ids))
+    def make_import(_backend, token_ids, *, semantic_context_revision=0):
+        importer = SimpleNamespace(
+            token_ids=tuple(token_ids),
+            semantic_context_revision=semantic_context_revision,
+        )
         imports.append(importer)
         return importer
 
@@ -387,8 +1357,11 @@ def test_unified_session_update_refreshes_190_token_prefix_to_227_before_audio(
     assert len(worker.calls) == 1
     call = worker.calls[0]
     assert call[:5] == ("session", imports[-1].token_ids, 1, 7, 190)
+    assert imports[-1].semantic_context_revision == 1
     assert len(call[1]) == binding["batch_cache_position"] == 227
     assert binding["semantic_prefix_importer"] is imports[-1]
+    assert session.history_context_notifications == 1
+    assert session.history_context_notification_lock_owned == [False]
 
     # Repeating the same instruction is harmless even after audio begins; a
     # changed instruction is rejected without changing the committed session.
@@ -414,19 +1387,19 @@ def test_unified_session_update_refreshes_190_token_prefix_to_227_before_audio(
         ))
 
 
-def test_backchannel_generation_budget_caps_real_tokenizer_ids_at_two() -> None:
+def test_backchannel_generation_budget_caps_real_tokenizer_ids_at_six() -> None:
     assert _controller_guided_say_generation_options(
         action="BACKCHANNEL",
         controller_guided_say=False,
         direct_audio_candidate=False,
         response_protocol=None,
-    )["max_tokens"] == 2
+    )["max_tokens"] == 6
     assert _controller_guided_say_generation_options(
         action="BACKCHANNEL",
         controller_guided_say=True,
         direct_audio_candidate=True,
         response_protocol="heard_action_say_v2",
-    )["max_tokens"] == 2
+    )["max_tokens"] == AUDIO_RESPONSE_V2_MAX_NEW_TOKENS
 
 
 def test_unified_instruction_refresh_failure_rolls_back_instruction_and_revision(
@@ -443,7 +1416,10 @@ def test_unified_instruction_refresh_failure_rolls_back_instruction_and_revision
     )
     monkeypatch.setattr(
         "duplex_kernel.server.make_unified_prefix_import",
-        lambda _backend, token_ids: SimpleNamespace(token_ids=tuple(token_ids)),
+        lambda _backend, token_ids, *, semantic_context_revision=0: SimpleNamespace(
+            token_ids=tuple(token_ids),
+            semantic_context_revision=semantic_context_revision,
+        ),
     )
     binding = {
         "generation": 7,
@@ -466,6 +1442,7 @@ def test_unified_instruction_refresh_failure_rolls_back_instruction_and_revision
     assert session.semantic_context_revision == 0
     assert binding["batch_cache_position"] == 190
     assert binding["semantic_prefix_importer"] is old_importer
+    assert session.history_context_notifications == 0
 
 
 def test_unified_native_result_waits_and_records_before_forward_returns(
@@ -553,20 +1530,58 @@ def test_unified_frame_logical_q_preserves_pending_user_audio() -> None:
     ) == (2, None, False)
 
 
-def test_unified_frame_logical_q_skips_only_idle_prespeech_and_marks_assistant_queue() -> None:
+def test_unified_frame_logical_q_keeps_silence_and_assistant_playback_continuous() -> None:
     quiet = np.zeros(1280, dtype=np.float32)
     assert _unified_listener_frame_contract(
         quiet,
         assistant_audio_queue_open=False,
         user_input_pending=False,
-    ) == (0, "prespeech_silence", False)
+    ) == (2, None, False)
 
     voiced = np.full(1280, 0.02, dtype=np.float32)
     assert _unified_listener_frame_contract(
         voiced,
         assistant_audio_queue_open=True,
         user_input_pending=False,
-    ) == (0, "assistant_turn_open", True)
+    ) == (2, None, False)
+
+
+def test_assistant_queue_retention_includes_current_endpoint_but_not_pending_silence() -> None:
+    quiet = np.zeros(1280, dtype=np.float32)
+    pending_context = SimpleNamespace(
+        policy_input=SimpleNamespace(peer_turn_active=False),
+        speech_endpoint=False,
+    )
+    pending_voice = _shared_listener_queue_voice_activity(
+        pending_context,
+        lambda: True,
+    )
+    assert pending_voice is False
+    assert _unified_listener_frame_contract(
+        quiet,
+        assistant_audio_queue_open=True,
+        user_input_pending=True,
+        voice_active=pending_voice,
+    ) == (2, None, False)
+
+    endpoint_context = SimpleNamespace(
+        policy_input=SimpleNamespace(peer_turn_active=False),
+        speech_endpoint=True,
+    )
+    endpoint_voice = _shared_listener_queue_voice_activity(
+        endpoint_context,
+        lambda: False,
+    )
+    assert endpoint_voice is True
+    # The endpoint event is a retention signal only; it does not rewrite the
+    # policy's peer_turn_active state.
+    assert endpoint_context.policy_input.peer_turn_active is False
+    assert _unified_listener_frame_contract(
+        quiet,
+        assistant_audio_queue_open=True,
+        user_input_pending=False,
+        voice_active=endpoint_voice,
+    ) == (2, None, False)
 
 
 def test_unified_listener_q0_requires_owner_queue_and_backchannel_keeps_causal_q2() -> None:
@@ -592,7 +1607,7 @@ def test_unified_listener_q0_requires_owner_queue_and_backchannel_keeps_causal_q
         ),
         user_input_pending=False,
     )
-    assert assistant_frame == (0, "assistant_turn_open", True)
+    assert assistant_frame == (2, None, False)
 
     assert _unified_response_owns_shared_audio_queue(assistant_branch)
 
@@ -650,13 +1665,13 @@ def test_shared_queue_ownership_is_independent_of_active_response_flag() -> None
     }
     binding = {"playback_ack_branches": branches}
 
-    # A shared response owns canonical KV as soon as its queue is open, including prefill.
+    # Legacy queue metadata cannot suppress canonical Q2, including during prefill.
     assert _shared_listener_frame_queue_contract(
         binding,
         voiced,
         response_id="shared",
         user_input_pending=True,
-    ) == (0, "assistant_turn_open", True)
+    ) == (2, None, False)
     # A private BACKCHANNEL never owns canonical Q0, regardless of its queue flag.
     assert _shared_listener_frame_queue_contract(
         binding,
@@ -949,7 +1964,7 @@ def test_unified_thinker_uses_owner_rebased_cursor_only_for_first_append() -> No
     owner_calls = []
     callback_order = []
 
-    class Worker:
+    class Worker(_DecodeBudgetWorkerMixin):
         def __init__(self) -> None:
             self.cursor = 20
             self.cache_identity = object()
@@ -973,6 +1988,7 @@ def test_unified_thinker_uses_owner_rebased_cursor_only_for_first_append() -> No
             self, session_id, token_ids, *, expected_generation_id,
             expected_cache_position, allow_initial_cursor_rebase=False,
             append_scope_id=None, response_cancel_event=None,
+            consume_reserved_tokens=None,
         ):
             callback_order.append(("append", tuple(token_ids)))
             assert session_id == "session"
@@ -1194,7 +2210,7 @@ def test_cancel_during_token0_forward_keeps_late_metrics_local_only() -> None:
     websocket_events: list[dict] = []
     fifo_records: list[dict] = []
 
-    class Worker:
+    class Worker(_DecodeBudgetWorkerMixin):
         def __init__(self) -> None:
             self.cursor = 20
 
@@ -1217,6 +2233,7 @@ def test_cancel_during_token0_forward_keeps_late_metrics_local_only() -> None:
             allow_initial_cursor_rebase=False,
             append_scope_id=None,
             response_cancel_event=None,
+            consume_reserved_tokens=None,
         ):
             token_ids = tuple(int(token_id) for token_id in token_ids)
             assert expected_generation_id == 12
@@ -1329,7 +2346,7 @@ def test_cancel_during_token0_forward_keeps_late_metrics_local_only() -> None:
 
 
 def test_failed_early_say_packet_rolls_back_before_the_next_response() -> None:
-    class Worker:
+    class Worker(_DecodeBudgetWorkerMixin):
         def __init__(self) -> None:
             self.cursor = 20
             self.append_calls: list[tuple[int, ...]] = []
@@ -1358,6 +2375,7 @@ def test_failed_early_say_packet_rolls_back_before_the_next_response() -> None:
             allow_initial_cursor_rebase=False,
             append_scope_id=None,
             response_cancel_event=None,
+            consume_reserved_tokens=None,
         ):
             assert expected_generation_id == 12
             assert expected_cache_position == self.cursor
@@ -1607,7 +2625,23 @@ class _FutureWorker:
         self.drain_open_modes.append(user_turn_already_open)
         self.cursor += self.queued_tokens
         self.queued_tokens = 0
-        return self._done(SimpleNamespace(cache_position=self.cursor))
+        branch = getattr(self, "queue_branch", None)
+        if branch is not None:
+            self.drain_queue_boundary_observation = (
+                branch["queue_open"],
+                branch["queue_epoch_state"]["value"],
+                branch.get("queue_close_epoch"),
+            )
+            lock = branch.get("transition_lock")
+            if lock is not None:
+                acquired = lock.acquire(blocking=False)
+                self.drain_was_submitted_under_transition_lock = not acquired
+                if acquired:
+                    lock.release()
+        return self._done(SimpleNamespace(
+            cache_position=self.cursor,
+            queued_audio_drain_metrics=getattr(self, "drain_metrics", None),
+        ))
 
 
 def _unified_branch(cursor: int, turn_start: int) -> dict[str, object]:
@@ -1639,6 +2673,89 @@ def test_unified_close_capacity_preflight_rolls_back_before_any_close_append() -
     assert worker.cursor == 84
     assert branch["finalized"] is True
     assert branch["queue_open"] is False
+
+
+def test_unified_finalizer_captures_worker_drain_metrics_without_changing_cursor() -> None:
+    worker = _FutureWorker(cursor=70, turn_start=60, capacity=100)
+    worker.drain_metrics = SimpleNamespace(
+        elapsed_ms=17.25,
+        frame_count=3,
+        token_count=6,
+        retained_context_source="assistant_phase_q2_queue",
+        source_frame_ids=(41, 42, 43),
+        queue_response_id="response-finalized",
+        queue_epoch="epoch-2",
+        queue_first_frame_id=41,
+    )
+    branch = _unified_branch(cursor=70, turn_start=60)
+
+    asyncio.run(_finalize_unified_native_cache_branch(
+        worker,
+        "session",
+        branch,
+        history_committed=True,
+        close_ids=(71, 72),
+    ))
+
+    assert worker.cursor == 72
+    flattened_metrics = branch["queued_audio_drain_metrics"]
+    assert flattened_metrics["drain_transition_lock_wait_ms"] >= 0.0
+    assert flattened_metrics["drain_completion_wait_ms"] >= 0.0
+    assert {
+        key: value for key, value in flattened_metrics.items()
+        if key not in {"drain_transition_lock_wait_ms", "drain_completion_wait_ms"}
+    } == {
+        "queued_audio_drain_ms": 17.25,
+        "queued_audio_drain_frames": 3,
+        "queued_audio_drain_tokens": 6,
+        "queued_audio_retained_context_source": "assistant_phase_q2_queue",
+        "queued_audio_source_frame_ids": [41, 42, 43],
+        "queued_audio_response_id": "response-finalized",
+        "queued_audio_epoch": "epoch-2",
+        "queued_audio_first_frame_id": 41,
+        "drain_queue_wait_ms": 0.0,
+        "owner_wait_ms": 0.0,
+        "drain_replay_forward_ms": 0.0,
+        "queued_audio_source_queue_epochs": [],
+        "retained_frames_count": 3,
+        "drain_total_elapsed_ms": 17.25,
+        "queued_audio_queue_open_epoch": None,
+        "queued_audio_queue_close_epoch": 1,
+    }
+
+
+def test_unified_queue_close_epoch_and_drain_submission_share_transition_lock() -> None:
+    worker = _FutureWorker(cursor=70, turn_start=60, capacity=100)
+    transition_lock = threading.Lock()
+    branch = _unified_branch(cursor=70, turn_start=60)
+    branch.update({
+        "transition_lock": transition_lock,
+        "queue_epoch_state": {"value": 9},
+        "queue_open_epoch": 9,
+        "queue_boundary_epoch": 9,
+    })
+    worker.queue_branch = branch
+
+    asyncio.run(_finalize_unified_native_cache_branch(
+        worker,
+        "session",
+        branch,
+        history_committed=True,
+        close_ids=(71, 72),
+    ))
+
+    assert worker.drain_queue_boundary_observation == (False, 10, 10)
+    assert worker.drain_was_submitted_under_transition_lock is True
+    assert branch["queue_open"] is False
+    assert branch["queue_close_epoch"] > branch["queue_open_epoch"]
+    assert isinstance(branch["queue_closed_at_ns"], int)
+    closed_binding = {"playback_ack_branches": {"response": branch}}
+    assert _shared_listener_frame_queue_contract(
+        closed_binding,
+        np.full(1280, 0.02, dtype=np.float32),
+        response_id="response",
+        user_input_pending=False,
+    ) == (2, None, False)
 
 
 def test_unified_close_append_failure_rolls_back_partial_suffix_and_drains_open_turn() -> None:
@@ -1934,13 +3051,13 @@ def test_finish_audio_segment_flushes_packets_then_enqueues_closed_marker() -> N
     assert queued[2][1:] == ("audio", 3)
 
 
-def test_private_backchannel_budget_without_eos_is_discarded_and_slot_released() -> None:
+def test_private_budget_exhaustion_discards_backchannel_and_releases_slot() -> None:
     from duplex_kernel.session import DuplexSession
 
     assert _backchannel_budget_without_eos(
         "BACKCHANNEL", private=True, controller_guided=True,
         terminal_reason="budget_exhausted", cancelled=False
-    ) == "backchannel_budget_without_eos"
+    ) == "backchannel_without_eos"
     assert _backchannel_budget_without_eos(
         "SPEAK", private=True, controller_guided=True,
         terminal_reason="budget_exhausted", cancelled=False
@@ -1948,7 +3065,7 @@ def test_private_backchannel_budget_without_eos_is_discarded_and_slot_released()
     assert _backchannel_budget_without_eos(
         "BACKCHANNEL", private=True, controller_guided=True,
         terminal_reason="cancelled", cancelled=True
-    ) is None
+    ) == "cancelled"
     assert _backchannel_budget_without_eos(
         "BACKCHANNEL", private=False, controller_guided=True,
         terminal_reason="budget_exhausted", cancelled=False
@@ -1960,18 +3077,23 @@ def test_private_backchannel_budget_without_eos_is_discarded_and_slot_released()
 
     published: list[tuple[int, int, str, object]] = []
     buffered = [(0, 7, "sì", object())]
+    assert _backchannel_budget_without_eos(
+        "BACKCHANNEL", private=True, controller_guided=True,
+        terminal_reason="budget_exhausted", cancelled=False,
+        buffered_tokens=buffered,
+    ) == "backchannel_without_eos"
     assert not _publish_backchannel_tokens_after_eos(
         buffered,
         terminal_reason="budget_exhausted",
-        publish=lambda *row: published.append(row),
+        publish_batch=published.append,
     )
     assert published == []
     assert _publish_backchannel_tokens_after_eos(
         buffered,
         terminal_reason="eos",
-        publish=lambda *row: published.append(row),
+        publish_batch=published.append,
     )
-    assert published == [buffered[0]]
+    assert published == [tuple(buffered)]
 
     class Worker:
         def __init__(self) -> None:
@@ -2204,6 +3326,82 @@ def test_unified_cancel_rebuilds_exact_acknowledged_gemma_ids_not_retokenized_te
     assert branch["spoken_prefix_rebuilt"] is True
 
 
+def test_unified_rollback_metrics_separate_physical_rewind_sampled_eos_and_acked_rebuild():
+    worker = _FutureWorker(cursor=178, turn_start=159, capacity=200)
+    branch = _unified_branch(cursor=178, turn_start=159)
+    branch.update({
+        "response_id": "response-rollback-metrics",
+        "session_generation_id": 12,
+        "speaker_segment_id": "segment-rollback-metrics",
+        "transition_token_ids": (100, 101, 102, 103, 104, 105),
+        "generated_token_count": 13,
+        "sampled_generated_token_count": 14,
+        "terminal_reason": "eos",
+        "spoken_prefix_base_cursor": 165,
+        "spoken_prefix_token_ids": (),
+        "spoken_prefix_exclusive_cursor": 165,
+        "spoken_prefix_text": "",
+        "spoken_prefix_text_parts": (),
+        "client_consumed_pcm_sequence": -1,
+        "client_consumed_segments": (),
+        "playback_segments": {
+            "segment-rollback-metrics": {
+                "response_id": "response-rollback-metrics",
+                "generation_id": 12,
+                "speaker_segment_id": "segment-rollback-metrics",
+                "start_sample": 0,
+                "end_sample": 200,
+                "emitted_end_sample": 200,
+                "sample_rate": 24000,
+                "done_emitted": True,
+                "token_packets": (
+                    {"token_id": 501, "exclusive_kv_cursor": 166, "text_piece": "Cia"},
+                    {"token_id": 502, "exclusive_kv_cursor": 167, "text_piece": "o"},
+                    {"token_id": 503, "exclusive_kv_cursor": 168, "text_piece": "!"},
+                ),
+            },
+        },
+    })
+    ack = {
+        "type": "client_consumed_pcm",
+        "response_id": "response-rollback-metrics",
+        "generation_id": 12,
+        "speaker_segment_id": "segment-rollback-metrics",
+        "start_sample": 0,
+        "end_sample": 200,
+        "sample_rate": 24000,
+        "sequence": 1,
+        "consumption_semantics": "logical_client_device_buffer",
+    }
+    assert _record_client_consumed_pcm(branch, ack) is True
+    assert branch["spoken_prefix_token_ids"] == (501, 502, 503)
+    assert branch["spoken_prefix_exclusive_cursor"] == 168
+
+    asyncio.run(_finalize_unified_native_cache_branch(
+        worker,
+        "session",
+        branch,
+        history_committed=False,
+        close_ids=(301, 302),
+    ))
+
+    metrics = branch["rollback_metrics"]
+    assert worker.rollback_targets == [159]
+    assert metrics["physical_rewind_tokens"] == 19
+    assert metrics["committed_generated_tokens"] == 13
+    assert metrics["sampled_generated_tokens"] == 14
+    assert metrics["unappended_terminal_tokens"] == 1
+    assert metrics["transition_tokens_replayed"] == 6
+    assert metrics["acknowledged_source_tokens_replayed"] == 3
+    assert metrics["client_consumed_pcm_ack_sequence"] == 1
+    assert metrics["acknowledged_source_exclusive_cursor"] == 168
+    assert metrics["close_tokens_replayed"] == 2
+    assert metrics["cache_position_before_rewind"] == 178
+    assert metrics["cache_position_after_rebuild"] == 170
+    assert metrics["net_cache_cursor_tokens_removed_after_rebuild"] == 8
+    assert worker.cursor == 170
+
+
 def test_client_consumed_pcm_rejects_stale_identity_and_replayed_sequence() -> None:
     branch = {
         "response_id": "response-current",
@@ -2297,6 +3495,7 @@ def test_segment_done_marker_uses_exact_emitted_range_and_client_schema() -> Non
         start_sample=0,
         end_sample=16,
         packet_id=0,
+        pcm=np.full(16, 0.25, dtype=np.float32),
     )
     _record_emitted_pcm_packet(branch, packet)
     marker = _complete_client_pcm_segment(
@@ -2336,10 +3535,12 @@ def test_emitted_segment_requires_contiguous_packets_and_marker_once() -> None:
     first = SimpleNamespace(
         generation_id=9, speaker_segment_id="segment-marker",
         start_sample=0, end_sample=16, packet_id=0,
+        pcm=np.full(16, 0.25, dtype=np.float32),
     )
     gap = SimpleNamespace(
         generation_id=9, speaker_segment_id="segment-marker",
         start_sample=17, end_sample=24, packet_id=1,
+        pcm=np.full(7, 0.25, dtype=np.float32),
     )
     _record_emitted_pcm_packet(branch, first)
     with pytest.raises(RuntimeError, match="non-contiguous"):
@@ -2385,6 +3586,199 @@ def test_unified_finalizer_retries_one_pending_q0_watermark_without_rolling_back
     assert worker.drain_open_modes == [False]
     assert worker.cursor == 74
     assert branch["history_committed"] is True
+
+
+def test_shared_transition_lock_wait_is_per_row_and_uses_injected_clock() -> None:
+    class Lock:
+        acquired = False
+
+        def acquire(self):
+            self.acquired = True
+
+    stamps = iter((1_000_000, 6_250_000))
+    lock = Lock()
+    tick = DuplexTick(
+        frame_id=4,
+        capture_start_ns=1,
+        capture_end_ns=2,
+        enqueue_ns=3,
+    )
+    tick.listener_batch_id = "batch-4"
+
+    waited_ms = _acquire_shared_transition_lock_with_timing(
+        lock, tick, now_ns=lambda: next(stamps),
+    )
+
+    assert lock.acquired is True
+    assert waited_ms == 5.25
+    assert tick.microbatch_unified_transition_lock_wait_ms == 5.25
+    event = scheduler_tick_trace_metadata(tick)
+    assert event["scheduler_unified_turn_transition_lock_wait_ms"] == 5.25
+    assert event["listener_batch_unified_turn_transition_lock_wait_ms"] == 5.25
+
+
+def test_runtime_metrics_filter_preserves_qwen_clocks_and_finalizer_denominators() -> None:
+    fields = _filter_unified_native_event_metrics({
+        "first_qwen_id_published_at_ns": 100,
+        "qwen_dynamic_prefill_model_entry_at_ns": 145,
+        "qwen_first_id_to_prefill_entry_ms": 0.000045,
+        "qwen_prefill_clock": "server monotonic_ns",
+        "physical_rewind_tokens": 19,
+        "sampled_generated_tokens": 14,
+        "net_cache_cursor_tokens_removed_after_rebuild": 8,
+        "acknowledged_source_token_ids_replayed": [411, 412, 413],
+        "queued_audio_drain_tokens": 62,
+        "queued_audio_source_frame_ids": list(range(42, 73)),
+        "ignored_object": object(),
+    })
+
+    assert fields == {
+        "first_qwen_id_published_at_ns": 100,
+        "qwen_dynamic_prefill_model_entry_at_ns": 145,
+        "qwen_first_id_to_prefill_entry_ms": 0.000045,
+        "qwen_prefill_clock": "server monotonic_ns",
+        "physical_rewind_tokens": 19,
+        "sampled_generated_tokens": 14,
+        "net_cache_cursor_tokens_removed_after_rebuild": 8,
+        "acknowledged_source_token_ids_replayed": [411, 412, 413],
+        "queued_audio_drain_tokens": 62,
+        "queued_audio_source_frame_ids": list(range(42, 73)),
+    }
+
+
+def test_terminal_metrics_projection_omits_full_response_trace() -> None:
+    projected = _compact_unified_native_terminal_metrics({
+        "generation_trace": {"thinker_token_ids": list(range(100_000))},
+        "scheduler": {"queued_ticks": list(range(100_000))},
+        "qwen_prefill": {
+            "qwen_dynamic_prefill_model_entry_at_ns": 145,
+            "qwen_prefill_clock": "server monotonic_ns",
+        },
+        "unified_native_rollback": {"physical_rewind_tokens": 19, "raw_trace": "x" * 10_000},
+        "unified_native_finalizer": {"status": "completed", "queued_audio_drain_tokens": 62},
+        "thinker": {"thinker_token_ids": list(range(100_000))},
+    })
+
+    assert projected == {
+        "qwen_prefill": {
+            "qwen_dynamic_prefill_model_entry_at_ns": 145,
+            "qwen_prefill_clock": "server monotonic_ns",
+        },
+        "unified_native_rollback": {"physical_rewind_tokens": 19},
+        "unified_native_finalizer": {
+            "queued_audio_drain_tokens": 62,
+            "status": "completed",
+        },
+    }
+
+
+def test_unified_native_finalizer_result_is_a_separate_metrics_event() -> None:
+    event = _unified_native_finalizer_event(
+        "response-yield",
+        status="completed",
+        rollback_metrics={"physical_rewind_tokens": 19},
+        drain_metrics={
+            "queued_audio_drain_ms": 324.5,
+            "queued_audio_drain_frames": 31,
+            "queued_audio_drain_tokens": 62,
+            "queued_audio_retained_context_source": "assistant_phase_q2_queue",
+            "queued_audio_source_frame_ids": list(range(42, 73)),
+        },
+    )
+
+    assert event["type"] == "response.unified_native_finalized"
+    assert event["response_id"] == "response-yield"
+    assert event["status"] == "completed"
+    assert event["runtime_metrics"]["unified_native_rollback"]["physical_rewind_tokens"] == 19
+    assert event["runtime_metrics"]["unified_native_finalizer"]["queued_audio_drain_tokens"] == 62
+    assert event["runtime_metrics"]["unified_native_finalizer"]["queued_audio_source_frame_ids"] == list(range(42, 73))
+
+
+def test_unified_native_finalizer_send_keeps_metrics_after_response_cancelled() -> None:
+    sent: list[dict] = []
+    event_metrics = {
+        "unified_native_rollback": _filter_unified_native_event_metrics({
+            "physical_rewind_tokens": 19,
+            "sampled_generated_tokens": 14,
+            "net_cache_cursor_tokens_removed_after_rebuild": 8,
+        }),
+        "unified_native_finalizer": _filter_unified_native_event_metrics({
+            "queued_audio_drain_ms": 320.0,
+            "queued_audio_drain_frames": 31,
+            "queued_audio_drain_tokens": 62,
+            "queued_audio_retained_context_source": "assistant_phase_q2_queue",
+            "queued_audio_source_frame_ids": list(range(42, 73)),
+            "status": "completed",
+        }),
+        "qwen_prefill": _filter_unified_native_event_metrics({
+            "first_qwen_id_published_at_ns": 100,
+            "qwen_dynamic_prefill_model_entry_at_ns": 145,
+            "qwen_prefill_clock": "server monotonic_ns",
+        }),
+    }
+
+    async def send(payload):
+        sent.append(payload)
+        return True
+
+    accepted = asyncio.run(_send_unified_native_finalizer_event(
+        send,
+        "response-yield",
+        status="completed",
+        runtime_metrics=event_metrics,
+    ))
+
+    assert accepted is True
+    assert sent == [{
+        "type": "response.unified_native_finalized",
+        "response_id": "response-yield",
+        "status": "completed",
+        "runtime_metrics": event_metrics,
+    }]
+    assert sent[0]["runtime_metrics"]["qwen_prefill"]["qwen_dynamic_prefill_model_entry_at_ns"] == 145
+    assert sent[0]["runtime_metrics"]["unified_native_rollback"]["net_cache_cursor_tokens_removed_after_rebuild"] == 8
+
+
+def test_unified_native_finalizer_prunes_oversized_metrics_in_one_event_pass(monkeypatch) -> None:
+    sent: list[dict] = []
+    event_metrics = {
+        "qwen_prefill": {"qwen_dynamic_prefill_model_entry_at_ns": 145},
+        "unified_native_rollback": {"physical_rewind_tokens": 19},
+        "unified_native_finalizer": {"status": "completed", "queued_audio_drain_tokens": 62},
+        **{
+            f"phase-{index:03d}": {"physical_rewind_tokens": 10**250}
+            for index in range(100)
+        },
+    }
+    original_dumps = json.dumps
+    event_serializations = 0
+
+    def count_event_serializations(value, *args, **kwargs):
+        nonlocal event_serializations
+        if isinstance(value, dict) and value.get("type") == "response.unified_native_finalized":
+            event_serializations += 1
+        return original_dumps(value, *args, **kwargs)
+
+    monkeypatch.setattr(server_metrics_module.json, "dumps", count_event_serializations)
+
+    async def send(payload):
+        sent.append(payload)
+        return True
+
+    assert asyncio.run(_send_unified_native_finalizer_event(
+        send,
+        "response-yield",
+        status="completed",
+        runtime_metrics=event_metrics,
+    )) is True
+
+    event = sent[0]
+    compact_json = original_dumps(event, separators=(",", ":")).encode("utf-8")
+    assert event_serializations == 1
+    assert len(compact_json) <= 2_048
+    assert event["runtime_metrics"]["unified_native_finalizer"]["status"] == "completed"
+    assert event["runtime_metrics"]["qwen_prefill"]["qwen_dynamic_prefill_model_entry_at_ns"] == 145
+    assert event["runtime_metrics"]["unified_native_rollback"]["physical_rewind_tokens"] == 19
 
 
 def test_unified_finalizer_rolls_back_untracked_cache_advance_before_close() -> None:

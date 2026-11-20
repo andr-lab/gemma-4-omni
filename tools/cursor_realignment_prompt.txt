@@ -1,0 +1,60 @@
+[AGYSTACK TASK SPECIFICATION: CURSOR REALIGNMENT FIX FOR GEMMA-4 OMNI DUPLEX SERVER]
+
+OBJECTIVE:
+Fix the cursor desynchronization bug between `duplex_kernel/server_unified_thinker.py` and `duplex_kernel/server_pcm_tracker.py` that causes client PCM consumption ACKs to be rejected with:
+`rejected token packet ... reason=non_contiguous_cursor token_cursor=804 expected_cursor=798`.
+
+ROOT CAUSE:
+1. In `duplex_kernel/server_unified_thinker.py`, when a Thinker branch initializes, line 67 sets:
+   `branch["client_consumed_prefix_exclusive_cursor"] = int(cache_cursor)`
+   where `cache_cursor` is the listener snapshot position (e.g. 797).
+2. The Thinker appends transition tokens (e.g. 6 tokens, from 797 to 803).
+   When all transition tokens commit (lines 200-205):
+   ```python
+   if transition_tokens_appended == len(private_transition_ids):
+       branch["spoken_prefix_base_cursor"] = committed_cursor
+       branch["spoken_prefix_transition_cursor"] = committed_cursor
+       if not tuple(branch.get("client_consumed_segments", ())):
+           branch["spoken_prefix_exclusive_cursor"] = committed_cursor
+   ```
+   `branch["client_consumed_prefix_exclusive_cursor"]` was NOT updated to `committed_cursor`! It stayed at 797!
+3. In `duplex_kernel/server_pcm_tracker.py`, `_commit_client_consumed_segment()`:
+   Lines 183-195:
+   ```python
+   if branch.get("client_consumed_prefix_exclusive_cursor") is not None:
+       consumed_cursor = int(branch["client_consumed_prefix_exclusive_cursor"])
+   ```
+   Because `client_consumed_prefix_exclusive_cursor` is already 797, it used 797.
+   Then for the first segment packet (packet 0, token_cursor=804):
+   `expected_cursor = consumed_cursor + 1 = 798`.
+   `804 != 798`, raising `non_contiguous_cursor` and rejecting the ACK!
+
+REQUIRED MODIFICATIONS:
+1. `duplex_kernel/server_unified_thinker.py`:
+   - In lines 200-205, when `transition_tokens_appended == len(private_transition_ids)`:
+     If `not tuple(branch.get("client_consumed_segments", ())):`, also update:
+     `branch["client_consumed_prefix_exclusive_cursor"] = committed_cursor`
+     This ensures that before any client segment has been consumed, committing transition tokens advances `client_consumed_prefix_exclusive_cursor` to the committed cursor alongside `spoken_prefix_exclusive_cursor`.
+
+2. `duplex_kernel/server_pcm_tracker.py`:
+   - In `_commit_client_consumed_segment(branch, ack_event)` (around line 183):
+     If no segments have been consumed yet (`not tuple(branch.get("client_consumed_segments", ())):`):
+       - If `packets` has valid `exclusive_kv_cursor` on `packets[0]`, set `consumed_cursor = int(packets[0]["exclusive_kv_cursor"]) - 1`.
+       - Else if `branch.get("spoken_prefix_base_cursor") is not None`, set `consumed_cursor = int(branch["spoken_prefix_base_cursor"])`.
+       - Else if `branch.get("client_consumed_prefix_exclusive_cursor") is not None`, set `consumed_cursor = int(branch["client_consumed_prefix_exclusive_cursor"])`.
+       - Else set `consumed_cursor = int(branch.get("turn_start_cache_position", 0))`.
+     Else (when `branch.get("client_consumed_segments")` is non-empty, i.e. segment 2 and beyond):
+       - If `branch.get("client_consumed_prefix_exclusive_cursor") is not None`, set `consumed_cursor = int(branch["client_consumed_prefix_exclusive_cursor"])`.
+       - Else if `packets` has valid `exclusive_kv_cursor` on `packets[0]`, set `consumed_cursor = int(packets[0]["exclusive_kv_cursor"]) - 1`.
+       - Else if `branch.get("spoken_prefix_base_cursor") is not None`, set `consumed_cursor = int(branch["spoken_prefix_base_cursor"])`.
+       - Else set `consumed_cursor = int(branch.get("turn_start_cache_position", 0))`.
+
+3. `tests/kernel/test_client_consumed_pcm_ack.py`:
+   - Add unit test `test_first_segment_with_stale_pre_transition_client_consumed_cursor_succeeds()`:
+     Initialize branch with `client_consumed_prefix_exclusive_cursor = 797`, `spoken_prefix_base_cursor = 803`, and pass a segment whose packet 0 has `exclusive_kv_cursor = 804`.
+     Verify that `_record_client_consumed_pcm` succeeds (returns True), commits the segment, and updates `client_consumed_prefix_exclusive_cursor` to 804.
+
+4. VERIFICATION:
+   Run:
+   `.venv\Scripts\python.exe -m pytest -v tests/kernel/test_client_consumed_pcm_ack.py`
+   All unit tests must pass.

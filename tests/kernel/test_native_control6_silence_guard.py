@@ -42,7 +42,7 @@ def test_native_callback_uses_one_speaking_snapshot_for_mask_input_and_no_input(
     expected_speaking: bool,
 ) -> None:
     # The callback snapshots active_response/control_state once and passes this
-    # result to legality, PolicyInput, and exact-zero handling.
+    # result to legality and PolicyInput while retaining the genuine hidden.
     policy_speaker_active = _native_control6_speaker_active(
         active_response=active_response,
         control_state=control_state,
@@ -70,16 +70,13 @@ def test_native_callback_uses_one_speaking_snapshot_for_mask_input_and_no_input(
     assert policy_input.legal_actions == (
         ("CONTINUE", "YIELD") if expected_speaking else ("LISTEN", "BACKCHANNEL", "SPEAK")
     )
-    assert no_input_tick is expected_speaking
-    assert policy_hidden is (None if expected_speaking else listener_hidden)
-    if expected_speaking:
-        assert _native_control6_decision_has_valid_input(
-            fresh_hidden=False,
-            no_input_tick=no_input_tick,
-            speaker_active=policy_input.speaker_active,
-            action="CONTINUE",
-            legal_actions=policy_input.legal_actions,
-        )
+    assert no_input_tick is False
+    assert policy_hidden is listener_hidden
+    assert _native_control6_decision_has_valid_input(
+        fresh_hidden=True, no_input_tick=no_input_tick,
+        speaker_active=policy_input.speaker_active, action="CONTINUE",
+        legal_actions=policy_input.legal_actions,
+    )
 
 
 def test_native_endpoint_bypass_excludes_legacy_control6() -> None:
@@ -94,13 +91,13 @@ def test_native_endpoint_bypass_excludes_legacy_control6() -> None:
 @pytest.mark.parametrize(
     ("pcm", "speaker_active", "expected_no_input"),
     [
-        (np.zeros(POLICY_FRAME_SAMPLES, dtype=np.float32), True, True),
+        (np.zeros(POLICY_FRAME_SAMPLES, dtype=np.float32), True, False),
         (np.zeros(POLICY_FRAME_SAMPLES, dtype=np.float32), False, False),
         (np.full(POLICY_FRAME_SAMPLES, 0.01, dtype=np.float32), True, False),
         (np.zeros(POLICY_FRAME_SAMPLES - 1, dtype=np.float32), True, False),
     ],
 )
-def test_exact_zero_active_frame_is_no_input_without_hiding_listener_conditioning(
+def test_exact_zero_active_frame_preserves_listener_hidden(
     pcm: np.ndarray,
     speaker_active: bool,
     expected_no_input: bool,
@@ -117,8 +114,8 @@ def test_exact_zero_active_frame_is_no_input_without_hiding_listener_conditionin
     assert policy_hidden is (None if expected_no_input else listener_hidden)
 
 
-def test_native_no_input_decision_only_allows_legal_continue_while_speaking() -> None:
-    assert _native_control6_decision_has_valid_input(
+def test_native_no_input_flag_cannot_authorize_continue_without_hidden() -> None:
+    assert not _native_control6_decision_has_valid_input(
         fresh_hidden=False,
         no_input_tick=True,
         speaker_active=True,

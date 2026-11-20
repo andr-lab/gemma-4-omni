@@ -519,7 +519,13 @@ class Code2WavWindowGraph:
 
     @torch.inference_mode()
     def decode(self, codes: torch.Tensor) -> torch.Tensor:
-        if not self.captured or self.graph is None or self.static_codes is None or self.static_audio is None:
+        if (
+            not self.captured
+            or self.graph is None
+            or self.static_codes is None
+            or self.static_audio is None
+            or self.capture_stream is None
+        ):
             raise RuntimeError("Code2WavWindowGraph non catturato")
         if tuple(codes.shape) != (1, self.window_frames, 16):
             raise ValueError(
@@ -529,8 +535,22 @@ class Code2WavWindowGraph:
             raise ValueError(f"Code2Wav codes dtype {codes.dtype} != torch.long")
         if codes.device != self.device:
             raise ValueError(f"Code2Wav codes device {codes.device} != {self.device}")
+
+        caller_stream = torch.cuda.current_stream(device=self.device)
+        capture_stream = self.capture_stream
         self.static_codes.copy_(codes, non_blocking=True)
-        self.graph.replay()
+        same_stream = int(caller_stream.cuda_stream) == int(capture_stream.cuda_stream)
+        if not same_stream:
+            # The static input copy runs on the caller. Replay must wait for it,
+            # and the caller must wait for graph output before cloning the tail.
+            capture_stream.wait_stream(caller_stream)
+        try:
+            self.graph.replay()
+        finally:
+            completion_event = torch.cuda.Event(enable_timing=False, blocking=False)
+            completion_event.record(capture_stream)
+            if not same_stream:
+                caller_stream.wait_event(completion_event)
         self.replays += 1
         # Copy the newly decoded tail before this slot can replay again. EOS
         # flush can contain one pending frame, so a one-frame exact graph owns

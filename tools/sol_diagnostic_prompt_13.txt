@@ -1,0 +1,107 @@
+# RICHIESTA DIAGNOSI ARCHITETTURALE E CONTRATTI: GPT 6.1 SOL (MEDIUM EFFORT)
+
+## 1. Stato del Sistema e Risultati Raggiunti
+Siamo nella pipeline full-duplex omni per Gemma 4 su host Mondaini (NVIDIA GeForce RTX 3090 24GB VRAM, Docker container `gemma4-speech-s2s-readyframes-20261102`).
+Tutti i 141 test unitari/kernel passano regolarmente (`tests/kernel/`).
+I grafi CUDA nativi Q1 con capacità 1536 e Code2Wav window graph (74 frame) sono catturati e pronti al boot.
+Abbiamo corretto:
+1. L'inversione di lock in `run_talker_gpu_step`: ora acquisisce `listener_compute_quantum()` prima di `_thinker_lock`.
+2. Il vocoder Code2Wav è stato disaccoppiato da `_thinker_lock` (eseguito con `thinker_lock=False`), trattenendo solo il compute permit CUDA.
+3. La serializzazione quadratica delle metriche in `server_metrics.py` e la sostituzione con metriche terminali compatte `unified_native_terminal_metrics_event` sul canale WebSocket.
+
+## 2. Risultati della Nuova Suite di Accettazione a 3 Run (Artifact: `artifacts/acceptance_suite_20261104T001943152237Z`)
+Abbiamo lanciato l'acceptance suite ufficiale a 3 run consecutive (`tools/run_acceptance_suite.py --runs 3 --container gemma4-speech-s2s-readyframes-20261102 --execution docker`).
+
+### Progressi Verificati:
+- **Zone 1 (inizio turno lungo, frame ~412/413) è COMPLETAMENTE RISOLTA:** nessun picco di ACK gap a inizio turno. I primi 1000+ frame scorrono con ACK gap stabili tra 40 e 80 ms.
+- **TTFT eccellente (<= 800 ms).**
+- **VRAM post-drain verificata e bounded:** in Run 2 crescita allocata di soli 38.6 MiB (budget 256 MiB), reserved 32 MiB; in Run 3 crescita allocata di 50.0 MiB, reserved 6 MiB.
+- **Tutti i frame inviati sono stati ricevuti e ackati al 100%:**
+  - Run 1: 2355 frame inviati, 2355 ackati (100%). Playout duration 192.47s.
+  - Run 2: 2254 frame inviati, 2254 ackati (100%).
+  - Run 3: 2627 frame inviati, 2627 ackati (100%). Playout duration 214.81s.
+
+### L'Unico Blocco Rimanente: Spike di ACK Gap al Confine della Conclusione del Turno
+In tutte e 3 le run, si verifica un unico e solo picco di ACK gap che sfora la soglia di 160.0 ms, ed avviene esattamente al confine temporale in cui la risposta lunga finisce di generare (Thinker/Talker done) e il client completa la riproduzione:
+
+- **Run 1:**
+  - `playout_completed_ns`: 6535721706515023
+  - Frame 2700: ricevuto a 6535721581245144 (ACK latency 66.1 ms)
+  - Frame 2701: ricevuto a 6535721783352872 (ACK latency 186.3 ms)
+  - **ACK Gap:** **202.1 ms** (`max_input_ack_gap_pair`: Frame 2700 -> Frame 2701)
+  - Frame 2702 arriva poco dopo con gap normale.
+
+- **Run 2:**
+  - `playout_completed_ns`: 6535922599494331
+  - Frame 2254: ricevuto a 6535922483745549
+  - Frame 2255: ricevuto a 6535922746582860
+  - **ACK Gap:** **262.8 ms** (`max_input_ack_gap_pair`: Frame 2254 -> Frame 2255)
+
+- **Run 3:**
+  - `playout_completed_ns`: 6536182487657122
+  - Frame 2972: ricevuto a 6536182386438540
+  - Frame 2973: ricevuto a 6536182589796019
+  - **ACK Gap:** **203.4 ms** (`max_input_ack_gap_pair`: Frame 2972 -> Frame 2973)
+
+---
+
+## 3. Evidenza Forense di Precisione (da `server.log` ed `events.jsonl` su Run 1)
+
+Ispezionando i log dettagliati di Frame 2701 in Run 1:
+```json
+{
+  "listener_frame_id": 2701,
+  "scheduler_enqueue_ns": 6535721597827978,
+  "scheduler_listener_start_ns": 6535721598053301,
+  "scheduler_listener_end_ns": 6535721774294392,
+  "listener_batch_queue_wait_ms": 0.225,
+  "listener_batch_compute_ms": 176.241,
+  "scheduler_listener_callback_ms": 176.241,
+  "listener_batch_frontend_encode_ms": 2.317,
+  "listener_batch_audio_tower_cuda_ms": 1.971,
+  "listener_batch_native_submit_ms": 46.719,
+  "listener_batch_native_cuda_ms": 44.94,
+  "listener_batch_native_output_health_ms": 17.09,
+  "listener_batch_control6_policy_ms": 65.447,
+  "listener_batch_cuda_completion_wait_ms": 6.826,
+  "scheduler_commit_state_lock_hold_ms": 0.096,
+  "server_listener_queue_ms": 180.917
+}
+```
+
+### Osservazioni Chiave:
+1. **Nessun ritardo di accodamento:** Il frame è stato accodato a `...1597827978` e il batch compute è iniziato subito a `...1598053301` (`queue_wait_ms: 0.225 ms`).
+2. **Il tempo di calcolo del listener è esploso:** `listener_batch_compute_ms` è balzato a **176.241 ms** (normalmente è 40-50 ms)!
+3. **Inflazione simultanea di TUTTE le fasi del batch:**
+   - `listener_batch_native_submit_ms`: 46.719 ms (normalmente ~22 ms)
+   - `listener_batch_native_cuda_ms`: 44.94 ms (normalmente ~21-23 ms)
+   - `listener_batch_native_output_health_ms`: 17.09 ms (normalmente ~0.08 ms)
+   - `listener_batch_control6_policy_ms`: 65.447 ms (normalmente ~2-4 ms; CPU thread time 16.5 ms, wall time 65.4 ms)
+   - `listener_batch_cuda_completion_wait_ms`: 6.826 ms
+4. **Cosa stava succedendo in parallelo sul server in quei precisi millisecondi?**
+   - A `00:23:25,118`: Frame 2701 esegue il batch.
+   - A `00:23:25,168`: `[duplex_kernel.server] [realtime c35b1619 resp_bac9d81a8744] Thinker/Talker done elapsed=193.14s`.
+   - Il thread dell'inferenza termina il ciclo `infer_ws` (Talker EOS stop), rilascia `engine_synthesis_owner.release()`.
+   - L'event loop asyncio esegue `playout.flush_segment()`, `packetizer.flush_segment()`, invia gli ultimi frame audio.
+   - Il client invia contemporaneamente una raffica di eventi `client_consumed_pcm` (10 messaggi in 100 ms).
+   - A `00:23:25,381` (262 ms dopo): il server invia `response.audio.segment_done`, poi `response.done`, poi `response.unified_native_finalized`.
+   - Su Frame 2701, `turn_generation_id` passa da 0 a 1 e `native_control6_peer_turn_active` passa da `True` a `False`.
+
+---
+
+## 4. Domande di Diagnosi Architetturale per GPT 6.1 Sol
+
+1. **Causa Radice dell'Inflazione di Calcolo del Listener:**
+   Perché il tempo di calcolo complessivo del worker (`listener_batch_compute_ms`) raddoppia o triplica (da ~45 ms a 176 ms) esattamente nel momento in cui il Thinker/Talker raggiunge EOS/done e l'inferenza si conclude?
+   - C'è contesa di GIL Python tra i thread del server (es. ricezione di `client_consumed_pcm`, flush dei segmenti, finalizzatore) e il worker del listener microbatch?
+   - C'è sincronizzazione CUDA implicita (ad es. `verify_output_health` che impiega 17 ms a leggere `gemma4_listener_batch_output_health`, o stream sync/event wait durante la chiusura del talker/code2wav)?
+   - C'è contesa di lock (`sess._generation_lock`, `model_lock`, o scheduler locks)?
+
+2. **Perché `control6_policy_ms` sale a 65.4 ms (CPU thread time 16.5 ms, wall 65 ms)?**
+   In `gemma_native_control6_batch_policy.py`, `_step_policy_context_views` esegue `adapter(model_hidden, phase_t=model_phase)`. Cosa blocca il thread per 48 ms di tempo non-CPU durante la policy evaluation?
+
+3. **Strategia Architetturale di Risoluzione e Contratti di Disaccoppiamento:**
+   Come possiamo proteggere e disaccoppiare in modo deterministico il thread del worker del listener in modo che `listener_batch_compute_ms` rimanga rigorosamente <= 60 ms anche durante la chiusura del turno Talker e la finalizzazione della risposta?
+   Quali modifiche minime, rigorose e contrattualmente sicure devono applicare i worker GPT-6 Luna Max Effort?
+
+Scrivi la tua diagnosi dettagliata con file, numeri di riga e soluzioni concrete in `tools/sol_diagnosis_output_7.md`.

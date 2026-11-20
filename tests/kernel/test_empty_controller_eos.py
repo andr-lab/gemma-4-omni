@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from duplex_kernel.backchannel_guard import BACKCHANNEL_MAX_TEXT_TOKENS
 from duplex_kernel.server import (
     _controller_guided_say_generation_options,
     _empty_controller_say_think_from_eos,
@@ -60,4 +61,9 @@ def test_production_controller_generation_options_reach_thinker_for_speak_and_ba
             max_new_tokens=int(request_options["max_tokens"]),
             min_new_tokens=int(request_options["_min_new_tokens"]),
         )
-        assert engine.calls[-1] == {"max_new_tokens": 256, "min_new_tokens": 1}
+        expected = (
+            {"max_new_tokens": 256, "min_new_tokens": 1}
+            if action == ControlAction.SPEAK
+            else {"max_new_tokens": BACKCHANNEL_MAX_TEXT_TOKENS, "min_new_tokens": 0}
+        )
+        assert engine.calls[-1] == expected

@@ -34,7 +34,7 @@ Comportamento guidato da test snelli e mirati: RED -> GREEN -> REFACTOR.
 
 ## Esecuzione su RTX 3090 (Host `mondaini` via Docker)
 
-L'esecuzione avviene sulla macchina remota Linux con NVIDIA GeForce RTX 3090 (24GB VRAM), raggiungibile via SSH (host `mondaini`).
+L'esecuzione avviene sulla macchina remota Linux con NVIDIA GeForce RTX 3090 (24GB VRAM), raggiungibile via SSH (skill: `mondaini`).
 
 ### Vincoli operativi e di sicurezza (obbligatori)
 - **Container non-root**: eseguire sempre come utente `uid:gid 1000:1000` (`appuser`) per garantire che i file creati nei volumi montati mantengano permessi coerenti.
@@ -44,26 +44,3 @@ L'esecuzione avviene sulla macchina remota Linux con NVIDIA GeForce RTX 3090 (24
   - MAI usare `--network host`. Per il serving REST usare esclusivamente il port mapping esplicito `-p 8000:8000`.
 - **Volume di lavoro**: montare sempre il repository host in `/workspace` (`-v /home/administrator/gemma-4-omni:/workspace`).
 - **Preservazione dei Checkpoint**: MAI cancellare o sovrascrivere checkpoint in `checkpoints/` (inclusi adapter QLoRA e Projector FiLM v2) senza esplicita richiesta dell'utente.
-
-### Comandi standard su `mondaini`
-```bash
-# Avvio del servizio speech di produzione
-./start_speech_service_3090.sh
-
-# Verifica health endpoint
-curl -s http://localhost:8000/health
-```
-
----
-
-## Delega Operativa a Codex CLI (GPT-6 Luna xhigh)
-
-Tutte le implementazioni complesse non banali (> 50 righe, logica core multi-file, refactoring estesi) vengono affidate a **Codex CLI** con modello **`gpt-6-luna`** a massimo sforzo di ragionamento (**`xhigh`**).
-
-### Regole di Delega
-1. **Modello e Ragionamento**: usare rigorosamente `gpt-6-luna` con reasoning `xhigh`.
-2. **Timeout Illimitato**: non impostare timeout artificiali brevi; lasciare a Codex il tempo necessario per il completamento.
-3. **Contratti Tecnici Rigorosi**: passare a Codex specifiche deterministiche, interfacce, vincoli e criteri di verifica; non delegare decisioni architetturali di alto livello aperte.
-4. **Strumento di Esecuzione**:
-   `$null | codex exec -m gpt-6-luna -c model_reasoning_effort="xhigh" --dangerously-bypass-approvals-and-sandbox -C "<workspace>" "<task_spec>"`
-   oppure tramite lo script dedicato in `tools/codex_orchestrator.py`.

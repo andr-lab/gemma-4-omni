@@ -1,0 +1,14 @@
+{
+  "source": "/workspace/artifacts/test/service_audit_20261026/barge_isolated/response_resp_5a22d1ee5431_playout.wav",
+  "model": "faster-whisper-small",
+  "device": "cpu",
+  "transcript": "ci Gherto prenditi il tuo tempo",
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 6.0,
+      "text": " ci Gherto prenditi il tuo tempo"
+    }
+  ],
+  "elapsed_seconds": 3.7366584995761514
+}

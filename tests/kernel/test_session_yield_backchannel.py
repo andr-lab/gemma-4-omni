@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 import torch
+from tokenizers import Tokenizer, models, pre_tokenizers
 
 from duplex_kernel.session import (
     DuplexKVCacheProxy,
@@ -20,6 +21,11 @@ class DummyGemmaEngine:
         self.embedded_tokens_calls: list[tuple[int, ...]] = []
         self.forward_steps: list[dict[str, Any]] = []
         self.backchannel_calls: list[dict[str, Any]] = []
+        self.terminal_reason = "eos"
+        self.tokenizer = Tokenizer(models.WordLevel(
+            {"[UNK]": 0, "Capito.": 1}, unk_token="[UNK]"
+        ))
+        self.tokenizer.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
 
     def embed_tokens(self, token_ids: tuple[int, ...]) -> torch.Tensor:
         self.embedded_tokens_calls.append(tuple(token_ids))
@@ -43,16 +49,20 @@ class DummyGemmaEngine:
         *,
         session_id: Any,
         start_kv_pos: int,
-        max_tokens: int = 2,
-    ) -> tuple[list[int], torch.Tensor]:
+        max_tokens: int = 6,
+    ) -> dict[str, Any]:
         self.backchannel_calls.append({
             "session_id": session_id,
             "start_kv_pos": start_kv_pos,
             "max_tokens": max_tokens,
         })
-        tokens = [9991, 9992][:max_tokens]
+        tokens = [1][:max_tokens]
         hiddens = torch.ones((1, len(tokens), 1536), dtype=torch.float32)
-        return tokens, hiddens
+        return {
+            "gen_ids": tokens,
+            "hidden": hiddens,
+            "terminal_reason": self.terminal_reason,
+        }
 
 
 class MockSpeaker:
@@ -248,14 +258,41 @@ def test_handle_ephemeral_backchannel_preserves_audio_kv_pos() -> None:
 
     bc_tokens, bc_hiddens = manager.handle_ephemeral_backchannel(session_id)
 
-    assert bc_tokens == [9991, 9992]
+    assert bc_tokens == [1]
     assert len(speaker.enqueued_bc) == 1
-    assert speaker.enqueued_bc[0][0] == [9991, 9992]
+    assert speaker.enqueued_bc[0][0] == [1]
 
     # Crucial property: KV cache position was restored to saved position (50)
     assert session.kv_cache.current_position == 50
     assert len(engine.backchannel_calls) == 1
     assert engine.backchannel_calls[0]["start_kv_pos"] == 50
+    assert engine.backchannel_calls[0]["max_tokens"] == 6
+
+
+def test_backchannel_response_keeps_pending_user_onset_for_causal_endpoint_release() -> None:
+    session = DuplexSession("pending-user-turn")
+    assert session.observe_user_onset(42) is True
+
+    session.reset_backchannel_response()
+
+    assert session.pending_user_onset_frame_id == 42
+    assert session.reserved_user_onset_frame_id is None
+    assert session.last_answered_onset_frame_id is None
+
+
+@pytest.mark.parametrize("terminal_reason", ["length", "budget_exhausted", "structure"])
+def test_handle_ephemeral_backchannel_omits_without_natural_eos(terminal_reason: str) -> None:
+    engine = DummyGemmaEngine()
+    engine.terminal_reason = terminal_reason
+    manager = SessionManager(gemma_engine=engine)
+    session = manager.create_session()
+    speaker = MockSpeaker()
+    session.speaker = speaker
+    session.kv_cache.current_position = 50
+
+    assert manager.handle_ephemeral_backchannel(session.session_id) is None
+    assert speaker.enqueued_bc == []
+    assert session.kv_cache.current_position == 50
 
 
 def test_session_manager_int_and_str_session_ids() -> None:

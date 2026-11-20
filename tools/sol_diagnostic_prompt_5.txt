@@ -1,0 +1,107 @@
+Sei GPT 6.1 Sol (medium reasoning effort), consulente architetturale senior per il progetto Gemma 4 Full-Duplex Omni Pipeline.
+
+Il coordinatore richiede la tua diagnosi architetturale e la specifica tecnica di soluzione per due errori emersi durante la suite di accettazione a 3 run consecutive (`tools/run_acceptance_suite.py --runs 3`).
+
+### Contesto Operativo
+- Modello duplex: Gemma-4-Omni servito su GPU NVIDIA RTX 3090 (24GB VRAM) in container Docker (`gemma4-listener-attempt9-implementation-fixes-20261024`).
+- Obiettivo: 3 run consecutive della suite di accettazione completate con esito complessivo PASS (`overall_status: PASS`).
+- Stato attuale:
+  - Run 1: PASS pulito! (telemetry_samples: 748, errors: 0, ACK gap max: 124.7 ms < 160 ms, VRAM growth: ~65 MiB < 256 MiB).
+  - Run 2: FALLITA durante il Turn 1 con eccezione runtime:
+    `ValueError: Qwen [3:-5] raw text IDs do not reconstruct canonical h_txt`
+  - Run 3: FALLITA con errore WebSocket:
+    `INFERENCE_ERROR: audio response protocol v2 rejected: no_legal_candidate_within_top64`
+
+---
+
+### Dettaglio Errore 1 (Run 2)
+Stack trace da `server.log`:
+```
+2026-10-30T15:41:32.051928332Z   File "/workspace/artifacts/runtime/system_convergence_final_20261023_rerun6/source/duplex_kernel/server_response_runtime.py", line 1803, in run_response
+2026-10-30T15:41:32.051934032Z     think = _run_unified_native_thinker(...)
+2026-10-30T15:41:32.052042334Z   File "/workspace/artifacts/runtime/system_convergence_final_20261023_rerun6/source/duplex_kernel/server_unified_thinker.py", line 711, in timed_token_packet_callback
+2026-10-30T15:41:32.052047944Z     result = token_packet_callback(generated)
+2026-10-30T15:41:32.052058274Z   File "/workspace/artifacts/runtime/system_convergence_final_20261023_rerun6/source/duplex_kernel/server_response_runtime.py", line 1261, in live_say_native_token_packet
+2026-10-30T15:41:32.052069644Z   File "/workspace/artifacts/runtime/system_convergence_final_20261023_rerun6/source/duplex_kernel/server_response_runtime.py", line 1204, in live_say_generated_token
+2026-10-30T15:41:32.052075444Z     sealed_initial = _feed_unified_v1_say_packet(...)
+2026-10-30T15:41:32.052085844Z   File "/workspace/artifacts/runtime/system_convergence_final_20261023_rerun6/source/duplex_kernel/server_speech_ack.py", line 463, in _feed_unified_v1_say_packet
+2026-10-30T15:41:32.052091494Z     return live_stream.feed_piece(...)
+2026-10-30T15:41:32.052101664Z   File "/workspace/artifacts/runtime/system_convergence_final_20261023_rerun6/source/duplex_kernel/live_say.py", line 1213, in feed_piece
+2026-10-30T15:41:32.052107205Z     return self._feed_piece(...)
+2026-10-30T15:41:32.052117355Z   File "/workspace/artifacts/runtime/system_convergence_final_20261023_rerun6/source/duplex_kernel/live_say.py", line 1593, in _feed_piece
+2026-10-30T15:41:32.052122985Z     ) = self._cached_segmented_alignment(snapshot, canonical_data)
+2026-10-30T15:41:32.052133595Z   File "/workspace/artifacts/runtime/system_convergence_final_20261023_rerun6/source/duplex_kernel/live_say.py", line 1010, in _cached_segmented_alignment
+2026-10-30T15:41:32.052146425Z     tail_ids, local_offsets = qwen_assistant_text_offsets(tokenizer, canonical_text)
+2026-10-30T15:41:32.052157015Z   File "/workspace/artifacts/runtime/system_convergence_final_20261023_rerun6/source/duplex_kernel/response_intent_local.py", line 129, in qwen_assistant_text_offsets
+2026-10-30T15:41:32.052162735Z     raise ValueError("Qwen [3:-5] raw text IDs do not reconstruct canonical h_txt")
+ValueError: Qwen [3:-5] raw text IDs do not reconstruct canonical h_txt
+```
+
+Nel codice di `duplex_kernel/response_intent_local.py`:
+```python
+QWEN_ASSISTANT_PREFIX = "<|im_start|>assistant\n"
+QWEN_ASSISTANT_SUFFIX = "<|im_end|>\n"
+
+def qwen_assistant_text_offsets(
+    tokenizer: Any,
+    text: str,
+) -> tuple[list[int], list[tuple[int, int]]]:
+    prompt = f"{QWEN_ASSISTANT_PREFIX}{text}{QWEN_ASSISTANT_SUFFIX}"
+    encoding = tokenizer(
+        prompt,
+        add_special_tokens=False,
+        return_offsets_mapping=True,
+    )
+    ids: list[int] = list(encoding.input_ids)
+    char_offsets: list[tuple[int, int]] = [
+        (int(start), int(end)) for start, end in encoding.offset_mapping
+    ]
+    raw_ids = ids[3:-5]
+    raw_full_offsets = char_offsets[3:-5]
+    text_start = len(QWEN_ASSISTANT_PREFIX)
+    text_end = text_start + len(text)
+    raw_offsets: list[tuple[int, int]] = []
+    for start, end in raw_full_offsets:
+        clipped_start = max(start, text_start)
+        clipped_end = min(end, text_end)
+        if clipped_end <= clipped_start:
+            raise ValueError("Qwen raw-text token has no character overlap with h_txt")
+        raw_offsets.append((clipped_start - text_start, clipped_end - text_start))
+    if not raw_ids or len(raw_ids) != len(raw_offsets):
+        raise ValueError("Qwen raw-text token IDs and offsets are empty or misaligned")
+    decoded = tokenizer.decode(
+        raw_ids,
+        skip_special_tokens=False,
+        clean_up_tokenization_spaces=False,
+    )
+    if decoded != text:
+        raise ValueError("Qwen [3:-5] raw text IDs do not reconstruct canonical h_txt")
+    return raw_ids, raw_offsets
+```
+
+---
+
+### Dettaglio Errore 2 (Run 3)
+In `duplex_kernel/thinker_sampler.py:250`:
+```python
+        for candidate_id in candidate_ids:
+            # valuta legalità dei token candidati top64
+            ...
+        if not legal_pool:
+            if fallback_id is not None:
+                ...
+                return torch.tensor([[fallback_id]], device=self.device, dtype=torch.long), fallback_id, candidate_scores
+        raise AudioResponseProtocolError("no_legal_candidate_within_top64")
+```
+Durante la generazione di risposta audio v2, tutti i candidati nei top-64 sono stati respinti come illegali (o nessun fallback valido era disponibile per chiudere la struttura forzata), lanciando `AudioResponseProtocolError("no_legal_candidate_within_top64")`.
+
+---
+
+### Richiesta per Sol
+1. Fornisci la diagnosi analitica delle cause scatenanti di entrambi i fallimenti:
+   - Perché `qwen_assistant_text_offsets` fallisce l'asserzione `decoded != text` con slicing rigido `[3:-5]` per certi testi/frammenti generati? Come determinare in modo deterministico e robusto i token appartenenti a `text` senza assunzioni rigide sull'offset dei token speciali o sul merge di spazi con il prefisso/suffisso?
+   - Perché `thinker_sampler.py` esaurisce i 64 candidati senza trovare un candidato legale o un fallback valido? Qual è la corretta logica di fallback o di gestione dei token consentiti dal protocollo di risposta audio v2?
+2. Definisci la soluzione architetturale e le istruzioni esatte per l'implementazione da parte del worker GPT-6 Luna Max, specificando:
+   - File esatti da modificare.
+   - Contratti, firme, gestione dei casi limite e test unitari di regressione da aggiungere.
+   - Garanzie di preservazione delle performance (ACK gap $< 160$ ms, memoria VRAM $< 256$ MiB).

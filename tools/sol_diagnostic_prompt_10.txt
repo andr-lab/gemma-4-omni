@@ -1,0 +1,124 @@
+# RICHIESTA DIAGNOSI ARCHITETTURALE E CONTRATTO: GPT 6.1 SOL (MEDIUM EFFORT)
+
+## 1. Contesto del Sistema e Stato di Avanzamento
+Siamo nella pipeline full-duplex omni per Gemma 4 su GPU NVIDIA RTX 3090 (24GB VRAM, host `mondaini`).
+Stiamo portando a completamento `PLAN.md` validando il sistema tramite la suite di accettazione:
+`python3 tools/run_acceptance_suite.py --runs 3 --container gemma4-speech-s2s-readyframes-20261102 --execution docker`
+
+### Progressi confermati:
+- La tua precedente soluzione architetturale (`TerminalResponseArchive` FIFO a 64 record in `duplex_kernel/server.py` e relativo consumo in `tools/acceptance_telemetry.py`) è stata implementata con successo da GPT-6 Luna ed è stata convalidata con 9 test unitari su Mondaini (`tests/kernel/test_terminal_response_archive.py`: 9/9 PASS).
+- L'evidence gap della VRAM (`runtime VRAM telemetry lacks measured allocated/reserved baseline, active, peak, or per-turn post-drain values`) è **100% RISOLTO**. Non compare più alcun errore o gap relativo alla telemetria VRAM nei report di runtime!
+
+---
+
+## 2. Il Blocco Rilevato nel Run 1
+Nel Run 1 (`acceptance_suite_20261102T205147331301Z`), il sistema ha girato per 88 secondi durante il Turno 1 (la risposta lunga a `long_backpressure_prompt.wav`), inviando e riconoscendo con successo oltre 754 frame microfonici continui.
+Tuttavia, la suite è fallita con una singola eccezione di jitter al frame 664:
+`EvidenceError: long response microphone ACK gap 161.9ms reached the 160.0ms limit`
+
+La soglia di accettazione è 160.0 ms. Il frame 664 ha registrato **161.901 ms**, superando il limite di appena **1.9 ms**.
+
+---
+
+## 3. Evidenze Empiriche Raccolte e Misure Deterministiche
+
+### 3.1 Gap tra frame 663 e frame 664
+Dal log eventi del simulatore (`events.jsonl`):
+- ACK frame 663 ricevuto dal client (`ws_received_ns`): `6436679391745144`
+- ACK frame 664 ricevuto dal client (`ws_received_ns`): `6436679553646912`
+- Gap osservato dal client: `(6436679553646912 - 6436679391745144) / 1e6` = **161.901 ms**.
+- Subito dopo, frame 665 e frame 666 sono arrivati a passo regolare (~78 ms e ~51 ms).
+
+### 3.2 Scomposizione temporale sul Server per il Frame 664
+Dalla telemetria di `events.jsonl` del server (`shared-listener-1175`):
+- `listener_batch_start_ns`: `6436679392861484`
+- `listener_batch_end_ns`:   `6436679541370035`
+- `listener_batch_compute_ms`: **148.509 ms**! (Contro i 44.1 ms di frame 661, 84.0 ms di frame 662, 66.0 ms di frame 663).
+- I 148.5 ms di compute batch spiegano da soli il 92% dei 161.9 ms di gap (il restante ~13.4 ms è la coda ACK / trasporto WebSocket).
+
+### 3.3 Scomposizione interna di `listener_batch_compute_ms` (Frame 664)
+- `listener_batch_native_cuda_ms`: 33.73 ms
+- `listener_batch_frontend_encode_ms`: 10.08 ms
+- `listener_batch_control6_policy_ms`: 7.227 ms
+- `scheduler_commit_state_lock_hold_ms`: 7.003 ms
+- `listener_batch_audio_tower_cuda_ms`: 5.406 ms
+- `listener_batch_mel_prepare_ms`: 2.90 ms
+- `listener_batch_frontend_copy_ms`: 1.507 ms
+- `listener_batch_cuda_completion_wait_ms`: 0.129 ms
+- `listener_batch_model_lock_hold_ms`: None (il worker microbatch NON acquisisce il model lock sui frame normali > 0).
+- Somma delle sotto-metriche misurate: **~68.0 ms**.
+- **Gap non spiegato**: ci sono circa **80.5 ms** trascorsi all'interno del batch listener senza una metrica esplicita.
+
+### 3.4 Stato concorrente del Compute Thread (Talker autoregressivo)
+Nel timeline degli eventi lock (`listener_batch_host_lock_timeline`) catturato proprio nel batch 1175 di frame 664:
+Il thread di compute (thread `130599973000768`, il Talker generativo in `engine.py:talk`) ha registrato una sequenza serrata di hold pesanti su `_thinker_lock`:
+- Ticket 1652: `hold_ms` = **32.877 ms** (`next_qwen_model`)
+- Ticket 1655: `hold_ms` = **26.526 ms** (`next_qwen_model`)
+- Ticket 1659: `hold_ms` = **33.729 ms** (`next_qwen_model`)
+- Ticket 1662: `hold_ms` = **13.234 ms** (`subtalker`)
+- Ticket 1666: `hold_ms` = **33.947 ms** (`next_qwen_model`)
+- Ticket 1669: `hold_ms` = **22.057 ms** (`next_qwen_model`)
+Somma degli hold del Talker durante questa finestra: **162.37 ms**!
+Inoltre, in tutti questi ticket:
+`pending_counts: {'listener': 0, 'compute': 0}`.
+Il listener non era in attesa del model lock perché nei frame normali esegue direttamente su `listener_stream` senza passare da `_thinker_lock`.
+
+### 3.5 Meccanismo di ammissione cooperativa in `duplex_kernel/engine.py`
+Nel codice di `duplex_kernel/engine.py`:
+```python
+def admit_listener(phase: str, site: str) -> None:
+    if (
+        prioritized_v2_talker
+        and phase == "talker"
+        and site in {"subtalker", "next_qwen_model"}
+    ):
+        return
+    started = time.perf_counter() if cuda_timing_enabled else 0.0
+    self._wait_for_listener_admission(
+        listener_admission_wait, metrics, phase
+    )
+```
+Notice: quando `prioritized_v2_talker` è true, `admit_listener` esce immediatamente con `return` sia su `subtalker` sia su `next_qwen_model`!
+Viene chiamato con effetto reale solo su `codec_head` (una volta ogni 80 ms).
+Tra un frame codec e l'altro, il Talker esegue SubTalker (13 ms) e lo step Qwen Q1 (25-34 ms) senza cedere il passo o verificare la coda del listener.
+
+Inoltre, in `duplex_kernel/server_pcm_tracker.py`:
+```python
+def _wait_for_listener_backlog_admission(
+    queue_depth: Callable[[], int],
+    generation_is_current: Callable[[], bool],
+    *,
+    callbacks_active: bool = False,
+    max_wait_s: float = 0.160,
+    poll_interval_s: float = 0.0005,
+    now: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], Any] = time.sleep,
+) -> ListenerBacklogAdmission:
+    ...
+    while True:
+        if not generation_is_current():
+            return ListenerBacklogAdmission.ABORTED
+        if queue_depth() <= 1:
+            return ListenerBacklogAdmission.ADMITTED
+        remaining = deadline - now()
+        if remaining <= 0:
+            return ListenerBacklogAdmission.ADMITTED
+        sleep(min(poll_interval_s, remaining))
+```
+La condizione controlla `queue_depth() <= 1` (dove queue_depth è `sess.audio_ingress.qsize`), con timeout fino a 160 ms.
+
+---
+
+## 4. Domande per la Diagnosi Architetturale
+
+1. **Causa Radice del Picco a 148.5 ms**:
+   Perché il batch listener per il frame 664 ha impiegato 148.5 ms (con ~80 ms non coperti dalle sotto-metriche)?
+   È dovuto a contesa CUDA / scheduling SM tra i forward da 33 ms di Q1 del Talker e i kernel del Listener stream? Oppure a sincronizzazioni o latenze di scheduling del dispatcher / worker?
+
+2. **Accoppiamento tra Talker e Listener**:
+   L'esclusione di `subtalker` e `next_qwen_model` da `admit_listener` quando `prioritized_v2_talker` è attivo consente al Talker di sparare burst continui di GPU compute (162 ms consecutivi) senza cedere la precedenza. Qual è il corretto protocollo di cooperazione tra Talker e Listener durante una risposta lunga per garantire che il listener abbia sempre tempo di compute sufficiente a completare il batch entro 50-70 ms, mantenendo l'ACK gap rigidamente sotto 120-140 ms?
+
+3. **Contratto di Remediation Pulito**:
+   Definisci le specifiche architetturali e i contratti esatti per la patch che GPT-6 Luna dovrà implementare:
+   - Quali file modificare?
+   - Quali invarianti preservare? (Non toccare le soglie dei test, non degradare il TTFT <= 800ms, non impattare la stabilità dello stream audio né la VRAM).

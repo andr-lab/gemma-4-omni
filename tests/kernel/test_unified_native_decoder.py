@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from types import SimpleNamespace
 
 import pytest
 import torch
 
 from duplex_kernel.engine import ThinkerSampler
+from duplex_kernel.response_revision_runtime import _candidate_ready_for_adoption
 from duplex_kernel.unified_native_decoder import UnifiedNativeDecoder
 
 
@@ -334,6 +336,82 @@ def test_anticipated_first_token_respects_one_token_budget_and_eos_has_no_packet
     assert eos_result.generated_count == 0
 
 
+def test_continuation_replays_original_prefix_without_republishing_and_keeps_global_budget() -> None:
+    forwarded: list[list[int]] = []
+    sampled_histories: list[tuple[int, ...]] = []
+    packets = []
+    sample_ids = iter((42, 99))
+
+    class Tokenizer:
+        def decode(self, token_ids, *, skip_special_tokens=True):
+            del skip_special_tokens
+            return "".join(f"<{int(token_id)}>" for token_id in token_ids)
+
+    async def forward_tokens(token_ids: list[int]):
+        forwarded.append(list(token_ids))
+        logits = torch.zeros((1, 100))
+        hidden = torch.tensor([token_ids[-1]], dtype=torch.float32)
+        return logits, hidden
+
+    def sample_token(_logits: torch.Tensor, history: tuple[int, ...]):
+        sampled_histories.append(tuple(history))
+        return next(sample_ids)
+
+    thinker = SimpleNamespace(tokenizer=Tokenizer(), model=SimpleNamespace(
+        generation_config=SimpleNamespace(eos_token_id=[99]),
+    ))
+    decoder = UnifiedNativeDecoder(
+        thinker,
+        forward_tokens=forward_tokens,
+        sample_token=sample_token,
+        monotonic_ns=_Clock(),
+    )
+    result = asyncio.run(decoder.decode_continuation(
+        frozen_prefix_token_ids=(7, 8, 9),
+        context_transition_token_ids=(5, 6),
+        logical_source_offset=31,
+        generated_budget_used=767,
+        max_new_tokens=8,
+        total_generated_budget=768,
+        anticipate_first_token=True,
+        on_token_packet=packets.append,
+    ))
+
+    assert forwarded == [[5, 6, 7, 8, 9], [42]]
+    assert sampled_histories == [(7, 8, 9), (7, 8, 9, 42)]
+    assert [packet.token_id for packet in packets] == [42]
+    assert [(packet.token_index, packet.logical_source_sequence) for packet in packets] == [(0, 31)]
+    assert result.termination_reason == "budget_exhausted"
+    assert result.finish_reason == "length"
+    assert result.terminal_token_id is None
+    assert result.generated_count == result.committed_count == 1
+    assert result.transition_token_count == 5
+
+
+def test_continuation_with_exhausted_global_budget_emits_no_prefix_replay_or_token() -> None:
+    forwarded: list[list[int]] = []
+    decoder = UnifiedNativeDecoder(
+        _thinker(),
+        forward_tokens=lambda ids: forwarded.append(list(ids)),
+        sample_token=lambda *_args: 42,
+        monotonic_ns=_Clock(),
+    )
+
+    result = asyncio.run(decoder.decode_continuation(
+        frozen_prefix_token_ids=(7, 8),
+        context_transition_token_ids=(5, 6),
+        logical_source_offset=400,
+        generated_budget_used=768,
+        max_new_tokens=5,
+    ))
+
+    assert forwarded == []
+    assert result.generated_tokens == ()
+    assert result.transition_token_count == 0
+    assert result.termination_reason == "budget_exhausted"
+    assert result.finish_reason == "length"
+
+
 def test_token_packet_text_uses_full_prefix_delta_contract() -> None:
     class Tokenizer:
         def decode(self, token_ids, *, skip_special_tokens=True):
@@ -368,6 +446,47 @@ def test_token_packet_text_uses_full_prefix_delta_contract() -> None:
 
     assert [packet.token_text for packet in packets] == ["<42>", "<43>"]
     assert [token.token_text for token in result.generated_tokens] == ["<42>", "<43>"]
+
+
+def test_nonanticipated_first_token_packet_carries_its_own_postforward_hidden() -> None:
+    events = []
+    sample_ids = iter((42, 99))
+
+    async def forward_tokens(token_ids: list[int]):
+        events.append(("forward", tuple(token_ids)))
+        hidden = torch.tensor([1000 + token_ids[-1]], dtype=torch.float32)
+        logits = torch.zeros((1, 100))
+        logits[0, 99] = 10.0
+        return logits, hidden
+
+    def on_token_packet(packet) -> None:
+        events.append((
+            "packet", packet.token_index, packet.hidden_provenance,
+            packet.kv_committed, int(packet.hidden.item()),
+        ))
+
+    decoder = UnifiedNativeDecoder(
+        _thinker(),
+        forward_tokens=forward_tokens,
+        sample_token=lambda *_args: next(sample_ids),
+        monotonic_ns=_Clock(),
+    )
+    result = asyncio.run(
+        decoder.decode(
+            transition_token_ids=[7],
+            max_new_tokens=2,
+            anticipate_first_token=False,
+            on_token_packet=on_token_packet,
+        )
+    )
+
+    assert events == [
+        ("forward", (7,)),
+        ("forward", (42,)),
+        ("packet", 0, "token", True, 1042),
+    ]
+    assert result.generated_tokens[0].hidden_provenance == "token"
+    assert result.generated_tokens[0].kv_committed is True
 
 
 @pytest.mark.parametrize("transition_len", [5, 8])
@@ -525,7 +644,7 @@ def test_cancellation_after_streaming_leaves_pending_token_and_requires_branch_r
     assert result.owner_action == "rollback_assistant_branch"
 
 
-def test_shared_sampler_orders_raw_next_force_publish_then_next_dispatch():
+def test_shared_sampler_commits_protocol_before_next_sample_and_dispatch():
     events = []
 
     class Tokenizer:
@@ -585,12 +704,12 @@ def test_shared_sampler_orders_raw_next_force_publish_then_next_dispatch():
         ("forward", (10,)),
         ("sample", (), 1),
         ("forward", (1,)),
-        ("sample", (1,), 2),
         ("generated", 0, 1, "<1>", 1),
+        ("sample", (1,), 2),
         ("publish", 1),
         ("forward", (3,)),
-        ("sample", (1, 3), 99),
         ("generated", 1, 3, "<3>", 3),
+        ("sample", (1, 3), 99),
         ("publish", 3),
     ]
     assert result.termination_reason == "eos"
@@ -763,3 +882,445 @@ def test_decoder_fork_rejects_stochastic_sampler_without_private_rng():
             sampler_factory=lambda source, generator, _fork_id: StochasticSampler(),
             fork_id="branch-no-rng",
         )
+
+
+def _byte_fallback_session_case(script: tuple[int, ...], *, seed: int = 1234):
+    from tokenizers import Tokenizer, decoders, models
+
+    from duplex_kernel.thinker_sampler import ThinkerSampler
+
+    byte_values = (0xE2, 0x82, 0xAC)
+    vocab = {f"<0x{value:02X}>": index for index, value in enumerate(byte_values)}
+    tokenizer = Tokenizer(models.BPE(vocab=vocab, merges=[], byte_fallback=True))
+    tokenizer.decoder = decoders.ByteFallback()
+    generator = torch.Generator(device="cpu").manual_seed(seed)
+    events = {
+        "forwarded": [],
+        "samples": [],
+        "protocol": [],
+        "packets": [],
+        "flushes": [],
+    }
+    sampler = ThinkerSampler(
+        tokenizer=tokenizer,
+        device="cpu",
+        eos_token_ids={99},
+        temperature=0.8,
+        top_p=1.0,
+        repetition_penalty=1.0,
+        on_generated_token=lambda index, token_id, text, hidden: events["protocol"].append(
+            (index, token_id, text, int(hidden.reshape(-1)[0].item()))
+        ),
+        on_decoded_text_flush=lambda suffix, index, token_id, hidden: events["flushes"].append(
+            (suffix, index, token_id, None if hidden is None else int(hidden.reshape(-1)[0].item()))
+        ),
+        generator=generator,
+    )
+    original_sample = sampler.sample_token
+
+    def record_sample(logits, history):
+        events["samples"].append((logits.detach().clone(), tuple(int(value) for value in history)))
+        return original_sample(logits, history)
+
+    sampler.sample_token = record_sample
+    generated_forward_count = 0
+
+    async def forward_tokens(token_ids):
+        nonlocal generated_forward_count
+        values = list(token_ids)
+        events["forwarded"].append(values)
+        if values == [50]:
+            candidate_index = 0
+        else:
+            candidate_index = generated_forward_count + 1
+            generated_forward_count += 1
+        candidate_id = script[min(candidate_index, len(script) - 1)]
+        logits = torch.full((1, 100), float("-inf"), dtype=torch.float32)
+        logits[0, candidate_id] = 10.0 + candidate_index
+        hidden = torch.tensor([[float(values[-1])]], dtype=torch.float32)
+        return logits, hidden
+
+    decoder = UnifiedNativeDecoder(
+        _thinker(),
+        forward_tokens=forward_tokens,
+        sampler=sampler,
+        monotonic_ns=_Clock(),
+        eos_token_ids={99},
+    )
+    return decoder, sampler, generator, events
+
+
+def test_resumable_session_pauses_with_pending_utf8_and_resumes_to_eos_without_finish():
+    script = (0,) * 8 + (1, 2, 99)
+    generated_ids = (0,) * 8 + (1, 2)
+    source_group = tuple((11 + index, token_id) for index, token_id in enumerate(generated_ids))
+    baseline, baseline_sampler, baseline_generator, baseline_events = _byte_fallback_session_case(script)
+    baseline_flushes = []
+    baseline_result = asyncio.run(baseline.decode(
+        transition_token_ids=[50],
+        max_new_tokens=16,
+        logical_source_offset=11,
+        on_token_packet=baseline_events["packets"].append,
+        on_text_flush=lambda suffix, token: baseline_flushes.append(
+            (suffix, token.token_id, token.text_source_sequences)
+        ),
+    ))
+
+    decoder, sampler, generator, events = _byte_fallback_session_case(script)
+    flushes = []
+    handle = object()
+    session = decoder.start_session(
+        transition_token_ids=[50],
+        max_new_tokens=16,
+        logical_source_offset=11,
+        native_handle=handle,
+        native_cursor=400,
+        on_token_packet=events["packets"].append,
+        on_text_flush=lambda suffix, token: flushes.append(
+            (suffix, token.token_id, token.text_source_sequences)
+        ),
+    )
+    paused = asyncio.run(session.advance(
+        max_committed_tokens=8,
+        ready_when=lambda progress: bool(progress.generated_text),
+    ))
+
+    assert paused.status.value == "more"
+    assert len(paused.generated_tokens) == 8
+    assert paused.progress.generated_token_ids == (0,) * 8
+    assert paused.progress.generated_text == ""
+    assert all(token.text_delta == "" for token in paused.progress.source_tokens)
+    assert [token.source_sequence for token in paused.progress.source_tokens] == list(range(11, 19))
+    assert paused.native_handle is handle
+    assert paused.native_cursor == 409
+    assert paused.source_offset == 19
+    assert decoder._text_decoder is not None and not decoder._text_decoder._finished
+    assert not sampler._text_decoder._finished
+    assert events["forwarded"] == [[50], *([[0]] * 8)]
+
+    completed = asyncio.run(session.resume(
+        max_committed_tokens=8,
+        ready_when=lambda progress: bool(progress.generated_text),
+    ))
+
+    assert completed.status.value == "done"
+    assert completed.result is not None
+    assert completed.result.termination_reason == baseline_result.termination_reason == "eos"
+    assert completed.result.finish_reason == baseline_result.finish_reason == "stop"
+    assert [token.token_id for token in completed.result.generated_tokens] == [
+        token.token_id for token in baseline_result.generated_tokens
+    ] == list(generated_ids)
+    assert completed.result.sampled_count == baseline_result.sampled_count == 11
+    assert completed.result.committed_count == baseline_result.committed_count == 10
+    assert sampler.last_decoded_output == baseline_sampler.last_decoded_output == "\ufffd" * 10
+    assert sampler._text_decoder._finished and baseline_sampler._text_decoder._finished
+    assert flushes == baseline_flushes == [("\ufffd" * 10, 2, source_group)]
+    expected_forwarded = [[50], *([[0]] * 8), [1], [2]]
+    assert events["forwarded"] == baseline_events["forwarded"] == expected_forwarded
+    assert events["protocol"] == baseline_events["protocol"]
+    assert len(events["samples"]) == len(baseline_events["samples"]) == 11
+    for (logits, history), (baseline_logits, baseline_history) in zip(
+        events["samples"], baseline_events["samples"]
+    ):
+        assert history == baseline_history
+        assert torch.equal(logits, baseline_logits)
+    assert torch.equal(generator.get_state(), baseline_generator.get_state())
+    assert events["packets"] == baseline_events["packets"]
+
+
+def test_revision_candidate_adopts_after_eight_ids_when_utf8_yields_no_qwen_text():
+    decoder, sampler, _generator, events = _byte_fallback_session_case(
+        (0,) * 8 + (1, 2, 99)
+    )
+    session = decoder.start_session(
+        transition_token_ids=[50],
+        max_new_tokens=768,
+        logical_source_offset=40,
+        native_handle=SimpleNamespace(handle_id="candidate"),
+        native_cursor=700,
+    )
+    step = asyncio.run(session.advance(
+        max_committed_tokens=8,
+        ready_when=lambda progress: _candidate_ready_for_adoption(
+            progress, qwen_text_ready=False
+        ),
+    ))
+
+    assert step.status.value == "ready"
+    assert step.progress.generated_token_ids == (0,) * 8
+    assert step.progress.generated_text == ""
+    assert step.progress.stable_text == ""
+    assert all(source.text_delta == "" for source in step.progress.source_tokens)
+    assert step.source_offset == 48
+    assert step.native_handle is not None and step.native_handle.handle_id == "candidate"
+    assert step.native_cursor == 709
+    assert events["forwarded"] == [[50], *([[0]] * 8)]
+    assert not decoder._text_decoder._finished
+    assert not sampler._text_decoder._finished
+    assert sampler.last_decoded_output == ""
+    session.close()
+
+
+def test_resumable_session_cancel_while_paused_does_no_forward_or_unicode_finish():
+    decoder, sampler, _generator, events = _byte_fallback_session_case((0, 1, 2, 99))
+    session = decoder.start_session(
+        transition_token_ids=[50],
+        max_new_tokens=5,
+        logical_source_offset=20,
+        on_token_packet=events["packets"].append,
+    )
+    paused = asyncio.run(session.advance(
+        max_committed_tokens=1,
+        ready_when=lambda _progress: False,
+    ))
+    assert paused.status.value == "more"
+    forwards_before_cancel = [*events["forwarded"]]
+    packets_before_cancel = [*events["packets"]]
+
+    cancelled = session.cancel()
+
+    assert cancelled is not None
+    assert cancelled.status.value == "cancelled"
+    assert cancelled.result is not None
+    assert cancelled.result.termination_reason == "cancelled"
+    assert cancelled.result.owner_action == "rollback_assistant_branch"
+    assert cancelled.result.pending_token_id == 1
+    assert [token.token_id for token in cancelled.result.generated_tokens] == [0]
+    assert events["forwarded"] == forwards_before_cancel == [[50], [0]]
+    assert events["packets"] == packets_before_cancel
+    assert [packet.token_id for packet in events["packets"]] == [0]
+    assert decoder._text_decoder is not None and not decoder._text_decoder._finished
+    assert not sampler._text_decoder._finished
+    closed = session.close()
+    assert closed is not None and closed.status.value == "cancelled"
+    assert session.native_handle is None
+
+
+def test_resumable_session_keeps_length_budget_and_final_text_equal_to_decode():
+    baseline, baseline_sampler, baseline_generator, baseline_events = _byte_fallback_session_case((0, 1, 2, 99))
+    baseline_result = asyncio.run(baseline.decode(
+        transition_token_ids=[50],
+        max_new_tokens=2,
+    ))
+
+    decoder, sampler, generator, events = _byte_fallback_session_case((0, 1, 2, 99))
+    session = decoder.start_session(transition_token_ids=[50], max_new_tokens=2)
+    steps = []
+    for _ in range(3):
+        steps.append(asyncio.run(session.advance(
+            max_committed_tokens=1,
+            ready_when=lambda _progress: False,
+        )))
+        if steps[-1].result is not None:
+            break
+
+    final = steps[-1]
+    assert [step.status.value for step in steps] == ["more", "more", "done"]
+    assert final.result is not None
+    assert final.result.termination_reason == baseline_result.termination_reason == "budget_exhausted"
+    assert final.result.finish_reason == baseline_result.finish_reason == "length"
+    assert [token.token_id for token in final.result.generated_tokens] == [
+        token.token_id for token in baseline_result.generated_tokens
+    ] == [0, 1]
+    assert final.result.sampled_count == baseline_result.sampled_count == 3
+    assert final.result.committed_count == baseline_result.committed_count == 2
+    assert sampler.last_decoded_output == baseline_sampler.last_decoded_output == "\ufffd\ufffd"
+    assert events["forwarded"] == baseline_events["forwarded"] == [[50], [0], [1]]
+    assert len(events["samples"]) == len(baseline_events["samples"]) == 3
+    for (logits, history), (baseline_logits, baseline_history) in zip(
+        events["samples"], baseline_events["samples"]
+    ):
+        assert history == baseline_history
+        assert torch.equal(logits, baseline_logits)
+    assert torch.equal(generator.get_state(), baseline_generator.get_state())
+
+
+def test_resumable_continuation_replays_frozen_prefix_once_without_publication():
+    from duplex_kernel.thinker_sampler import ThinkerSampler
+
+    class Tokenizer:
+        eos_token_id = 99
+        eot_id = None
+
+        def decode(self, token_ids, *, skip_special_tokens=True):
+            del skip_special_tokens
+            return "".join(f"<{int(token_id)}>" for token_id in token_ids)
+
+    tokenizer = Tokenizer()
+    sampler = ThinkerSampler(
+        tokenizer=tokenizer,
+        device="cpu",
+        eos_token_ids={99},
+        temperature=0.0,
+        top_p=1.0,
+        repetition_penalty=1.0,
+    )
+    forwarded = []
+    histories = []
+    packets = []
+    protocol = []
+    sampler.on_generated_token_callback = lambda index, token_id, text, _hidden: protocol.append(
+        (index, token_id, text)
+    )
+    original_sample = sampler.sample_token
+
+    def sample(logits, history):
+        histories.append(tuple(history))
+        return original_sample(logits, history)
+
+    sampler.sample_token = sample
+
+    async def forward(token_ids):
+        forwarded.append(list(token_ids))
+        logits = torch.full((1, 100), float("-inf"))
+        logits[0, 42 if token_ids[-1] in {5, 6, 7, 8} else 99] = 10.0
+        return logits, torch.tensor([[float(token_ids[-1])]])
+
+    decoder = UnifiedNativeDecoder(
+        _thinker(), forward_tokens=forward, sampler=sampler, monotonic_ns=_Clock(), eos_token_ids={99}
+    )
+    native_handle = object()
+    session = decoder.start_session(
+        transition_token_ids=(5, 6, 7, 8),
+        continuation_prefix_token_ids=(7, 8),
+        logical_source_offset=31,
+        max_new_tokens=5,
+        native_handle=native_handle,
+        native_cursor=100,
+        on_token_packet=packets.append,
+    )
+    first = asyncio.run(session.advance(
+        max_committed_tokens=1,
+        ready_when=lambda progress: bool(progress.generated_token_ids),
+    ))
+    assert first.status.value == "ready"
+    assert first.native_handle is native_handle
+    assert first.native_cursor == 105
+    assert first.source_offset == 32
+    assert [source.source_sequence for source in first.progress.source_tokens] == [31]
+    assert [source.source_token_id for source in first.progress.source_tokens] == [42]
+    assert [packet.token_id for packet in packets] == [42]
+    assert [(packet.token_index, packet.logical_source_sequence) for packet in packets] == [(0, 31)]
+    assert protocol == [(0, 42, "<42>")]
+
+    final = asyncio.run(session.advance(
+        max_committed_tokens=8,
+        ready_when=lambda _progress: False,
+    ))
+    assert final.status.value == "done"
+    assert final.result is not None and final.result.termination_reason == "eos"
+    assert forwarded == [[5, 6, 7, 8], [42]]
+    assert histories == [(7, 8), (7, 8, 42)]
+    assert [packet.token_id for packet in packets] == [42]
+    assert [token.token_id for token in final.result.generated_tokens] == [42]
+
+
+def test_resumable_session_replays_original_failure_after_cleanup():
+    decoder, _sampler, _generator, events = _byte_fallback_session_case((0, 99))
+    failure = RuntimeError("original native forward failure")
+
+    async def fail_forward(token_ids):
+        events["forwarded"].append(list(token_ids))
+        raise failure
+
+    decoder.forward_tokens = fail_forward
+    session = decoder.start_session(
+        transition_token_ids=[50],
+        max_new_tokens=2,
+        native_handle=SimpleNamespace(handle_id="failed-session"),
+    )
+
+    with pytest.raises(RuntimeError) as first:
+        asyncio.run(session.advance(ready_when=lambda _progress: False))
+
+    assert first.value is failure
+    assert session.status is not None and session.status.value == "failed"
+
+    session.close()
+    session.close()
+    with pytest.raises(RuntimeError) as repeated:
+        asyncio.run(session.advance(ready_when=lambda _progress: False))
+
+    assert repeated.value is failure
+    assert events["forwarded"] == [[50]]
+
+
+def test_resumable_session_task_cancellation_is_terminal_and_replayable():
+    decoder, _sampler, _generator, events = _byte_fallback_session_case((0, 99))
+    cancellation = asyncio.CancelledError("native forward task cancelled")
+
+    async def cancel_forward(token_ids):
+        events["forwarded"].append(list(token_ids))
+        raise cancellation
+
+    decoder.forward_tokens = cancel_forward
+    session = decoder.start_session(
+        transition_token_ids=[50],
+        max_new_tokens=2,
+        native_handle=SimpleNamespace(handle_id="cancelled-session"),
+    )
+
+    with pytest.raises(asyncio.CancelledError) as first:
+        asyncio.run(session.advance(ready_when=lambda _progress: False))
+
+    assert first.value is cancellation
+    assert session.status is not None and session.status.value == "cancelled"
+
+    replay = asyncio.run(session.advance(ready_when=lambda _progress: False))
+    assert replay.status.value == "cancelled"
+    assert replay.result is not None
+    assert replay.result.termination_reason == "cancelled"
+    session.close()
+    closed_replay = asyncio.run(session.advance(ready_when=lambda _progress: False))
+    assert closed_replay.status.value == "cancelled"
+    assert events["forwarded"] == [[50]]
+
+
+def test_resumable_session_serializes_cross_loop_advance_and_defers_close_cleanup():
+    decoder, _sampler, _generator, events = _byte_fallback_session_case((0, 99))
+    handle = SimpleNamespace(handle_id="in-flight-session")
+    forward_started = threading.Event()
+    release_forward = threading.Event()
+    failure = RuntimeError("forward aborted after close request")
+
+    async def blocked_forward(token_ids):
+        events["forwarded"].append(list(token_ids))
+        forward_started.set()
+        if not release_forward.wait(timeout=3.0):
+            raise TimeoutError("test did not release the in-flight forward")
+        raise failure
+
+    decoder.forward_tokens = blocked_forward
+    session = decoder.start_session(
+        transition_token_ids=[50],
+        max_new_tokens=2,
+        native_handle=handle,
+    )
+    errors: list[BaseException] = []
+
+    def advance_in_own_loop():
+        try:
+            asyncio.run(session.advance(ready_when=lambda _progress: False))
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=advance_in_own_loop)
+    worker.start()
+    assert forward_started.wait(timeout=1.0)
+
+    with pytest.raises(RuntimeError, match="advance is already in progress"):
+        asyncio.run(session.advance(ready_when=lambda _progress: False))
+    assert session.close() is None
+    assert session.native_handle is handle
+    assert session.status is None
+
+    release_forward.set()
+    worker.join(timeout=2.0)
+
+    assert not worker.is_alive()
+    assert errors == [failure]
+    assert session.status is not None and session.status.value == "cancelled"
+    assert session.native_handle is None
+    replay = asyncio.run(session.advance(ready_when=lambda _progress: False))
+    assert replay.status.value == "cancelled"
+    assert events["forwarded"] == [[50]]

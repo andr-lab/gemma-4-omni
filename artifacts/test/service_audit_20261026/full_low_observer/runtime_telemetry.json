@@ -1,0 +1,40 @@
+{
+  "schema": "duplex_runtime_telemetry_v1",
+  "session_id": "8627e54c94ea4232895c4bdc6c3af544",
+  "sample_interval_ms": 1000,
+  "kv": {
+    "source": "/debug/runtime-telemetry host allocator/branch snapshot",
+    "turns": [],
+    "sample_count": 68,
+    "post_drain_response_ids": []
+  },
+  "vram": {
+    "post_warmup_baseline": {
+      "allocated_mib": 14692.27978515625,
+      "reserved_mib": 16872.0,
+      "sampled_at_monotonic_ns": 5816778098764477
+    },
+    "active": {
+      "allocated_mib": 15093.07763671875,
+      "reserved_mib": 15740.0
+    },
+    "peak": {
+      "allocated_mib": 15183.76123046875,
+      "reserved_mib": 16958.0,
+      "basis": "maximum current allocator value observed by 1000ms telemetry samples during this run",
+      "allocator_process_high_water_after_run": {
+        "allocated_mib": 15401.94091796875,
+        "reserved_mib": 16958.0
+      }
+    },
+    "turns": []
+  },
+  "collection": {
+    "sample_errors": [],
+    "sample_count": 68,
+    "post_drain_snapshots_count": 0,
+    "sampler_errors": 0,
+    "runtime_endpoint": "GET /debug/runtime-telemetry",
+    "allocator_source": "torch.cuda memory_allocated/reserved and max counters; no synchronize or tensor readback"
+  }
+}

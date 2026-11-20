@@ -63,6 +63,17 @@ def test_pool_keeps_code2wav_window_scratch_private_per_response() -> None:
     pool.release(second)
 
 
+def test_pool_admission_capacity_is_explicit_positive_and_matches_captured_slots() -> None:
+    graphs = [_Graph(), _Graph(), _Graph()]
+    pool = ResponseTalkContextPool(graphs, admission_capacity=3)
+
+    assert pool.capacity == pool.admission_capacity == 3
+    with pytest.raises(ValueError, match="positive integer"):
+        ResponseTalkContextPool([_Graph()], admission_capacity=0)
+    with pytest.raises(ValueError, match="match the number"):
+        ResponseTalkContextPool(graphs, admission_capacity=2)
+
+
 def test_pool_release_waits_for_callback_completion() -> None:
     graph = _Graph()
     pool = ResponseTalkContextPool([graph])

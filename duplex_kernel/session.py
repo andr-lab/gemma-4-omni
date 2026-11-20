@@ -17,11 +17,15 @@ Sessione duplex (per utente):
 from __future__ import annotations
 
 import asyncio
+import copy
 import inspect
+import json
 import logging
+import math
 import threading
 import time
 import uuid
+from collections.abc import Mapping
 from collections import deque
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable
@@ -36,6 +40,10 @@ from duplex_kernel.config import (
     FROZEN_QWEN_PLAYOUT_DELAY_FRAMES,
     USER_SAMPLE_RATE,
 )
+from duplex_kernel.backchannel_guard import (
+    BACKCHANNEL_MAX_TEXT_TOKENS,
+    validate_backchannel_phrase,
+)
 from duplex_kernel.conditioning_provenance import validate_trace_row
 from duplex_kernel.audio_response_conditioning import DEFAULT_MAX_AUDIO_MS
 from duplex_kernel.frame_residual_adapter import estimate_token_audio_frames_80ms
@@ -46,6 +54,7 @@ from duplex_kernel.scheduler import (
     AudioIngressQueue,
     REALTIME_INGRESS_QUEUE_FRAMES,
 )
+from duplex_kernel.response_event_ledger import ResponseEventLedger, ResponseLedgerProjection
 from duplex_kernel.turn_policy import ControlState
 
 logger = logging.getLogger("duplex_kernel.session")
@@ -58,6 +67,11 @@ MAX_COMPLETED_UTTERANCE_AUDIO_SAMPLES = USER_SAMPLE_RATE * DEFAULT_MAX_AUDIO_MS 
 TURN_LOCAL_SPEECH_FIFO_CAPACITY = 4
 GEMMA_SPEECH_TICK_MS = 80
 GEMMA_SPEECH_TOKENS_PER_TICK = 2
+DEFAULT_CONVERSATIONAL_INSTRUCTIONS = (
+    "Sei un assistente vocale intelligente e disponibile. Rispondi all'utente in italiano "
+    "in modo chiaro, naturale e conciso. Non ripetere la domanda o la frase dell'utente, "
+    "ma dialoga e rispondi direttamente alla sua richiesta."
+)
 
 
 @dataclass(frozen=True)
@@ -82,6 +96,132 @@ class SpeechFrameSpan:
 class SpeechFrameSelection:
     span: SpeechFrameSpan
     tail_hold: bool
+
+
+@dataclass(frozen=True)
+class UserAudioSpan:
+    """Archived user input; references belong to the CPU archive."""
+
+    turn_id: int
+    chunk_id: int
+    revision: int
+    first_frame_id: int
+    last_frame_id: int
+    pcm_reference: Any = field(repr=False, compare=False)
+    soft_tokens_reference: Any = field(repr=False, compare=False)
+    encoder_profile: str
+    turn_open: bool
+
+
+@dataclass(frozen=True)
+class AssistantTextSpan:
+    """Confirmed assistant text and its rendered audio frontier."""
+
+    turn_id: int
+    response_id: str
+    revision: int
+    confirmed_text: str
+    source_character_range: tuple[int, int]
+    pcm_reference: Any = field(repr=False, compare=False)
+    rendered_sample_frontier: int
+
+
+@dataclass(frozen=True)
+class MemoryRevision:
+    memory_id: str
+    parent_memory_id: str | None
+    covered_source_ranges: tuple[Any, ...]
+    source_revisions: tuple[int, ...]
+    semantic_notes: str
+    open_turn_state: Any | None
+
+
+def serialize_memory_revision(revision: MemoryRevision) -> str:
+    """Serialize semantic memory as delimited context data for private prefill."""
+    payload = json.dumps({
+        "memory_id": revision.memory_id,
+        "parent_memory_id": revision.parent_memory_id,
+        "covered_source_ranges": revision.covered_source_ranges,
+        "source_revisions": revision.source_revisions,
+        "semantic_notes": revision.semantic_notes,
+        "open_turn_state": revision.open_turn_state,
+    }, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+    payload = payload.replace("<", "\\u003c").replace(">", "\\u003e")
+    return "<memory_data>\n" + payload + "\n</memory_data>"
+
+
+def _archive_cpu_reference(value: Any) -> Any:
+    """Own in-memory buffers without retaining GPU storage or writable views."""
+    if isinstance(value, torch.Tensor):
+        if value.device.type != "cpu":
+            raise ValueError("audio archive references must already be on CPU")
+        value = value.detach()
+        if value.dtype is torch.bfloat16:
+            value = value.float()
+        value = value.numpy()
+    if isinstance(value, np.ndarray):
+        if value.dtype.hasobject:
+            raise ValueError("audio archive buffers cannot contain Python objects")
+        backing = value
+        while isinstance(backing, np.ndarray):
+            backing = backing.base
+        if isinstance(backing, bytes):
+            return value
+        return np.frombuffer(value.tobytes(), dtype=value.dtype).reshape(value.shape)
+    if isinstance(value, Mapping):
+        return tuple((key, _archive_cpu_reference(item)) for key, item in value.items())
+    if isinstance(value, (tuple, list)):
+        return tuple(_archive_cpu_reference(item) for item in value)
+    if isinstance(value, (bytearray, memoryview)):
+        return bytes(value)
+    return value
+
+
+@dataclass(frozen=True)
+class UserHistoryItemProvenance:
+    """CPU provenance for one committed user history item."""
+
+    session_id: str
+    archive_id: int
+    history_item_id: int
+    message_index: int
+    timeline_id: str
+    state_epoch_id: int | str | None
+    first_frame_id: int
+    last_frame_id: int
+    coverage_complete: bool
+    transcript_status: str
+    source: str
+    asr_provenance: tuple[tuple[str, str | int | float | bool], ...]
+    history_revision: int
+    history_mutation_sequence: int
+
+    @property
+    def compaction_eligible(self) -> bool:
+        return (
+            self.coverage_complete
+            and bool(self.timeline_id)
+            and self.state_epoch_id is not None
+            and self.first_frame_id >= 0
+            and self.last_frame_id >= self.first_frame_id
+        )
+
+
+@dataclass(frozen=True)
+class SessionHistorySnapshot:
+    """Detached, lock-coherent history and prompt context with provenance."""
+
+    session_id: str
+    history: tuple[dict[str, Any], ...]
+    history_item_ids: tuple[int, ...]
+    provenance: tuple[UserHistoryItemProvenance, ...]
+    history_revision: int
+    history_mutation_sequence: int
+    instructions: str
+    language: str
+    timeline_id: str = ""
+    user_audio_spans: tuple[UserAudioSpan, ...] = ()
+    assistant_text_spans: tuple[AssistantTextSpan, ...] = ()
 
 
 class SpanAlignedSpeechCursor:
@@ -924,6 +1064,7 @@ class DuplexSession:
 
     session_id: str
     created_at: float = field(default_factory=time.time)
+    _timeline_id: str = field(default_factory=lambda: uuid.uuid4().hex, init=False, repr=False, compare=False)
     speaker: Any = None
     kv_cache: Any = None
     turn_start_kv_position: int | None = field(
@@ -963,6 +1104,24 @@ class DuplexSession:
     stale_kv_writes: int = 0
     stale_session_mutations: int = 0
     stale_write_attempts: dict[str, int] = field(default_factory=dict)
+    _response_event_ledgers: dict[str, ResponseEventLedger] = field(
+        default_factory=dict, repr=False, compare=False
+    )
+    _response_history_order: int = field(default=0, repr=False, compare=False)
+    _latest_committed_response_history_order: int = field(default=-1, repr=False, compare=False)
+    _history_mutation_sequence: int = field(default=0, repr=False, compare=False)
+    _history_item_sequence: int = field(default=0, repr=False, compare=False)
+    _history_item_ids: list[int] = field(default_factory=list, repr=False, compare=False)
+    _history_item_signatures: list[str] = field(default_factory=list, repr=False, compare=False)
+    _user_history_provenance: list[UserHistoryItemProvenance] = field(
+        default_factory=list, repr=False, compare=False
+    )
+    _history_archive_commit_callback: Callable[["DuplexSession", SessionHistorySnapshot], Any] | None = field(
+        default=None, repr=False, compare=False
+    )
+    _response_ledger_history_callback: Callable[["DuplexSession", ResponseLedgerProjection], Any] | None = field(
+        default=None, repr=False, compare=False
+    )
     # Gemma-to-Qwen speech packets are owned by this response generation.
     speech_fifo: TurnLocalSpeechFIFO = field(default_factory=TurnLocalSpeechFIFO, repr=False, compare=False)
     _speech_fifo_snapshots: dict[int, tuple[int | None, str]] = field(
@@ -975,7 +1134,7 @@ class DuplexSession:
     _closed: bool = field(default=False, repr=False, compare=False)
     # Stato conversazione
     history: list[dict[str, Any]] = field(default_factory=list)
-    instructions: str = ""
+    instructions: str = DEFAULT_CONVERSATIONAL_INSTRUCTIONS
     # Revision consumed by the native listener's bounded semantic prefix.
     semantic_context_revision: int = 0
     # Audio ingress indipendente dal ciclo request/response (P2). P3 collega
@@ -1030,6 +1189,7 @@ class DuplexSession:
     ref_text: str | None = None
     language: str = "Italian"
     tools: list[dict[str, Any]] = field(default_factory=list)
+    response_profile: str = "standard"
     auto_response: bool = False
     # Audio captured by the 80 ms policy clock for action-driven turns.  Frame
     # IDs below the watermark were already committed by the WebSocket API.
@@ -1057,6 +1217,9 @@ class DuplexSession:
     last_answered_onset_frame_id: int | None = None
     assistant_history_committed_generation_id: int | None = field(default=None, repr=False, compare=False)
     next_audio_history_archive_id: int = 1
+    _archived_audio_history: dict[int, dict[str, Any]] = field(
+        default_factory=dict, repr=False, compare=False,
+    )
     pending_audio_history_archive: dict[str, Any] | None = field(default=None, repr=False, compare=False)
     queued_audio_history_archives: deque[dict[str, Any]] = field(default_factory=deque, repr=False, compare=False)
     audio_history_archive_overflow_count: int = 0
@@ -1070,6 +1233,28 @@ class DuplexSession:
             raise AttributeError("session_id è immutabile")
         super().__setattr__(name, value)
 
+    @property
+    def timeline_id(self) -> str:
+        """Identity of the monotone input-frame clock, stable across responses."""
+        return str(self._timeline_id)
+
+    def reset_audio_timeline(self, *, notify_callback: bool = True) -> str:
+        """Rotate the frame-clock identity when its frame IDs are reinitialized.
+
+        Response generations and ``reset_turn`` do not call this: they leave
+        the session input frame clock running. A caller that truly starts a
+        new frame-ID timeline must invoke this while holding the generation
+        fence used for that reset.
+        """
+        lock_owned = getattr(self._generation_lock, "_is_owned", lambda: False)()
+        with self._generation_lock:
+            self._timeline_id = uuid.uuid4().hex
+            self.semantic_context_revision += 1
+            timeline_id = self._timeline_id
+        if notify_callback and not lock_owned:
+            self._notify_history_archive_commit()
+        return timeline_id
+
     def __post_init__(self) -> None:
         if not isinstance(self.session_id, str) or not self.session_id:
             raise ValueError("session_id non può essere vuoto")
@@ -1081,6 +1266,8 @@ class DuplexSession:
             raise ValueError("audio_ingress_capacity_frames deve essere un intero positivo")
         if self.audio_ingress.max_frames != self.audio_ingress_capacity_frames:
             self.audio_ingress = AudioIngressQueue(max_frames=self.audio_ingress_capacity_frames)
+        with self._generation_lock:
+            self._ensure_history_item_ids_locked()
         # The scheduler owns consumption of audio_ingress.  Server adapters
         # inject callbacks but never call get()/policy.step() themselves.
         from duplex_kernel.scheduler import DuplexScheduler
@@ -1123,29 +1310,215 @@ class DuplexSession:
                 self.turn_policy.reset()
             self._policy_revision += 1
 
+    def _allocate_history_item_id_locked(self) -> int:
+        self._history_item_sequence += 1
+        return self._history_item_sequence
+
+    @staticmethod
+    def _history_item_signature(message: Mapping[str, Any]) -> str:
+        return repr((
+            message.get("role"), message.get("content"),
+            message.get("audio_span"), message.get("text_span"),
+            id(message["audio_span"]) if "audio_span" in message else None,
+            id(message["text_span"]) if "text_span" in message else None,
+        ))
+
+    def _ensure_history_item_ids_locked(self) -> None:
+        if len(self._history_item_ids) > len(self.history):
+            self._history_item_ids = self._history_item_ids[:len(self.history)]
+        if len(self._history_item_signatures) > len(self.history):
+            self._history_item_signatures = self._history_item_signatures[:len(self.history)]
+        for index, message in enumerate(self.history):
+            signature = self._history_item_signature(message)
+            if index >= len(self._history_item_ids):
+                self._history_item_ids.append(self._allocate_history_item_id_locked())
+            if index >= len(self._history_item_signatures):
+                self._history_item_signatures.append(signature)
+            elif self._history_item_signatures[index] != signature:
+                self._history_item_ids[index] = self._allocate_history_item_id_locked()
+                self._history_item_signatures[index] = signature
+
+    def _replace_history_locked(self, messages: list[dict[str, Any]]) -> bool:
+        updated = [dict(message) for message in messages]
+        old = [dict(message) for message in self.history]
+        self._ensure_history_item_ids_locked()
+        old_ids = list(self._history_item_ids)
+        if updated == old:
+            return False
+
+        retained = 0
+        retained_ids: list[int] = []
+        # Most session history replacements are a bounded suffix of current
+        # history followed by a response. Preserve the longest exact suffix
+        # overlap first so IDs follow the retained messages through truncation.
+        max_overlap = min(len(old), len(updated))
+        for overlap in range(max_overlap, 0, -1):
+            if old[-overlap:] == updated[:overlap]:
+                retained = overlap
+                retained_ids = old_ids[-overlap:]
+                break
+        if retained == 0:
+            for overlap in range(max_overlap, 0, -1):
+                if old[:overlap] == updated[:overlap]:
+                    retained = overlap
+                    retained_ids = old_ids[:overlap]
+                    break
+        new_ids = retained_ids + [
+            self._allocate_history_item_id_locked()
+            for _ in range(len(updated) - retained)
+        ]
+        self.history = updated[-16:]
+        self._history_item_ids = new_ids[-16:]
+        self._history_item_signatures = [
+            self._history_item_signature(message) for message in self.history
+        ]
+        return self.history != old
+
+    def _append_history_items_locked(
+        self,
+        messages: list[dict[str, Any]],
+    ) -> tuple[int, ...]:
+        self._ensure_history_item_ids_locked()
+        additions = [dict(message) for message in messages]
+        if not additions:
+            return ()
+        added_ids = tuple(
+            self._allocate_history_item_id_locked() for _ in additions
+        )
+        combined_history = [dict(message) for message in self.history] + additions
+        combined_ids = list(self._history_item_ids) + list(added_ids)
+        self.history = combined_history[-16:]
+        self._history_item_ids = combined_ids[-16:]
+        self._history_item_signatures = [
+            self._history_item_signature(message) for message in self.history
+        ]
+        return added_ids
+
+    def append_history_items(self, messages: list[dict[str, Any]]) -> bool:
+        """Append direct conversation items while keeping stable row identities."""
+        with self._generation_lock:
+            before = [dict(message) for message in self.history]
+            self._append_history_items_locked(messages)
+            changed = self.history != before
+            if changed:
+                self.semantic_context_revision += 1
+                self._history_mutation_sequence += 1
+        if changed:
+            self._notify_history_archive_commit()
+        return changed
+
+    def replace_history(self, messages: list[dict[str, Any]]) -> bool:
+        """Replace bounded conversation rows, preserving IDs for exact overlap."""
+        with self._generation_lock:
+            changed = self._replace_history_locked(messages)
+            if changed:
+                self.semantic_context_revision += 1
+                self._history_mutation_sequence += 1
+        if changed:
+            self._notify_history_archive_commit()
+        return changed
+
+    @staticmethod
+    def _normalize_asr_provenance(value: Mapping[str, Any] | None) -> tuple[tuple[str, str | int | float | bool], ...]:
+        if not isinstance(value, Mapping):
+            return ()
+        allowed = ("model", "device", "compute_type", "cpu_threads", "language")
+        result: list[tuple[str, str | int | float | bool]] = []
+        for key in allowed:
+            item = value.get(key)
+            if type(item) in {str, int, bool}:
+                result.append((key, item))
+            elif type(item) is float and math.isfinite(item):
+                result.append((key, item))
+        return tuple(result)
+
+    def _history_snapshot_locked(self) -> SessionHistorySnapshot:
+        self._ensure_history_item_ids_locked()
+        user_audio_spans = tuple(
+            message["audio_span"] for message in self.history
+            if isinstance(message.get("audio_span"), UserAudioSpan)
+        )
+        assistant_text_spans = tuple(
+            message["text_span"] for message in self.history
+            if isinstance(message.get("text_span"), AssistantTextSpan)
+        )
+        references = {
+            id(span): span for span in (*user_audio_spans, *assistant_text_spans)
+        }
+        return SessionHistorySnapshot(
+            session_id=self.session_id,
+            history=tuple(copy.deepcopy(message, references) for message in self.history),
+            history_item_ids=tuple(self._history_item_ids),
+            provenance=tuple(self._user_history_provenance),
+            history_revision=int(self.semantic_context_revision),
+            history_mutation_sequence=int(self._history_mutation_sequence),
+            instructions=str(self.instructions),
+            language=str(self.language),
+            timeline_id=self.timeline_id,
+            user_audio_spans=user_audio_spans,
+            assistant_text_spans=assistant_text_spans,
+        )
+
+    def snapshot_history_with_provenance(self) -> SessionHistorySnapshot:
+        """Return history, row identities, provenance, and prompt revision atomically."""
+        with self._generation_lock:
+            return self._history_snapshot_locked()
+
+    def set_history_archive_commit_callback(
+        self,
+        callback: Callable[["DuplexSession", SessionHistorySnapshot], Any] | None,
+    ) -> None:
+        """Install a callback for committed archive or prompt-context snapshots."""
+        if callback is not None and not callable(callback):
+            raise TypeError("history archive commit callback must be callable")
+        with self._generation_lock:
+            self._history_archive_commit_callback = callback
+
+    def _notify_history_archive_commit(self) -> None:
+        with self._generation_lock:
+            callback = self._history_archive_commit_callback
+            snapshot = self._history_snapshot_locked() if callback is not None else None
+        if callback is not None and snapshot is not None:
+            try:
+                callback(self, snapshot)
+            except Exception:
+                logger.exception("history archive commit callback failed")
+
+    def notify_history_context_changed(self) -> None:
+        """Publish a snapshot after an externally fenced history mutation."""
+        self._notify_history_archive_commit()
+
     def observe_user_onset(self, frame_id: int) -> bool:
         """Retain the newest real onset independently of endpoint consumption."""
         onset = int(frame_id)
         if onset < 0:
             raise ValueError("user onset frame id deve essere non negativo")
+        archive_changed = False
+        accepted = False
         with self._generation_lock:
-            if self.last_answered_onset_frame_id is not None and onset <= self.last_answered_onset_frame_id:
-                return False
-            snapshot = self._completed_utterance_audio_snapshot
-            if snapshot is not None and onset > snapshot.first_frame_id:
-                self._completed_utterance_audio_snapshot = None
-            if self.pending_user_onset_frame_id is None or onset > self.pending_user_onset_frame_id:
-                previous_onset = self.pending_user_onset_frame_id
-                if (
-                    previous_onset is not None
-                    and self.reserved_user_onset_frame_id != previous_onset
-                ):
-                    self._finalize_audio_history_archive_absent_locked(previous_onset)
-                self.pending_user_onset_frame_id = onset
-                return True
-            return False
+            if not (
+                self.last_answered_onset_frame_id is not None
+                and onset <= self.last_answered_onset_frame_id
+            ):
+                snapshot = self._completed_utterance_audio_snapshot
+                if snapshot is not None and onset > snapshot.first_frame_id:
+                    self._completed_utterance_audio_snapshot = None
+                if self.pending_user_onset_frame_id is None or onset > self.pending_user_onset_frame_id:
+                    previous_onset = self.pending_user_onset_frame_id
+                    if (
+                        previous_onset is not None
+                        and self.reserved_user_onset_frame_id != previous_onset
+                    ):
+                        archive_changed = self._finalize_audio_history_archive_absent_locked(
+                            previous_onset
+                        )
+                    self.pending_user_onset_frame_id = onset
+                    accepted = True
+        if archive_changed:
+            self._notify_history_archive_commit()
+        return accepted
 
-    def _finalize_audio_history_archive_absent_locked(self, onset_frame_id: int) -> None:
+    def _finalize_audio_history_archive_absent_locked(self, onset_frame_id: int) -> bool:
         """Finish an unassociated archive when a newer user turn supersedes it."""
         pending = self.pending_audio_history_archive
         candidates = ([pending] if isinstance(pending, dict) else []) + list(
@@ -1159,7 +1532,7 @@ class DuplexSession:
                 archive["assistant_text"] = ""
                 archive["assistant_status"] = "absent"
                 archive["assistant_finalized"] = True
-        self._drain_audio_history_archives_locked()
+        return self._drain_audio_history_archives_locked()
 
     def reserve_user_onset_for_response(self, frame_id: int) -> bool:
         """Reserve the pending onset at SPEAK launch; never reserve an older turn."""
@@ -1269,17 +1642,135 @@ class DuplexSession:
                 # clock by one. Anchor after the committed clock so the first
                 # post-boundary hidden is still relative frame zero.
                 processed_listener_through = self.listener_state.next_input_frame_id - 1
+                source_input_watermark = max(
+                    processed_listener_through,
+                    self.last_listener_frame_id
+                    if self.last_listener_frame_id is not None else -1,
+                )
                 base_frame_id = max(
                     0,
-                    processed_listener_through,
-                    self.last_listener_frame_id if self.last_listener_frame_id is not None else 0,
+                    source_input_watermark,
                 )
                 self.conditioning_buffer.begin_segment(
                     generation_id=self.session_generation_id,
                     segment_id=self.speaker_segment_id,
                     base_frame_id=base_frame_id,
                 )
+                self._response_history_order += 1
+                ledger = ResponseEventLedger(
+                    response_id=str(response_id),
+                    generation_id=int(self.session_generation_id),
+                    source_input_watermark=int(source_input_watermark),
+                    history_order=int(self._response_history_order),
+                    history_mutation_sequence_at_start=int(self._history_mutation_sequence),
+                )
+                self._response_event_ledgers[str(response_id)] = ledger
+                while len(self._response_event_ledgers) > 32:
+                    oldest = next(iter(self._response_event_ledgers))
+                    if oldest == str(response_id):
+                        break
+                    self._response_event_ledgers.pop(oldest)
                 return GenerationToken(self.session_generation_id, response_id, self.speaker_segment_id)
+
+    def get_response_event_ledger(self, response_id: str) -> ResponseEventLedger | None:
+        """Return the exact response-owned event ledger, including old branches."""
+        with self._generation_lock:
+            return self._response_event_ledgers.get(str(response_id))
+
+    def commit_response_ledger_projection(
+        self,
+        ledger: ResponseEventLedger,
+        *,
+        archive_id: int | None = None,
+        response_done_at_monotonic_ns: int | None = None,
+    ) -> bool:
+        """Commit one ledger projection and notify refresh owners after history changes."""
+        projection = ledger.project()
+        assistant_text = str(projection.confirmed_text)
+        callback: Callable[[DuplexSession, ResponseLedgerProjection], Any] | None = None
+        committed = False
+        archive_changed = False
+        with self._generation_lock:
+            if self._closed:
+                self.stale_history_writes += 1
+                return False
+            mutation_before = int(self._history_mutation_sequence)
+            if archive_id is not None:
+                pending = self._find_audio_history_archive_locked(int(archive_id))
+                if pending is not None:
+                    order = int(projection.history_order)
+                    pending["response_history_order"] = order
+                    pending["response_id"] = projection.response_id
+                    pending["assistant_revision"] = int(projection.generation_id)
+                    pending["assistant_pcm_reference"] = _archive_cpu_reference(
+                        projection.consumed_pcm_chunks
+                    )
+                    pending["rendered_sample_frontier"] = int(projection.pcm_samples_consumed)
+                    if order < self._latest_committed_response_history_order:
+                        assistant_text = ""
+                        status = "absent"
+                    else:
+                        status = projection.text_status
+                    pending["assistant_text"] = assistant_text
+                    pending["assistant_status"] = status
+                    pending["assistant_finalized"] = True
+                    if response_done_at_monotonic_ns is not None:
+                        pending["response_done_at_monotonic_ns"] = int(
+                            response_done_at_monotonic_ns
+                        )
+                    archive_changed = self._drain_audio_history_archives_locked()
+                    self._latest_committed_response_history_order = max(
+                        self._latest_committed_response_history_order, order
+                    )
+                    committed = True
+            if not committed:
+                order = int(projection.history_order)
+                if order < self._latest_committed_response_history_order:
+                    self.stale_history_writes += 1
+                    return False
+                if (
+                    int(projection.history_mutation_sequence_at_start)
+                    != int(self._history_mutation_sequence)
+                ):
+                    self.stale_history_writes += 1
+                    return False
+                if assistant_text.strip():
+                    changed = self._append_history_items_locked([
+                        self._assistant_history_message_locked(
+                            assistant_text,
+                            response_id=projection.response_id,
+                            revision=int(projection.generation_id),
+                            pcm_reference=projection.consumed_pcm_chunks,
+                            rendered_sample_frontier=int(projection.pcm_samples_consumed),
+                        )
+                    ])
+                    if changed:
+                        self.semantic_context_revision += 1
+                        self._history_mutation_sequence += 1
+                self._latest_committed_response_history_order = max(
+                    self._latest_committed_response_history_order, order
+                )
+                committed = True
+            if self._history_mutation_sequence != mutation_before:
+                callback = self._response_ledger_history_callback
+        if callback is not None:
+            try:
+                callback(self, projection)
+            except Exception:
+                logger.exception("response ledger history refresh callback failed")
+        if archive_changed:
+            self._notify_history_archive_commit()
+        return committed
+
+    def set_response_ledger_history_callback(
+        self,
+        callback: Callable[["DuplexSession", ResponseLedgerProjection], Any] | None,
+    ) -> None:
+        """Install a nonblocking callback for canonical listener-context refresh."""
+        if callback is not None and not callable(callback):
+            raise TypeError("response ledger history callback must be callable")
+        with self._generation_lock:
+            self._response_ledger_history_callback = callback
 
     def next_frame(self) -> int:
         with self._generation_lock:
@@ -1623,20 +2114,31 @@ class DuplexSession:
         first_frame_id: int,
         last_frame_id: int,
         base_messages: list[dict[str, Any]],
-        source: str = "post_response_asr",
+        source: str = "user_audio",
         response_created_at_monotonic_ns: int | None = None,
         coverage: str = "complete",
+        timeline_id: str | None = None,
+        state_epoch_id: int | str | None = None,
+        soft_tokens_reference: Any = None,
+        encoder_profile: str = "pcm",
+        turn_id: int | None = None,
+        chunk_id: int = 0,
+        revision: int = 0,
+        turn_open: bool = False,
     ) -> int | None:
-        """Queue bounded actual user audio for ordered asynchronous archival."""
+        """Archive CPU input and commit it independently of ASR and the response."""
         normalized_source = str(source).strip()
-        if normalized_source not in {"post_response_asr", "heard_action_say_v2"}:
+        if normalized_source not in {"user_audio", "post_response_asr", "heard_action_say_v2"}:
             raise ValueError("sorgente archivio audio non supportata")
         if pcm is None:
-            if normalized_source != "heard_action_say_v2":
+            if normalized_source != "heard_action_say_v2" and soft_tokens_reference is None:
                 raise ValueError("solo heard_action_say_v2 può archiviare senza PCM")
             audio = None
         else:
+            if isinstance(pcm, torch.Tensor) and pcm.device.type != "cpu":
+                raise ValueError("audio archive references must already be on CPU")
             audio = np.asarray(pcm, dtype=np.float32).reshape(-1)
+        archived_soft_tokens = _archive_cpu_reference(soft_tokens_reference)
         first = int(first_frame_id)
         last = int(last_frame_id)
         normalized_coverage = str(coverage).strip().lower()
@@ -1651,11 +2153,21 @@ class DuplexSession:
         with self._generation_lock:
             if self._closed:
                 raise RuntimeError("sessione chiusa: non si può archiviare audio")
-            existing = self.pending_audio_history_archive
-            if isinstance(existing, dict) and int(existing.get("first_frame_id", -1)) == first:
-                return int(existing["archive_id"])
-            for existing in self.queued_audio_history_archives:
-                if int(existing.get("first_frame_id", -1)) == first:
+            for existing in self._archived_audio_history.values():
+                span = existing.get("audio_span")
+                if (isinstance(span, UserAudioSpan) and turn_id is not None
+                        and existing["timeline_id"] == str(timeline_id or self.timeline_id)
+                        and span.turn_id == int(turn_id) and span.chunk_id == int(chunk_id)):
+                    if ((span.first_frame_id, span.last_frame_id, span.revision, span.turn_open,
+                         span.encoder_profile) != (first, last, int(revision), bool(turn_open), str(encoder_profile))
+                            or not np.array_equal(span.soft_tokens_reference, archived_soft_tokens)
+                            or not np.array_equal(span.pcm_reference, audio)):
+                        raise ValueError("archived audio chunk identity is immutable")
+                if (
+                    int(existing["first_frame_id"]) == first
+                    and int(existing["last_frame_id"]) == last
+                    and existing["timeline_id"] == str(timeline_id or self.timeline_id)
+                ):
                     return int(existing["archive_id"])
             pending_count = int(self.pending_audio_history_archive is not None) + len(self.queued_audio_history_archives)
             if pending_count >= MAX_PENDING_AUDIO_HISTORY_ARCHIVES:
@@ -1664,12 +2176,22 @@ class DuplexSession:
             archive_id = self.next_audio_history_archive_id
             self.next_audio_history_archive_id += 1
             reserved_at_ns = time.monotonic_ns()
+            captured_state_epoch = (
+                getattr(self.listener_state, "state_epoch_id", None)
+                if state_epoch_id is None else state_epoch_id
+            )
+            if isinstance(captured_state_epoch, bool) or not isinstance(
+                captured_state_epoch, (int, str, type(None))
+            ):
+                captured_state_epoch = None
             pending = {
                 "archive_id": archive_id,
+                "timeline_id": str(timeline_id or self.timeline_id),
+                "state_epoch_id": captured_state_epoch,
                 "first_frame_id": first,
                 "last_frame_id": last,
                 "coverage": normalized_coverage,
-                "pcm": audio.copy() if audio is not None else None,
+                "pcm": _archive_cpu_reference(audio),
                 "base_messages": [dict(message) for message in base_messages[-16:]],
                 "source": normalized_source,
                 "created_at_monotonic_ns": reserved_at_ns,
@@ -1689,11 +2211,70 @@ class DuplexSession:
                 "assistant_finalized": False,
                 "status": "pending",
             }
+            if audio is not None or archived_soft_tokens is not None:
+                pending["audio_span"] = UserAudioSpan(
+                    turn_id=archive_id if turn_id is None else int(turn_id),
+                    chunk_id=int(chunk_id),
+                    revision=int(revision),
+                    first_frame_id=first,
+                    last_frame_id=last,
+                    pcm_reference=pending["pcm"],
+                    soft_tokens_reference=archived_soft_tokens,
+                    encoder_profile=str(encoder_profile),
+                    turn_open=bool(turn_open),
+                )
+            self._archived_audio_history[archive_id] = pending
             if self.pending_audio_history_archive is None:
                 self.pending_audio_history_archive = pending
             else:
                 self.queued_audio_history_archives.append(pending)
-            return archive_id
+            archive_changed = self._drain_audio_history_archives_locked()
+            pending_ids = {
+                int(item["archive_id"])
+                for item in self.queued_audio_history_archives
+            }
+            if self.pending_audio_history_archive is not None:
+                pending_ids.add(int(self.pending_audio_history_archive["archive_id"]))
+            for old_id in tuple(self._archived_audio_history)[:-16]:
+                if old_id not in pending_ids:
+                    del self._archived_audio_history[old_id]
+        if archive_changed:
+            self._notify_history_archive_commit()
+        return archive_id
+
+    def prepare_memory_audio_chunks(
+        self, spans: tuple[UserAudioSpan, ...] | None = None,
+    ) -> tuple[Any, ...]:
+        """Prepare private Q2 replay from immutable CPU archives, including open turns.
+
+        Callers interleave model-template text delimiters with these frames.
+        Missing archived embeddings are an error; PCM is never re-encoded here.
+        """
+        from duplex_kernel.listener_microbatch_worker import MemoryPrefillChunk
+
+        selected = self.snapshot_history_with_provenance().user_audio_spans if spans is None else tuple(spans)
+        chunks = []
+        previous = -1
+        for span in selected:
+            if not isinstance(span, UserAudioSpan) or span.soft_tokens_reference is None:
+                raise ValueError("REBUILD requires archived CPU soft-tokens for every audio span")
+            soft = _archive_cpu_reference(span.soft_tokens_reference)
+            frame_count = span.last_frame_id - span.first_frame_id + 1
+            if (not isinstance(soft, np.ndarray) or soft.shape != (2 * frame_count, 1536)
+                    or not np.issubdtype(soft.dtype, np.number) or not np.isfinite(soft).all()):
+                raise ValueError("archived soft-tokens must contain two finite 1536-wide tokens per frame")
+            if span.first_frame_id <= previous:
+                raise ValueError("archived audio chunks must be chronological and nonoverlapping")
+            for offset in range(frame_count):
+                frame_id = span.first_frame_id + offset
+                chunks.append(MemoryPrefillChunk(
+                    audio_soft=soft[2 * offset:2 * offset + 2],
+                    first_frame_id=frame_id, last_frame_id=frame_id,
+                    turn_id=span.turn_id, chunk_id=span.chunk_id,
+                    revision=span.revision, turn_open=span.turn_open,
+                ))
+            previous = span.last_frame_id
+        return tuple(chunks)
 
     def mark_audio_history_archive_submitted(
         self,
@@ -1717,7 +2298,7 @@ class DuplexSession:
             return True
 
     def get_audio_history_archive(self, archive_id: int) -> dict[str, Any] | None:
-        """Return a detached snapshot for the CPU ASR worker, if still pending."""
+        """Return detached diagnostics for a pending or recently committed archive."""
         with self._generation_lock:
             pending = self._find_audio_history_archive_locked(archive_id)
             if pending is None:
@@ -1735,50 +2316,55 @@ class DuplexSession:
         for item in self.queued_audio_history_archives:
             if int(item.get("archive_id", -1)) == target:
                 return item
-        return None
+        return self._archived_audio_history.get(target)
 
-    def _advance_audio_history_archive_locked(self) -> None:
-        self.pending_audio_history_archive = (
-            self.queued_audio_history_archives.popleft()
-            if self.queued_audio_history_archives else None
+    def _drain_audio_history_archives_locked(self) -> bool:
+        history_changed = False
+        for pending in self._archived_audio_history.values():
+            history_changed = self._commit_audio_history_archive_locked(pending) or history_changed
+        waiting = deque(
+            pending for pending in self._archived_audio_history.values()
+            if not pending.get("user_committed") and not pending.get("assistant_finalized")
         )
+        self.pending_audio_history_archive = waiting.popleft() if waiting else None
+        self.queued_audio_history_archives = waiting
+        return history_changed
 
-    def _drain_audio_history_archives_locked(self) -> None:
-        while isinstance(self.pending_audio_history_archive, dict):
-            pending = self.pending_audio_history_archive
-            status = str(pending.get("status", "pending"))
-            transcript = str(pending.get("transcript") or "").strip()
-            assistant_finalized = bool(pending.get("assistant_finalized"))
-            if status in {"failed", "empty"}:
-                # Empty user ASR cannot discard completed assistant text.
-                if not assistant_finalized:
-                    break
-                self._commit_audio_history_archive_locked(pending)
-                self._advance_audio_history_archive_locked()
-                continue
-            if transcript and assistant_finalized:
-                self._commit_audio_history_archive_locked(pending)
-                self._advance_audio_history_archive_locked()
-                continue
-            break
-
-    def complete_audio_history_archive(self, archive_id: int, transcript: str) -> bool:
-        """Commit only real non-empty transcripts, preserving archive order."""
-        value = str(transcript).strip()
+    def complete_audio_history_archive(
+        self,
+        archive_id: int,
+        transcript: str | None,
+        *,
+        asr_provenance: Mapping[str, Any] | None = None,
+        expected_generation_id: int | None = None,
+    ) -> bool:
+        """Attach optional ASR diagnostics without changing conversational state."""
+        value = str(transcript or "").strip()
         with self._generation_lock:
             pending = self._find_audio_history_archive_locked(archive_id)
-            if self._closed or pending is None:
+            if (
+                self._closed
+                or pending is None
+                or (
+                    expected_generation_id is not None
+                    and self.session_generation_id != int(expected_generation_id)
+                )
+            ):
                 self.stale_history_writes += 1
                 return False
             pending["completed_at_monotonic_ns"] = time.monotonic_ns()
-            if not value:
-                pending["status"] = "empty"
-                self._drain_audio_history_archives_locked()
-                return True
-            pending["transcript"] = value
-            pending["status"] = "transcript_ready"
-            self._drain_audio_history_archives_locked()
-            return True
+            pending["asr_provenance"] = self._normalize_asr_provenance(asr_provenance)
+            pending["transcript"] = value or None
+            pending["status"] = "transcript_ready" if value else "empty"
+            self._user_history_provenance = [
+                replace(
+                    item,
+                    transcript_status="available" if value else "empty",
+                    asr_provenance=pending["asr_provenance"],
+                ) if item.archive_id == int(archive_id) else item
+                for item in self._user_history_provenance
+            ]
+        return True
 
     def update_audio_history_archive_assistant(
         self,
@@ -1787,31 +2373,47 @@ class DuplexSession:
         *,
         status: str = "completed",
         response_done_at_monotonic_ns: int | None = None,
+        response_id: str | None = None,
+        revision: int | None = None,
+        pcm_reference: Any = None,
+        rendered_sample_frontier: int | None = None,
     ) -> bool:
         """Attach the actual completed assistant turn to its archive slot."""
         normalized_status = str(status).strip().lower()
         if normalized_status not in {"completed", "partial", "cancelled", "absent"}:
             raise ValueError("stato assistant archive non supportato")
+        archive_changed = False
         with self._generation_lock:
             pending = self._find_audio_history_archive_locked(archive_id)
             if self._closed or pending is None:
                 self.stale_history_writes += 1
                 return False
             assistant_text = (
-                str(text).strip()
+                (str(text) if str(text).strip() else "")
                 if normalized_status in {"completed", "partial"}
                 else ""
             )
             pending["assistant_text"] = assistant_text
             pending["assistant_status"] = normalized_status
             pending["assistant_finalized"] = True
+            if response_id is not None:
+                pending["response_id"] = str(response_id)
+            if revision is not None:
+                pending["assistant_revision"] = int(revision)
+            if pcm_reference is not None:
+                pending["assistant_pcm_reference"] = _archive_cpu_reference(pcm_reference)
+            if rendered_sample_frontier is not None:
+                pending["rendered_sample_frontier"] = int(rendered_sample_frontier)
             if response_done_at_monotonic_ns is not None:
                 pending["response_done_at_monotonic_ns"] = int(response_done_at_monotonic_ns)
-            self._drain_audio_history_archives_locked()
-            return True
+            archive_changed = self._drain_audio_history_archives_locked()
+        if archive_changed:
+            self._notify_history_archive_commit()
+        return True
 
     def fail_audio_history_archive(self, archive_id: int, reason: str) -> bool:
-        """Skip failed archive work so a later valid turn can still commit."""
+        """Record an ASR failure without invalidating archived conversation audio."""
+        archive_changed = False
         with self._generation_lock:
             pending = self._find_audio_history_archive_locked(archive_id)
             if self._closed or pending is None:
@@ -1820,43 +2422,143 @@ class DuplexSession:
             pending["status"] = "failed"
             pending["failure_reason"] = str(reason)[:240]
             pending["completed_at_monotonic_ns"] = time.monotonic_ns()
-            self._drain_audio_history_archives_locked()
-            return True
+            archive_changed = self._drain_audio_history_archives_locked()
+        if archive_changed:
+            self._notify_history_archive_commit()
+        return True
 
-    def _commit_audio_history_archive_locked(self, pending: dict[str, Any]) -> None:
-        snapshot = [dict(message) for message in pending.get("base_messages", [])]
-        # A prior queued archive may have committed since this snapshot was
-        # reserved. Current history wins so turns cannot overwrite each other.
-        base_messages = [dict(message) for message in self.history] if self.history else snapshot
-        transcript = str(pending.get("transcript") or "").strip()
-        if transcript:
-            base_messages.append({"role": "user", "content": transcript})
+    def _commit_audio_history_archive_locked(self, pending: dict[str, Any]) -> bool:
+        assistant_updated = False
+        audio_span = pending.get("audio_span")
+        appended_messages: list[dict[str, Any]] = []
+        audio_added = isinstance(audio_span, UserAudioSpan) and not pending.get("user_committed")
+        if audio_added:
+            appended_messages.append({"role": "user", "content": "", "audio_span": audio_span})
         assistant_text = (
-            str(pending.get("assistant_text", "")).strip()
-            if pending.get("assistant_status", "completed") in {"completed", "partial"}
+            (str(pending.get("assistant_text", ""))
+             if str(pending.get("assistant_text", "")).strip() else "")
+            if pending.get("assistant_finalized")
+            and pending.get("assistant_status") in {"completed", "partial"}
             else ""
         )
         if assistant_text:
-            base_messages.append({"role": "assistant", "content": assistant_text})
-        updated_history = base_messages[-16:]
-        if updated_history != self.history:
-            self.history = updated_history
-            self.semantic_context_revision += 1
+            assistant_message = self._assistant_history_message_locked(
+                assistant_text,
+                response_id=str(pending.get("response_id", "")),
+                turn_id=audio_span.turn_id if isinstance(audio_span, UserAudioSpan) else int(pending["archive_id"]),
+                revision=int(pending.get("assistant_revision", 0)),
+                pcm_reference=pending.get("assistant_pcm_reference"),
+                rendered_sample_frontier=int(pending.get("rendered_sample_frontier", 0)),
+            )
+            if pending.get("assistant_committed"):
+                self._ensure_history_item_ids_locked()
+                item_id = pending.get("assistant_history_item_id")
+                if item_id in self._history_item_ids:
+                    index = self._history_item_ids.index(item_id)
+                    if self.history[index] != assistant_message:
+                        self.history[index] = assistant_message
+                        self._ensure_history_item_ids_locked()
+                        pending["assistant_history_item_id"] = self._history_item_ids[index]
+                        self.semantic_context_revision += 1
+                        self._history_mutation_sequence += 1
+                        assistant_updated = True
+                assistant_text = ""
+            else:
+                appended_messages.append(assistant_message)
+        if not appended_messages:
+            return assistant_updated
+        if not self.history:
+            self._replace_history_locked(pending.get("base_messages", []))
+        appended_item_ids = self._append_history_items_locked(appended_messages)
+        self.semantic_context_revision += 1
+        self._history_mutation_sequence += 1
+        if audio_added:
+            pending["user_committed"] = True
+            asr_provenance = pending.get("asr_provenance")
+            if not isinstance(asr_provenance, tuple):
+                asr_provenance = self._normalize_asr_provenance(
+                    asr_provenance if isinstance(asr_provenance, Mapping) else None
+                )
+            audio_item_id = int(appended_item_ids[0])
+            try:
+                message_index = self._history_item_ids.index(audio_item_id)
+            except ValueError:
+                message_index = -1
+            if message_index >= 0:
+                self._user_history_provenance.append(UserHistoryItemProvenance(
+                    session_id=self.session_id,
+                    archive_id=int(pending["archive_id"]),
+                    history_item_id=audio_item_id,
+                    message_index=message_index,
+                    timeline_id=str(pending.get("timeline_id") or self.session_id),
+                    state_epoch_id=pending.get("state_epoch_id"),
+                    first_frame_id=int(pending["first_frame_id"]),
+                    last_frame_id=int(pending["last_frame_id"]),
+                    coverage_complete=str(pending.get("coverage", "partial")) == "complete",
+                    transcript_status="available" if pending.get("transcript") else "pending",
+                    source=str(pending.get("source", "")),
+                    asr_provenance=tuple(asr_provenance),
+                    history_revision=int(self.semantic_context_revision),
+                    history_mutation_sequence=int(self._history_mutation_sequence),
+                ))
+        if assistant_text:
+            pending["assistant_committed"] = True
+            pending["assistant_history_item_id"] = int(appended_item_ids[-1])
+        retained_item_ids = set(self._history_item_ids)
+        self._user_history_provenance = [
+            item for item in self._user_history_provenance
+            if item.history_item_id in retained_item_ids
+        ]
+        response_order = pending.get("response_history_order")
+        if isinstance(response_order, int) and not isinstance(response_order, bool):
+            self._latest_committed_response_history_order = max(
+                self._latest_committed_response_history_order, int(response_order)
+            )
+        return True
 
-    def update_instructions(self, instructions: str) -> bool:
+    def _assistant_history_message_locked(
+        self,
+        text: str,
+        *,
+        response_id: str = "",
+        turn_id: int | None = None,
+        revision: int = 0,
+        pcm_reference: Any = None,
+        rendered_sample_frontier: int = 0,
+    ) -> dict[str, Any]:
+        span = AssistantTextSpan(
+            turn_id=int(self.session_generation_id) if turn_id is None else int(turn_id),
+            response_id=str(response_id),
+            revision=int(revision),
+            confirmed_text=text,
+            source_character_range=(0, len(text)),
+            pcm_reference=_archive_cpu_reference(pcm_reference),
+            rendered_sample_frontier=int(rendered_sample_frontier),
+        )
+        return {"role": "assistant", "content": text, "text_span": span}
+
+    def update_instructions(
+        self,
+        instructions: str,
+        *,
+        notify_callback: bool = True,
+    ) -> bool:
         """Update session instructions and invalidate semantic listener context."""
-        value = str(instructions)
+        value = str(instructions or "").strip() or DEFAULT_CONVERSATIONAL_INSTRUCTIONS
         with self._generation_lock:
             if value == self.instructions:
                 return False
             self.instructions = value
             self.semantic_context_revision += 1
-            return True
+        if notify_callback:
+            self._notify_history_archive_commit()
+        return True
 
     def note_semantic_context_changed(self) -> None:
         """Mark an already-locked direct history mutation for listener refresh."""
         with self._generation_lock:
             self.semantic_context_revision += 1
+            self._history_mutation_sequence += 1
 
     def reset_policy_audio(self, *, committed_sample_count: int) -> None:
         """Discard committed frames and trim an ingress frame straddling commit."""
@@ -2017,6 +2719,8 @@ class DuplexSession:
             return True
 
     def commit_history(self, token: GenerationToken, base_messages: list[dict[str, Any]], text: str) -> bool:
+        context_changed = False
+        committed = False
         with self._generation_lock:
             if not self.is_generation_current(token):
                 self.stale_write_attempts["history"] = self.stale_write_attempts.get("history", 0) + 1
@@ -2024,11 +2728,21 @@ class DuplexSession:
             committed_text = self.speaker_segment.emitted_text if self.speaker_segment is not None else text
             if not committed_text:
                 return False
-            updated_history = [dict(m) for m in base_messages[-16:]] + [{"role": "assistant", "content": committed_text}]
-            if updated_history != self.history:
-                self.history = updated_history
+            current_messages = self.history if self.history else base_messages
+            updated_history = [dict(m) for m in current_messages[-16:]] + [
+                self._assistant_history_message_locked(
+                    committed_text, response_id=token.response_id,
+                    revision=token.session_generation_id,
+                )
+            ]
+            context_changed = self._replace_history_locked(updated_history)
+            if context_changed:
                 self.semantic_context_revision += 1
-            return True
+                self._history_mutation_sequence += 1
+            committed = True
+        if context_changed:
+            self._notify_history_archive_commit()
+        return committed
 
     def commit_completed_assistant_response(
         self,
@@ -2040,10 +2754,13 @@ class DuplexSession:
         user_onset_frame_id: int | None = None,
         response_done_at_monotonic_ns: int | None = None,
     ) -> bool:
-        """Commit completed assistant text once, preserving any user-ASR slot."""
+        """Commit confirmed assistant text once, independently of user ASR."""
         assistant_text = str(text).strip()
         if not assistant_text:
             return False
+        archive_changed = False
+        context_changed = False
+        committed = False
         with self._generation_lock:
             if not self.is_generation_current(token) or str(response_id) != token.response_id:
                 self.stale_write_attempts["history"] = self.stale_write_attempts.get("history", 0) + 1
@@ -2057,9 +2774,7 @@ class DuplexSession:
             )
             if pending is None and user_onset_frame_id is not None:
                 onset = int(user_onset_frame_id)
-                candidates = ([self.pending_audio_history_archive]
-                              if isinstance(self.pending_audio_history_archive, dict) else [])
-                candidates += list(self.queued_audio_history_archives)
+                candidates = list(self._archived_audio_history.values())
                 pending = next((
                     item for item in candidates
                     if int(item.get("first_frame_id", -1)) == onset
@@ -2068,22 +2783,30 @@ class DuplexSession:
                 pending["assistant_text"] = assistant_text
                 pending["assistant_status"] = "completed"
                 pending["assistant_finalized"] = True
+                pending["response_id"] = str(response_id)
+                pending["assistant_revision"] = token.session_generation_id
                 if response_done_at_monotonic_ns is not None:
                     pending["response_done_at_monotonic_ns"] = int(response_done_at_monotonic_ns)
                 self.assistant_history_committed_generation_id = token.session_generation_id
-                self._drain_audio_history_archives_locked()
-                return True
-
-            # ASR may be disabled, empty, or over its bounded queue. Append
-            # against current history so pending user archives are preserved.
-            messages = [dict(message) for message in self.history]
-            messages.append({"role": "assistant", "content": assistant_text})
-            updated_history = messages[-16:]
-            if updated_history != self.history:
-                self.history = updated_history
-                self.semantic_context_revision += 1
-            self.assistant_history_committed_generation_id = token.session_generation_id
-            return True
+                archive_changed = self._drain_audio_history_archives_locked()
+                committed = True
+            else:
+                before_history = [dict(message) for message in self.history]
+                self._append_history_items_locked([
+                    self._assistant_history_message_locked(
+                        assistant_text, response_id=response_id,
+                        revision=token.session_generation_id,
+                    )
+                ])
+                context_changed = self.history != before_history
+                if context_changed:
+                    self.semantic_context_revision += 1
+                    self._history_mutation_sequence += 1
+                self.assistant_history_committed_generation_id = token.session_generation_id
+                committed = True
+        if archive_changed or context_changed:
+            self._notify_history_archive_commit()
+        return committed
 
     def close(self) -> None:
         """Fence all outstanding workers before releasing session-owned state."""
@@ -2103,6 +2826,8 @@ class DuplexSession:
             self.reset_native_control6_user_pcm()
             self.pending_audio_history_archive = None
             self.queued_audio_history_archives.clear()
+            self._archived_audio_history.clear()
+            self._response_event_ledgers.clear()
             self.response_id = None
             with self._pending_audio_lock:
                 self.pending_audio = np.empty(0, dtype=np.float32)
@@ -2264,9 +2989,10 @@ class SessionManager:
             session_id = str(self._session_id_factory())
             if session_id in self.sessions:
                 raise RuntimeError(f"session_id duplicato: {session_id}")
+            actual_instructions = str(instructions or "").strip() or DEFAULT_CONVERSATIONAL_INSTRUCTIONS
             sess = DuplexSession(
                 session_id=session_id,
-                instructions=instructions,
+                instructions=actual_instructions,
                 voice=voice,
                 language=language,
                 audio_ingress_capacity_frames=audio_ingress_capacity_frames,
@@ -2404,23 +3130,65 @@ class SessionManager:
         state.user_speech_active = True
 
     def handle_ephemeral_backchannel(self, session_id: Any) -> tuple[Any, Any] | None:
-        """Genera un backchannel di 1-2 token senza spezzare la sequenza audio utente in KV cache."""
+        """Publish only an EOS-terminated, validated private backchannel result."""
         state = self._lookup_session(session_id)
         saved_audio_kv_pos = state.kv_cache.current_position
-
-        # Fork temporaneo: chiude virtualmente l'audio, genera 2 token (es. "Capisco.") e li manda a Qwen3-TTS
-        bc_tokens, bc_hiddens = None, None
-        if self.gemma_engine is not None:
-            bc_tokens, bc_hiddens = self.gemma_engine.generate_ephemeral_backchannel(
-                session_id=session_id,
-                start_kv_pos=saved_audio_kv_pos,
-                max_tokens=2,
+        if self.gemma_engine is None:
+            return None
+        result = self.gemma_engine.generate_ephemeral_backchannel(
+            session_id=session_id,
+            start_kv_pos=saved_audio_kv_pos,
+            max_tokens=BACKCHANNEL_MAX_TEXT_TOKENS,
+        )
+        if not isinstance(result, Mapping):
+            return None
+        if result.get("terminal_reason") not in {"eos", "stop"} or result.get("cancelled"):
+            return None
+        generated_ids = result.get("gen_ids")
+        hidden = result.get("hidden")
+        if (
+            not isinstance(generated_ids, (tuple, list))
+            or not generated_ids
+            or len(generated_ids) > BACKCHANNEL_MAX_TEXT_TOKENS
+            or hidden is None
+        ):
+            return None
+        try:
+            original_ids = [int(token_id) for token_id in generated_ids]
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if any(token_id < 0 for token_id in original_ids):
+            return None
+        tokenizer = getattr(self.gemma_engine, "tokenizer", None)
+        if tokenizer is None:
+            return None
+        try:
+            source_text = tokenizer.decode(original_ids, skip_special_tokens=True)
+        except (TypeError, ValueError, RuntimeError):
+            return None
+        valid_phrase, _guard_reason, _word_count = validate_backchannel_phrase(
+            source_text, max_words=4
+        )
+        if not valid_phrase:
+            return None
+        if isinstance(hidden, torch.Tensor):
+            hidden_token_count = (
+                int(hidden.shape[1])
+                if hidden.ndim == 3 and hidden.shape[0] == 1
+                else int(hidden.shape[0]) if hidden.ndim == 2 else -1
             )
-        state.speaker.enqueue_backchannel_tts(bc_tokens, bc_hiddens)
-
-        # Rollback immediato della KV cache alla posizione dell'audio utente!
-        state.kv_cache.rollback_to(saved_audio_kv_pos)
-        return bc_tokens, bc_hiddens
+        else:
+            try:
+                hidden_token_count = len(hidden)
+            except TypeError:
+                return None
+        if hidden_token_count != len(original_ids):
+            return None
+        with state._generation_lock:
+            if state.stop_requested or state._closed:
+                return None
+            state.speaker.enqueue_backchannel_tts(original_ids, hidden)
+        return original_ids, hidden
 
 
 __all__ = [

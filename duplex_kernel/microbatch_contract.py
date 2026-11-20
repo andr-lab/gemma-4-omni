@@ -195,6 +195,9 @@ class ListenerFrame:
     logical_q_len: int
     ephemeral_reason: str | None
     queue_audio_for_next_turn: bool
+    queue_epoch: int | None
+    queue_audio_reason: str | None
+    queue_audio_onset_frame_id: int | None
     reference_frame_id: int | None
     policy_context: Any | None
     _pcm_f32le: bytes = field(repr=False)
@@ -214,6 +217,9 @@ class ListenerFrame:
         logical_q_len: int = LISTENER_Q_PER_FRAME,
         ephemeral_reason: str | None = None,
         queue_audio_for_next_turn: bool = False,
+        queue_epoch: int | None = None,
+        queue_audio_reason: str | None = None,
+        queue_audio_onset_frame_id: int | None = None,
         reference_pcm: np.ndarray | None = None,
         reference_frame_id: int | None = None,
         policy_context: Any | None = None,
@@ -230,16 +236,34 @@ class ListenerFrame:
             raise ValueError(
                 f"logical_q_len must be in [0,{LISTENER_Q_PER_FRAME}]"
             )
-        if ephemeral_reason not in {None, "prespeech_silence", "assistant_turn_open"}:
-            raise ValueError("ephemeral_reason must be prespeech_silence, assistant_turn_open, or None")
+        if ephemeral_reason not in {
+            None,
+            "prespeech_silence",
+            "assistant_turn_open",
+            "stale_post_drain_straggler",
+        }:
+            raise ValueError(
+                "ephemeral_reason must be prespeech_silence, assistant_turn_open, "
+                "stale_post_drain_straggler, or None"
+            )
         if ephemeral_reason is not None and logical_q_len != 0:
             raise ValueError("ephemeral listener frames must commit zero logical KV tokens")
         if logical_q_len == 0 and ephemeral_reason is None:
             raise ValueError("logical_q_len=0 requires an explicit ephemeral_reason")
         if type(queue_audio_for_next_turn) is not bool:
             raise TypeError("queue_audio_for_next_turn must be a bool")
+        if queue_epoch is not None:
+            _strict_nonnegative_int("queue_epoch", queue_epoch)
         if queue_audio_for_next_turn and ephemeral_reason != "assistant_turn_open":
             raise ValueError("only assistant-turn ephemeral frames may queue audio for the next turn")
+        if queue_audio_reason not in {None, "utterance_body", "endpoint_tail"}:
+            raise ValueError("queue_audio_reason must be utterance_body, endpoint_tail, or None")
+        if queue_audio_reason is not None and not queue_audio_for_next_turn:
+            raise ValueError("a queue audio reason requires queue_audio_for_next_turn")
+        if queue_audio_onset_frame_id is not None:
+            _strict_nonnegative_int("queue_audio_onset_frame_id", queue_audio_onset_frame_id)
+            if not queue_audio_for_next_turn or queue_audio_onset_frame_id > frame_id:
+                raise ValueError("queue audio onset must belong to a retained frame at or after its onset")
         samples = self._encode_pcm(pcm, name="pcm")
         reference: bytes | None = None
         if reference_pcm is None:
@@ -289,6 +313,9 @@ class ListenerFrame:
         object.__setattr__(self, "logical_q_len", logical_q_len)
         object.__setattr__(self, "ephemeral_reason", ephemeral_reason)
         object.__setattr__(self, "queue_audio_for_next_turn", queue_audio_for_next_turn)
+        object.__setattr__(self, "queue_epoch", queue_epoch)
+        object.__setattr__(self, "queue_audio_reason", queue_audio_reason)
+        object.__setattr__(self, "queue_audio_onset_frame_id", queue_audio_onset_frame_id)
         object.__setattr__(self, "reference_frame_id", reference_frame_id)
         object.__setattr__(self, "policy_context", policy_context)
         object.__setattr__(self, "_pcm_f32le", samples)
@@ -352,6 +379,13 @@ class ListenerSessionState:
     native_context: Any | None = field(default=None, repr=False)
     closed: bool = False
     poisoned_reason: str | None = None
+    # Physical listener KV identity is deliberately separate from the
+    # generation/state epoch and the session's logical audio timeline.
+    cache_epoch_id: int = 0
+    # Technical revision of the semantic prefix imported into this cache.
+    semantic_context_revision: int | None = None
+    # Session history revision represented by that imported prefix.
+    applied_history_revision: str | int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.session_id, str) or not self.session_id.strip():
@@ -367,8 +401,28 @@ class ListenerSessionState:
             "sequence_position",
             "cache_position",
             "valid_history_tokens",
+            "cache_epoch_id",
         ):
             _strict_nonnegative_int(name, getattr(self, name))
+        if self.semantic_context_revision is not None:
+            _strict_nonnegative_int(
+                "semantic_context_revision", self.semantic_context_revision
+            )
+        if self.applied_history_revision is not None and (
+            isinstance(self.applied_history_revision, bool)
+            or not isinstance(self.applied_history_revision, (str, int))
+            or (
+                isinstance(self.applied_history_revision, str)
+                and not self.applied_history_revision.strip()
+            )
+            or (
+                isinstance(self.applied_history_revision, int)
+                and self.applied_history_revision < 0
+            )
+        ):
+            raise ValueError(
+                "applied_history_revision must be a non-empty string or non-negative integer"
+            )
         if self.native_context_id is not None:
             if (
                 isinstance(self.native_context_id, bool)
@@ -421,6 +475,34 @@ class ListenerSessionSnapshot:
     native_context: Any = field(default=None, repr=False)
     closed: bool = False
     poisoned_reason: str | None = None
+    queued_audio_drain_metrics: "QueuedAudioDrainMetrics | None" = field(
+        default=None, repr=False
+    )
+    cache_epoch_id: int = 0
+    semantic_context_revision: int | None = None
+    applied_history_revision: str | int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class QueuedAudioDrainMetrics:
+    """Host-side timing and source provenance for one queued-Q2 drain."""
+
+    elapsed_ms: float
+    frame_count: int
+    token_count: int
+    retained_context_source: str
+    source_frame_ids: tuple[int, ...]
+    queue_response_id: str | None = None
+    queue_epoch: str | None = None
+    queue_first_frame_id: int | None = None
+    drain_queue_wait_ms: float = 0.0
+    drain_replay_forward_ms: float = 0.0
+    retained_frames_count: int = 0
+    drain_total_elapsed_ms: float = 0.0
+    drain_transition_lock_wait_ms: float = 0.0
+    drain_completion_wait_ms: float = 0.0
+    source_queue_epochs: tuple[int | None, ...] = ()
+    owner_wait_ms: float | None = None
 
 
 def _immutable_array_snapshot(value: np.ndarray | None) -> np.ndarray | None:
@@ -498,6 +580,9 @@ def snapshot_listener_state(state: ListenerSessionState) -> ListenerSessionSnaps
         ),
         closed=state.closed,
         poisoned_reason=state.poisoned_reason,
+        cache_epoch_id=state.cache_epoch_id,
+        semantic_context_revision=state.semantic_context_revision,
+        applied_history_revision=state.applied_history_revision,
     )
 
 
@@ -519,6 +604,9 @@ class BatchRowDescriptor:
     logical_q_len: int = LISTENER_Q_PER_FRAME
     ephemeral_reason: str | None = None
     queue_audio_for_next_turn: bool = False
+    queue_epoch: int | None = None
+    queue_audio_reason: str | None = None
+    queue_audio_onset_frame_id: int | None = None
 
     def __post_init__(self) -> None:
         if not self.session_id.strip() or not self.state_epoch_id.strip():
@@ -539,12 +627,27 @@ class BatchRowDescriptor:
             raise ValueError(
                 "logical_q_len must be in [0,8]"
             )
-        if self.ephemeral_reason not in {None, "prespeech_silence", "assistant_turn_open"}:
+        if self.ephemeral_reason not in {
+            None,
+            "prespeech_silence",
+            "assistant_turn_open",
+            "stale_post_drain_straggler",
+        }:
             raise ValueError("unsupported logical-Q ephemeral reason")
         if (self.logical_q_len == 0) != (self.ephemeral_reason is not None):
             raise ValueError("logical_q_len=0 and ephemeral_reason must be specified together")
         if type(self.queue_audio_for_next_turn) is not bool:
             raise TypeError("queue_audio_for_next_turn must be a bool")
+        if self.queue_epoch is not None:
+            _strict_nonnegative_int("queue_epoch", self.queue_epoch)
+        if self.queue_audio_reason not in {None, "utterance_body", "endpoint_tail"}:
+            raise ValueError("queue_audio_reason must be utterance_body, endpoint_tail, or None")
+        if self.queue_audio_reason is not None and not self.queue_audio_for_next_turn:
+            raise ValueError("a queue audio reason requires queue_audio_for_next_turn")
+        if self.queue_audio_onset_frame_id is not None:
+            _strict_nonnegative_int("queue_audio_onset_frame_id", self.queue_audio_onset_frame_id)
+            if not self.queue_audio_for_next_turn or self.queue_audio_onset_frame_id > self.frame_id:
+                raise ValueError("queue audio onset must belong to a retained frame at or after its onset")
         if self.queue_audio_for_next_turn and self.ephemeral_reason != "assistant_turn_open":
             raise ValueError("queued next-turn audio requires assistant-turn ephemeral mode")
         if self.native_context_id == 0:

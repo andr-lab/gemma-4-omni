@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from duplex_kernel.engine import PipelineEngine
+from duplex_kernel.engine import GenerationAdmissionAborted, PipelineEngine
 
 
 class _FakeCache:
@@ -198,6 +198,68 @@ def test_audio_encoder_runs_outside_listener_lock_and_lm_keeps_original_scatter_
     assert torch.equal(output.logits, thinker.lm_head((expected_embeds * 2)[:, -1:, :]))
     assert output.past_key_values is cache
     assert torch.equal(final_mask, attention_mask)
+    assert engine._thinker_audio_forward_active.is_set() is False
+
+
+def test_audio_lm_prefill_aborts_if_generation_stales_while_waiting_for_model_lock() -> None:
+    timeline: list[str] = []
+
+    class CancelledLock:
+        def acquire_fair(self, priority: str, *, stop_check):
+            assert priority == "compute"
+            timeline.append("lock_wait")
+            assert stop_check()
+            return False
+
+        def release(self):
+            raise AssertionError("a lock rejected for cancellation must not be released")
+
+        def locked(self):
+            return False
+
+    lock = CancelledLock()
+    model = _FakeTextModel(lock)  # type: ignore[arg-type]
+    thinker = _FakeThinker(model)
+    engine = PipelineEngine.__new__(PipelineEngine)
+    engine.device = "cpu"
+    engine.thinker = thinker
+    engine._thinker_wrapper = SimpleNamespace(processor=None)
+    engine._thinker_lock = lock
+    engine._thinker_audio_forward_active = threading.Event()
+    engine._thinker_audio_prefill_lock_hold_max_ms = 0.0
+    runtime_metrics = {
+        "thinker_prefill_lock_wait_ms": 0.0,
+        "thinker_prefill_lock_hold_ms": 0.0,
+        "thinker_prefill_lock_hold_max_ms": 0.0,
+        "thinker_prefill_lock_hold_80ms_frames": 0.0,
+    }
+    audio_inputs = {
+        "input_ids": torch.tensor([[1, 99, 99, 2]], dtype=torch.long),
+        "attention_mask": torch.ones((1, 4), dtype=torch.long),
+        "input_features": torch.ones((1, 2, 4)),
+        "input_features_mask": torch.ones((1, 2), dtype=torch.bool),
+    }
+
+    def admit_listener():
+        timeline.append("listener_admitted")
+
+    def should_cancel() -> bool:
+        return "lock_wait" in timeline
+
+    with pytest.raises(GenerationAdmissionAborted, match="while waiting for model lock"):
+        engine._run_thinker_audio_prefill(
+            audio_inputs,
+            is_compiled=False,
+            static_cache=None,
+            past_length=0,
+            cache_init_started=None,
+            runtime_metrics=runtime_metrics,
+            listener_admission_wait=admit_listener,
+            stop_check=should_cancel,
+        )
+
+    assert timeline == ["listener_admitted", "listener_admitted", "lock_wait"]
+    assert model.language_model_call_count == 0
     assert engine._thinker_audio_forward_active.is_set() is False
 
 

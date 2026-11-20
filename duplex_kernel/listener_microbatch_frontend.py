@@ -248,20 +248,32 @@ class PreparedListenerAudioBatch:
         except BaseException:
             try:
                 if streaming_committed:
-                    self._streaming_audio_batch.rollback_committed()
+                    try:
+                        self._streaming_audio_batch.rollback_committed()
+                    except BaseException:
+                        pass
                 elif self._streaming_audio_batch is not None:
                     abort_stream = getattr(self._streaming_audio_batch, "abort", None)
                     if callable(abort_stream) and not getattr(self._streaming_audio_batch, "_aborted", False):
-                        abort_stream()
+                        try:
+                            abort_stream()
+                        except BaseException:
+                            pass
                 if mutation_started:
-                    for state, user_tail, assistant_tail, user_mels, assistant_mels in previous:
-                        state.user_pcm_tail = user_tail
-                        state.assistant_pcm_tail = assistant_tail
-                        state.user_mel_history = user_mels
-                        state.assistant_mel_history = assistant_mels
+                    try:
+                        for state, user_tail, assistant_tail, user_mels, assistant_mels in previous:
+                            state.user_pcm_tail = user_tail
+                            state.assistant_pcm_tail = assistant_tail
+                            state.user_mel_history = user_mels
+                            state.assistant_mel_history = assistant_mels
+                    except BaseException:
+                        pass
             finally:
                 self._aborted = True
-                self._abort_workspace(self.manifest_id)
+                try:
+                    self._abort_workspace(self.manifest_id)
+                except BaseException:
+                    pass
             raise
         self._committed = True
 
@@ -441,6 +453,7 @@ class ListenerMicrobatchAudioFrontend:
                 raise RuntimeError("frontend workspace is still leased")
             workspace.manifest_id = batch.manifest.manifest_id
             self._active_manifest_id = batch.manifest.manifest_id
+            streaming_audio_batch: Any | None = None
             try:
                 cpu_features = workspace.cpu_features[:n]
                 features = workspace.features[:n]
@@ -478,7 +491,6 @@ class ListenerMicrobatchAudioFrontend:
                 audio_tower_row_timings: tuple[AudioTowerRowTiming, ...] = ()
                 audio_tower_graph_submit_ms = 0.0
                 audio_tower_execution_mode = "vectorized_cpu"
-                streaming_audio_batch: Any | None = None
                 audio_tower_raw_tokens: tuple[torch.Tensor, ...] = ()
                 try:
                     acquire_fair = getattr(lock, "acquire_fair", None)
@@ -655,9 +667,12 @@ class ListenerMicrobatchAudioFrontend:
                 if streaming_audio_batch is not None and not getattr(streaming_audio_batch, "_committed", False):
                     try:
                         streaming_audio_batch.abort()
-                    except RuntimeError:
+                    except BaseException:
                         pass
-                self._abort_workspace(batch.manifest.manifest_id)
+                try:
+                    self._abort_workspace(batch.manifest.manifest_id)
+                except BaseException:
+                    pass
                 raise
             return PreparedListenerAudioBatch(
                 manifest_id=batch.manifest.manifest_id,
@@ -936,7 +951,17 @@ def _snapshot_mel_history(
         raise TypeError("mel history must be a finite iterable of frame arrays") from exc
     if len(entries) > max_frames:
         raise ValueError(f"mel history exceeds its configured {max_frames}-frame context")
-    return tuple(_validate_mel_rows(entry, "mel history frame") for entry in entries)
+    snapshot: list[np.ndarray] = []
+    for entry in entries:
+        if isinstance(entry, np.ndarray) and entry.dtype == np.float32:
+            if entry.shape != (MEL_ROWS_PER_FRAME, MEL_BINS):
+                raise ValueError("mel history frame must contain exactly 8 finite rows of 128 bins")
+            snapshot.append(entry)
+        else:
+            # Preserve conversion for non-canonical inputs. Production history
+            # arrays are validated float32 frames and can be safely referenced.
+            snapshot.append(_validate_mel_rows(entry, "mel history frame"))
+    return tuple(snapshot)
 
 
 def _pad_mel_history(history: tuple[np.ndarray, ...]) -> np.ndarray:
@@ -971,17 +996,15 @@ def _user_mel_window(
     geometry = mel_window_geometry(mel_window_rows)
     if tuple(current.shape) != (MEL_ROWS_PER_FRAME, MEL_BINS):
         raise ValueError("current user Mel must have shape [8,128]")
-    prior_rows = tuple(_validate_mel_rows(entry, "user Mel history") for entry in history)
     current_rows = _validate_mel_rows(current, "current user Mel")
-    joined_prior = (
-        np.concatenate(prior_rows, axis=0)
-        if prior_rows else np.empty((0, MEL_BINS), dtype=np.float32)
-    )
-    context = (
-        joined_prior[-geometry.context_rows:]
-        if geometry.context_rows
-        else np.empty((0, MEL_BINS), dtype=np.float32)
-    )
+    if geometry.context_rows and history:
+        needed_frames = (
+            geometry.context_rows + MEL_ROWS_PER_FRAME - 1
+        ) // MEL_ROWS_PER_FRAME
+        joined = np.concatenate(history[-needed_frames:], axis=0)
+        context = joined[-geometry.context_rows:]
+    else:
+        context = np.empty((0, MEL_BINS), dtype=np.float32)
     result = np.concatenate((context, current_rows), axis=0)
     if result.shape[0] > geometry.mel_window_rows or result.shape[0] % 4:
         raise RuntimeError("user Mel window did not preserve its configured geometry")

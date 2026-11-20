@@ -3,9 +3,9 @@
 The training adapter and single-row production policy are intentionally left
 unchanged.  This wrapper accepts only real fresh listener rows, performs one
 ``NativeControl6LoRA`` forward, masks each row with its own legal actions, and
-reads the compact selection metadata to the CPU once per batch. The existing
-adapter's finite-input guard remains unchanged and may itself synchronize a
-CUDA scalar; the one-transfer claim applies only to policy selection metadata.
+reads the compact selection metadata to the CPU once per batch. The adapter
+keeps its finite-input validation by default; this packed CUDA path defers the
+input checks to its finite-logits bit in the batch readback.
 """
 from __future__ import annotations
 
@@ -178,12 +178,28 @@ class PolicyPreHeadContext:
     tick_id: tuple[str, int, int]
     captured_at_ns: int
     listener_generation_id: int
+    speech_endpoint: bool = False
+    new_voice_onset: bool = False
+    voice_run_onset_frame_id: int | None = None
 
     def __post_init__(self) -> None:
         if not callable(getattr(self.policy, "step_with_logits", None)):
             raise TypeError("policy context requires a step_with_logits session policy")
         if not isinstance(self.policy_input, PolicyInput):
             raise TypeError("policy context requires a pre-head PolicyInput snapshot")
+        if not isinstance(self.speech_endpoint, bool):
+            raise TypeError("speech_endpoint must be a bool")
+        if not isinstance(self.new_voice_onset, bool):
+            raise TypeError("new_voice_onset must be a bool")
+        if self.voice_run_onset_frame_id is not None and (
+            isinstance(self.voice_run_onset_frame_id, bool)
+            or not isinstance(self.voice_run_onset_frame_id, int)
+            or self.voice_run_onset_frame_id < 0
+            or self.voice_run_onset_frame_id > self.policy_input.frame_id
+        ):
+            raise ValueError("voice_run_onset_frame_id must identify this frame or an earlier frame")
+        if self.new_voice_onset and self.voice_run_onset_frame_id is None:
+            raise ValueError("a new voice onset must carry its original frame ID")
         state = self.policy_input
         if not isinstance(self.tick_id, tuple) or len(self.tick_id) != 3:
             raise ValueError("policy tick ID must be (session_id, generation_id, frame_id)")
@@ -298,8 +314,11 @@ class GemmaNativeControl6BatchPolicy:
         model_hidden = tensor[:, 0, :].to(
             device=parameter.device, dtype=self.adapter.base_rows.dtype,
         )
+        adapter_kwargs: dict[str, bool] = {}
+        if model_hidden.is_cuda:
+            adapter_kwargs["defer_cuda_input_finite_check"] = True
         with torch.inference_mode():
-            logits = self.adapter(model_hidden).float()
+            logits = self.adapter(model_hidden, **adapter_kwargs).float()
             self.forward_call_count += 1
         if tuple(logits.shape) != (manifest.batch_size, len(ACTIONS)):
             raise RuntimeError("batched native Control6 produced invalid six-way logits")
@@ -436,6 +455,26 @@ class GemmaNativeControl6BatchPolicy:
         branch session IDs and output generations remain in per-row
         ``native_output_provenance`` diagnostics.
         """
+        wall_start_ns = time.perf_counter_ns()
+        thread_cpu_start_ns = time.thread_time_ns()
+
+        def with_timing(decisions: Sequence[PolicyDecision]) -> tuple[PolicyDecision, ...]:
+            wall_end_ns = time.perf_counter_ns()
+            thread_cpu_end_ns = time.thread_time_ns()
+            timing = {
+                "native_control6_batch_policy_wall_start_ns": wall_start_ns,
+                "native_control6_batch_policy_wall_end_ns": wall_end_ns,
+                "native_control6_batch_policy_thread_cpu_start_ns": thread_cpu_start_ns,
+                "native_control6_batch_policy_thread_cpu_end_ns": thread_cpu_end_ns,
+            }
+            return tuple(
+                replace(
+                    decision,
+                    diagnostics={**dict(decision.diagnostics or {}), **timing},
+                )
+                for decision in decisions
+            )
+
         sources = tuple(output_views)
         states = tuple(policy_states)
         if not sources or len(sources) != len(states):
@@ -443,10 +482,10 @@ class GemmaNativeControl6BatchPolicy:
         if any(isinstance(state, PolicyPreHeadContext) for state in states):
             if not all(isinstance(state, PolicyPreHeadContext) for state in states):
                 raise TypeError("mixed-source Control6 cannot mix context and fixture policy rows")
-            return self._step_policy_context_views(
+            return with_timing(self._step_policy_context_views(
                 sources,
                 tuple(state for state in states if isinstance(state, PolicyPreHeadContext)),
-            )
+            ))
         if len({state.session_id for state in states}) != len(states):
             raise ValueError("mixed-source Control6 requires distinct canonical sessions")
 
@@ -501,10 +540,12 @@ class GemmaNativeControl6BatchPolicy:
                 if native_row != decision_row:
                     raise RuntimeError(f"canonical output view {index} changed its source row")
             elif (
-                not native_row.session_id.startswith("__q2view__")
+                not native_row.session_id.startswith(
+                    f"__q2view__{decision_row.session_id}__"
+                )
                 or native_row.logical_q_len != LISTENER_STREAM_Q_LEN
                 or decision_row.logical_q_len != 0
-                or not decision_row.queue_audio_for_next_turn
+                or decision_row.ephemeral_reason != "assistant_turn_open"
             ):
                 raise RuntimeError(f"native output view {index} is not a valid speaking Q2 branch")
             if (
@@ -577,7 +618,7 @@ class GemmaNativeControl6BatchPolicy:
                 session=state.session_id,
                 diagnostics=diagnostics,
             ))
-        return tuple(decisions)
+        return with_timing(decisions)
 
     def _step_policy_context_views(
         self,
@@ -592,7 +633,7 @@ class GemmaNativeControl6BatchPolicy:
 
         consumer_stream = None
         native_rows: list[BatchRowDescriptor] = []
-        hidden_rows: list[torch.Tensor | None] = []
+        hidden_rows: list[torch.Tensor] = []
         phase_rows: list[torch.Tensor] = []
         score_indices: list[int] = []
         for index, (source, context) in enumerate(zip(sources, contexts, strict=True)):
@@ -632,10 +673,12 @@ class GemmaNativeControl6BatchPolicy:
                 if native_row != decision_row:
                     raise RuntimeError(f"canonical output view {index} changed its source row")
             elif (
-                not native_row.session_id.startswith("__q2view__")
+                not native_row.session_id.startswith(
+                    f"__q2view__{decision_row.session_id}__"
+                )
                 or native_row.logical_q_len != LISTENER_STREAM_Q_LEN
                 or decision_row.logical_q_len != 0
-                or not decision_row.queue_audio_for_next_turn
+                or decision_row.ephemeral_reason != "assistant_turn_open"
             ):
                 raise RuntimeError(f"native output view {index} is not a valid speaking Q2 branch")
             tensor = output.tensor
@@ -654,11 +697,6 @@ class GemmaNativeControl6BatchPolicy:
                     consumer_stream = torch.cuda.current_stream(device=tensor.device)
                 output.completion_event.wait(consumer_stream)
             native_rows.append(native_row)
-            if state.native_control_no_input_tick:
-                if state.native_control_hidden is not None or not state.legal_actions:
-                    raise RuntimeError("exact-zero no-input context must omit hidden and keep legal actions")
-                hidden_rows.append(None)
-                continue
             if state.native_control_hidden is not None:
                 raise RuntimeError("pre-head policy context contains a hidden from outside this worker")
             hidden = tensor[source.row_index, 0, :]
@@ -691,14 +729,23 @@ class GemmaNativeControl6BatchPolicy:
                     dtype=self.adapter.base_rows.dtype,
                 )
                 for index in score_indices
-                if hidden_rows[index] is not None
             ])
             model_phase = torch.stack(phase_rows).to(
                 device=parameter.device,
                 dtype=torch.float32,
             )
+            adapter_kwargs: dict[str, bool] = {}
+            if model_hidden.is_cuda and all(
+                getattr(contexts[index].policy, "fused_readback", False) is True
+                for index in score_indices
+            ):
+                adapter_kwargs["defer_cuda_input_finite_check"] = True
             with torch.inference_mode():
-                logits = self.adapter(model_hidden, phase_t=model_phase).float()
+                logits = self.adapter(
+                    model_hidden,
+                    phase_t=model_phase,
+                    **adapter_kwargs,
+                ).float()
             self.forward_call_count += 1
             if tuple(logits.shape) != (len(score_indices), len(ACTIONS)):
                 raise RuntimeError("mixed-source Control6 produced invalid batched logits")
@@ -727,20 +774,14 @@ class GemmaNativeControl6BatchPolicy:
             hidden = hidden_rows[index]
             completed_state = replace(
                 state,
-                native_control_hidden=(
-                    None if hidden is None else hidden.reshape(1, 1, -1)
-                ),
-                native_control_hidden_frame_id=(
-                    None if hidden is None else native_row.frame_id
-                ),
-                native_control_hidden_at_ns=(
-                    None if hidden is None else available_at_ns
-                ),
+                native_control_hidden=hidden.reshape(1, 1, -1),
+                native_control_hidden_frame_id=native_row.frame_id,
+                native_control_hidden_at_ns=available_at_ns,
                 native_listener_generation=native_row.session_generation,
             )
             decision = context.policy.step_with_logits(
                 completed_state,
-                logits_by_index.get(index),
+                logits_by_index[index],
                 tick_id=context.tick_id,
             )
             diagnostics = dict(decision.diagnostics or {})
@@ -758,7 +799,7 @@ class GemmaNativeControl6BatchPolicy:
                 "cache_position": native_row.cache_position,
                 "policy_tick_id": list(context.tick_id),
                 "policy_context_captured_at_ns": context.captured_at_ns,
-                "used_for_policy": hidden is not None,
+                "used_for_policy": True,
             }
             if index in debug_inputs_by_index:
                 # Private binary-capture payload, removed by the server before
@@ -798,8 +839,6 @@ class GemmaNativeControl6BatchPolicy:
             ):
                 raise RuntimeError("batched native Control6 hidden provenance does not match row state")
             hidden = state.native_control_hidden
-            if state.native_control_no_input_tick:
-                raise RuntimeError("no-input safety ticks are not synthetic Control6 batch rows")
             if hidden is None:
                 raise RuntimeError("batched native Control6 requires fresh listener hidden state")
             source_frame = state.native_control_hidden_frame_id
@@ -865,10 +904,16 @@ class GemmaNativeControl6BatchPolicy:
         )
 
         with torch.inference_mode():
-            # Keep the adapter's existing finite-input guard intact. On CUDA
-            # that guard may synchronize independently of the packed policy
-            # metadata transfer below; this wrapper does not bypass it.
-            logits = self.adapter(model_hidden, phase_t=model_phase_t).float()
+            # CUDA input finiteness is carried by the packed logits flag below;
+            # retain the adapter's synchronous finite checks for CPU callers.
+            adapter_kwargs = {}
+            if model_hidden.is_cuda:
+                adapter_kwargs["defer_cuda_input_finite_check"] = True
+            logits = self.adapter(
+                model_hidden,
+                phase_t=model_phase_t,
+                **adapter_kwargs,
+            ).float()
             self.forward_call_count += 1
             if tuple(logits.shape) != (len(rows), len(ACTIONS)):
                 raise RuntimeError("batched native Control6 produced invalid six-way logits")
@@ -890,8 +935,7 @@ class GemmaNativeControl6BatchPolicy:
                 confidence.to(dtype=torch.float32),
             ), dim=1)
             # One batch-sized policy metadata transfer. No row performs its
-            # own Tensor.item() or .cpu(); this does not count the adapter's
-            # separate finite-input guard.
+            # own Tensor.item() or .cpu().
             packet = packed.detach().cpu().tolist()
 
         if not isinstance(packet, list) or len(packet) != len(rows):

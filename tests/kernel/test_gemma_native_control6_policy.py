@@ -239,12 +239,23 @@ def test_native_policy_high_confidence_speak_is_fast_but_lower_confidence_keeps_
         FixedSixLogitAdapter(high_logits), checkpoint_path="cpu-test.pt"
     )
     high_result = high_policy.step(_state(
+        frame_id=12,
+        native_control_hidden_frame_id=12,
         speaker_active=False,
         peer_turn_active=True,
         legal_actions=("LISTEN", "SPEAK"),
     ))
-    assert high_result.action is ControlAction.SPEAK
-    assert high_result.diagnostics["native_control6_hysteresis_count"] == 1
+    assert high_result.action is ControlAction.LISTEN
+    assert high_result.diagnostics["native_control6_early_speak_streak_count"] == 1
+    second_result = high_policy.step(_state(
+        frame_id=13,
+        native_control_hidden_frame_id=13,
+        speaker_active=False,
+        peer_turn_active=True,
+        legal_actions=("LISTEN", "SPEAK"),
+    ))
+    assert second_result.action is ControlAction.SPEAK
+    assert second_result.diagnostics["native_control6_early_speak_streak_count"] == 2
 
     # SPEAK+REPLAN effective probability is below .85 after legal-mass
     # normalization; the configured default still requires adjacent ticks.
@@ -296,7 +307,7 @@ def test_idle_continue_row_contributes_to_physical_listen_hold_not_backchannel()
 @pytest.mark.parametrize(
     ("logits", "legal", "speaker_active", "expected_raw", "expected", "expected_candidate", "expected_fallback"),
     [
-        ([-1.0, -2.0, -3.0, -4.0, 10.0, -5.0], ("LISTEN", "BACKCHANNEL", "SPEAK"), False, "BACKCHANNEL", ControlAction.BACKCHANNEL, "BACKCHANNEL", None),
+        ([-1.0, -2.0, -3.0, -4.0, 10.0, -5.0], ("LISTEN", "BACKCHANNEL", "SPEAK"), False, "BACKCHANNEL", ControlAction.LISTEN, "BACKCHANNEL", "two_distinct_consecutive_fresh_ticks_required"),
         ([-1.0, 10.0, -3.0, -4.0, -5.0, -6.0], ("LISTEN", "SPEAK"), False, "SPEAK", ControlAction.LISTEN, "SPEAK", "two_distinct_consecutive_fresh_ticks_required"),
         ([0.0, -1.0, 2.0, 10.0, -2.0, -3.0], ("CONTINUE", "YIELD"), True, "YIELD", ControlAction.CONTINUE, "YIELD", "two_distinct_consecutive_fresh_ticks_required"),
     ],
@@ -315,6 +326,69 @@ def test_native_policy_keeps_legal_raw_actions_and_uses_active_continue_fallback
     assert result.diagnostics["base_action"] == expected_raw
     assert result.diagnostics["selected_action"] == expected_candidate
     assert result.diagnostics.get("policy_fallback_reason") == expected_fallback
+
+
+def test_backchannel_requires_confidence_floor_and_two_distinct_fresh_frames() -> None:
+    policy = GemmaNativeControl6Policy(
+        FixedSixLogitAdapter([0.0] * len(ACTIONS)),
+        checkpoint_path="cpu-test.pt",
+        high_confidence_single_tick_threshold=0.80,
+        minimum_backchannel_confidence=0.70,
+        hysteresis_required_ticks=1,
+    )
+    legal = ("LISTEN", "BACKCHANNEL", "SPEAK")
+
+    weak_logits = np.log([0.20, 0.05, 0.05, 0.05, 0.55, 0.10]).tolist()
+    policy.adapter.fixed_logits.copy_(torch.tensor(weak_logits, dtype=torch.float32))
+    weak = policy.step(_state(
+        frame_id=20,
+        native_control_hidden_frame_id=20,
+        legal_actions=legal,
+    ))
+    assert weak.action is ControlAction.LISTEN
+    assert weak.diagnostics["native_control6_effective_candidate"] == "BACKCHANNEL"
+    assert weak.diagnostics["native_control6_selected_effective_probability"] < 0.70
+    assert weak.diagnostics["native_control6_hysteresis_count"] == 0
+    assert weak.diagnostics["native_control6_transition_confidence_eligible"] is False
+
+    strong_logits = np.log([0.02, 0.03, 0.03, 0.02, 0.85, 0.05]).tolist()
+    policy.adapter.fixed_logits.copy_(torch.tensor(strong_logits, dtype=torch.float32))
+    first = policy.step(_state(
+        frame_id=21,
+        native_control_hidden_frame_id=21,
+        legal_actions=legal,
+    ))
+    duplicate = policy.step(_state(
+        frame_id=21,
+        native_control_hidden_frame_id=21,
+        legal_actions=legal,
+    ))
+    second = policy.step(_state(
+        frame_id=22,
+        native_control_hidden_frame_id=22,
+        legal_actions=legal,
+    ))
+
+    assert first.action is ControlAction.LISTEN
+    assert first.diagnostics["native_control6_hysteresis_count"] == 1
+    assert first.diagnostics["native_control6_hysteresis_required_ticks"] == 2
+    assert first.diagnostics["native_control6_hysteresis_pending"] is True
+    assert duplicate.action is ControlAction.LISTEN
+    assert duplicate.diagnostics["native_control6_hysteresis_count"] == 1
+    assert second.action is ControlAction.BACKCHANNEL
+    assert second.diagnostics["native_control6_minimum_backchannel_confidence"] == pytest.approx(0.70)
+
+
+def test_minimum_backchannel_confidence_validation() -> None:
+    parameters = inspect.signature(GemmaNativeControl6Policy).parameters
+    assert parameters["minimum_backchannel_confidence"].default == pytest.approx(0.70)
+    for invalid in (float("nan"), float("inf"), -0.01, 1.01, True, "0.7"):
+        with pytest.raises(ValueError, match="minimum_backchannel_confidence"):
+            GemmaNativeControl6Policy(
+                FixedSixLogitAdapter([0.0] * len(ACTIONS)),
+                checkpoint_path="cpu-test.pt",
+                minimum_backchannel_confidence=invalid,  # type: ignore[arg-type]
+            )
 
 
 @pytest.mark.parametrize("fused_readback", [False, True])
@@ -761,44 +835,21 @@ def test_native_policy_fails_closed_on_stale_or_invalid_input(
     with pytest.raises((RuntimeError, ValueError), match=message):
         policy.step(_state(**overrides))
 
-def test_native_no_input_does_not_hide_pending_speak_but_keeps_idle_safety() -> None:
+@pytest.mark.parametrize("speaker_active, legal", [
+    (False, ("LISTEN",)),
+    (False, ("LISTEN", "SPEAK")),
+    (True, ("CONTINUE", "YIELD")),
+])
+def test_native_zero_pcm_requires_fresh_hidden_for_every_phase(speaker_active, legal) -> None:
     policy = GemmaNativeControl6Policy(
-        FixedSixLogitAdapter([0.0] * len(ACTIONS)),
-        checkpoint_path="cpu-test.pt",
+        FixedSixLogitAdapter([0.0] * len(ACTIONS)), checkpoint_path="cpu-test.pt",
     )
-
-    with pytest.raises(RuntimeError, match="fresh listener hidden for a pending user turn"):
+    with pytest.raises(RuntimeError, match="fresh Gemma listener hidden"):
         policy.step(_state(
-            native_control_hidden=None,
-            native_control_hidden_frame_id=None,
-            native_control_hidden_at_ns=None,
-            native_control_no_input_tick=True,
-            legal_actions=("LISTEN", "SPEAK"),
+            native_control_hidden=None, native_control_hidden_frame_id=None,
+            native_control_hidden_at_ns=None, native_control_no_input_tick=True,
+            speaker_active=speaker_active, legal_actions=legal,
         ))
-
-    idle = policy.step(_state(
-        native_control_hidden=None,
-        native_control_hidden_frame_id=None,
-        native_control_hidden_at_ns=None,
-        native_control_no_input_tick=True,
-        legal_actions=("LISTEN",),
-    ))
-    assert idle.action is ControlAction.LISTEN
-    assert idle.listener_frame_id == idle.frame_id
-    assert not idle.diagnostics.get("native_control6_head_scored", False)
-    assert not any("_token" in key or "_row_index" in key for key in idle.diagnostics)
-
-    active = policy.step(_state(
-        native_control_hidden=None,
-        native_control_hidden_frame_id=None,
-        native_control_hidden_at_ns=None,
-        native_control_no_input_tick=True,
-        speaker_active=True,
-        legal_actions=("CONTINUE", "YIELD"),
-    ))
-    assert active.action is ControlAction.CONTINUE
-    assert active.listener_frame_id == active.frame_id
-    assert not active.diagnostics.get("native_control6_head_scored", False)
 
 
 def test_fresh_zero_pcm_tick_still_uses_native_logits() -> None:
@@ -990,16 +1041,16 @@ def test_hysteresis_resets_on_candidate_state_change_and_missing_hidden() -> Non
     assert changed_state.action is ControlAction.CONTINUE
     assert changed_state.diagnostics["native_control6_hysteresis_count"] == 1
 
-    missing = policy.step(_state(
-        frame_id=14,
-        native_control_hidden=None,
-        native_control_hidden_frame_id=None,
-        native_control_hidden_at_ns=None,
-        native_control_no_input_tick=True,
-        speaker_active=True,
-        legal_actions=speaking_legal,
-    ))
-    assert missing.action is ControlAction.CONTINUE
+    with pytest.raises(RuntimeError, match="fresh Gemma listener hidden"):
+        policy.step(_state(
+            frame_id=14,
+            native_control_hidden=None,
+            native_control_hidden_frame_id=None,
+            native_control_hidden_at_ns=None,
+            native_control_no_input_tick=True,
+            speaker_active=True,
+            legal_actions=speaking_legal,
+        ))
 
     first_yield = policy.step(_state(
         frame_id=15,
@@ -1431,190 +1482,136 @@ def test_active_user_replan_mass_cannot_authorize_early_speak(
 
 
 @pytest.mark.parametrize("entrypoint", ["step", "step_with_logits"])
-def test_voiced_replan_evidence_is_remembered_until_two_quiet_ticks(
-    entrypoint: str,
-) -> None:
+def test_causal_endpoint_cannot_override_listener_hold(entrypoint: str) -> None:
+    logits = torch.tensor(
+        np.log([0.88, 0.01, 0.02, 0.01, 0.02, 0.06]), dtype=torch.float32
+    )
     policy = GemmaNativeControl6Policy(
-        FixedSixLogitAdapter([0.0] * len(ACTIONS)),
-        checkpoint_path="cpu-test.pt",
-        trace_scores=True,
+        FixedSixLogitAdapter(logits.tolist()), checkpoint_path="cpu-test.pt",
     )
-    speak_logits = (
-        np.log([0.093, 0.001, 0.001, 0.001, 0.002, 0.902]).tolist(),
-        np.log([0.123, 0.001, 0.001, 0.001, 0.002, 0.872]).tolist(),
+    state = _state(
+        frame_id=30,
+        native_control_hidden_frame_id=30,
+        user_pcm=np.zeros(1280, dtype=np.float32),
+        peer_turn_active=False,
+        user_turn_onset_frame_id=700,
+        user_endpoint_onset_frame_id=700,
+        user_endpoint_frame_id=29,
+        legal_actions=("LISTEN", "SPEAK"),
     )
-    hold_logits = np.log([0.88, 0.01, 0.02, 0.01, 0.02, 0.06]).tolist()
-    results = {}
+    decision = (
+        policy.step(state)
+        if entrypoint == "step"
+        else policy.step_with_logits(
+            state, logits,
+            tick_id=(state.session_id, state.generation_id, state.frame_id),
+        )
+    )
 
-    def decide(frame_id: int, logits_values: list[float], *, voiced: bool):
-        logits = torch.tensor(logits_values, dtype=torch.float32)
-        policy.adapter.fixed_logits.copy_(logits)
+    assert decision.action is ControlAction.LISTEN
+    assert decision.reason == "gemma_native_control6"
+    assert decision.diagnostics["native_control6_endpoint_speak_pending"] is True
+    assert decision.diagnostics["native_control6_endpoint_speak_ready"] is True
+    assert decision.diagnostics["native_control6_endpoint_speak_released"] is False
+    assert decision.diagnostics["policy_fallback_reason"] is None
+
+
+@pytest.mark.parametrize("entrypoint", ["step", "step_with_logits"])
+def test_causal_endpoint_preserves_listener_speak_hysteresis(entrypoint: str) -> None:
+    logits = torch.tensor(
+        np.log([0.12, 0.74, 0.05, 0.02, 0.01, 0.06]), dtype=torch.float32
+    )
+    policy = GemmaNativeControl6Policy(
+        FixedSixLogitAdapter(logits.tolist()), checkpoint_path="cpu-test.pt",
+    )
+    decisions = []
+    for frame_id in (30, 31):
         state = _state(
             frame_id=frame_id,
             native_control_hidden_frame_id=frame_id,
-            user_pcm=(
-                np.full(1280, 0.05, dtype=np.float32)
-                if voiced else np.zeros(1280, dtype=np.float32)
-            ),
-            peer_turn_active=True,
-            user_turn_onset_frame_id=700,
-            legal_actions=("LISTEN", "SPEAK", "BACKCHANNEL"),
+            user_pcm=np.zeros(1280, dtype=np.float32),
+            peer_turn_active=False,
+            user_turn_onset_frame_id=7,
+            user_endpoint_onset_frame_id=7,
+            user_endpoint_frame_id=29,
+            legal_actions=("LISTEN", "SPEAK"),
         )
-        decision = (
+        decisions.append(
             policy.step(state)
             if entrypoint == "step"
             else policy.step_with_logits(
-                state,
-                logits,
+                state, logits,
                 tick_id=(state.session_id, state.generation_id, state.frame_id),
             )
         )
-        results[frame_id] = decision
-        return decision
-
-    # Two consecutive voiced physical SPEAK+REPLAN ticks qualify the endpoint
-    # even though the raw SPEAK member is tiny and the early gate holds output.
-    first = decide(30, speak_logits[0], voiced=True)
-    second = decide(31, speak_logits[1], voiced=True)
+    first, second = decisions
     assert first.action is ControlAction.LISTEN
-    assert second.action is ControlAction.LISTEN
-    assert first.diagnostics["native_control6_selected_effective_probability"] >= 0.90
-    assert second.diagnostics["native_control6_selected_effective_probability"] >= 0.87
-    assert second.diagnostics["native_control6_endpoint_speak_pending"] is True
-    assert second.diagnostics["native_control6_endpoint_speak_evidence_count"] == 2
+    assert first.diagnostics["native_control6_endpoint_speak_released"] is False
+    assert first.diagnostics["native_control6_hysteresis_count"] == 1
+    assert second.action is ControlAction.SPEAK
+    assert second.diagnostics["native_control6_endpoint_speak_released"] is True
+    assert second.diagnostics["native_control6_hysteresis_count"] == 2
 
-    # The candidate returns to HOLD for the rest of speech. The pending intent
-    # survives this change and does not trigger while user RMS remains voiced.
-    for frame_id in range(32, 40):
-        held = decide(frame_id, hold_logits, voiced=True)
-        assert held.action is ControlAction.LISTEN
-        assert held.diagnostics["native_control6_effective_candidate"] == "LISTEN"
-        assert held.diagnostics["native_control6_endpoint_speak_pending"] is True
 
-    quiet_40 = decide(40, hold_logits, voiced=False)
-    quiet_41 = decide(41, hold_logits, voiced=False)
-    assert quiet_40.action is ControlAction.LISTEN
-    assert quiet_40.diagnostics["native_control6_endpoint_speak_quiet_count"] == 1
-    assert quiet_41.action is ControlAction.SPEAK
-    assert quiet_41.diagnostics["native_control6_endpoint_speak_released"] is True
-    assert quiet_41.diagnostics["native_control6_endpoint_speak_pending"] is False
-    assert [frame for frame, decision in results.items() if decision.action is ControlAction.SPEAK] == [41]
-
-    # The gate and diagnostic use the legal-normalized raw SPEAK member even
-    # when the physical group candidate has moved to HOLD.
-    assert quiet_40.diagnostics["native_control6_early_speak_confidence_source"] == (
-        "legal_normalized_raw_speak_member"
+def test_causal_endpoint_waits_for_backchannel_speaker_and_keeps_pending_turn() -> None:
+    logits = torch.tensor(
+        np.log([0.88, 0.01, 0.02, 0.01, 0.02, 0.06]), dtype=torch.float32
     )
-    assert quiet_40.diagnostics["native_control6_early_speak_confidence"] == pytest.approx(
-        quiet_40.diagnostics["native_action_raw_probabilities"][1]
-        / quiet_40.diagnostics["native_control6_legal_effective_mass"]
+    policy = GemmaNativeControl6Policy(
+        FixedSixLogitAdapter(logits.tolist()), checkpoint_path="cpu-test.pt",
     )
-    assert quiet_40.diagnostics["native_control6_early_speak_confidence"] != pytest.approx(
-        quiet_40.diagnostics["native_control6_selected_effective_probability"]
+    during_backchannel = _state(
+        frame_id=30,
+        native_control_hidden_frame_id=30,
+        speaker_active=True,
+        peer_turn_active=False,
+        user_turn_onset_frame_id=700,
+        user_endpoint_onset_frame_id=700,
+        user_endpoint_frame_id=29,
+        legal_actions=("CONTINUE", "YIELD"),
     )
+    held = policy.step(during_backchannel)
+    assert held.action is not ControlAction.SPEAK
+    assert held.diagnostics["native_control6_endpoint_speak_pending"] is True
+    assert held.diagnostics["native_control6_endpoint_speak_ready"] is False
+
+    after_backchannel = _state(
+        frame_id=31,
+        native_control_hidden_frame_id=31,
+        speaker_active=False,
+        peer_turn_active=False,
+        user_turn_onset_frame_id=700,
+        user_endpoint_onset_frame_id=700,
+        user_endpoint_frame_id=29,
+        legal_actions=("LISTEN", "SPEAK", "BACKCHANNEL"),
+    )
+    released = policy.step(after_backchannel)
+    assert released.action is ControlAction.LISTEN
+    assert released.diagnostics["native_control6_endpoint_speak_ready"] is True
+    assert released.diagnostics["native_control6_endpoint_speak_released"] is False
 
 
-def test_endpoint_speak_memory_requires_consecutive_evidence_and_resets_quiet_run() -> None:
-    high_replan = np.log([0.093, 0.001, 0.001, 0.001, 0.002, 0.902]).tolist()
-    weak_replan = np.log([0.209, 0.001, 0.001, 0.001, 0.002, 0.786]).tolist()
-    hold = np.log([0.88, 0.01, 0.02, 0.01, 0.02, 0.06]).tolist()
-
-    def run(policy, frame_id: int, probabilities: list[float], *, voiced: bool,
-            turn_id: int | None = 701, speaker_active: bool = False,
-            session_id: str = "s1",
-            legal: tuple[str, ...] = ("LISTEN", "SPEAK", "BACKCHANNEL")):
-        logits = torch.tensor(probabilities, dtype=torch.float32)
-        policy.adapter.fixed_logits.copy_(logits)
+def test_causal_endpoint_release_requires_same_turn_completed_endpoint() -> None:
+    logits = torch.tensor(
+        np.log([0.88, 0.01, 0.02, 0.01, 0.02, 0.06]), dtype=torch.float32
+    )
+    policy = GemmaNativeControl6Policy(
+        FixedSixLogitAdapter(logits.tolist()), checkpoint_path="cpu-test.pt",
+    )
+    for endpoint_onset, endpoint_frame in ((701, 29), (700, 31)):
         state = _state(
-            session_id=session_id,
-            frame_id=frame_id,
-            native_control_hidden_frame_id=frame_id,
-            user_pcm=(
-                np.full(1280, 0.05, dtype=np.float32)
-                if voiced else np.zeros(1280, dtype=np.float32)
-            ),
-            peer_turn_active=True,
-            speaker_active=speaker_active,
-            user_turn_onset_frame_id=turn_id,
-            legal_actions=legal,
+            frame_id=30,
+            native_control_hidden_frame_id=30,
+            user_pcm=np.zeros(1280, dtype=np.float32),
+            user_turn_onset_frame_id=700,
+            user_endpoint_onset_frame_id=endpoint_onset,
+            user_endpoint_frame_id=endpoint_frame,
+            legal_actions=("LISTEN", "SPEAK"),
         )
-        return policy.step(state)
-
-    def new_policy(*, early_threshold: float = 0.80):
-        return GemmaNativeControl6Policy(
-            FixedSixLogitAdapter([0.0] * len(ACTIONS)),
-            checkpoint_path="cpu-test.pt",
-            early_speak_confidence_threshold=early_threshold,
-        )
-
-    # One high voiced tick cannot prime the latch.
-    one_peak = new_policy()
-    run(one_peak, 10, high_replan, voiced=True)
-    run(one_peak, 11, hold, voiced=True)
-    assert run(one_peak, 12, hold, voiced=False).action is ControlAction.LISTEN
-    assert run(one_peak, 13, hold, voiced=False).action is ControlAction.LISTEN
-
-    # Two consecutive physical group scores below .80 do not qualify.
-    below_gate = new_policy()
-    for frame_id in (20, 21):
-        decision = run(below_gate, frame_id, weak_replan, voiced=True)
-        assert decision.diagnostics["native_control6_selected_effective_probability"] < 0.80
+        decision = policy.step(state)
+        assert decision.action is ControlAction.LISTEN
         assert decision.diagnostics["native_control6_endpoint_speak_pending"] is False
-    assert run(below_gate, 22, hold, voiced=False).action is ControlAction.LISTEN
-    assert run(below_gate, 23, hold, voiced=False).action is ControlAction.LISTEN
-
-    # A voiced interruption resets the quiet counter but retains same-turn intent.
-    resumed = new_policy()
-    run(resumed, 30, high_replan, voiced=True)
-    run(resumed, 31, np.log([0.123, 0.001, 0.001, 0.001, 0.002, 0.872]).tolist(), voiced=True)
-    assert run(resumed, 32, hold, voiced=False).action is ControlAction.LISTEN
-    interruption = run(resumed, 33, hold, voiced=True)
-    assert interruption.action is ControlAction.LISTEN
-    assert interruption.diagnostics["native_control6_endpoint_speak_pending"] is True
-    assert interruption.diagnostics["native_control6_endpoint_speak_quiet_count"] == 0
-    assert run(resumed, 34, hold, voiced=False).action is ControlAction.LISTEN
-    assert run(resumed, 35, hold, voiced=False).action is ControlAction.SPEAK
-
-    # Assistant activity, onset replacement/consumption, and missing identity
-    # clear pending intent rather than carrying it into another user turn.
-    for change in (
-        {"speaker_active": True, "legal": ("CONTINUE", "YIELD")},
-        {"turn_id": 702},
-        {"turn_id": None},
-    ):
-        cleared = new_policy()
-        run(cleared, 40, high_replan, voiced=True)
-        run(cleared, 41, np.log([0.123, 0.001, 0.001, 0.001, 0.002, 0.872]).tolist(), voiced=True)
-        cleared_state = run(cleared, 42, hold, voiced=False, **change)
-        assert cleared_state.diagnostics["native_control6_endpoint_speak_pending"] is False
-        if change.get("speaker_active"):
-            assert cleared_state.action is ControlAction.YIELD
-        else:
-            assert cleared_state.action is ControlAction.LISTEN
-        assert run(cleared, 43, hold, voiced=False, turn_id=change.get("turn_id", 701)).action is ControlAction.LISTEN
-
-    reset = new_policy()
-    run(reset, 60, high_replan, voiced=True)
-    run(reset, 61, np.log([0.123, 0.001, 0.001, 0.001, 0.002, 0.872]).tolist(), voiced=True)
-    reset.reset()
-    assert run(reset, 62, hold, voiced=False).action is ControlAction.LISTEN
-    assert run(reset, 63, hold, voiced=False).action is ControlAction.LISTEN
-
-    changed_session = new_policy()
-    run(changed_session, 70, high_replan, voiced=True)
-    run(changed_session, 71, np.log([0.123, 0.001, 0.001, 0.001, 0.002, 0.872]).tolist(), voiced=True)
-    assert run(changed_session, 72, hold, voiced=False, session_id="s2").action is ControlAction.LISTEN
-    assert run(changed_session, 73, hold, voiced=False, session_id="s2").action is ControlAction.LISTEN
-
-    for threshold in (0.0, -0.1):
-        disabled = new_policy(early_threshold=threshold)
-        run(disabled, 80, high_replan, voiced=True)
-        disabled_second = run(
-            disabled, 81,
-            np.log([0.123, 0.001, 0.001, 0.001, 0.002, 0.872]).tolist(),
-            voiced=True,
-        )
-        assert disabled_second.diagnostics["native_control6_endpoint_speak_pending"] is False
+        assert decision.diagnostics["native_control6_endpoint_speak_ready"] is False
 
 
 @pytest.mark.parametrize("entrypoint", ["step", "step_with_logits"])
@@ -1741,7 +1738,24 @@ def test_quiet_peer_active_raw_speak_can_still_clear_early_gate(entrypoint: str)
     )
     assert result.diagnostics["native_control6_early_speak_confidence"] >= 0.80
     assert result.diagnostics["native_control6_early_speak_gated"] is False
-    assert result.action is ControlAction.SPEAK
+    assert result.action is ControlAction.LISTEN
+    state2 = _state(
+        frame_id=93,
+        native_control_hidden_frame_id=93,
+        user_pcm=np.zeros(1280, dtype=np.float32),
+        peer_turn_active=True,
+        legal_actions=("LISTEN", "SPEAK"),
+    )
+    result2 = (
+        policy.step(state2)
+        if entrypoint == "step"
+        else policy.step_with_logits(
+            state2,
+            logits,
+            tick_id=(state2.session_id, state2.generation_id, state2.frame_id),
+        )
+    )
+    assert result2.action is ControlAction.SPEAK
 
 
 @pytest.mark.parametrize("entrypoint", ["step", "step_with_logits"])
@@ -1773,7 +1787,24 @@ def test_active_user_raw_speak_probability_can_clear_early_gate(
     assert result.diagnostics["native_control6_user_rms"] == pytest.approx(0.05)
     assert result.diagnostics["native_control6_early_speak_confidence"] >= 0.80
     assert result.diagnostics["native_control6_early_speak_gated"] is False
-    assert result.action is ControlAction.SPEAK
+    assert result.action is ControlAction.LISTEN
+    state2 = _state(
+        frame_id=81,
+        native_control_hidden_frame_id=81,
+        user_pcm=np.full(1280, 0.05, dtype=np.float32),
+        peer_turn_active=False,
+        legal_actions=("LISTEN", "SPEAK"),
+    )
+    result2 = (
+        policy.step(state2)
+        if entrypoint == "step"
+        else policy.step_with_logits(
+            state2,
+            logits,
+            tick_id=(state2.session_id, state2.generation_id, state2.frame_id),
+        )
+    )
+    assert result2.action is ControlAction.SPEAK
 
 
 def test_peer_gate_hysteresis_tracks_physical_candidate_not_raw_hold_or_old_streak() -> None:

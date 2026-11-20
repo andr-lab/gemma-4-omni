@@ -115,6 +115,8 @@ class _PlaybackSegment:
     end_sample: int | None = None
     closed: bool = False
     ack_queued: bool = False
+    last_progress_queued_end: int | None = None
+    final_ack_accepted: bool = False
 
 
 def _required_int(event: dict[str, Any], name: str) -> int:
@@ -178,10 +180,18 @@ class BoundedMicrophoneFrames:
 class BoundedPCMPlayback:
     """Generation-fenced FIFO with logical application-buffer consumption ACKs."""
 
-    def __init__(self, *, max_samples: int = PLAYBACK_MAX_SAMPLES) -> None:
+    def __init__(
+        self,
+        *,
+        max_samples: int = PLAYBACK_MAX_SAMPLES,
+        ack_version: int = 2,
+    ) -> None:
         if isinstance(max_samples, bool) or int(max_samples) < 1:
             raise ValueError("max_samples deve essere positivo")
+        if isinstance(ack_version, bool) or int(ack_version) not in {1, 2}:
+            raise ValueError("ack_version deve essere 1 o 2")
         self.max_samples = int(max_samples)
+        self.ack_version = int(ack_version)
         self._chunks: deque[_PlaybackChunk] = deque()
         self._pending_samples = 0
         self._response_id: str | None = None
@@ -193,7 +203,9 @@ class BoundedPCMPlayback:
         self._segments: dict[tuple[str, int, str], _PlaybackSegment] = {}
         self._ack_sequence = 0
         self._last_accepted_ack_sequence = 0
-        self._pending_acks: deque[dict[str, Any]] = deque()
+        # One pending cumulative ACK per response/segment bounds callback
+        # bookkeeping while retaining the latest copied sample watermark.
+        self._pending_acks: dict[tuple[str, int, str], dict[str, Any]] = {}
         self._outstanding_acks: dict[int, dict[str, Any]] = {}
         self._accepted_watermarks: dict[tuple[str, int, str], int] = {}
         self._lock = threading.Lock()
@@ -208,16 +220,35 @@ class BoundedPCMPlayback:
         with self._lock:
             return self._generation_id
 
-    def _discard_acks_locked(self, *, response_id: str | None = None, generation_id: int | None = None) -> None:
+    @property
+    def pending_ack_count(self) -> int:
+        with self._lock:
+            return len(self._pending_acks) + len(self._outstanding_acks)
+
+    @property
+    def outstanding_ack_count(self) -> int:
+        with self._lock:
+            return len(self._outstanding_acks)
+
+    def _discard_acks_locked(
+        self,
+        *,
+        response_id: str | None = None,
+        generation_id: int | None = None,
+        preserve_final: bool = False,
+    ) -> None:
         def matches(ack: dict[str, Any]) -> bool:
             return (
                 (response_id is None or ack["response_id"] == response_id)
                 and (generation_id is None or ack["generation_id"] == generation_id)
             )
-        self._pending_acks = deque(ack for ack in self._pending_acks if not matches(ack))
+        self._pending_acks = {
+            key: ack for key, ack in self._pending_acks.items()
+            if not matches(ack) or (preserve_final and ack.get("final") is True)
+        }
         self._outstanding_acks = {
             sequence: ack for sequence, ack in self._outstanding_acks.items()
-            if not matches(ack)
+            if not matches(ack) or (preserve_final and ack.get("final") is True)
         }
 
     def _clear_locked(self) -> int:
@@ -230,7 +261,7 @@ class BoundedPCMPlayback:
         self._outstanding_acks.clear()
         return dropped
 
-    def _discard_locked(self, predicate) -> int:
+    def _discard_locked(self, predicate, *, preserve_final_acks: bool = False) -> int:
         kept: deque[_PlaybackChunk] = deque()
         dropped = 0
         discarded_pairs: set[tuple[str, int]] = set()
@@ -243,33 +274,68 @@ class BoundedPCMPlayback:
         self._chunks = kept
         self._pending_samples -= dropped
         for response_id, generation_id in discarded_pairs:
-            self._discard_acks_locked(response_id=response_id, generation_id=generation_id)
+            self._discard_acks_locked(
+                response_id=response_id,
+                generation_id=generation_id,
+                preserve_final=preserve_final_acks,
+            )
         for key in tuple(self._segments):
             response_id, generation_id, _segment_id = key
             if predicate(response_id, generation_id):
-                self._segments.pop(key, None)
-                self._discard_acks_locked(response_id=response_id, generation_id=generation_id)
+                self._discard_acks_locked(
+                    response_id=response_id,
+                    generation_id=generation_id,
+                    preserve_final=preserve_final_acks,
+                )
+                has_final = preserve_final_acks and (
+                    any(
+                        ack.get("response_id") == response_id
+                        and ack.get("generation_id") == generation_id
+                        and ack.get("speaker_segment_id") == key[2]
+                        and ack.get("final") is True
+                        for ack in self._pending_acks.values()
+                    )
+                    or any(
+                        ack.get("response_id") == response_id
+                        and ack.get("generation_id") == generation_id
+                        and ack.get("speaker_segment_id") == key[2]
+                        and ack.get("final") is True
+                        for ack in self._outstanding_acks.values()
+                    )
+                )
+                if not has_final:
+                    self._segments.pop(key, None)
         for response_id in {response for response, _generation in discarded_pairs}:
             if not any(chunk.response_id == response_id for chunk in self._chunks):
                 self._completed_responses.discard(response_id)
         return dropped
 
     def _cleanup_completed_response_locked(self, response_id: str) -> None:
-        if response_id not in self._completed_responses:
-            return
-        if response_id == self._response_id:
-            return
-        if any(chunk.response_id == response_id for chunk in self._chunks):
-            return
-        if any(ack["response_id"] == response_id for ack in self._pending_acks):
-            return
-        if any(ack["response_id"] == response_id for ack in self._outstanding_acks.values()):
-            return
-        self._completed_responses.discard(response_id)
-        self._response_generations.pop(response_id, None)
-        for key in tuple(self._segments):
-            if key[0] == response_id:
-                self._segments.pop(key, None)
+        if response_id in self._completed_responses:
+            if response_id == self._response_id:
+                return
+            if any(chunk.response_id == response_id for chunk in self._chunks):
+                return
+            if any(ack["response_id"] == response_id for ack in self._pending_acks.values()):
+                return
+            if any(ack["response_id"] == response_id for ack in self._outstanding_acks.values()):
+                return
+            self._completed_responses.discard(response_id)
+            self._response_generations.pop(response_id, None)
+            for key in tuple(self._segments):
+                if key[0] == response_id:
+                    self._segments.pop(key, None)
+        elif response_id in self._cancelled_responses:
+            if any(chunk.response_id == response_id for chunk in self._chunks):
+                return
+            if any(ack["response_id"] == response_id for ack in self._pending_acks.values()):
+                return
+            if any(ack["response_id"] == response_id for ack in self._outstanding_acks.values()):
+                return
+            self._response_generations.pop(response_id, None)
+            for key in tuple(self._segments):
+                if key[0] == response_id:
+                    self._segments.pop(key, None)
 
     def _advance_generation_locked(self, generation_id: int) -> bool:
         if self._generation_id is not None and generation_id < self._generation_id:
@@ -288,10 +354,8 @@ class BoundedPCMPlayback:
                 if segment.generation_id < generation_id
                 and segment.response_id not in self._completed_responses
             )
-            self._cancelled_pairs.update(stale_pairs)
-            self._discard_locked(
-                lambda response_id, chunk_generation: (response_id, chunk_generation) in stale_pairs
-            )
+            for response_id, old_generation in stale_pairs:
+                self._cancel_pair_locked(response_id, old_generation)
             self._generation_id = generation_id
         return True
 
@@ -302,6 +366,100 @@ class BoundedPCMPlayback:
         speaker_segment_id: str,
     ) -> tuple[str, int, str]:
         return (str(response_id), int(generation_id), str(speaker_segment_id))
+
+    def _queue_ack_locked(
+        self,
+        segment: _PlaybackSegment,
+        *,
+        end_sample: int,
+        final: bool,
+    ) -> None:
+        key = self._segment_key(
+            segment.response_id, segment.generation_id, segment.speaker_segment_id
+        )
+        self._ack_sequence += 1
+        ack: dict[str, Any] = {
+            "type": "client_consumed_pcm",
+            "response_id": segment.response_id,
+            "generation_id": segment.generation_id,
+            "speaker_segment_id": segment.speaker_segment_id,
+            "start_sample": segment.start_sample,
+            "end_sample": int(end_sample),
+            "sample_rate": segment.sample_rate,
+            "sequence": self._ack_sequence,
+            "client_monotonic_ns": time.monotonic_ns(),
+            "consumption_semantics": "logical_client_device_buffer",
+        }
+        if self.ack_version == 2:
+            ack.update({"ack_version": 2, "final": bool(final)})
+        # V1 is deliberately supported as a complete-segment protocol. It
+        # cannot report partial progress or a consumed prefix on cancellation.
+        self._pending_acks[key] = ack
+        if final:
+            segment.ack_queued = True
+        else:
+            segment.last_progress_queued_end = int(end_sample)
+
+    def _maybe_queue_segment_ack_locked(self, segment: _PlaybackSegment) -> None:
+        if self.ack_version == 1:
+            if (
+                segment.closed
+                and not segment.ack_queued
+                and segment.end_sample is not None
+                and segment.start_sample < segment.end_sample
+                and segment.enqueued_end_sample == segment.end_sample
+                and segment.consumed_end_sample == segment.end_sample
+            ):
+                self._queue_ack_locked(segment, end_sample=segment.end_sample, final=True)
+            return
+
+        if segment.ack_queued:
+            return
+        if (
+            segment.closed
+            and segment.end_sample is not None
+            and segment.consumed_end_sample == segment.end_sample
+        ):
+            self._queue_ack_locked(segment, end_sample=segment.end_sample, final=True)
+            return
+        if (
+            segment.consumed_end_sample > segment.start_sample
+            and (
+                segment.last_progress_queued_end is None
+                or segment.consumed_end_sample > segment.last_progress_queued_end
+            )
+        ):
+            self._queue_ack_locked(
+                segment, end_sample=segment.consumed_end_sample, final=False
+            )
+
+    def _queue_cancel_final_acks_locked(
+        self,
+        response_id: str,
+        generation_id: int | None,
+    ) -> None:
+        if self.ack_version != 2:
+            return
+        for segment in self._segments.values():
+            if segment.response_id != response_id or (
+                generation_id is not None and segment.generation_id != generation_id
+            ):
+                continue
+            if not segment.ack_queued:
+                self._queue_ack_locked(
+                    segment, end_sample=segment.consumed_end_sample, final=True
+                )
+
+    def _cancel_pair_locked(self, response_id: str, generation_id: int) -> int:
+        self._cancelled_pairs.add((response_id, generation_id))
+        self._queue_cancel_final_acks_locked(response_id, generation_id)
+        dropped = self._discard_locked(
+            lambda queued_response, queued_generation: (
+                queued_response == response_id and queued_generation == generation_id
+            ),
+            preserve_final_acks=self.ack_version == 2,
+        )
+        return dropped
 
     def _cancel_response_locked(self, response_id: str, generation_id: int | None) -> bool:
         response = str(response_id)
@@ -318,14 +476,16 @@ class BoundedPCMPlayback:
         elif response == self._response_id and self._generation_id is not None:
             generations.add(self._generation_id)
         for generation in generations:
-            self._cancelled_pairs.add((response, generation))
-        dropped = self._discard_locked(
-            lambda queued_response, queued_generation: (
-                queued_response == response
-                and (generation_id is None or queued_generation == int(generation_id))
-            )
+            self._cancel_pair_locked(response, generation)
+        # A segment may have been accepted without an extant queue/generation
+        # record. Still emit its zero-length final watermark on response flush.
+        self._queue_cancel_final_acks_locked(response, generation_id)
+        self._discard_acks_locked(
+            response_id=response,
+            generation_id=generation_id,
+            preserve_final=self.ack_version == 2,
         )
-        self._discard_acks_locked(response_id=response, generation_id=generation_id)
+        dropped = 0
         if generation_id is None:
             self._cancelled_responses.add(response)
             self._completed_responses.discard(response)
@@ -517,31 +677,6 @@ class BoundedPCMPlayback:
             self._pending_samples += int(array.size)
             return True
 
-    def _maybe_queue_segment_ack_locked(self, segment: _PlaybackSegment) -> None:
-        if (
-            not segment.closed
-            or segment.ack_queued
-            or segment.end_sample is None
-            or segment.start_sample >= segment.end_sample
-            or segment.enqueued_end_sample != segment.end_sample
-            or segment.consumed_end_sample != segment.end_sample
-        ):
-            return
-        self._ack_sequence += 1
-        self._pending_acks.append({
-            "type": "client_consumed_pcm",
-            "response_id": segment.response_id,
-            "generation_id": segment.generation_id,
-            "speaker_segment_id": segment.speaker_segment_id,
-            "start_sample": segment.start_sample,
-            "end_sample": segment.end_sample,
-            "sample_rate": segment.sample_rate,
-            "sequence": self._ack_sequence,
-            "client_monotonic_ns": time.monotonic_ns(),
-            "consumption_semantics": "logical_client_device_buffer",
-        })
-        segment.ack_queued = True
-
     def complete_segment(
         self,
         *,
@@ -562,7 +697,7 @@ class BoundedPCMPlayback:
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{name} non valido")
-        if end_sample <= start_sample or sample_rate <= 0:
+        if end_sample < start_sample or sample_rate <= 0:
             raise ValueError("segment completion range/sample rate non valido")
         with self._lock:
             if (
@@ -594,15 +729,26 @@ class BoundedPCMPlayback:
     ) -> bool:
         with self._lock:
             if response_id is None:
-                for response, generations in self._response_generations.items():
-                    self._cancelled_pairs.update((response, generation) for generation in generations)
-                for chunk in self._chunks:
-                    self._cancelled_pairs.add((chunk.response_id, chunk.generation_id))
-                for segment in self._segments.values():
-                    self._cancelled_pairs.add((segment.response_id, segment.generation_id))
-                self._clear_locked()
+                pairs = set(
+                    (response, generation)
+                    for response, generations in self._response_generations.items()
+                    for generation in generations
+                )
+                pairs.update((chunk.response_id, chunk.generation_id) for chunk in self._chunks)
+                pairs.update(
+                    (segment.response_id, segment.generation_id)
+                    for segment in self._segments.values()
+                )
+                for response, generation in pairs:
+                    self._cancel_pair_locked(response, generation)
+                self._cancelled_responses.update(response for response, _ in pairs)
+                self._discard_acks_locked(preserve_final=self.ack_version == 2)
+                self._completed_responses.clear()
+                if self.ack_version == 1:
+                    self._segments.clear()
                 self._response_id = None
-                self._response_generations.clear()
+                if self.ack_version == 1:
+                    self._response_generations.clear()
                 return True
             return self._cancel_response_locked(str(response_id), generation_id)
 
@@ -618,16 +764,25 @@ class BoundedPCMPlayback:
             raise ValueError("current_generation_id non valido")
         with self._lock:
             valid: list[dict[str, Any]] = []
-            remaining: deque[dict[str, Any]] = deque()
-            while self._pending_acks:
-                ack = self._pending_acks.popleft()
-                if current_generation_id is None or ack["generation_id"] == current_generation_id:
+            remaining: dict[tuple[str, int, str], dict[str, Any]] = {}
+            for key, ack in self._pending_acks.items():
+                generation_matches = (
+                    current_generation_id is None
+                    or ack["generation_id"] == current_generation_id
+                )
+                if generation_matches or (
+                    self.ack_version == 2 and ack.get("final") is True
+                ):
                     self._outstanding_acks[int(ack["sequence"])] = ack
                     valid.append(dict(ack))
+                elif self.ack_version == 2 and ack.get("final") is not True:
+                    # The generation was fenced before delivery; progress from
+                    # an old branch is stale, while cancellation finals survive.
+                    continue
                 else:
-                    remaining.append(ack)
+                    remaining[key] = ack
             self._pending_acks = remaining
-            return valid
+            return sorted(valid, key=lambda ack: int(ack["sequence"]))
 
     def accept_client_consumed_pcm_ack(
         self,
@@ -641,12 +796,19 @@ class BoundedPCMPlayback:
         with self._lock:
             sequence = ack.get("sequence")
             generation = ack.get("generation_id")
+            is_final = ack.get("final") is True if self.ack_version == 2 else False
             if (
                 isinstance(sequence, bool) or not isinstance(sequence, int)
                 or isinstance(generation, bool) or not isinstance(generation, int)
-                or (current_generation_id is not None and generation != current_generation_id)
-                or (ack.get("response_id"), generation) in self._cancelled_pairs
-                or ack.get("response_id") in self._cancelled_responses
+                or (
+                    current_generation_id is not None
+                    and generation != current_generation_id
+                    and not (self.ack_version == 2 and is_final)
+                )
+                or (
+                    (ack.get("response_id"), generation) in self._cancelled_pairs
+                    or ack.get("response_id") in self._cancelled_responses
+                ) and not (self.ack_version == 2 and is_final)
                 or sequence <= self._last_accepted_ack_sequence
                 or self._outstanding_acks.get(sequence) != ack
                 or ack.get("type") != "client_consumed_pcm"
@@ -662,11 +824,41 @@ class BoundedPCMPlayback:
             ):
                 return False
             key = (response_id, generation, segment_id)
-            if watermark <= self._accepted_watermarks.get(key, -1):
+            segment = self._segments.get(key)
+            if segment is None or (
+                ack.get("start_sample") != segment.start_sample
+                or ack.get("sample_rate") != segment.sample_rate
+                or ack.get("consumption_semantics") != "logical_client_device_buffer"
+                or watermark > segment.consumed_end_sample
+            ):
+                return False
+            if self.ack_version == 2:
+                if (
+                    ack.get("ack_version") != 2
+                    or not isinstance(ack.get("final"), bool)
+                    or watermark < self._accepted_watermarks.get(key, segment.start_sample)
+                    or (
+                        ack.get("final") is False
+                        and watermark <= segment.start_sample
+                    )
+                ):
+                    return False
+                if ack.get("final") is True:
+                    if not segment.ack_queued:
+                        return False
+                    segment.final_ack_accepted = True
+            elif (
+                watermark <= self._accepted_watermarks.get(key, -1)
+                or not segment.closed
+                or segment.end_sample != watermark
+            ):
                 return False
             self._accepted_watermarks[key] = watermark
             self._last_accepted_ack_sequence = sequence
             self._outstanding_acks.pop(sequence, None)
+            if self.ack_version == 2 and segment.final_ack_accepted:
+                self._segments.pop(key, None)
+                self._accepted_watermarks.pop(key, None)
             self._cleanup_completed_response_locked(response_id)
             return True
 
@@ -1046,7 +1238,7 @@ async def send_client_consumed_pcm_acks(
                 async with event_lock:
                     if not playback.accept_client_consumed_pcm_ack(
                         acknowledgement,
-                        current_generation_id=int(acknowledgement["generation_id"]),
+                        current_generation_id=playback.generation_id,
                     ):
                         continue
                     await websocket.send(json.dumps(acknowledgement, separators=(",", ":")))

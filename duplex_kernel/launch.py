@@ -20,18 +20,43 @@ import sys
 import time
 from pathlib import Path
 
+_REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _path_key(value: str | Path) -> str:
+    try:
+        return os.path.normcase(str(Path(value).expanduser().resolve()))
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return os.path.normcase(os.path.abspath(str(value)))
+
 
 def _prioritize_explicit_pythonpath(*fallback_paths: str | Path) -> None:
-    """Keep caller-selected source paths ahead of repository fallbacks."""
+    """Keep this checkout ahead of package overlays and repository fallbacks."""
+    repository_root = str(_REPOSITORY_ROOT.resolve())
+    repository_key = _path_key(repository_root)
     explicit_paths = list(dict.fromkeys(
         item for item in os.environ.get("PYTHONPATH", "").split(os.pathsep) if item
     ))
-    rest = [item for item in sys.path if item not in explicit_paths]
-    sys.path[:] = explicit_paths + rest
+    explicit_paths = [item for item in explicit_paths if _path_key(item) != repository_key]
+    explicit_keys = {_path_key(item) for item in explicit_paths}
+    rest = [
+        item for item in sys.path
+        if _path_key(item) != repository_key and _path_key(item) not in explicit_keys
+    ]
+    ordered = [repository_root, *explicit_paths, *rest]
+    unique_paths: list[str] = []
+    seen_keys: set[str] = set()
+    for item in ordered:
+        key = _path_key(item)
+        if key not in seen_keys:
+            unique_paths.append(item)
+            seen_keys.add(key)
+    sys.path[:] = unique_paths
     for fallback in fallback_paths:
         value = str(fallback)
-        if value and value not in sys.path:
+        if value and _path_key(value) not in seen_keys:
             sys.path.append(value)
+            seen_keys.add(_path_key(value))
 
 
 def _log_runtime_source_files(
@@ -42,19 +67,25 @@ def _log_runtime_source_files(
     session_module,
     native_listener_module,
 ) -> None:
+    from duplex_kernel.runtime_source_diagnostics import (
+        collect_runtime_source_diagnostics,
+    )
+
+    diagnostics = collect_runtime_source_diagnostics({
+        "server": server_module,
+        "listener": listener_module,
+        "frontend": frontend_module,
+        "worker": worker_module,
+        "session": session_module,
+        "native_binding": native_listener_module,
+    })
     logging.getLogger(__name__).info(
-        "[launch] runtime source files server=%s listener=%s frontend=%s worker=%s session=%s native=%s",
-        server_module.__file__,
-        listener_module.__file__,
-        frontend_module.__file__,
-        worker_module.__file__,
-        session_module.__file__,
-        native_listener_module.__file__,
+        "[launch] runtime source diagnostics %s",
+        json.dumps(diagnostics, sort_keys=True, separators=(",", ":")),
     )
 
 
-_REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
-_prioritize_explicit_pythonpath(_REPOSITORY_ROOT)
+_prioritize_explicit_pythonpath()
 if not os.path.isdir(os.environ.get("GEMMA4_OMNI_WORKSPACE", "/workspace")) and _REPOSITORY_ROOT.is_dir():
     os.environ["GEMMA4_OMNI_WORKSPACE"] = str(_REPOSITORY_ROOT)
 from duplex_kernel import config
@@ -246,6 +277,10 @@ def main() -> int:
         default_bundle = None
     adapter_defaults_active = default_adapter is not None
     ap = argparse.ArgumentParser()
+    response_talk_context_capacity_default = os.environ.get(
+        "DUPLEX_RESPONSE_TALK_CONTEXT_CAPACITY", "1"
+    )
+    gpu_admission_capacity_default = os.environ.get("DUPLEX_GPU_ADMISSION_CAPACITY", "1")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--workspace", default=config.WORKSPACE)
@@ -324,7 +359,19 @@ def main() -> int:
         "--controller-guided-talk-context-pool",
         action="store_true",
         default=adapter_defaults_active,
-        help="abilita due contesti Talker isolati per risposte controller-guided; pesi frozen condivisi",
+        help="abilita il pool Talker con capacità configurata; i pesi frozen restano condivisi",
+    )
+    ap.add_argument(
+        "--response-talk-context-capacity",
+        type=int,
+        default=response_talk_context_capacity_default,
+        help="numero positivo di contesti Talker isolati da catturare per le risposte concorrenti",
+    )
+    ap.add_argument(
+        "--gpu-admission-capacity",
+        type=int,
+        default=gpu_admission_capacity_default,
+        help="numero massimo di lease inference GPU concorrenti condivisi tra realtime e HTTP",
     )
     ap.add_argument(
         "--gemma-qlora-adapter-dir",
@@ -363,6 +410,17 @@ def main() -> int:
         help="capacità esplicita della StaticCache per ogni generazione Thinker compilata",
     )
     args = ap.parse_args()
+    if args.response_talk_context_capacity < 1:
+        ap.error("--response-talk-context-capacity must be positive")
+    if args.gpu_admission_capacity < 1:
+        ap.error("--gpu-admission-capacity must be positive")
+    if (
+        args.controller_guided_talk_context_pool
+        and args.gpu_admission_capacity > args.response_talk_context_capacity
+    ):
+        ap.error(
+            "GPU admission capacity cannot exceed the response talk context pool capacity"
+        )
     try:
         args.frame_residual_adapter_checkpoint = str(
             _require_query_film_v2_checkpoint(
@@ -541,7 +599,9 @@ def main() -> int:
         ablate_session_voice_conditioning=args.ablate_session_voice_conditioning,
         diagnostic_talker_seed=args.diagnostic_talker_seed,
         controller_guided_talk_contexts=(
-            2 if args.controller_guided_talk_context_pool else 0
+            args.response_talk_context_capacity
+            if args.controller_guided_talk_context_pool
+            else 0
         ),
         gemma_qlora_adapter_dir=args.gemma_qlora_adapter_dir,
         thinker_prefill_chunk_tokens=args.thinker_prefill_chunk_tokens,
@@ -551,6 +611,14 @@ def main() -> int:
         frame_residual_adapter_checkpoint_path=args.frame_residual_adapter_checkpoint,
     )
     engine.enforce_v9_training_voice = bool(args.enforce_v9_training_voice)
+    engine.gpu_admission_capacity = int(args.gpu_admission_capacity)
+    engine.gpu_admission_capacity_source = (
+        "--gpu-admission-capacity"
+        if "--gpu-admission-capacity" in sys.argv
+        else "DUPLEX_GPU_ADMISSION_CAPACITY"
+        if "DUPLEX_GPU_ADMISSION_CAPACITY" in os.environ
+        else "default"
+    )
     engine.ablate_response_projector = args.ablate_projector == "true"
     engine.virtual_prefix_mode = args.virtual_prefix_mode
     print(f"[launch] virtual_prefix_mode={engine.virtual_prefix_mode}", flush=True)

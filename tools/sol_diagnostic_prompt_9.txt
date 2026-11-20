@@ -1,0 +1,116 @@
+# RICHIESTA DIAGNOSI ARCHITETTURALE E CONTRATTO: GPT 6.1 SOL (MEDIUM EFFORT)
+
+## 1. Contesto del Sistema e Stato di Avanzamento
+Siamo nella pipeline full-duplex omni per Gemma 4 su GPU NVIDIA RTX 3090 (24GB VRAM, host `mondaini`).
+Stiamo validando `PLAN.md` tramite la suite di accettazione end-to-end:
+`python3 tools/run_acceptance_suite.py --runs 1 --container gemma4-speech-s2s-readyframes-20261102 --execution docker`
+
+Tutti i contratti funzionali della Run 1 sono stati superati con successo:
+- **Turno 1 (Long Response, ~55s)**: ACK ratio > 99% (2911/2911 frame inviati e riconosciuti con ACK a passo 80 ms), ACK gap massimo ben al di sotto dei 160 ms (nessuna violazione di pacing), primo audio a 110 ms TTFT.
+- **Turno 2 (Barge-in / YIELD con Rollback)**: interruzione vocale rilevata tempestivamente, cancellazione del playback in 38.2 ms (budget 250 ms), svuotamento FIFO e rollback causale dello spoken prefix confermati.
+- **Turno 3 (Memory Follow-up)**: ripresa fluida con contesto storico coerente.
+- **Turno 4 (Closure)**: chiusura e drain completi.
+- `errors: []` sia in `report.json` che in `report.finalized.json`.
+
+---
+
+## 2. Il Blocco di Certificazione Rilevato
+Nonostante il successo completo del dialogo, `report.finalized.json` e la suite riportano:
+`overall_status: "INCOMPLETE"`
+con l'unico evidence gap:
+`evidence_gaps: ["runtime VRAM telemetry lacks measured allocated/reserved baseline, active, peak, or per-turn post-drain values"]`
+
+---
+
+## 3. Ricostruzione Meccanica ed Evidenza Empirica (Root Cause)
+
+### 3.1 Il Requisito del Verificatore (`tools/real_dialogue_simulator.py:2367-2405`)
+Il simulatore richiede che in `runtime_telemetry.json` (sezioni `vram["turns"]` e `kv["turns"]`) sia registrato lo snapshot `post_drain` per ciascuna risposta che possiede un tag di scenario obbligatorio:
+```python
+expected_response_ids = {
+    record.scenario_tag: record.response_id
+    for record in self.responses.values()
+    if record.scenario_tag in (
+        "long_response_completed",
+        "memory_followup_resume",
+        "long_response_interrupted",
+        "closure",
+    )
+}
+```
+Nella nostra run:
+- `long_response_completed` -> `resp_28df7ae4fd36` (presente in `vram["turns"]`)
+- `memory_followup_resume` -> `resp_afff826bc95b` (presente in `vram["turns"]`)
+- `closure` -> `resp_2a1ba33a1585` (presente in `vram["turns"]`)
+- `long_response_interrupted` -> `resp_3734ee96a27a` **RISULTA ASSENTE**!
+
+### 3.2 Il Meccanismo del Sampler Telemetrico (`tools/acceptance_telemetry.py:150-158`)
+Il sampler esterno campiona periodicamente (ogni 500 ms) l'endpoint HTTP:
+`GET /debug/runtime-telemetry`
+Per registrare una risposta in `self.post_drain`, il branch deve essere presente nella lista `branches` dell'endpoint con:
+- `finalized == True`
+- `ended_response == True`
+- `playback_pending == False`
+- `finalizer_task_status == "completed"` (oppure cancellata e finalizzata)
+
+### 3.3 Il Race Condition tra Scadenza di Cancellazione e Pruning del Branch
+Analizzando `runtime_telemetry_samples.jsonl` e `events.jsonl` per la risposta interrotta `resp_3734ee96a27a`:
+1. Alle `19:59:25.530` l'utente interrompe vocalmente l'assistente. Scatta lo YIELD:
+   `branch["playback_cancelled"] = True`
+   In `duplex_kernel/server_silence_skip.py:342`:
+   `branch["playback_ack_final_deadline_monotonic"] = cancelled_at + PLAYBACK_ACK_FINAL_GRACE_SECONDS` (con `PLAYBACK_ACK_FINAL_GRACE_SECONDS = 2.0`).
+   Quindi `deadline = 19:59:27.530`.
+2. Il server avvia il task di finalizzazione asincrona:
+   In `duplex_kernel/server_response_control.py:414-439`, `_wait_for_response_playback_drain` attende l'arrivo di eventuali ACK residui fino a `final_deadline` (`19:59:27.530`).
+3. L'attesa del drain termina esattamente alla scadenza della deadline (dopo 2.0 secondi). Subito dopo viene invocato `finalize_unified_native_cache()`, che imposta `finalized: True` e `ended_response: True` alle `19:59:27.534` (+4 ms).
+4. Alle `19:59:27.780` (appena 246 ms dopo la finalizzazione), la nuova risposta `resp_1b93c524755c` (generata dalla voce dell'utente durante il barge-in) invoca `prune_playback_ack_branches(response_id, branch)` in `duplex_kernel/server.py:3780-3806`.
+5. `prune_playback_ack_branches` controlla se `resp_3734ee96a27a` deve essere mantenuta tramite `_response_branch_ack_retained`:
+   ```python
+   # duplex_kernel/server_response_control.py:291-309
+   def _response_branch_ack_retained(branch, *, now_monotonic=None):
+       now = time.monotonic() if now_monotonic is None else float(now_monotonic)
+       deadline = branch.get("playback_ack_final_deadline_monotonic")
+       if branch.get("playback_cancelled") is True:
+           return isinstance(deadline, (int, float)) and now <= float(deadline)
+       return _response_branch_has_pending_pcm(branch)
+   ```
+   Poiché alle `19:59:27.780` `now` (27.780) è maggiore di `deadline` (27.530), `_response_branch_ack_retained` restituisce `False`!
+6. In `prune_playback_ack_branches`:
+   ```python
+   with playback_ack_branches_lock:
+       for key in removable_keys:
+           if key != str(response_id) and playback_ack_branches.get(key) is snapshot_by_key.get(key):
+               playback_ack_branches.pop(key, None)
+       while len(playback_ack_branches) > 64:
+           ...
+   ```
+   `resp_3734ee96a27a` viene immediatamente rimossa con `pop(key, None)`!
+7. **Il gap telemetrico**:
+   Il sampler telemetrico ha effettuato i suoi campionamenti ogni 500 ms:
+   - Sample 368: alle `19:59:27.467` -> `resp_3734ee96a27a` era presente, ma `finalized: False` (il task era ancora in drain).
+   - Sample 369: alle `19:59:27.968` -> `resp_3734ee96a27a` era già stata eliminata alle `19:59:27.780`!
+   La finestra utile in cui `resp_3734ee96a27a` era contemporaneamente `finalized: True` e presente in `playback_ack_branches` è durata soli **246 ms**, inferiore al periodo di campionamento del sampler (500 ms).
+   Inoltre, per costruzione, poiché l'attesa di drain aspetta fino a `deadline`, la finalizzazione avviene *dopo* o *in concomitanza* con la scadenza della deadline stessa, rendendo la rimozione immediata a qualsiasi creazione di una nuova risposta.
+
+---
+
+## 4. Domande per GPT 6.1 Sol
+
+1. **Ciclo di vita e ritenzione del branch dopo la finalizzazione**:
+   Qual è il contratto temporale corretto che garantisce che un branch finalizzato (sia esso completato normalmente o cancellato via YIELD) rimanga visibile in `sess._playback_ack_branches` per consentire ai consumatori di telemetria e audit (che campionano a intervalli di 500 ms) di acquisire lo stato `post_drain`?
+   Dovremmo definire una retention window post-finalizzazione (ad es. `finalized_at_monotonic + POST_FINALIZATION_TELEMETRY_RETENTION_SECONDS`, es. 10.0s), oppure preservare i branch finalizzati fino a saturazione della capacità massima (es. i 64 branch previsti dal limite di capienza)?
+
+2. **Correzione di `prune_playback_ack_branches` e `_response_branch_ack_retained`**:
+   In `prune_playback_ack_branches` (server.py:3780-3806):
+   - Notiamo che il loop `while len(playback_ack_branches) > 64` è reso vano dal fatto che `for key in removable_keys: pop(key)` epura indiscriminatamente qualsiasi branch non retained ad ogni singolo arrivo di nuova risposta, anche se nel dizionario ci sono solo 1 o 2 elementi.
+   - Come deve essere formulata la condizione in `_response_branch_ack_retained` (o in `prune_playback_ack_branches`) affinché un branch cancellato:
+     (a) attenda i watermark di ACK finali durante il drain (fase attiva di drain);
+     (b) una volta finalizzato (`finalized: True`), rimanga memorizzato con i suoi contatori di telemetria / VRAM post-drain per il tempo necessario all'osservabilità (o fino al limite FIFO/LRU di 64 elementi)?
+
+3. **Invarianti di memoria e sicurezza**:
+   Come prevenire qualsiasi accumulo incontrollato di memoria garantendo che:
+   - I buffer pesanti (come i tensori audio o code interne) vengano comunque rilasciati tempestivamente alla finalizzazione;
+   - Solo i metadati leggeri del branch (utili per telemetria, rollback cursor e ACK tracing) rimangano nel dizionario `playback_ack_branches` fino a scadenza TTL o rotazione a 64 posizioni?
+
+4. **Specifica tecnica per il worker GPT-6 Luna**:
+   Fornisci la specifica implementativa puntuale (file, funzioni, logica esatta) che GPT-6 Luna deve applicare per risolvere definitivamente il race condition e garantire il passaggio dell'acceptance suite con `overall_status: PASS`.

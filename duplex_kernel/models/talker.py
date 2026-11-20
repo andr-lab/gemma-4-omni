@@ -21,11 +21,13 @@ import os
 import sys
 import types
 from contextlib import contextmanager
+from numbers import Integral
 from typing import Any, Callable
 
 import numpy as np
 import torch
 
+from duplex_kernel.config import AUDIO_FRAME_SAMPLES
 from duplex_kernel.qwen_conditioning import QWEN_AUDIO_CONDITIONING_RECIPE
 
 PINNED_QWEN_TALKER_REVISION = "fd4b254389122332181a7c3db7f27e918eec64e3"
@@ -646,7 +648,7 @@ class TalkerModel:
         torch.Tensor,
         torch.Tensor,
     ]:
-        """Build the Qwen stable/text/BOS prefill with official Base framing."""
+        """Build the Qwen prefill from separately tokenized role and text IDs."""
         if not isinstance(
             text,
             str,
@@ -659,43 +661,37 @@ class TalkerModel:
         cfg = self.cfg
         tcfg = self.tcfg
 
-        # Exact framing used by Qwen3TTSModel._build_assistant_text().
-        assistant_text = (
-            "<|im_start|>assistant\n"
-            f"{text}"
-            "<|im_end|>\n"
-            "<|im_start|>assistant\n"
-        )
+        tokenizer = getattr(self.proc, "tokenizer", None)
+        if not callable(tokenizer):
+            raise RuntimeError("Qwen processor must expose its text tokenizer")
 
-        input_ids = self.proc(
-            text=assistant_text,
-            return_tensors="pt",
-        )["input_ids"].to(
-            self.device
-        )
-
-        if (
-            input_ids.ndim != 2
-            or input_ids.shape[0] != 1
-            or input_ids.shape[1] <= 8
-        ):
-            raise RuntimeError(
-                "Qwen assistant token layout "
-                f"inatteso: {tuple(input_ids.shape)}"
+        def tokenize_single_text(value: str) -> torch.Tensor:
+            encoded = tokenizer(value, add_special_tokens=False)
+            token_ids = encoded.get("input_ids")
+            if isinstance(token_ids, torch.Tensor):
+                token_ids = token_ids.detach().cpu().tolist()
+            else:
+                tolist = getattr(token_ids, "tolist", None)
+                if callable(tolist):
+                    token_ids = tolist()
+            if not isinstance(token_ids, (list, tuple)):
+                raise RuntimeError("Qwen tokenizer did not return input_ids")
+            if token_ids and isinstance(token_ids[0], (list, tuple)):
+                if len(token_ids) != 1:
+                    raise RuntimeError("Qwen text tokenization must return one sequence")
+                token_ids = token_ids[0]
+            if not token_ids or any(
+                isinstance(token_id, bool) or not isinstance(token_id, Integral)
+                for token_id in token_ids
+            ):
+                raise RuntimeError("Qwen text tokenization returned empty or invalid token IDs")
+            return torch.tensor(
+                [list(map(int, token_ids))],
+                device=self.device,
+                dtype=torch.long,
             )
 
-        # Upstream Qwen slicing contract:
-        #   [:3]   -> "<|im_start|>assistant\n"
-        #   [3:-5] -> synthesis text
-        role_ids = input_ids[
-            :,
-            :3,
-        ]
-
-        raw_ids = input_ids[
-            :,
-            3:-5,
-        ]
+        role_ids = tokenize_single_text("<|im_start|>assistant\n")
 
         if raw_text_token_ids is not None:
             if not raw_text_token_ids:
@@ -704,9 +700,11 @@ class TalkerModel:
                 raise TypeError("raw_text_token_ids deve contenere interi")
             raw_ids = torch.tensor(
                 [list(raw_text_token_ids)],
-                device=input_ids.device,
-                dtype=input_ids.dtype,
+                device=role_ids.device,
+                dtype=role_ids.dtype,
             )
+        else:
+            raw_ids = tokenize_single_text(text)
 
         if raw_ids.shape[1] <= 0:
             raise RuntimeError(
@@ -721,7 +719,7 @@ class TalkerModel:
                 cfg.tts_pad_token_id,
             ]],
             device=self.device,
-            dtype=input_ids.dtype,
+            dtype=role_ids.dtype,
         )
 
         (
@@ -761,7 +759,7 @@ class TalkerModel:
                 tcfg.codec_think_eos_id,
             ]],
             device=self.device,
-            dtype=input_ids.dtype,
+            dtype=role_ids.dtype,
         )
 
         codec_prefix_embedding = (
@@ -778,7 +776,7 @@ class TalkerModel:
                         tcfg.codec_bos_id,
                     ]],
                     device=self.device,
-                    dtype=input_ids.dtype,
+                    dtype=role_ids.dtype,
                 )
             )
         )
@@ -865,35 +863,27 @@ class TalkerModel:
             )
         )
 
-        text_part_projection = text_embedding
         if include_text_eos:
             text_part_projection = torch.cat((text_embedding, eos_e), dim=1)
-        text_part_length = int(raw_ids.shape[1]) + int(bool(include_text_eos))
-        codec_pad_embedding = talker.get_input_embeddings()(
-            torch.full(
-                (1, text_part_length),
-                int(tcfg.codec_pad_id),
-                device=self.device,
-                dtype=input_ids.dtype,
-            )
-        )
-        text_part = text_part_projection + codec_pad_embedding
-
-        # Kept separate so FuturePrefixQwen can place:
-        #
-        # stable prefill | text | V9 frame slots | codec BOS
-        bos_part = (
-            pad_e
-            + talker.get_input_embeddings()(
-                torch.tensor(
-                    [[
-                        tcfg.codec_bos_id
-                    ]],
+            codec_pad_embedding = talker.get_input_embeddings()(
+                torch.full(
+                    (1, int(raw_ids.shape[1]) + 1),
+                    int(tcfg.codec_pad_id),
                     device=self.device,
-                    dtype=input_ids.dtype,
+                    dtype=role_ids.dtype,
                 )
             )
-        )
+            text_part = text_part_projection + codec_pad_embedding
+            bos_text = pad_e
+        else:
+            if int(raw_ids.shape[1]) != 1:
+                raise ValueError("streaming Qwen prefill requires exactly one text token")
+            text_part = text_embedding[:, :0]
+            bos_text = text_embedding
+
+        # Upstream streaming pairs the first text ID with codec BOS. Complete
+        # text prefill pairs BOS with text padding after its text/EOS positions.
+        bos_part = bos_text + codec_embedding[:, -1:]
 
         for name, value in (
             ("icl_part", icl_part),
@@ -959,12 +949,38 @@ class TalkerModel:
         """RVQ codes -> 24 kHz waveform."""
         if self.code2wav is None:
             raise RuntimeError("Code2Wav non caricato")
+        if not isinstance(codes, torch.Tensor) or codes.ndim != 3:
+            raise ValueError("RVQ codes devono avere shape (batch, frames, 16)")
+        if codes.shape[0] != 1 or codes.shape[1] <= 0 or codes.shape[2] != 16:
+            raise ValueError(
+                f"RVQ codes devono avere shape (1, frames>0, 16), got {tuple(codes.shape)}"
+            )
         if preclamp_callback is None:
             decoded = self.code2wav.decode(codes)
         else:
             with capture_code2wav_preclamp(self.code2wav, preclamp_callback):
                 decoded = self.code2wav.decode(codes)
-        return decoded.audio_values[0].detach().cpu()
+        waveform = getattr(decoded, "audio_values", decoded)
+        if not isinstance(waveform, torch.Tensor):
+            waveform = torch.as_tensor(waveform)
+        if waveform.ndim == 1:
+            audio = waveform
+        elif waveform.ndim >= 2 and waveform.shape[0] == 1:
+            audio = waveform[0].reshape(-1)
+        else:
+            raise RuntimeError(
+                f"Code2Wav output shape non supportata: {tuple(waveform.shape)}"
+            )
+        expected_samples = int(codes.shape[1]) * AUDIO_FRAME_SAMPLES
+        if audio.numel() < expected_samples:
+            raise RuntimeError(
+                "Code2Wav output troppo corto per i frame RVQ: "
+                f"{audio.numel()} < {expected_samples}"
+            )
+        # Qwen may retain a padded final frame in its output container. Keep
+        # only samples owned by the real codec frames, including a 1-frame or
+        # odd EOS tail.
+        return audio[:expected_samples].detach().cpu()
 
 
 

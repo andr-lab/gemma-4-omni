@@ -1,0 +1,45 @@
+# Diagnosi Architetturale: "long response microphone ACK gap reaches 160ms limit"
+
+## 1. Contesto e Progressi
+Abbiamo risolto con successo il problema del VRAM post-drain leak:
+- Il listener microbatch worker e il tick dispatcher sono stati resi risorse residenti di servizio avviate in `@app.on_event("startup")` in `duplex_kernel/server.py`.
+- Nei test di verifica (es. Run 1 della suite di accettazione), il post-drain growth è sceso a **59.4 MiB** (budget massimo 256.0 MiB, prima falliva a 445 MiB).
+- `DEFAULT_PACING_TOLERANCE_MS` nel simulatore è stato portato a 60.0 ms.
+- Il **Run 1** della suite di accettazione a 3 run ha superato **tutti** i controlli contrattuali (`overall_status: PASS`, VRAM entro i limiti, 4 turni completati con successo).
+
+## 2. Il Problema Emerso in Run 2 e Run 3
+Nei run successivi della suite a 3 run consecutivi (`tools/run_acceptance_suite.py --runs 3`), il Run 2 e il Run 3 sono falliti durante il Turn 1 (il turno lungo con oltre 120s di stream continuo) con lo stesso identico errore:
+
+- **Run 2**:
+  `WebSocket/runtime error: EvidenceError: long response microphone ACK gap 172.2ms reached the 160.0ms limit`
+  - Coppia incriminata: frame 781 (ACK ricevuto a monotonic 6153007207634529) e frame 782 (ACK ricevuto a monotonic 6153007379841168). Gap: **172.2 ms**.
+  - Frame 783 è arrivato subito dopo con gap di soli **2.70 ms**!
+  - Traccia eventi in `events.jsonl` tra i due ACK:
+    - ACK frame 781 (listener_q_ms: 827.5, step_ms: 73.48, ack_q_ms: 0.25)
+    - `duplex_control6.decision`
+    - `input_frame_sent` (client invia frame successivo)
+    - `response.output_text.delta`
+    - `response.thinker_metrics`
+    - ACK frame 782 (listener_q_ms: 854.55, step_ms: 87.457, ack_q_ms: 16.61) -> gap 172.2ms!
+    - ACK frame 783 (gap 2.7ms)
+
+- **Run 3**:
+  `WebSocket/runtime error: EvidenceError: long response microphone ACK gap 184.9ms reached the 160.0ms limit`
+  - Coppia incriminata: frame 807 (ACK ricevuto a monotonic 6153178064856156) e frame 808 (ACK ricevuto a monotonic 6153178249781525). Gap: **184.9 ms**.
+  - Anche qui, 1505 frame inviati, 1505 frame ackati (100% ack ratio), FIFO peak entro 52000 campioni, ma un singolo gap tra ricezione di due ACK consecutivi ha sforato la soglia di 160.0 ms.
+
+## 3. Analisi e Richiesta di Diagnosi
+Per il requisito contrattuale in PLAN.md:
+"Mantenere FIFO playout a 96000 campioni/4 s, in-flight massimo client a 15, timeout input a 3,5 s e gap massimo input a 160 ms."
+Il client misura il gap tra la ricezione di due ACK consecutivi (`input_audio_buffer.consumed`) sul WebSocket durante la generazione della risposta lunga (Turn 1).
+
+Ti chiediamo di:
+1. **Identificare la causa radice** del gap temporale nell'emissione o nella ricezione degli ACK `input_audio_buffer.consumed`:
+   - È dovuto a contesa di lock (`_generation_lock`, `_transition_lock`, `listener_pair_lock`, GIL) durante l'emissione di token/metriche (`response.output_text.delta`, `response.thinker_metrics`, talker step)?
+   - È dovuto alla serializzazione o all'accumulo nella coda di invio WebSocket (`_ack_enqueued_ns`, `server_ack_queue_ms` era a 16.6ms per il frame 782)?
+   - È dovuto al listener step che dura ~87ms più jitter dello scheduler?
+   - È dovuto al client receiver loop in `real_dialogue_simulator.py` che si accoda o subisce jitter nella lettura dei frame WebSocket?
+2. **Fornire una diagnosi architetturale precisa** con citazioni esatte dei file e delle righe di codice interessate.
+3. **Definire la strategia e la soluzione implementativa raccomandata**, con istruzioni chiare e dettagliate per i worker GPT-6 Luna Max che dovranno applicarla.
+
+Scrivi la tua diagnosi completa nel file `tools/sol_diagnosis_output_3.md`.

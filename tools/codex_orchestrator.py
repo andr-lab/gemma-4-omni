@@ -66,6 +66,8 @@ def run_codex(
     cwd: Optional[str] = None,
     timeout_s: Optional[int] = None,
     task_name: Optional[str] = None,
+    model: str = "gpt-6-luna",
+    effort: str = "max",
 ) -> Dict[str, Any]:
     if prompt.startswith("@") and Path(prompt[1:]).exists():
         prompt = Path(prompt[1:]).read_text(encoding="utf-8")
@@ -75,15 +77,17 @@ def run_codex(
     log_file = RUNS_DIR / f"{run_id}.log"
     last_msg_file = RUNS_DIR / f"{run_id}_last.md"
 
-    user_instruction = f"Esegui il piano dettagliato fornito in input stdin ({task_name or 'autonomous_task'}). Procedi autonomamente passo per passo fino alla fine."
+    user_instruction = (
+        f"Sei l'esecutore/consulente esperto {model}. Esegui il compito fornito in input stdin ({task_name or 'autonomous_task'})."
+    )
     cmd = [
         str(CODEX_BIN),
         "exec",
         "--dangerously-bypass-approvals-and-sandbox",
         "-m",
-        "gpt-6-luna",
+        model,
         "-c",
-        'model_reasoning_effort="xhigh"',
+        f'model_reasoning_effort="{effort}"',
         "-C",
         str(work_dir),
         "-o",
@@ -92,7 +96,7 @@ def run_codex(
     ]
 
     sys.stdout.write(f"[codex_tool] Avvio Codex CLI ({run_id})\n")
-    sys.stdout.write(f"[codex_tool] Modello: gpt-6-luna (xhigh reasoning)\n")
+    sys.stdout.write(f"[codex_tool] Modello: {model} ({effort} reasoning)\n")
     sys.stdout.write(f"[codex_tool] Task: {task_name or prompt[:80]}...\n")
     sys.stdout.write(f"[codex_tool] Log: {log_file}\n")
     sys.stdout.flush()
@@ -120,6 +124,107 @@ def run_codex(
             except Exception as write_exc:
                 sys.stderr.write(f"[codex_tool] Warning: error writing prompt to stdin: {write_exc}\n")
 
+
+        active = _load_active_pids()
+        active[str(proc.pid)] = {
+            "run_id": run_id,
+            "task_name": task_name or prompt[:80],
+            "started_at": time.time(),
+            "log_file": str(log_file),
+        }
+        _save_active_pids(active)
+
+        full_output = []
+        try:
+            start_t = time.time()
+            for line in proc.stdout:  # type: ignore
+                lf.write(line)
+                lf.flush()
+                full_output.append(line)
+                sys.stdout.write(line)
+                sys.stdout.flush()
+                if timeout_s and (time.time() - start_t) > timeout_s:
+                    proc.kill()
+                    raise TimeoutError(f"Codex execution exceeded {timeout_s}s timeout")
+            proc.wait()
+        finally:
+            active = _load_active_pids()
+            active.pop(str(proc.pid), None)
+            _save_active_pids(active)
+
+    sys.stdout.write(f"\n[codex_tool] Codex terminato con exit code {proc.returncode}\n")
+    last_msg = last_msg_file.read_text(encoding="utf-8") if last_msg_file.exists() else ""
+    return {
+        "run_id": run_id,
+        "pid": proc.pid,
+        "exit_code": proc.returncode,
+        "output": "".join(full_output),
+        "last_message": last_msg,
+        "log_file": str(log_file),
+    }
+
+
+def resume_codex(
+    session_id: str,
+    prompt: str,
+    *,
+    cwd: Optional[str] = None,
+    timeout_s: Optional[int] = None,
+    task_name: Optional[str] = None,
+    model: str = "gpt-6-luna",
+    effort: str = "max",
+) -> Dict[str, Any]:
+    if prompt.startswith("@") and Path(prompt[1:]).exists():
+        prompt = Path(prompt[1:]).read_text(encoding="utf-8")
+
+    work_dir = Path(cwd or "C:/Users/andre/Documents/gemma-4-omni").resolve()
+    run_id = f"codex_resume_{int(time.time())}_{os.getpid()}"
+    log_file = RUNS_DIR / f"{run_id}.log"
+    last_msg_file = RUNS_DIR / f"{run_id}_last.md"
+
+    cmd = [
+        str(CODEX_BIN),
+        "exec",
+        "resume",
+        session_id,
+        "-",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "-m",
+        model,
+        "-c",
+        f'model_reasoning_effort="{effort}"',
+        "-o",
+        str(last_msg_file),
+    ]
+
+    sys.stdout.write(f"[codex_tool] Ripristino sessione Codex CLI {session_id} ({run_id})\n")
+    sys.stdout.write(f"[codex_tool] Modello: {model} ({effort} reasoning)\n")
+    sys.stdout.write(f"[codex_tool] Task: {task_name or prompt[:80]}...\n")
+    sys.stdout.write(f"[codex_tool] Log: {log_file}\n")
+    sys.stdout.flush()
+
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+    with open(log_file, "w", encoding="utf-8") as lf:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(work_dir),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+        )
+        if proc.stdin:
+            try:
+                proc.stdin.write(prompt)
+                proc.stdin.close()
+            except Exception as write_exc:
+                sys.stderr.write(f"[codex_tool] Warning: error writing prompt to stdin: {write_exc}\n")
 
         active = _load_active_pids()
         active[str(proc.pid)] = {
@@ -193,6 +298,17 @@ def main() -> None:
     run_p.add_argument("--cwd", default=None, help="Working directory")
     run_p.add_argument("--timeout", type=int, default=None, help="Timeout in seconds")
     run_p.add_argument("--name", default=None, help="Task name")
+    run_p.add_argument("--model", default="gpt-6-luna", help="Model name (e.g. gpt-6-luna, gpt-6.1-sol)")
+    run_p.add_argument("--effort", default="max", choices=("low", "medium", "high", "xhigh", "max"), help="Reasoning effort")
+
+    resume_p = sub.add_parser("resume", help="Resume a task via Codex CLI")
+    resume_p.add_argument("session_id", help="Session ID to resume")
+    resume_p.add_argument("prompt", help="Prompt / follow-up instruction (or @path/to/prompt.txt)")
+    resume_p.add_argument("--cwd", default=None, help="Working directory")
+    resume_p.add_argument("--timeout", type=int, default=None, help="Timeout in seconds")
+    resume_p.add_argument("--name", default=None, help="Task name")
+    resume_p.add_argument("--model", default="gpt-6-luna", help="Model name (e.g. gpt-6-luna, gpt-6.1-sol)")
+    resume_p.add_argument("--effort", default="max", choices=("low", "medium", "high", "xhigh", "max"), help="Reasoning effort")
 
     sub.add_parser("status", help="Show active Codex instances")
     sub.add_parser("kill-all", help="Kill all active Codex instances")
@@ -208,6 +324,18 @@ def main() -> None:
             cwd=args.cwd,
             timeout_s=args.timeout,
             task_name=args.name,
+            model=args.model,
+            effort=args.effort,
+        )
+    elif args.subcmd == "resume":
+        resume_codex(
+            args.session_id,
+            args.prompt,
+            cwd=args.cwd,
+            timeout_s=args.timeout,
+            task_name=args.name,
+            model=args.model,
+            effort=args.effort,
         )
     else:
         parser.print_help()

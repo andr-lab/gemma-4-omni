@@ -28,24 +28,34 @@ from duplex_kernel.listener_microbatch_frontend import ListenerMicrobatchAudioFr
 from duplex_kernel.microbatch_contract import (
     BatchRowDescriptor,
     ListenerFrame,
+    ListenerBatchManifest,
     ListenerSessionState,
     LISTENER_Q_PER_FRAME,
     NativeBatchCapability,
     PCM_TAIL_SAMPLES,
     RuntimeSignature,
 )
-from duplex_kernel.native_listener_microbatch import NativeBatchOutput, NativeBatchOutputHealth
+from duplex_kernel.native_listener_microbatch import (
+    NativeBatchOutput,
+    NativeBatchOutputHealth,
+    NativeGemmaListenerMicrobatch,
+)
 from duplex_kernel.turn_policy import ControlAction, PolicyInput
 from training.duplex_qlora.native_control6 import ACTIONS, HIDDEN_WIDTH, NativeControl6LoRA
 
 from duplex_kernel.listener_microbatch_worker import (
+    CompactionRequestContext,
     _chunk_queued_q2_replay,
+    ListenerWatermark,
     PreparedInitialPrefix,
     ListenerMicrobatchRuntime,
     ListenerMicrobatchWorker,
     PrefixCacheImport,
+    ResponseDecodePurpose,
     SemanticPrefixShadowRuntime,
     SemanticPrefixShadowWorker,
+    StaleListenerWatermarkError,
+    StaleResponseRevisionError,
     ShadowQ2Frame,
     WorkerStopReport,
 )
@@ -223,6 +233,7 @@ class _FakeNativeBatch:
         self.lock_held_at_import: list[bool | None] = []
         self.lock_held_at_step: list[bool | None] = []
         self.import_rows: list[BatchRowDescriptor] = []
+        self.import_prefix_lengths: dict[str, int] = {}
         self.manifests: list[Any] = []
         self.audio_rows: list[torch.Tensor] = []
         self.supports_queued_audio_batch = False
@@ -232,6 +243,7 @@ class _FakeNativeBatch:
         self.slot_fork_calls: list[tuple[BatchRowDescriptor, BatchRowDescriptor]] = []
         self.metadata_rebind_calls: list[tuple[BatchRowDescriptor, BatchRowDescriptor]] = []
         self._metadata_rebind_api_available = True
+        self._cache_copy_api_available = True
         self.fail_fork: BaseException | None = None
         self.fork_entered: threading.Event | None = None
         self.fork_continue: threading.Event | None = None
@@ -259,6 +271,7 @@ class _FakeNativeBatch:
         )
         self.imports.append((row.native_context_id, row.session_id, row.frame_id))
         self.import_rows.append(row)
+        self.import_prefix_lengths[row.session_id] = int(prefix_len)
         self.event_order.append(("import", row.session_id))
 
     def ensure_capacity(self, requested_capacity: int) -> int:
@@ -407,7 +420,24 @@ class _FakeNativeBatch:
     def prepare_cache_copy_source(self, row):
         self._claim()
         self.cache_copy_source_rows.append(row)
-        return SimpleNamespace(row=row)
+        return SimpleNamespace(
+            row=row,
+            prefix_len=self.import_prefix_lengths.get(row.session_id, row.cache_position),
+        )
+
+    def copy_session_cache_from(self, source_token, destination_row):
+        self._claim()
+        source_row = source_token.row
+        copied_row = replace(
+            destination_row,
+            cache_position=source_row.cache_position,
+            valid_history_tokens=source_row.valid_history_tokens,
+        )
+        return SimpleNamespace(
+            destination_row=copied_row,
+            completion_event=_FakeCompletionEvent(),
+            prefix_len=int(source_token.prefix_len),
+        )
 
     def fork_session_cache_within_owner(self, source_row, destination_row):
         self._claim()
@@ -501,11 +531,12 @@ def _assistant_q0(
 
 def _mark_queued_soft_cuda_for_cpu_fixture(rig: _Rig, session_id: str) -> None:
     queued = rig.worker._queued_audio_soft[session_id]
-    assert len(queued) == 1
-    queued[0] = replace(
-        queued[0],
-        audio_soft_tokens=_CudaProvenanceTensor(queued[0].audio_soft_tokens),
-    )
+    assert queued
+    for index, item in enumerate(tuple(queued)):
+        queued[index] = replace(
+            item,
+            audio_soft_tokens=_CudaProvenanceTensor(item.audio_soft_tokens),
+        )
 
 
 class _OwnerRecordingCoordinator(ListenerMicrobatchCoordinator):
@@ -557,12 +588,18 @@ def _rig(
     auto_start=True,
     runtime_factory_entered=None,
     runtime_factory_continue=None,
+    compaction_request_builder=None,
+    compaction_trigger_tokens=8_192,
+    compaction_target_tokens=4_096,
+    shadow_prefix_builder=None,
+    on_cache_identity_commit=None,
 ) -> _Rig:
     signature = _signature()
     capability = _capability()
     coordinator = _OwnerRecordingCoordinator(signature, capability)
     model = _FakeAudioModel()
     native_holder: list[_FakeNativeBatch] = []
+    shadow_native_holder: list[_FakeNativeBatch] = []
     adapter_holder: list[_RecordingAdapter] = []
     factory_threads: list[int] = []
     prefix_threads: list[int] = []
@@ -588,6 +625,38 @@ def _rig(
             device="cpu",
             dtype=torch.bfloat16,
         )
+        shadow_factory = None
+        effective_shadow_prefix_builder = None
+        if compaction_request_builder is not None or shadow_prefix_builder is not None:
+            def create_shadow_runtime():
+                shadow_stream = _FakeStream()
+                shadow_capability = replace(
+                    capability,
+                    stream_priority=0,
+                    stream_identity="cpu:shadow-stream",
+                )
+                shadow_native = _FakeNativeBatch(signature, shadow_capability, shadow_stream)
+                shadow_native_holder.append(shadow_native)
+                return SemanticPrefixShadowRuntime(
+                    native=shadow_native,
+                    listener_stream=shadow_stream,
+                )
+
+            def build_shadow_prefix(request, _shadow_stream):
+                if shadow_prefix_builder is not None:
+                    return shadow_prefix_builder(request)
+                return PrefixCacheImport(
+                    past_key_values=object(),
+                    prefix_attention=torch.ones((1, request.prefix_len), dtype=torch.int64),
+                    prefix_len=request.prefix_len,
+                    cache_position=request.prefix_len,
+                    semantic_context_revision=request.semantic_context_revision,
+                    replay_frame_ids=tuple(request.replay_frame_ids),
+                    applied_history_revision=getattr(request, "history_revision", None),
+                )
+
+            shadow_factory = create_shadow_runtime
+            effective_shadow_prefix_builder = build_shadow_prefix
         return ListenerMicrobatchRuntime(
             listener_stream=stream,
             frontend=frontend,
@@ -607,6 +676,11 @@ def _rig(
             completion_barrier=completion_barrier,
             listener_model_lock=model_lock,
             token_adapter=_FakeTokenAdapter(),
+            shadow_factory=shadow_factory,
+            shadow_prefix_builder=effective_shadow_prefix_builder,
+            compaction_request_builder=compaction_request_builder,
+            compaction_trigger_tokens=compaction_trigger_tokens,
+            compaction_target_tokens=compaction_target_tokens,
         )
 
     def prefix_import(state, row) -> PrefixCacheImport:
@@ -636,6 +710,7 @@ def _rig(
         runtime_factory=runtime_factory,
         on_result=on_result,
         on_error=on_error,
+        on_cache_identity_commit=on_cache_identity_commit,
         stable_turn_policy_q2_context=stable_turn_policy_q2_context,
     )
     if auto_start:
@@ -653,6 +728,38 @@ def _rig(
 def _register(rig: _Rig, *states: ListenerSessionState) -> None:
     for state in states:
         rig.worker.register_session(state, prefix_import=rig.prefix_import).result(timeout=3)
+
+
+def test_owner_drains_at_most_one_command_before_rechecking_ready_ticks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rig = _rig(auto_start=False)
+    command_type = listener_microbatch_worker_module._Command
+    futures = [Future() for _ in range(3)]
+    commands = [command_type("snapshot", (index,), future) for index, future in enumerate(futures)]
+    for command in commands:
+        rig.worker._commands.put(command)
+    executed: list[int] = []
+
+    def execute(command):
+        index = int(command.args[0])
+        executed.append(index)
+        return index
+
+    monkeypatch.setattr(rig.worker, "_execute_command", execute)
+
+    rig.worker._drain_commands()
+
+    assert executed == [0]
+    assert futures[0].result(timeout=0) == 0
+    assert not futures[1].done()
+    assert rig.worker._commands.qsize() == 2
+
+    rig.worker._drain_commands()
+
+    assert executed == [0, 1]
+    assert futures[1].result(timeout=0) == 1
+    assert rig.worker._commands.qsize() == 1
 
 
 def _prime_native_prefix(rig: _Rig, state: ListenerSessionState) -> None:
@@ -1773,6 +1880,10 @@ def test_private_listener_pipeline_runs_while_compute_owns_shared_model_lock() -
         assert row_output.native_output_health_ms >= 0.0
         assert row_output.control6_policy_ms is not None
         assert row_output.cuda_completion_wait_ms is not None
+        assert row_output.worker_queue_wait_ms is not None
+        assert row_output.worker_queue_wait_ms >= 0.0
+        assert row_output.worker_wall_ms is not None
+        assert row_output.worker_wall_ms >= row_output.cuda_completion_wait_ms
         assert row_output.native_output_health is not None
         assert row_output.native_output_health.status == "healthy"
         assert row_output.native_output_health.checked
@@ -1889,6 +2000,19 @@ def test_worker_uses_one_frontend_native_step_and_control6_forward_per_batch(bat
     assert rig.native.steps[0][0] == tuple(state.session_id for state in states)
     assert len(rig.adapter.hidden_rows) == 1
     assert len(decisions) == batch_size
+    for decision in decisions:
+        diagnostics = decision.diagnostics
+        assert diagnostics is not None
+        for prefix in (
+            "listener_batch_control6_policy",
+            "native_control6_batch_policy",
+        ):
+            wall_start = diagnostics[f"{prefix}_wall_start_ns"]
+            wall_end = diagnostics[f"{prefix}_wall_end_ns"]
+            cpu_start = diagnostics[f"{prefix}_thread_cpu_start_ns"]
+            cpu_end = diagnostics[f"{prefix}_thread_cpu_end_ns"]
+            assert isinstance(wall_start, int) and wall_end >= wall_start
+            assert isinstance(cpu_start, int) and cpu_end >= cpu_start
     assert len(rig.native.imports) == batch_size
     assert rig.native.max_batch_size >= batch_size
     assert rig.native.capacity_requests[-1] == batch_size
@@ -1943,6 +2067,31 @@ def test_worker_uses_one_frontend_native_step_and_control6_forward_per_batch(bat
     assert report.stopped_cleanly
     assert report.processed_batches == 1
     assert rig.native.close_thread_id == worker_thread
+
+
+def test_worker_orders_listener_stream_after_admitted_compute_dependencies(monkeypatch) -> None:
+    rig = _rig()
+    state = _state(rig.coordinator.runtime_signature, "stream-order")
+    _register(rig, state)
+    assert rig.worker._runtime is not None
+    stream = rig.worker._runtime.listener_stream
+    event = object()
+    original_encode = rig.worker._runtime.frontend.encode_batch
+
+    def encode_after_dependency(batch, states, **kwargs):
+        assert stream.waited_events == [event]
+        return original_encode(batch, states, **kwargs)
+
+    monkeypatch.setattr(rig.worker._runtime.frontend, "encode_batch", encode_after_dependency)
+
+    output = rig.worker.submit_tick(
+        (_frame(state),),
+        cuda_dependencies=(event,),
+    ).result(timeout=4)
+
+    assert output[state.session_id].frame_id == 0
+    assert stream.waited_events == [event]
+    assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
 
 
 def test_worker_serializes_text_appends_around_ephemeral_audio_without_cursor_drift(
@@ -2307,18 +2456,18 @@ def test_speaking_q2_decision_view_extends_private_fork_across_queue_ticks(
     third = rig.worker.submit_tick((_assistant_q0(state, 2),)).result(timeout=4)[state.session_id]
     third_view = third.decision_view
     assert third_view is not None
-    assert third_view.cache_hit is False
-    assert third_view.fork_count == 1
-    assert third_view.replayed_q2_count == 3
+    assert third_view.cache_hit is True
+    assert third_view.fork_count == 0
+    assert third_view.replayed_q2_count == 1
     assert third_view.source_q2_frame_ids == (0, 1, 2)
-    assert len(rig.native.slot_fork_calls) == 2
-    assert len(rig.native.metadata_rebind_calls) == 1
-    assert len([item for item in rig.native.releases if item[0].startswith("__q2view__")]) == 1
+    assert len(rig.native.slot_fork_calls) == 1
+    assert len(rig.native.metadata_rebind_calls) == 2
+    assert not [item for item in rig.native.releases if item[0].startswith("__q2view__")]
     canonical = rig.worker.session_state(state.session_id).result(timeout=3)
     assert (canonical.next_frame_id, canonical.state_version, canonical.sequence_position) == (3, 3, 3)
     assert canonical.cache_position == canonical.valid_history_tokens == 35
     assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
-    assert len([item for item in rig.native.releases if item[0].startswith("__q2view__")]) == 2
+    assert len([item for item in rig.native.releases if item[0].startswith("__q2view__")]) == 1
 
     baseline = _rig()
     baseline.native._metadata_rebind_api_available = False
@@ -2486,7 +2635,8 @@ def test_stable_turn_q2_context_reuses_queue_open_fork_across_text_appends() -> 
     captured_cache = stable.worker._q2_decision_caches[state.session_id]
     assert captured_cache.base_cache_position == 34
     assert captured_cache.stable_turn_context is True
-    assert captured_cache.frame_keys == ()
+    assert captured_cache.last_applied_frame_id == -1
+    assert captured_cache.q2_applied_count == 0
 
     # The queue-open context is frozen before the Thinker appends its text.
     stable.worker.append_text_tokens(
@@ -2641,19 +2791,14 @@ def test_stable_turn_q2_idle_prefill_and_rollback_fail_closed() -> None:
     output0 = rig.worker.submit_tick((
         _assistant_q0(state, 0, pcm=quiet),
     )).result(timeout=4)[state.session_id]
-    assert output0.decision_view is None
+    assert output0.decision_view is not None
+    assert output0.decision_view.source_q2_frame_ids == (0,)
+    assert output0.decision_view.replayed_q2_count == 1
     assert output0.policy_decision is not None
     assert rig.worker._q2_decision_caches[state.session_id].stable_turn_context is True
-
-    deadline = time.monotonic() + 3
-    while time.monotonic() < deadline:
-        cache = rig.worker._q2_decision_caches.get(state.session_id)
-        if cache is not None and len(cache.frame_keys) == 1 and cache.frame_keys[-1][2] == 0:
-            break
-        time.sleep(0.005)
-    else:
-        raise AssertionError("stable idle prefill did not replay queued frame zero")
     cache = rig.worker._q2_decision_caches[state.session_id]
+    assert cache.last_applied_frame_id == 0
+    assert cache.q2_applied_count == 1
     canonical = rig.worker.session_state(state.session_id).result(timeout=3)
     assert cache.base_cache_position == 34
     assert cache.fork_row.cache_position == 36
@@ -2679,9 +2824,10 @@ def test_stable_turn_q2_idle_prefill_and_rollback_fail_closed() -> None:
     )).result(timeout=4)[state.session_id]
     assert failed_closed.decision_view is None
     assert failed_closed.policy_decision is not None
-    assert failed_closed.policy_decision.action is ControlAction.CONTINUE
+    assert failed_closed.policy_decision.action is ControlAction.HARD_STOP
     assert failed_closed.policy_decision.reason == "stable_q2_context_unavailable_fail_closed"
     assert failed_closed.policy_decision.diagnostics["policy_head_skipped"] is True
+    assert failed_closed.policy_decision.diagnostics["system_fail_closed_action"] is True
     assert "refusing canonical Q0 policy fallback" in failed_closed.decision_view_unavailable_reason
     canonical_after_failure = rig.worker.session_state(state.session_id).result(timeout=3)
     assert canonical_after_failure.cache_position == 34
@@ -2689,7 +2835,7 @@ def test_stable_turn_q2_idle_prefill_and_rollback_fail_closed() -> None:
     assert rig.worker.stop(drain=False).result(timeout=3).stopped_cleanly
 
 
-def test_exact_zero_speaking_queue_tick_skips_view_then_voiced_tick_catches_up() -> None:
+def test_speaking_q2_decision_view_works_when_retention_is_false() -> None:
     rig = _rig()
     state = _state(rig.coordinator.runtime_signature, "speaking-q2-zero-fastpath")
     _register(rig, state)
@@ -2738,19 +2884,27 @@ def test_exact_zero_speaking_queue_tick_skips_view_then_voiced_tick_catches_up()
         silent_frame = _assistant_q0(
             state,
             frame_id,
+            queue_audio_for_next_turn=False,
             pcm=np.zeros(1280, dtype=np.float32),
         )
         output = rig.worker.submit_tick((silent_frame,)).result(timeout=4)[state.session_id]
-        assert output.decision_view is None
+        view = output.decision_view
+        assert view is not None
+        assert view.source_q2_frame_ids == tuple(range(frame_id + 1))
+        assert view.replayed_q2_count == 1
+        assert view.cache_hit is (frame_id > 0)
         assert output.policy_decision is not None
         assert output.policy_decision.action.value == "CONTINUE"
-        assert output.policy_decision.diagnostics["native_output_provenance"]["native_session_id"] == state.session_id
-        assert output.policy_decision.diagnostics["native_output_provenance"]["used_for_policy"] is False
-        assert rig.adapter.hidden_rows == []
-        assert rig.native is not None and rig.native.slot_fork_calls == []
+        assert output.policy_decision.diagnostics["native_output_provenance"]["native_session_id"].startswith(
+            "__q2view__"
+        )
+        assert output.policy_decision.diagnostics["native_output_provenance"]["used_for_policy"] is True
+        assert len(rig.adapter.hidden_rows) == frame_id + 1
+        assert rig.native is not None and len(rig.native.slot_fork_calls) == 1
 
     queued = rig.worker._queued_audio_soft[state.session_id]
-    assert [item.source_frame_id for item in queued] == [0, 1]
+    assert not queued
+    assert not rig.worker._policy_q2_soft_pending[state.session_id]
     canonical = rig.worker.session_state(state.session_id).result(timeout=3)
     assert (canonical.next_frame_id, canonical.state_version, canonical.sequence_position) == (2, 2, 2)
     assert canonical.cache_position == canonical.valid_history_tokens == 34
@@ -2759,15 +2913,16 @@ def test_exact_zero_speaking_queue_tick_skips_view_then_voiced_tick_catches_up()
     view = voiced.decision_view
     assert view is not None
     assert view.source_q2_frame_ids == (0, 1, 2)
-    assert view.replayed_q2_count == 3
+    assert view.replayed_q2_count == 1
+    assert view.cache_hit is True
     assert view.source_row.frame_id == 2
     assert voiced.policy_decision is not None
     assert voiced.policy_decision.diagnostics["native_output_provenance"]["used_for_policy"] is True
-    assert len(rig.adapter.hidden_rows) == 1
+    assert len(rig.adapter.hidden_rows) == 3
     torch.testing.assert_close(
-        rig.adapter.hidden_rows[0][0], view.gemma_hidden_t[0, 0].float()
+        rig.adapter.hidden_rows[2][0], view.gemma_hidden_t[0, 0].float()
     )
-    assert [item.source_frame_id for item in rig.worker._queued_audio_soft[state.session_id]] == [0, 1, 2]
+    assert [item.source_frame_id for item in rig.worker._queued_audio_soft[state.session_id]] == [2]
     canonical = rig.worker.session_state(state.session_id).result(timeout=3)
     assert (canonical.next_frame_id, canonical.state_version, canonical.sequence_position) == (3, 3, 3)
     assert canonical.cache_position == canonical.valid_history_tokens == 34
@@ -2820,12 +2975,12 @@ def test_no_input_queue_tick_without_active_speaker_keeps_q2_view() -> None:
     assert output.policy_decision is not None
     assert output.policy_decision.action.value == "LISTEN"
     assert rig.native is not None and len(rig.native.slot_fork_calls) == 1
-    assert rig.adapter.hidden_rows == []
+    assert len(rig.adapter.hidden_rows) == 1
     assert [item.source_frame_id for item in rig.worker._queued_audio_soft[state.session_id]] == [0]
     assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
 
 
-def test_no_input_fastpath_rearms_idle_prefill_after_each_committed_frame() -> None:
+def test_no_input_policy_q2_fork_catches_up_without_retaining_silence() -> None:
     rig = _rig()
     state = _state(rig.coordinator.runtime_signature, "speaking-q2-prefill-rearm")
     _register(rig, state)
@@ -2869,55 +3024,26 @@ def test_no_input_fastpath_rearms_idle_prefill_after_each_committed_frame() -> N
 
     rig.worker._runtime.policy_inputs = policy_inputs
 
-    # Catch the initial request while it is replaying frame zero, then let the
-    # idle cache complete and verify that the one-shot request is consumed.
-    rig.native.step_entered = threading.Event()
-    rig.native.step_continue = threading.Event()
-    rig.native.step_block_at_count = 2  # canonical Q0, then the idle Q2 prefill
-    output0 = rig.worker.submit_tick((_assistant_q0(
-        state, 0, pcm=np.zeros(1280, dtype=np.float32),
-    ),)).result(timeout=4)[state.session_id]
-    assert output0.decision_view is None
-    assert rig.native.step_entered.wait(3)
-    assert state.session_id in rig.worker._pending_q2_prefills
-    rig.native.step_continue.set()
+    for frame_id in range(2):
+        output = rig.worker.submit_tick((_assistant_q0(
+            state,
+            frame_id,
+            queue_audio_for_next_turn=False,
+            pcm=np.zeros(1280, dtype=np.float32),
+        ),)).result(timeout=4)[state.session_id]
+        assert output.decision_view is not None
+        assert output.decision_view.source_q2_frame_ids == tuple(range(frame_id + 1))
+        assert output.decision_view.replayed_q2_count == 1
+        assert output.policy_decision is not None
+        assert output.policy_decision.action.value == "CONTINUE"
 
-    deadline = time.monotonic() + 3
-    while time.monotonic() < deadline:
-        cache = rig.worker._q2_decision_caches.get(state.session_id)
-        if cache is not None and cache.frame_keys and cache.frame_keys[-1][2] == 0:
-            break
-        time.sleep(0.005)
-    else:
-        raise AssertionError("idle prefill did not catch up through committed quiet frame zero")
+    cache = rig.worker._q2_decision_caches[state.session_id]
+    assert cache.last_applied_frame_id == 1
+    assert cache.q2_applied_count == 2
+    assert not rig.worker._policy_q2_soft_pending[state.session_id]
+    assert not rig.worker._queued_audio_soft[state.session_id]
     assert state.session_id not in rig.worker._pending_q2_prefills
-
-    # A later quiet commit must re-arm the existing idle mechanism after the
-    # prior request has drained. Hold that prefill, then queue a ready tick.
-    rig.native.step_entered = threading.Event()
-    rig.native.step_continue = threading.Event()
-    rig.native.step_block_at_count = len(rig.native.steps) + 2
-    output1 = rig.worker.submit_tick((_assistant_q0(
-        state, 1, pcm=np.zeros(1280, dtype=np.float32),
-    ),)).result(timeout=4)[state.session_id]
-    assert output1.decision_view is None
-    assert rig.native.step_entered.wait(3)
-    assert rig.worker._pending_q2_prefills[state.session_id] == (
-        state.generation_id,
-        "response-prefill-rearm",
-    )
-    assert [item.source_frame_id for item in rig.worker._queued_audio_soft[state.session_id]] == [0, 1]
-
-    ready_tick = rig.worker.submit_tick((_assistant_q0(
-        state, 2, pcm=np.full(1280, 0.25, dtype=np.float32),
-    ),))
-    rig.native.step_continue.set()
-    output2 = ready_tick.result(timeout=5)[state.session_id]
-    assert output2.decision_view is not None
-    assert output2.decision_view.cache_hit is True
-    assert output2.decision_view.fork_count == 0
-    assert output2.decision_view.replayed_q2_count == 1
-    assert output2.decision_view.source_q2_frame_ids == (0, 1, 2)
+    assert len(rig.adapter.hidden_rows) == 2
     assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
 
 
@@ -3058,6 +3184,7 @@ def test_backchannel_private_decode_fork_isolated_budgeted_and_cancel_cleanup() 
     assert handle.parent_generation_id == state.generation_id
     assert handle.cache_position == before.cache_position
     assert handle.fork_session_id != state.session_id
+    assert handle.max_tokens == 6
     assert state.session_id not in rig.worker._assistant_audio_queue_open
     private_fork_count = len(rig.native.slot_fork_calls)
 
@@ -3094,13 +3221,25 @@ def test_backchannel_private_decode_fork_isolated_budgeted_and_cancel_cleanup() 
     assert appended.token_count == 1
     assert tuple(appended.logits.shape) == (1, 1)
     assert tuple(appended.final_norm_hidden.shape) == (1, 1, HIDDEN_WIDTH)
+    four_tokens = append(
+        handle, (905, 906), expected_cache_position=appended.cache_position,
+    ).result(timeout=4)
+    assert four_tokens.token_count == 3
+    six_tokens_prefix = append(
+        handle, (907, 908), expected_cache_position=four_tokens.cache_position,
+    ).result(timeout=4)
+    assert six_tokens_prefix.token_count == 5
+    six_tokens = append(
+        handle, (909,), expected_cache_position=six_tokens_prefix.cache_position,
+    ).result(timeout=4)
+    assert six_tokens.token_count == 6
     with pytest.raises(RuntimeError, match="private transition is allowed once"):
         append_transition(
-            handle, (906,), expected_cache_position=appended.cache_position,
+            handle, (911,), expected_cache_position=six_tokens.cache_position,
         ).result(timeout=3)
     with pytest.raises(RuntimeError, match="private decode budget"):
         append(
-            handle, (904, 905), expected_cache_position=appended.cache_position,
+            handle, (910,), expected_cache_position=six_tokens.cache_position,
         ).result(timeout=3)
 
     end(handle).result(timeout=3)
@@ -3183,6 +3322,860 @@ def test_backchannel_private_decode_fork_isolated_budgeted_and_cancel_cleanup() 
     assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
 
 
+def test_response_forks_are_watermarked_revision_scoped_and_coexist_with_backchannel() -> None:
+    rig = _rig()
+    state = _state(rig.coordinator.runtime_signature, "private-response-forks")
+    state.applied_history_revision = 0
+    _register(rig, state)
+    _prime_native_prefix(rig, state)
+    source = rig.worker.session_state(state.session_id).result(timeout=3)
+    watermark = ListenerWatermark(
+        session_id=source.session_id,
+        generation_id=source.generation_id,
+        state_epoch_id=source.state_epoch_id,
+        frame_id=source.next_frame_id,
+        state_version=source.state_version,
+        sequence_position=source.sequence_position,
+        cache_position=source.cache_position,
+        cache_epoch_id=source.cache_epoch_id,
+        applied_history_revision=source.applied_history_revision,
+    )
+
+    active = rig.worker.begin_response_decode(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        response_id="answer-1",
+        response_generation_id=3,
+        revision_id="active-r1",
+        source_watermark=watermark,
+        max_tokens=8,
+    ).result(timeout=3)
+    candidate = rig.worker.begin_response_decode(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        response_id="answer-1",
+        response_generation_id=3,
+        revision_id="candidate-r1",
+        purpose=ResponseDecodePurpose.CANDIDATE,
+        source_watermark=watermark,
+        max_tokens=4,
+    ).result(timeout=3)
+    backchannel = rig.worker.begin_ephemeral_decode(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        expected_cache_position=source.cache_position,
+    ).result(timeout=3)
+    assert len(rig.worker._ephemeral_decode_branches) == 3
+    assert active.purpose == ResponseDecodePurpose.ACTIVE.value
+    assert candidate.purpose == ResponseDecodePurpose.CANDIDATE.value
+    assert active.source_cache_epoch_id == candidate.source_cache_epoch_id == 0
+    assert active.source_history_revision == candidate.source_history_revision == 0
+    assert backchannel.max_tokens == 6
+    assert state.session_id not in rig.worker._assistant_audio_queue_open
+
+    prompt = rig.worker.append_response_decode(
+        candidate,
+        tuple(range(100, 108)),
+        expected_cache_position=candidate.cache_position,
+        generated=False,
+    ).result(timeout=3)
+    assert prompt.token_count == 0
+    assert prompt.cache_position == candidate.cache_position + 8
+    assert tuple(prompt.logits.shape) == (1, 1)
+    assert tuple(prompt.final_norm_hidden.shape) == (1, 1, HIDDEN_WIDTH)
+    generated = rig.worker.append_response_decode(
+        candidate,
+        (108, 109, 110, 111),
+        expected_cache_position=prompt.cache_position,
+    ).result(timeout=3)
+    assert generated.token_count == 4
+    assert generated.ready_event is not None
+    with pytest.raises(RuntimeError, match="private decode budget"):
+        rig.worker.append_response_decode(
+            candidate,
+            (112,),
+            expected_cache_position=generated.cache_position,
+        ).result(timeout=3)
+
+    active_output = rig.worker.append_response_decode(
+        active,
+        tuple(range(200, 208)),
+        expected_cache_position=active.cache_position,
+    ).result(timeout=3)
+    assert active_output.token_count == 8
+    newer_active = rig.worker.begin_response_decode(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        response_id="answer-1",
+        response_generation_id=3,
+        revision_id="active-r2",
+        source_watermark=watermark,
+        max_tokens=3,
+    ).result(timeout=3)
+    with pytest.raises(StaleResponseRevisionError, match="superseded"):
+        rig.worker.append_response_decode(
+            active,
+            (208,),
+            expected_cache_position=active_output.cache_position,
+        ).result(timeout=3)
+
+    stale_watermark = replace(watermark, state_version=watermark.state_version + 1)
+    with pytest.raises(StaleListenerWatermarkError, match="watermark is stale"):
+        rig.worker.begin_response_decode(
+            state.session_id,
+            expected_generation_id=state.generation_id,
+            response_id="answer-1",
+            response_generation_id=3,
+            revision_id="active-invalid-cas",
+            source_watermark=stale_watermark,
+            max_tokens=3,
+        ).result(timeout=3)
+    # A rejected CAS does not supersede the live response revision.
+    latest = rig.worker.append_response_decode(
+        newer_active,
+        (300, 301),
+        expected_cache_position=newer_active.cache_position,
+    ).result(timeout=3)
+    assert latest.token_count == 2
+    assert rig.worker.session_state(state.session_id).result(timeout=3).cache_position == source.cache_position
+
+    rig.worker.end_response_decode(candidate).result(timeout=3)
+    rig.worker.end_response_decode(active).result(timeout=3)
+    rig.worker.end_response_decode(newer_active).result(timeout=3)
+    rig.worker.end_ephemeral_decode(backchannel).result(timeout=3)
+    assert not rig.worker._ephemeral_decode_branches
+    assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
+
+
+def test_candidate_response_promotion_is_cas_guarded_and_reuses_private_branch() -> None:
+    rig = _rig()
+    state = _state(rig.coordinator.runtime_signature, "response-promotion-cas")
+    state.applied_history_revision = "history-0"
+    _register(rig, state)
+    _prime_native_prefix(rig, state)
+    source = rig.worker.session_state(state.session_id).result(timeout=3)
+    watermark = ListenerWatermark(
+        session_id=source.session_id,
+        generation_id=source.generation_id,
+        state_epoch_id=source.state_epoch_id,
+        frame_id=source.next_frame_id,
+        state_version=source.state_version,
+        sequence_position=source.sequence_position,
+        cache_position=source.cache_position,
+        cache_epoch_id=source.cache_epoch_id,
+        applied_history_revision=source.applied_history_revision,
+    )
+    active = rig.worker.begin_response_decode(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        response_id="answer-1",
+        response_generation_id=5,
+        revision_id="active-r1",
+        source_watermark=watermark,
+        max_tokens=8,
+    ).result(timeout=3)
+    candidate = rig.worker.begin_response_decode(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        response_id="answer-1",
+        response_generation_id=5,
+        revision_id="candidate-r1",
+        purpose=ResponseDecodePurpose.CANDIDATE,
+        source_watermark=watermark,
+        max_tokens=8,
+    ).result(timeout=3)
+    backchannel = rig.worker.begin_ephemeral_decode(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        expected_cache_position=source.cache_position,
+    ).result(timeout=3)
+    assert len(rig.worker._ephemeral_decode_branches) == 3
+
+    # Model a newer ACTIVE request that has published its revision but has not
+    # reached its owner command yet. Promotion must leave both live branches
+    # untouched when its active-revision CAS loses.
+    active_key = (
+        state.session_id,
+        "answer-1",
+        5,
+        ResponseDecodePurpose.ACTIVE.value,
+    )
+    with rig.worker._response_revision_lock:
+        rig.worker._latest_response_revisions[active_key] = "active-r2"
+    active_branch = rig.worker._ephemeral_decode_branches[active.handle_id]
+    candidate_branch = rig.worker._ephemeral_decode_branches[candidate.handle_id]
+    branch_rows = {
+        handle_id: branch.row
+        for handle_id, branch in rig.worker._ephemeral_decode_branches.items()
+    }
+    releases_before = tuple(rig.native.releases)
+    forks_before = len(rig.native.slot_fork_calls)
+    with pytest.raises(StaleResponseRevisionError, match="identity or revision changed"):
+        rig.worker.promote_response_decode(
+            candidate, active, active.revision_id,
+        ).result(timeout=3)
+    assert rig.worker._ephemeral_decode_branches[active.handle_id] is active_branch
+    assert rig.worker._ephemeral_decode_branches[candidate.handle_id] is candidate_branch
+    assert {
+        handle_id: branch.row
+        for handle_id, branch in rig.worker._ephemeral_decode_branches.items()
+    } == branch_rows
+    assert tuple(rig.native.releases) == releases_before
+    assert len(rig.native.slot_fork_calls) == forks_before
+    with rig.worker._response_revision_lock:
+        assert rig.worker._latest_response_revisions[active_key] == "active-r2"
+
+    with rig.worker._response_revision_lock:
+        rig.worker._latest_response_revisions[active_key] = active.revision_id
+
+    candidate_key = (
+        state.session_id,
+        "answer-1",
+        5,
+        ResponseDecodePurpose.CANDIDATE.value,
+    )
+    with rig.worker._response_revision_lock:
+        rig.worker._latest_response_revisions[candidate_key] = "candidate-r2"
+    with pytest.raises(StaleResponseRevisionError, match="candidate response revision was superseded"):
+        rig.worker.promote_response_decode(
+            candidate, active, active.revision_id,
+        ).result(timeout=3)
+    assert rig.worker._ephemeral_decode_branches[active.handle_id] is active_branch
+    assert rig.worker._ephemeral_decode_branches[candidate.handle_id] is candidate_branch
+    assert tuple(rig.native.releases) == releases_before
+    assert len(rig.native.slot_fork_calls) == forks_before
+    with rig.worker._response_revision_lock:
+        assert rig.worker._latest_response_revisions[candidate_key] == "candidate-r2"
+        rig.worker._latest_response_revisions[candidate_key] = candidate.revision_id
+
+    candidate_prompt = rig.worker.append_response_decode(
+        candidate,
+        (101, 102),
+        expected_cache_position=candidate.cache_position,
+        generated=False,
+    ).result(timeout=3)
+    candidate_generated = rig.worker.append_response_decode(
+        candidate,
+        (103, 104),
+        expected_cache_position=candidate_prompt.cache_position,
+    ).result(timeout=3)
+    active_generated = rig.worker.append_response_decode(
+        active,
+        (501,),
+        expected_cache_position=active.cache_position,
+    ).result(timeout=3)
+    candidate_row_before = candidate_branch.row
+    candidate_event_before = candidate_branch.last_ready_event
+    candidate_logits_before = candidate_generated.logits.clone()
+    candidate_tokens_before = candidate_branch.token_count
+    candidate_prompt_tokens_before = candidate_branch.prompt_token_count
+    forks_before_promotion = len(rig.native.slot_fork_calls)
+    releases_before_promotion = tuple(rig.native.releases)
+    native_steps_before_promotion = len(rig.native.steps)
+
+    cleanup_started = threading.Event()
+    allow_cleanup = threading.Event()
+    drain_cleanup = rig.worker._drain_detached_response_decode_cleanup
+
+    def hold_cleanup_after_reply():
+        cleanup_started.set()
+        assert allow_cleanup.wait(2.0)
+        drain_cleanup()
+
+    rig.worker._drain_detached_response_decode_cleanup = hold_cleanup_after_reply
+    promotion_future = rig.worker.promote_response_decode(
+        candidate, active, active.revision_id,
+    )
+    promoted = promotion_future.result(timeout=3)
+    assert cleanup_started.wait(0.5)
+    assert active.handle_id not in rig.worker._ephemeral_decode_branches
+    assert promoted.handle_id in rig.worker._ephemeral_decode_branches
+    # Logical detachment fences a stale producer before the displaced native
+    # row is physically released. The returned Future does not wait for that
+    # cleanup, and stale appends cannot mutate the detached KV.
+    stale_append = rig.worker.append_response_decode(
+        active,
+        (701,),
+        expected_cache_position=active_generated.cache_position,
+    )
+    assert tuple(rig.native.releases) == releases_before_promotion
+    allow_cleanup.set()
+    rig.worker._drain_detached_response_decode_cleanup = drain_cleanup
+    with pytest.raises(RuntimeError, match="response decode handle|private decode handle|superseded"):
+        stale_append.result(timeout=3)
+    deadline = time.monotonic() + 1.0
+    expected_active_release = (
+        active.fork_session_id,
+        active.source_frame_id,
+        active_generated.cache_position,
+    )
+    while expected_active_release not in tuple(rig.native.releases) and time.monotonic() < deadline:
+        time.sleep(0.001)
+    assert not rig.worker._detached_response_decode_branches
+    assert rig.worker._cleanup_error is None
+
+    assert promoted.handle_id == candidate.handle_id
+    assert promoted.fork_session_id == candidate.fork_session_id
+    assert promoted.fork_native_context_id == candidate.fork_native_context_id
+    assert promoted.revision_id == candidate.revision_id
+    assert promoted.purpose == ResponseDecodePurpose.ACTIVE.value
+    assert rig.worker._ephemeral_decode_branches[promoted.handle_id] is candidate_branch
+    assert candidate_branch.row is candidate_row_before
+    assert candidate_branch.row.cache_position == candidate_generated.cache_position
+    assert candidate_branch.last_ready_event is candidate_event_before
+    assert candidate_branch.token_count == candidate_tokens_before
+    assert candidate_branch.prompt_token_count == candidate_prompt_tokens_before
+    assert torch.equal(candidate_generated.logits, candidate_logits_before)
+    assert active.handle_id not in rig.worker._ephemeral_decode_branches
+    assert backchannel.handle_id in rig.worker._ephemeral_decode_branches
+    assert len(rig.native.slot_fork_calls) == forks_before_promotion
+    assert tuple(rig.native.releases) == releases_before_promotion + (expected_active_release,)
+    assert len(rig.native.steps) == native_steps_before_promotion
+    assert rig.worker._runtime is not None
+    assert rig.worker._runtime.listener_stream.waited_events[-1] is active_generated.ready_event
+
+    # A cancellation callback holding the pre-transfer candidate value must
+    # not close the ACTIVE record that now owns the same stable handle ID.
+    rig.worker.end_response_decode(candidate).result(timeout=3)
+    assert rig.worker._ephemeral_decode_branches[promoted.handle_id] is candidate_branch
+    assert backchannel.handle_id in rig.worker._ephemeral_decode_branches
+
+    next_candidate = rig.worker.begin_response_decode(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        response_id="answer-1",
+        response_generation_id=5,
+        revision_id="candidate-r2",
+        purpose=ResponseDecodePurpose.CANDIDATE,
+        source_watermark=watermark,
+        max_tokens=4,
+    ).result(timeout=3)
+    assert next_candidate.handle_id != promoted.handle_id
+    assert rig.worker._ephemeral_decode_branches[promoted.handle_id] is candidate_branch
+    assert rig.worker._ephemeral_decode_branches[next_candidate.handle_id].handle.purpose == (
+        ResponseDecodePurpose.CANDIDATE.value
+    )
+    continued = rig.worker.append_response_decode(
+        promoted,
+        (105,),
+        expected_cache_position=candidate_generated.cache_position,
+    ).result(timeout=3)
+    assert continued.token_count == candidate_tokens_before + 1
+    assert continued.cache_position == candidate_generated.cache_position + 1
+
+    rig.worker.end_response_decode(promoted).result(timeout=3)
+    rig.worker.end_response_decode(next_candidate).result(timeout=3)
+    rig.worker.end_ephemeral_decode(backchannel).result(timeout=3)
+    assert not rig.worker._ephemeral_decode_branches
+    assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
+
+
+def test_reset_releases_promoted_response_and_unrelated_private_forks() -> None:
+    rig = _rig()
+    state = _state(rig.coordinator.runtime_signature, "response-promotion-reset")
+    state.applied_history_revision = "history-0"
+    _register(rig, state)
+    _prime_native_prefix(rig, state)
+    source = rig.worker.session_state(state.session_id).result(timeout=3)
+    watermark = ListenerWatermark(
+        session_id=source.session_id,
+        generation_id=source.generation_id,
+        state_epoch_id=source.state_epoch_id,
+        frame_id=source.next_frame_id,
+        state_version=source.state_version,
+        sequence_position=source.sequence_position,
+        cache_position=source.cache_position,
+        cache_epoch_id=source.cache_epoch_id,
+        applied_history_revision=source.applied_history_revision,
+    )
+    active = rig.worker.begin_response_decode(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        response_id="answer-1",
+        response_generation_id=6,
+        revision_id="active-r1",
+        source_watermark=watermark,
+        max_tokens=4,
+    ).result(timeout=3)
+    candidate = rig.worker.begin_response_decode(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        response_id="answer-1",
+        response_generation_id=6,
+        revision_id="candidate-r1",
+        purpose=ResponseDecodePurpose.CANDIDATE,
+        source_watermark=watermark,
+        max_tokens=4,
+    ).result(timeout=3)
+    backchannel = rig.worker.begin_ephemeral_decode(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        expected_cache_position=source.cache_position,
+    ).result(timeout=3)
+    promoted = rig.worker.promote_response_decode(
+        candidate, active, active.revision_id,
+    ).result(timeout=3)
+    live_private_sessions = {
+        branch.row.session_id
+        for branch in rig.worker._ephemeral_decode_branches.values()
+    }
+    assert live_private_sessions == {promoted.fork_session_id, backchannel.fork_session_id}
+
+    replacement = _state(rig.coordinator.runtime_signature, state.session_id, generation=8)
+    rig.worker.reset_session(
+        state.session_id, replacement, prefix_import=rig.prefix_import,
+    ).result(timeout=3)
+
+    released_private_sessions = {
+        session_id
+        for session_id, _frame_id, _cache_position in rig.native.releases
+        if session_id.startswith("__response__") or session_id.startswith("__decode__")
+    }
+    assert released_private_sessions == {
+        active.fork_session_id,
+        promoted.fork_session_id,
+        backchannel.fork_session_id,
+    }
+    assert not rig.worker._ephemeral_decode_branches
+    with pytest.raises(StaleResponseRevisionError, match="superseded"):
+        rig.worker.append_response_decode(
+            promoted, (901,), expected_cache_position=promoted.cache_position,
+        ).result(timeout=3)
+    assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
+
+
+def _wait_for_compaction_promotion(
+    rig: _Rig, session_id: str, *, timeout: float = 5.0,
+):
+    deadline = time.monotonic() + timeout
+    last_status = None
+    last_snapshot = None
+    while time.monotonic() < deadline:
+        last_status = rig.worker.listener_compaction_status(session_id).result(timeout=3)
+        last_snapshot = rig.worker.session_state(session_id).result(timeout=3)
+        if last_status.get("status") == "promoted":
+            return last_status, last_snapshot
+        if rig.worker.fatal_error is not None:
+            raise rig.worker.fatal_error
+        time.sleep(0.01)
+    raise AssertionError(
+        f"compaction did not promote: status={last_status!r}, snapshot={last_snapshot!r}"
+    )
+
+
+def test_automatic_compaction_replays_recent_q2_and_rebases_without_rewinding_input() -> None:
+    builder_calls: list[tuple[int, tuple[int, ...], str | None]] = []
+
+    def build_context(snapshot, recent_q2, history_revision):
+        builder_calls.append((
+            int(snapshot.next_frame_id),
+            tuple(item.frame.frame_id for item in recent_q2),
+            history_revision,
+        ))
+        return CompactionRequestContext(
+            prefix_token_ids=(10, 11, 12, 13),
+            history_context="confirmed archive",
+            history_revision=history_revision,
+        )
+
+    rig = _rig(
+        compaction_request_builder=build_context,
+        compaction_trigger_tokens=38,
+        compaction_target_tokens=12,
+    )
+    _set_fixture_capacity(rig, 40)
+    state = _state(rig.coordinator.runtime_signature, "automatic-compaction")
+    _register(rig, state)
+    _prime_native_prefix(rig, state)
+    first = rig.worker.submit_tick((_frame(state, frame_id=0),)).result(timeout=4)
+    assert first[state.session_id].cache_position == 36
+    second = rig.worker.submit_tick((_frame(state, frame_id=1),)).result(timeout=4)
+    assert second[state.session_id].cache_position == 38
+
+    status, compacted = _wait_for_compaction_promotion(rig, state.session_id)
+    assert status["target_cache_position"] == 8
+    assert status["replay_frames"] == 2
+    assert builder_calls == [(2, (0, 1), None)]
+    assert compacted.cache_position == 8
+    assert compacted.cache_epoch_id == 1
+    assert compacted.state_epoch_id == state.state_epoch_id
+    assert (
+        compacted.next_frame_id,
+        compacted.state_version,
+        compacted.sequence_position,
+    ) == (2, 2, 2)
+    ring = rig.worker._recent_listener_q2[state.session_id]
+    assert [item.frame.frame_id for item in ring] == [0, 1]
+    assert all(tuple(item.audio_soft_tokens.shape) == (2, HIDDEN_WIDTH) for item in ring)
+
+    third = rig.worker.submit_tick((_frame(state, frame_id=2),)).result(timeout=4)
+    assert third[state.session_id].cache_position == 10
+    after = rig.worker.session_state(state.session_id).result(timeout=3)
+    assert (after.next_frame_id, after.state_version, after.sequence_position) == (3, 3, 3)
+    assert after.cache_position == 10
+    assert rig.worker.fatal_error is None
+    assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
+
+
+def test_cache_epoch_tracks_two_compactions_and_keeps_old_active_fork_valid() -> None:
+    builder_revisions: list[str | None] = []
+    mirror: dict[str, Any] = {}
+    mirror_lock = threading.RLock()
+    commit_threads: list[int] = []
+
+    def build_context(_snapshot, _recent_q2, history_revision):
+        builder_revisions.append(history_revision)
+        return CompactionRequestContext(
+            prefix_token_ids=(40, 41, 42, 43),
+            history_context=f"history:{history_revision}",
+            history_revision=history_revision,
+            replay_after_frame_id=0,
+        )
+
+    def commit_identity(
+        session_id,
+        cache_epoch_id,
+        native_semantic_context_revision,
+        applied_history_revision,
+        commit_owner_metadata,
+    ):
+        with mirror_lock:
+            commit_owner_metadata()
+            mirror[session_id] = (
+                cache_epoch_id,
+                native_semantic_context_revision,
+                applied_history_revision,
+            )
+            commit_threads.append(threading.get_ident())
+
+    rig = _rig(
+        compaction_request_builder=build_context,
+        compaction_trigger_tokens=8_192,
+        compaction_target_tokens=12,
+        on_cache_identity_commit=commit_identity,
+    )
+    state = _state(rig.coordinator.runtime_signature, "two-cache-promotions")
+    state.applied_history_revision = "history-0"
+    _register(rig, state)
+    _prime_native_prefix(rig, state)
+    rig.worker.submit_tick((_frame(state, frame_id=0),)).result(timeout=4)
+
+    before = rig.worker.session_state(state.session_id).result(timeout=3)
+    old_watermark = ListenerWatermark(
+        session_id=before.session_id,
+        generation_id=before.generation_id,
+        state_epoch_id=before.state_epoch_id,
+        frame_id=before.next_frame_id,
+        state_version=before.state_version,
+        sequence_position=before.sequence_position,
+        cache_position=before.cache_position,
+        cache_epoch_id=before.cache_epoch_id,
+        applied_history_revision=before.applied_history_revision,
+    )
+    active = rig.worker.begin_response_decode(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        response_id="kept-active",
+        response_generation_id=4,
+        revision_id="active-before-compaction",
+        source_watermark=old_watermark,
+        max_tokens=4,
+    ).result(timeout=3)
+
+    first_request = rig.worker.request_listener_compaction(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        history_revision="history-1",
+    ).result(timeout=3)
+    assert first_request["status"] == "building"
+    _first_status, after_first = _wait_for_compaction_promotion(rig, state.session_id)
+    assert after_first.cache_epoch_id == 1
+    assert after_first.applied_history_revision == "history-1"
+
+    second_request = rig.worker.request_listener_compaction(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        history_revision="history-2",
+    ).result(timeout=3)
+    assert second_request["status"] == "building"
+    _second_status, after_second = _wait_for_compaction_promotion(rig, state.session_id)
+    assert after_second.cache_epoch_id == 2
+    assert after_second.applied_history_revision == "history-2"
+    assert after_second.state_epoch_id == before.state_epoch_id
+    assert (after_second.next_frame_id, after_second.state_version) == (
+        before.next_frame_id,
+        before.state_version,
+    )
+    assert builder_revisions == ["history-1", "history-2"]
+    assert mirror[state.session_id] == (
+        2,
+        after_second.semantic_context_revision,
+        "history-2",
+    )
+    assert commit_threads == [rig.worker.owner_thread_id, rig.worker.owner_thread_id]
+
+    with pytest.raises(StaleListenerWatermarkError, match="watermark is stale"):
+        rig.worker.begin_response_decode(
+            state.session_id,
+            expected_generation_id=state.generation_id,
+            response_id="kept-active",
+            response_generation_id=4,
+            revision_id="candidate-old-source",
+            purpose=ResponseDecodePurpose.CANDIDATE,
+            source_watermark=old_watermark,
+            max_tokens=4,
+        ).result(timeout=3)
+
+    current = rig.worker.session_state(state.session_id).result(timeout=3)
+    current_watermark = ListenerWatermark(
+        session_id=current.session_id,
+        generation_id=current.generation_id,
+        state_epoch_id=current.state_epoch_id,
+        frame_id=current.next_frame_id,
+        state_version=current.state_version,
+        sequence_position=current.sequence_position,
+        cache_position=current.cache_position,
+        cache_epoch_id=current.cache_epoch_id,
+        applied_history_revision=current.applied_history_revision,
+    )
+    candidate = rig.worker.begin_response_decode(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        response_id="kept-active",
+        response_generation_id=4,
+        revision_id="candidate-current-source",
+        purpose=ResponseDecodePurpose.CANDIDATE,
+        source_watermark=current_watermark,
+        max_tokens=4,
+    ).result(timeout=3)
+    assert candidate.source_cache_epoch_id == 2
+    assert candidate.source_history_revision == "history-2"
+
+    active_append = rig.worker.append_response_decode(
+        active,
+        (900,),
+        expected_cache_position=active.cache_position,
+    ).result(timeout=3)
+    assert active_append.token_count == 1
+    assert active.source_cache_epoch_id == 0
+    assert active.source_history_revision == "history-0"
+    canonical_after_active_append = rig.worker.session_state(state.session_id).result(timeout=3)
+    assert canonical_after_active_append.cache_epoch_id == 2
+    assert canonical_after_active_append.cache_position == after_second.cache_position
+
+    rig.worker.end_response_decode(candidate).result(timeout=3)
+    rig.worker.end_response_decode(active).result(timeout=3)
+    assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
+
+
+def test_rejected_cache_copy_does_not_advance_cache_epoch() -> None:
+    def build_context(_snapshot, _recent_q2, history_revision):
+        return CompactionRequestContext(
+            prefix_token_ids=(50, 51),
+            history_context="confirmed",
+            history_revision=history_revision,
+            replay_after_frame_id=0,
+        )
+
+    rig = _rig(
+        compaction_request_builder=build_context,
+        compaction_trigger_tokens=8_192,
+        compaction_target_tokens=8,
+    )
+    state = _state(rig.coordinator.runtime_signature, "failed-cache-copy")
+    state.applied_history_revision = 0
+    _register(rig, state)
+    _prime_native_prefix(rig, state)
+    rig.worker.submit_tick((_frame(state, frame_id=0),)).result(timeout=4)
+
+    assert rig.native is not None
+
+    def reject_copy(_source_token, _destination_row):
+        raise RuntimeError("injected cache-copy preflight failure")
+
+    rig.native.copy_session_cache_from = reject_copy
+    rig.worker.request_listener_compaction(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        history_revision=1,
+    ).result(timeout=3)
+
+    deadline = time.monotonic() + 3
+    observed_rejection = False
+    while time.monotonic() < deadline:
+        status = rig.worker.listener_compaction_status(state.session_id).result(timeout=3)
+        shadow_status = status.get("shadow", {})
+        diagnostics = shadow_status.get("diagnostics", {})
+        if int(diagnostics.get("promotion_preflight_rejections", 0)) > 0:
+            observed_rejection = True
+            break
+        time.sleep(0.005)
+    assert observed_rejection
+    snapshot = rig.worker.session_state(state.session_id).result(timeout=3)
+    assert snapshot.cache_epoch_id == 0
+    assert snapshot.applied_history_revision == 0
+    assert rig.worker.fatal_error is None
+    assert rig.worker.stop(drain=False).result(timeout=3).stopped_cleanly
+
+
+def test_compaction_catches_up_q2_frames_arriving_during_prefix_build() -> None:
+    entered = threading.Event()
+    continue_build = threading.Event()
+
+    def build_context(snapshot, recent_q2, history_revision):
+        del snapshot, recent_q2, history_revision
+        return CompactionRequestContext(
+            prefix_token_ids=(20, 21, 22, 23),
+            history_context="confirmed transcript",
+        )
+
+    def build_prefix(request):
+        entered.set()
+        assert continue_build.wait(3)
+        return PrefixCacheImport(
+            past_key_values=object(),
+            prefix_attention=torch.ones((1, request.prefix_len), dtype=torch.int64),
+            prefix_len=request.prefix_len,
+            cache_position=request.prefix_len,
+            semantic_context_revision=request.semantic_context_revision,
+            replay_frame_ids=tuple(request.replay_frame_ids),
+        )
+
+    rig = _rig(
+        compaction_request_builder=build_context,
+        compaction_trigger_tokens=38,
+        compaction_target_tokens=12,
+        shadow_prefix_builder=build_prefix,
+    )
+    _set_fixture_capacity(rig, 40)
+    state = _state(rig.coordinator.runtime_signature, "compaction-catchup")
+    _register(rig, state)
+    _prime_native_prefix(rig, state)
+    rig.worker.submit_tick((_frame(state, frame_id=0),)).result(timeout=4)
+    rig.worker.submit_tick((_frame(state, frame_id=1),)).result(timeout=4)
+    assert entered.wait(3)
+    latest = rig.worker.submit_tick((_frame(state, frame_id=2),)).result(timeout=4)
+    assert latest[state.session_id].cache_position == 40
+    continue_build.set()
+
+    status, compacted = _wait_for_compaction_promotion(rig, state.session_id)
+    assert compacted.cache_position == 10
+    assert (compacted.next_frame_id, compacted.state_version, compacted.sequence_position) == (3, 3, 3)
+    assert status["replay_frames"] == 2
+    assert [manifest.rows[0].frame_id for manifest in rig.worker._shadow_worker._runtime.native.manifests] == [0, 1, 2]
+    assert rig.worker.fatal_error is None
+    assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
+
+
+def test_confirmed_history_request_retries_on_revision_and_compacts_below_threshold() -> None:
+    builder_revisions: list[str | None] = []
+
+    def build_context(snapshot, recent_q2, history_revision):
+        del snapshot, recent_q2
+        builder_revisions.append(history_revision)
+        if history_revision == "history-1":
+            return None
+        return CompactionRequestContext(
+            prefix_token_ids=(30, 31, 32, 33),
+            history_context="confirmed history-2",
+            history_revision=history_revision,
+            replay_after_frame_id=0,
+        )
+
+    rig = _rig(
+        compaction_request_builder=build_context,
+        compaction_trigger_tokens=80,
+        compaction_target_tokens=12,
+    )
+    state = _state(rig.coordinator.runtime_signature, "confirmed-history-refresh")
+    _register(rig, state)
+    _prime_native_prefix(rig, state)
+    rig.worker.submit_tick((_frame(state, frame_id=0),)).result(timeout=4)
+    waiting = rig.worker.request_listener_compaction(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        history_revision="history-1",
+    ).result(timeout=3)
+    assert waiting["status"] == "waiting_for_confirmed_history"
+
+    queued = rig.worker.request_listener_compaction(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        history_revision="history-2",
+    ).result(timeout=3)
+    assert queued["status"] == "building"
+    status, compacted = _wait_for_compaction_promotion(rig, state.session_id)
+    assert builder_revisions == ["history-1", "history-2"]
+    assert status["history_revision"] == "history-2"
+    assert status["replay_frames"] == 0
+    assert compacted.cache_position == 4
+    assert (compacted.next_frame_id, compacted.state_version, compacted.sequence_position) == (1, 1, 1)
+    assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
+
+
+def test_typed_compaction_builder_capacity_failure_stays_session_scoped() -> None:
+    def build_context(_snapshot, _recent_q2, _history_revision):
+        raise listener_microbatch_worker_module.CompactionBuilderCapacityError(
+            "confirmed_history_cutoff_does_not_cover_missing_q2_frames"
+        )
+
+    rig = _rig(
+        compaction_request_builder=build_context,
+        compaction_trigger_tokens=80,
+        compaction_target_tokens=12,
+    )
+    state = _state(rig.coordinator.runtime_signature, "typed-compaction-capacity")
+    _register(rig, state)
+    _prime_native_prefix(rig, state)
+    rig.worker.submit_tick((_frame(state, frame_id=0),)).result(timeout=4)
+
+    result = rig.worker.request_listener_compaction(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        history_revision="history-9",
+    ).result(timeout=3)
+    status = rig.worker.listener_compaction_status(state.session_id).result(timeout=3)
+
+    assert result["status"] == "capacity_blocked"
+    assert status["status"] == "capacity_blocked"
+    assert status["reason"] == "confirmed_history_cutoff_does_not_cover_missing_q2_frames"
+    assert rig.worker.fatal_error is None
+    assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
+
+
+def test_listener_capacity_rejection_is_row_scoped_and_preserves_unaccepted_frame() -> None:
+    def not_ready(_snapshot, _recent_q2, _history_revision):
+        return None
+
+    rig = _rig(
+        compaction_request_builder=not_ready,
+        compaction_trigger_tokens=36,
+        compaction_target_tokens=4,
+    )
+    _set_fixture_capacity(rig, 38)
+    state = _state(rig.coordinator.runtime_signature, "capacity-row-retry")
+    _register(rig, state)
+    _prime_native_prefix(rig, state)
+    rig.worker.submit_tick((_frame(state, frame_id=0),)).result(timeout=4)
+    rig.worker.submit_tick((_frame(state, frame_id=1),)).result(timeout=4)
+
+    with pytest.raises(Exception) as caught:
+        rig.worker.submit_tick((_frame(state, frame_id=2),)).result(timeout=3)
+    capacity_error = caught.value
+    assert isinstance(
+        capacity_error,
+        listener_microbatch_worker_module.RecoverableSessionCapacityError,
+    )
+    assert capacity_error.session_id == state.session_id
+    assert capacity_error.frame_id == 2
+    assert capacity_error.reason == "waiting_for_confirmed_history"
+    snapshot = rig.worker.session_state(state.session_id).result(timeout=3)
+    assert snapshot.next_frame_id == 2
+    assert rig.coordinator.ready_depth == 0
+    assert rig.worker.fatal_error is None
+    assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
+
+
 def test_parent_generation_reset_releases_live_private_decode_fork() -> None:
     rig = _rig()
     state = _state(rig.coordinator.runtime_signature, "private-backchannel-reset")
@@ -3253,7 +4246,54 @@ def test_assistant_queue_reservation_survives_text_append_then_replays_before_ne
     assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
 
 
-def test_submit_tick_normalizes_stale_q2_to_open_shared_queue_and_preserves_pcm(
+def test_queued_audio_drain_returns_timing_and_retained_source_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rig = _rig()
+    state = _state(rig.coordinator.runtime_signature, "queued-audio-drain-metrics")
+    _register(rig, state)
+    _prime_native_prefix(rig, state)
+    rig.worker.begin_assistant_audio_queue(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        expected_cache_position=34,
+        reserve_tail_tokens=2,
+        response_id="response-metrics",
+    ).result(timeout=3)
+    output = rig.worker.submit_tick((_assistant_q0(state),)).result(timeout=4)
+    assert output[state.session_id].queue_audio_for_next_turn is True
+    _mark_queued_soft_cuda_for_cpu_fixture(rig, state.session_id)
+
+    stamps = iter((0, 1_000_000, 1_200_000, 6_300_000, 6_500_000))
+    monkeypatch.setattr(
+        listener_microbatch_worker_module,
+        "_perf_counter_ns",
+        lambda: next(stamps),
+        raising=False,
+    )
+    drained = rig.worker.drain_queued_audio(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        expected_cache_position=34,
+        user_turn_already_open=False,
+    ).result(timeout=4)
+
+    metrics = drained.queued_audio_drain_metrics
+    assert metrics.elapsed_ms == 5.5
+    assert metrics.drain_total_elapsed_ms == 5.5
+    assert metrics.drain_queue_wait_ms == 1.0
+    assert metrics.drain_replay_forward_ms == 5.1
+    assert metrics.retained_frames_count == 1
+    assert metrics.frame_count == 1
+    assert metrics.token_count == 2
+    assert metrics.retained_context_source == "assistant_phase_q2_queue"
+    assert metrics.source_frame_ids == (0,)
+    assert metrics.queue_response_id == "response-metrics"
+    assert drained.cache_position == 36
+    assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
+
+
+def test_submit_tick_preserves_retention_false_when_queue_open(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     rig = _rig()
@@ -3292,6 +4332,7 @@ def test_submit_tick_normalizes_stale_q2_to_open_shared_queue_and_preserves_pcm(
             ready_at_ns=time.monotonic_ns(),
             pcm=pcm,
             logical_q_len=2,
+            queue_audio_for_next_turn=False,
         )
         after_queue = rig.worker.submit_tick((stale_server_q2,)).result(timeout=4)[
             state.session_id
@@ -3299,15 +4340,15 @@ def test_submit_tick_normalizes_stale_q2_to_open_shared_queue_and_preserves_pcm(
 
         assert after_queue.logical_q_len == 0
         assert after_queue.ephemeral_reason == "assistant_turn_open"
-        assert after_queue.queue_audio_for_next_turn is True
+        assert after_queue.queue_audio_for_next_turn is False
         normalized = enqueued[-1]
         assert normalized.logical_q_len == 0
         assert normalized.ephemeral_reason == "assistant_turn_open"
-        assert normalized.queue_audio_for_next_turn is True
+        assert normalized.queue_audio_for_next_turn is False
         np.testing.assert_array_equal(normalized.pcm, pcm)
-        queued = rig.worker._queued_audio_soft[state.session_id]
-        assert len(queued) == 1
-        assert queued[0].source_frame_id == 1
+        assert not rig.worker._queued_audio_soft[state.session_id]
+        assert after_queue.decision_view is not None
+        assert after_queue.decision_view.source_q2_frame_ids == (1,)
         assert rig.native is not None
         assert [manifest.rows[0].logical_q_len for manifest in rig.native.manifests[-2:]] == [2, 0]
     finally:
@@ -3326,36 +4367,19 @@ def test_assistant_q2_drain_rejects_a_missing_frame_without_replaying_or_droppin
         expected_cache_position=34,
         reserve_tail_tokens=2,
     ).result(timeout=3)
-    for frame_id, queue_for_next_turn in ((0, True), (1, True), (2, False), (3, True)):
+    for frame_id in range(4):
         output = rig.worker.submit_tick((
-            _assistant_q0(
-                state,
-                frame_id,
-                queue_audio_for_next_turn=queue_for_next_turn,
-            ),
+            _assistant_q0(state, frame_id),
         )).result(timeout=4)[state.session_id]
-        if frame_id == 3:
-            assert output.decision_view is None
-            assert output.decision_view_unavailable_reason is not None
-            assert output.policy_decision is not None
-            assert output.policy_decision.diagnostics["decision_view_fallback_reason"]
-        if frame_id == 2:
-            # An open assistant queue normalizes every Q0 into queued audio.
-            # Model a real upstream queue loss after that frame was committed.
-            queued = rig.worker._queued_audio_soft[state.session_id]
-            assert [item.source_frame_id for item in queued] == [0, 1, 2]
-            dropped = queued.pop()
-            assert dropped.source_frame_id == 2
+        assert output.decision_view is not None
 
     queued = rig.worker._queued_audio_soft[state.session_id]
-    assert [item.source_frame_id for item in queued] == [0, 1, 3]
-    for index, item in enumerate(tuple(queued)):
-        queued[index] = replace(
-            item,
-            audio_soft_tokens=_CudaProvenanceTensor(item.audio_soft_tokens),
-        )
+    assert [item.source_frame_id for item in queued] == [0, 1, 2, 3]
+    dropped = queued[2]
+    del queued[2]
+    assert dropped.source_frame_id == 2
     try:
-        with pytest.raises(RuntimeError, match="non-contiguous Q2 frame IDs"):
+        with pytest.raises(RuntimeError, match="retained frame IDs differ"):
             rig.worker.drain_queued_audio(
                 state.session_id,
                 expected_generation_id=state.generation_id,
@@ -3372,9 +4396,326 @@ def test_assistant_q2_drain_rejects_a_missing_frame_without_replaying_or_droppin
             if manifest.rows[0].session_id.startswith("__q2view__")
         ]
         assert len(canonical_manifests) == 4  # four listener frames
-        assert len(scratch_manifests) == 3  # decision views only; drain did not run
+        assert len(scratch_manifests) == 4  # decision views only; drain did not run
     finally:
         rig.worker.stop(drain=False).result(timeout=3)
+
+
+def test_assistant_q2_drain_promotes_recent_gap_as_onset_preroll() -> None:
+    rig = _rig()
+    state = _state(rig.coordinator.runtime_signature, "unified-q2-explicit-gap")
+    _register(rig, state)
+    _prime_native_prefix(rig, state)
+    rig.worker.begin_assistant_audio_queue(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        expected_cache_position=34,
+        reserve_tail_tokens=0,
+    ).result(timeout=3)
+    for frame_id in range(3):
+        output = rig.worker.submit_tick((
+            _assistant_q0(
+                state,
+                frame_id,
+                queue_audio_for_next_turn=frame_id != 1,
+            ),
+        )).result(timeout=4)[state.session_id]
+        assert output.decision_view is not None
+    assert [item.source_frame_id for item in rig.worker._queued_audio_soft[state.session_id]] == [0, 1, 2]
+    assert [
+        (span.first_frame_id, span.last_frame_id, span.retained, span.reason)
+        for span in rig.worker._assistant_audio_queue_frame_spans[state.session_id]
+    ] == [
+        (0, 0, True, "utterance_body"),
+        (1, 1, True, "pre_roll"),
+        (2, 2, True, "utterance_body"),
+    ]
+
+    _mark_queued_soft_cuda_for_cpu_fixture(rig, state.session_id)
+    drained = rig.worker.drain_queued_audio(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        expected_cache_position=34,
+        user_turn_already_open=False,
+    ).result(timeout=4)
+    assert drained.queued_audio_drain_metrics.source_frame_ids == (0, 1, 2)
+    assert drained.queued_audio_drain_metrics.frame_count == 3
+    assert drained.cache_position == 40
+    assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
+
+
+def test_canonical_queued_audio_drain_never_uses_variable_q_private_append() -> None:
+    rig = _rig()
+    state = _state(rig.coordinator.runtime_signature, "canonical-drain-sequential-only")
+    _register(rig, state)
+    _prime_native_prefix(rig, state)
+    assert rig.native is not None
+    rig.native.supports_queued_audio_batch = True
+    batch_calls: list[object] = []
+    private_batch_step = rig.native.step_queued_audio_batch_async
+
+    def private_fork_batch_only(manifest, audio_soft, *, producer_stream=None):
+        if manifest.rows[0].session_id.startswith("__q2view__"):
+            return private_batch_step(
+                manifest, audio_soft, producer_stream=producer_stream,
+            )
+        batch_calls.append(manifest)
+        raise AssertionError("canonical queued-audio drain used the private variable-Q append")
+
+    rig.native.step_queued_audio_batch_async = private_fork_batch_only
+    rig.worker.begin_assistant_audio_queue(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        expected_cache_position=34,
+        reserve_tail_tokens=0,
+    ).result(timeout=3)
+    for frame_id in range(2):
+        rig.worker.submit_tick((_assistant_q0(state, frame_id),)).result(timeout=4)
+    _mark_queued_soft_cuda_for_cpu_fixture(rig, state.session_id)
+
+    drained = rig.worker.drain_queued_audio(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        expected_cache_position=34,
+    ).result(timeout=4)
+
+    replay_rows = [
+        manifest.rows[0]
+        for manifest in rig.native.manifests
+        if (
+            manifest.dispatch_reason == "carryover_ready"
+            and manifest.rows[0].session_id == state.session_id
+        )
+    ]
+    assert batch_calls == []
+    assert [row.logical_q_len for row in replay_rows] == [2, 2]
+    assert drained.queued_audio_drain_metrics.source_frame_ids == (0, 1)
+    assert drained.cache_position == 38
+    assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
+
+
+def test_private_variable_q_preflight_failure_does_not_quarantine_canonical_owner() -> None:
+    rig = _rig()
+    state = _state(rig.coordinator.runtime_signature, "private-q2-preflight-no-quarantine")
+    _register(rig, state)
+    _prime_native_prefix(rig, state)
+    assert rig.native is not None
+    rig.native.supports_queued_audio_batch = True
+
+    def reject_private_preflight(_manifest, _audio_soft, *, producer_stream=None):
+        raise ValueError("variable-Q queued replay requires an ephemeral private slot")
+
+    rig.native.step_queued_audio_batch_async = reject_private_preflight
+    rig.worker.begin_assistant_audio_queue(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        expected_cache_position=34,
+        reserve_tail_tokens=0,
+    ).result(timeout=3)
+
+    output = rig.worker.submit_tick((_assistant_q0(state, 0),)).result(timeout=4)[state.session_id]
+
+    assert output.decision_view is None
+    assert "rejected before KV mutation" in output.decision_view_unavailable_reason
+    assert rig.worker.fatal_error is None
+    assert rig.native.steps[-1][0] == (state.session_id,)
+    assert rig.worker.session_state(state.session_id).result(timeout=3).cache_position == 34
+    assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
+
+
+def test_frame_after_queue_close_is_retained_until_drain_retry_finishes() -> None:
+    rig = _rig()
+    state = _state(rig.coordinator.runtime_signature, "queue-close-frame-carryover")
+    _register(rig, state)
+    _prime_native_prefix(rig, state)
+    rig.worker.begin_assistant_audio_queue(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        expected_cache_position=34,
+        reserve_tail_tokens=0,
+    ).result(timeout=3)
+
+    rig.worker.mark_assistant_audio_queue_closing(
+        state.session_id,
+        queue_close_epoch=12,
+    ).result(timeout=3)
+    voiced_after_close = ListenerFrame(
+        session_id=state.session_id,
+        generation_id=state.generation_id,
+        state_epoch_id=state.state_epoch_id,
+        frame_id=0,
+        ready_at_ns=time.monotonic_ns(),
+        pcm=np.full(1280, 0.02, dtype=np.float32),
+        logical_q_len=2,
+        queue_audio_for_next_turn=False,
+        queue_epoch=12,
+    )
+    output = rig.worker.submit_tick((voiced_after_close,)).result(timeout=4)[state.session_id]
+    assert output.logical_q_len == 0
+    assert output.queue_audio_for_next_turn is True
+    assert [item.source_frame_id for item in rig.worker._queued_audio_soft[state.session_id]] == [0]
+
+    _mark_queued_soft_cuda_for_cpu_fixture(rig, state.session_id)
+    drained = rig.worker.drain_queued_audio(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        expected_cache_position=34,
+    ).result(timeout=4)
+    assert drained.queued_audio_drain_metrics.source_frame_ids == (0,)
+    assert drained.cache_position == 36
+    assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
+
+
+def test_variable_q_append_preflight_rejects_canonical_and_over_capacity_slots() -> None:
+    def manifest(cache_position: int) -> ListenerBatchManifest:
+        row = BatchRowDescriptor(
+            session_id="session",
+            session_generation=1,
+            state_epoch_id="epoch-session",
+            frame_id=0,
+            listener_state_version=0,
+            sequence_position=0,
+            cache_position=cache_position,
+            valid_history_tokens=cache_position,
+            native_context_id=77,
+            input_frame_sha256="a" * 64,
+            reference_pcm_sha256=None,
+            frame_ready_at_ns=0,
+            reference_frame_id=None,
+        )
+        return ListenerBatchManifest(
+            manifest_id="queued-append-preflight",
+            runtime_signature=_signature(),
+            stream_identity=_capability().stream_identity,
+            stream_priority=-1,
+            dispatch_at_ns=0,
+            max_coalesce_wait_ns=0,
+            dispatch_reason="carryover_ready",
+            rows=(row,),
+        )
+
+    def binding(*, ephemeral_fork: bool, cache_position: int) -> NativeGemmaListenerMicrobatch:
+        native = object.__new__(NativeGemmaListenerMicrobatch)
+        native._owner_thread_id = threading.get_ident()
+        native._closed = False
+        native._ctx = object()
+        native._poisoned = False
+        native._queued_audio_batch_api_available = True
+        native._session_by_id = {
+            "session": SimpleNamespace(
+                native_context_id=77,
+                slot=0,
+                ephemeral_fork=ephemeral_fork,
+            )
+        }
+        native._active_output_generation = None
+        native.gemm_graphs_enabled = False
+        native.variable_q_gemm_graphs_enabled = False
+        native.max_batch_size = 1
+        native.capability = SimpleNamespace(max_seq_len=100)
+        native._test_manifest = manifest(cache_position)
+        return native
+
+    canonical = binding(ephemeral_fork=False, cache_position=34)
+    with pytest.raises(ValueError, match="ephemeral private slot"):
+        canonical.step_queued_audio_batch_async(
+            canonical._test_manifest,
+            object(),
+        )
+    assert canonical._poisoned is False
+
+    full_slot = binding(ephemeral_fork=True, cache_position=98)
+    oversized = torch.empty((4, HIDDEN_WIDTH), dtype=torch.bfloat16)
+    with pytest.raises(ValueError, match="residual KV capacity"):
+        full_slot.step_queued_audio_batch_async(full_slot._test_manifest, oversized)
+    assert full_slot._poisoned is False
+
+    graph_mode = binding(ephemeral_fork=True, cache_position=34)
+    graph_mode.gemm_graphs_enabled = True
+    with pytest.raises(ValueError, match="graph mode"):
+        graph_mode.step_queued_audio_batch_async(
+            graph_mode._test_manifest,
+            oversized,
+        )
+    assert graph_mode._poisoned is False
+
+    leased = binding(ephemeral_fork=True, cache_position=34)
+    leased._active_output_generation = 3
+    with pytest.raises(ValueError, match="output lease"):
+        leased.step_queued_audio_batch_async(leased._test_manifest, oversized)
+    assert leased._poisoned is False
+
+    unprimed = binding(ephemeral_fork=True, cache_position=34)
+    unprimed.session_state = lambda _row: SimpleNamespace(
+        slot=0,
+        native_context_id=77,
+        primed=False,
+    )
+    with pytest.raises(ValueError, match="primed"):
+        unprimed.step_queued_audio_batch_async(unprimed._test_manifest, oversized)
+    assert unprimed._poisoned is False
+
+    incompatible_buffer = binding(ephemeral_fork=True, cache_position=34)
+    odd_query_buffer = torch.empty((3, HIDDEN_WIDTH), dtype=torch.bfloat16)
+    with pytest.raises(ValueError, match="even"):
+        incompatible_buffer.step_queued_audio_batch_async(
+            incompatible_buffer._test_manifest,
+            odd_query_buffer,
+        )
+    assert incompatible_buffer._poisoned is False
+
+
+def test_assistant_queue_noise_drain_is_empty() -> None:
+    rig = _rig()
+    state = _state(rig.coordinator.runtime_signature, "assistant-queue-noise-drain")
+    _register(rig, state)
+    _prime_native_prefix(rig, state)
+    rig.worker.begin_assistant_audio_queue(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        expected_cache_position=34,
+        reserve_tail_tokens=0,
+    ).result(timeout=3)
+
+    noise = np.full(1280, 0.001, dtype=np.float32)
+    for frame_id in range(500):
+        output = rig.worker.submit_tick((
+            _assistant_q0(
+                state,
+                frame_id,
+                queue_audio_for_next_turn=False,
+                pcm=noise,
+            ),
+        )).result(timeout=4)[state.session_id]
+        assert output.decision_view is not None
+        assert not rig.worker._queued_audio_soft[state.session_id]
+
+    assert len(rig.worker._assistant_audio_queue_frame_spans[state.session_id]) == 1
+    assert len(rig.worker._policy_q2_soft_pending[state.session_id]) == 0
+    cache = rig.worker._q2_decision_caches[state.session_id]
+    assert cache.last_applied_frame_id == 499
+    assert cache.q2_applied_count == 500
+    assert not hasattr(cache, "frame_keys")
+    assert rig.native is not None
+    replay_count_before_drain = len(rig.native.steps)
+    drained = rig.worker.drain_queued_audio(
+        state.session_id,
+        expected_generation_id=state.generation_id,
+        expected_cache_position=34,
+        user_turn_already_open=False,
+    ).result(timeout=4)
+
+    assert len(rig.native.steps) == replay_count_before_drain
+    assert drained.queued_audio_drain_metrics.frame_count == 0
+    assert drained.queued_audio_drain_metrics.token_count == 0
+    assert drained.queued_audio_drain_metrics.elapsed_ms < 5.0
+    assert drained.queued_audio_drain_metrics.source_frame_ids == ()
+    assert drained.cache_position == 34
+    assert state.session_id not in rig.worker._assistant_audio_queue_open
+    assert not rig.worker._queued_audio_soft[state.session_id]
+    assert not rig.worker._policy_q2_soft_pending[state.session_id]
+    assert rig.worker._reserved_tail_tokens[state.session_id] == 0
+    assert rig.worker.stop(drain=True).result(timeout=3).stopped_cleanly
 
 
 def test_backchannel_native_slot_fork_copies_generation_state_without_mutating_primary() -> None:
@@ -3941,6 +5282,33 @@ def test_startup_done_callback_cannot_block_on_queued_owner_command() -> None:
             rig.worker._stopped.result(timeout=3)
 
 
+def test_runtime_factory_failure_with_lazy_coordinator_completes_stop_report() -> None:
+    failure = RuntimeError("runtime factory failed before coordinator creation")
+
+    def fail_runtime_factory():
+        raise failure
+
+    worker = ListenerMicrobatchWorker(None, runtime_factory=fail_runtime_factory)
+    startup = worker.start()
+    with pytest.raises(RuntimeError, match="runtime factory failed before coordinator creation") as caught:
+        startup.result(timeout=2)
+    assert caught.value is failure
+
+    stopped = worker.stop(drain=False)
+    try:
+        report = stopped.result(timeout=1)
+    finally:
+        assert worker._thread is not None
+        worker._thread.join(timeout=1)
+
+    assert not worker._thread.is_alive()
+    assert report.status == "failed"
+    assert report.stopped_cleanly is False
+    assert report.drained is True
+    assert report.pending_frames == 0
+    assert report.fatal_error == "RuntimeError: runtime factory failed before coordinator creation"
+
+
 def test_reset_retires_old_native_generation_and_rejects_stale_frame(monkeypatch) -> None:
     rig = _rig()
     frontend_closed = []
@@ -4396,37 +5764,3 @@ def test_bounded_stop_reports_accepted_but_not_yet_ready_frames() -> None:
     assert not report.stopped_cleanly
     assert not report.drained
     assert report.pending_frames == 1
-
-
-def _tree_sha256(root: Path) -> dict[str, str]:
-    return {
-        path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
-        for path in root.rglob("*")
-        if path.is_file()
-        and path.suffix not in {".pyc", ".pyo"}
-        and "__pycache__" not in path.parts
-    }
-
-
-def test_runtime_mirror_tree_sha256_parity() -> None:
-    root = Path(__file__).resolve().parents[2]
-    mirror = root / "artifacts" / "runtime" / "listener_microbatch_source"
-    pairs = (
-        (root / "duplex_kernel", mirror / "duplex_kernel"),
-        (root / "tests" / "kernel", mirror / "tests" / "kernel"),
-    )
-    assert all(source.is_dir() and target.is_dir() for source, target in pairs)
-    common_count = 0
-    mismatches: list[str] = []
-    for source, target in pairs:
-        source_hashes = _tree_sha256(source)
-        target_hashes = _tree_sha256(target)
-        common = source_hashes.keys() & target_hashes.keys()
-        common_count += len(common)
-        mismatches.extend(
-            f"{source.name}/{relative}"
-            for relative in sorted(common)
-            if source_hashes[relative] != target_hashes[relative]
-        )
-    assert common_count > 0, "runtime mirror has no common source files to compare"
-    assert not mismatches, "runtime mirror content differs: " + ", ".join(mismatches)

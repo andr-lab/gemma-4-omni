@@ -1,0 +1,89 @@
+# RICHIESTA DIAGNOSI ARCHITETTURALE E CONTRATTI: GPT 6.1 SOL (MEDIUM EFFORT)
+
+## 1. Stato del Sistema e Risultati Raggiunti
+Siamo nella pipeline full-duplex omni per Gemma 4 su host Mondaini (NVIDIA GeForce RTX 3090 24GB VRAM, Docker container `gemma4-speech-s2s-readyframes-20261102`).
+Tutti i 105 test kernel pertinenti (`tests/kernel/`) passano al 100%.
+I grafi CUDA nativi Q1 con capacità 1536 e Code2Wav window graph sono verificati e pronti al boot.
+
+Nelle ultime sessioni abbiamo eradicato:
+1. Lo spike di ACK gap a inizio turno lungo (Zone 1).
+2. Lo spike di ACK gap terminale di fine turno lungo (abbattuto da 262 ms a 148-151 ms grazie alla vettorizzazione 2D NumPy di `_postprocess`, al bypass del postprocessing live sincrono durante lo streaming quando non c'è diagnostica, al D2H transfer protetto in `finalize_frame_residual_metrics` e all'inversione di lock in `run_talker_gpu_step`).
+3. L'ACK gap della risposta lunga ora è stabilmente **151.2 ms** (ampiamente inferiore al vincolo di 160.0 ms, `validation_status: PASS`!).
+
+---
+
+## 2. Il Nuovo Blocco Emerso nel Run di Accettazione
+
+Nel run di accettazione (`artifacts/acceptance_suite_20261104T020552885143Z/run_01`), dopo che il turno lungo ha superato tutte le verifiche di continuità e di timing:
+Al 3° o 4° turno di dialogo (memory follow-up o turn revision), il server ha sollevato un errore irreversibile sul WebSocket:
+
+```text
+EvidenceError: WebSocket receiver: EvidenceError: server realtime error: {'code': 'INFERENCE_ERROR', 'message': 'published Qwen token escaped the immutable alignment cache'}
+```
+
+### Traceback Completo da `server.log`:
+```text
+  File "/workspace/duplex_kernel/unified_native_decoder.py", line 836, in advance
+    await _resolve(state.on_token_packet_callback(token))
+  File "/workspace/duplex_kernel/unified_native_decoder.py", line 898, in _resolve
+    return await value
+  File "/workspace/duplex_kernel/server_unified_thinker.py", line 1049, in timed_token_packet_callback
+    result = token_packet_callback(generated)
+  File "/workspace/duplex_kernel/response_revision_runtime.py", line 408, in candidate_or_active_packet
+    callback(replace(...)
+  File "/workspace/duplex_kernel/server_response_runtime.py", line 1790, in live_say_native_token_packet
+    live_say_generated_token(...)
+  File "/workspace/duplex_kernel/server_response_runtime.py", line 1667, in live_say_generated_token
+    sealed_initial = live_say_stream.feed_piece(...)
+  File "/workspace/duplex_kernel/live_say.py", line 1444, in feed_piece
+    return self._feed_piece(...)
+  File "/workspace/duplex_kernel/live_say.py", line 2035, in _feed_piece
+    raise RuntimeError("published Qwen token escaped the immutable alignment cache")
+RuntimeError: published Qwen token escaped the immutable alignment cache
+```
+
+---
+
+## 3. Contratto e Codice Sorgente in `duplex_kernel/live_say.py`
+
+In `duplex_kernel/live_say.py`, all'interno di `_feed_piece` (righe 2021-2035):
+
+```python
+        with self._condition:
+            self._raise_terminal_locked()
+            if not segmented or prepared_alignment is not None or cache_fallback:
+                self._assert_published_immutable(
+                    self._published_ids,
+                    self._published_offsets,
+                    self._published_hidden,
+                    ids,
+                    offsets,
+                    aligned,
+                )
+            elif not cache_fallback and len(self._published_ids) > (
+                len(self._sealed_initial_ids) + len(self._stable_suffix_ids)
+            ):
+                raise RuntimeError("published Qwen token escaped the immutable alignment cache")
+```
+
+### Meccanismo di Pubblicazione dei Token:
+In `live_say.py`:
+- `self._published_ids` tiene traccia di tutti i token Qwen pubblicati per il Talker via `publish_qwen_token()` (chiamato ad esempio quando il Talker consuma un token via `take_trailing_token()` o quando viene fatto prefill).
+- `self._sealed_initial_ids` contiene i token dell'alignment iniziale sigillato.
+- `self._stable_suffix_ids` contiene i token considerati stabili oltre il confine di stabilità (`_safe_canonical_cache_boundary`).
+- Quando `feed_piece()` viene chiamato su un nuovo token generato dal Thinker (mentre `segmented` è True perché `sealed_initial` è già stabilito), se il Talker ha già pubblicato token che superano la somma di `sealed_initial_ids` + `stable_suffix_ids` (ossia token che si trovano nella coda mutabile / instabile non ancora consolidata nella cache stabile), la riga 2035 scatta con `RuntimeError("published Qwen token escaped the immutable alignment cache")`!
+
+---
+
+## 4. Domande Specifiche per la Diagnosi di GPT 6.1 Sol
+
+1. **Perché `len(self._published_ids) > (len(self._sealed_initial_ids) + len(self._stable_suffix_ids))` scatta?**
+   - In quali circostanze il Talker o il runtime pubblica/consuma token in `_published_ids` prima che `feed_piece()` abbia consolidato il prefisso stabile?
+   - Perché nel caso non segmentato (`if not segmented...`) il controllo è `_assert_published_immutable(self._published_ids, ..., ids, ...)` (che verifica che i token pubblicati siano identici al prefisso della nuova tokenizzazione), mentre nel caso segmentato (`elif not cache_fallback...`) scatta il fail rigido se la lunghezza pubblicata supera la somma dei token sigillati + stabili?
+
+2. **Qual è il contratto esatto di immutabilità dell'allineamento tra Thinker e Talker in `live_say`?**
+   - Se i token già pubblicati (`self._published_ids`) sono coerenti con `ids` (o con i token sigillati + stabili + coda coerente), è lecito verificare l'immutabilità dei token pubblicati (tramite `_assert_published_immutable`) invece di far fallire catastroficamente l'intera sessione con `escaped the immutable alignment cache`?
+   - Oppure la cache stabile (`_stable_suffix_ids`) deve essere avanzata/sincronizzata prima che il Talker possa consumarli?
+
+3. **Qual è la Remediation Minima e Causalmente Corretta?**
+   - Fornisci l'analisi causa-effetto e la patch esatta riga per riga per `live_say.py` (o per il chiamante in `server_response_runtime.py` / `engine.py`) che risolve questo errore preservando al 100% l'integrità causale e l'immutabilità dei token audio/testuali pubblicati.

@@ -1,0 +1,59 @@
+You are GPT-6 Luna executing with xhigh reasoning effort.
+You are tasked with implementing the architectural blueprint provided by GPT 6.1 Sol in `tools/sol_diagnosis_output_2.md`.
+
+### SCOPE & REQUIREMENTS
+
+1. `duplex_kernel/server.py`:
+   Update `_make_policy("gemma_native_control6")` around line 1768:
+   - `minimum_transition_confidence`: fallback to 0.70 (from 0.50):
+     `float(os.environ.get("GEMMA_CONTROL6_MIN_CONFIDENCE", 0.70))`
+   - `early_speak_confidence_threshold`: fallback to 0.80 (from 0.50):
+     `float(os.environ.get("GEMMA_CONTROL6_EARLY_SPEAK_THRESHOLD", 0.80))`
+   - `high_confidence_single_tick_threshold`: fallback to 0.85 (from 0.70):
+     `float(os.environ.get("GEMMA_CONTROL6_HIGH_CONF_THRESHOLD", 0.85))`
+
+2. `duplex_kernel/gemma_native_control6_policy.py`:
+   Implement Sol's contract for early SPEAK stabilization:
+   - User activity is defined by:
+     `activity_active = bool(state.peer_turn_active or current_user_voiced)`
+   - During user activity, early SPEAK requires two consecutive fresh, qualifying ticks.
+     High confidence (single-tick shortcut) MUST NOT bypass this 2-tick requirement during active user speech.
+   - Qualifying early SPEAK tick requires:
+     - `candidate == ControlAction.SPEAK.value`
+     - `effective_probability >= self.minimum_transition_confidence`
+     - `early_speak_gate_confidence is not None and early_speak_gate_confidence >= self.early_speak_confidence_threshold`
+   - Maintain a streak counter for consecutive qualifying early SPEAK ticks during activity.
+     Reset this streak on: non-qualifying tick, non-contiguous frame_id, session_id change, turn_generation_id change, or speaker_active change.
+     Duplicate frames must never advance the streak.
+   - If `activity_active` and `candidate == SPEAK`:
+     - If qualifying streak < 2: hold action (CONTINUE if speaker_active else LISTEN).
+     - If qualifying streak >= 2: allow SPEAK.
+   - Single-tick shortcut (`high_confidence_single_tick_threshold`) remains valid for YIELD, and for SPEAK when NOT in active user speech (`not activity_active`).
+   - Preserve `endpoint_speak_memory` release semantics as an alternative release path.
+   - Ensure `native_control6_hysteresis_required_ticks` in diagnostics accurately reflects the effective required ticks.
+
+3. `tools/real_dialogue_simulator.py`:
+   Implement Sol's contract for terminal waiting and full-duplex delivery recovery:
+   - In `_await_response_terminal(self, record: ResponseRecord, *, want_done: bool, timeout_s: float)`:
+     When `want_done=True`:
+     If `record.cancelled_event is not None`: return immediately (e.g. return a status or allow caller to check `record.cancelled_event`), do NOT loop until timeout!
+   - In `_complete_fixture(self, fixture_key: str, scenario_tag: str)`:
+     Manage delivery attempts gracefully:
+     - Track the delivery start and remaining timeout budget from `deadline = loop.time() + self.args.response_timeout_s`.
+     - When `_await_response_terminal(record, want_done=True, timeout_s=remaining_budget)` returns:
+       - If `record.done_event is not None`: proceed with playback drain and finalizer validation as normal.
+       - If `record.cancelled_event is not None`:
+         Check if the cancellation was a policy YIELD while user prompt audio was still being streamed.
+         If so, record this as an early interruption attempt (log it in events/report), and wait for the NEXT speaking response for this delivery (`record = await self._next_speaking_response(remaining_budget)`).
+         If cancellation was due to error or unexpected reason, raise `EvidenceError` immediately.
+     - Ensure late cleanup/finalization of early attempt A does not clear active-response state of subsequent attempt B.
+
+4. Unit Tests:
+   - Update / add unit tests in `tests/kernel/test_gemma_native_control6_policy.py`:
+     - Test that frame-281-equivalent scores with user activity produce LISTEN on tick 1 and require 2 consecutive qualifying ticks.
+     - Test that high confidence >= 0.85 does not produce single-tick SPEAK when user activity is active.
+     - Test that high confidence >= 0.85 DOES produce single-tick SPEAK when user activity is NOT active.
+     - Test that high confidence YIELD continues to work in 1 tick.
+   - Run `python -m pytest tests/kernel/test_gemma_native_control6_policy.py tests/kernel/test_shared_listener_tick_dispatcher.py` and verify all tests pass.
+
+Preserve existing documentation, comments, and interfaces. DO NOT touch checkpoints or download any model weights.

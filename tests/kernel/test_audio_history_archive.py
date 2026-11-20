@@ -264,3 +264,258 @@ def test_cancelled_empty_archive_never_commits_assistant_text():
     )
     assert session.history == []
     assert session.pending_audio_history_archive is None
+
+
+def _complete_cpu_asr_provenance() -> dict[str, object]:
+    return {
+        "model": "faster-whisper-small",
+        "device": "cpu",
+        "compute_type": "int8",
+        "cpu_threads": 4,
+        "language": "it",
+        "text": "must not be copied into provenance",
+        "phase_timings_ms": {"decode": 12.0},
+    }
+
+
+def test_archive_commit_keeps_immutable_cpu_asr_provenance_after_pending_closes():
+    session = DuplexSession("archive-provenance")
+    archive_id = session.reserve_audio_history_archive(
+        pcm=np.ones(1280, dtype=np.float32),
+        first_frame_id=12,
+        last_frame_id=14,
+        base_messages=[],
+        source="post_response_asr",
+        timeline_id="timeline-archive-provenance",
+        state_epoch_id=9,
+        coverage="complete",
+    )
+    assert archive_id is not None
+    assert session.complete_audio_history_archive(
+        archive_id,
+        "parlami di Torino",
+        asr_provenance=_complete_cpu_asr_provenance(),
+    )
+    assert session.update_audio_history_archive_assistant(archive_id, "Certo.")
+
+    snapshot = session.snapshot_history_with_provenance()
+    assert session.pending_audio_history_archive is None
+    assert snapshot.session_id == session.session_id
+    assert [dict(message) for message in snapshot.history] == [
+        {"role": "user", "content": "parlami di Torino"},
+        {"role": "assistant", "content": "Certo."},
+    ]
+    assert len(snapshot.provenance) == 1
+    provenance = snapshot.provenance[0]
+    assert provenance.archive_id == archive_id
+    assert provenance.history_item_id == snapshot.history_item_ids[0]
+    assert provenance.message_index == 0
+    assert provenance.timeline_id == "timeline-archive-provenance"
+    assert provenance.state_epoch_id == 9
+    assert (provenance.first_frame_id, provenance.last_frame_id) == (12, 14)
+    assert provenance.coverage_complete is True
+    assert provenance.transcript_status == "committed"
+    assert provenance.history_revision == snapshot.history_revision
+    assert provenance.history_mutation_sequence == snapshot.history_mutation_sequence
+    assert provenance.compaction_eligible is True
+    assert dict(provenance.asr_provenance) == {
+        "model": "faster-whisper-small",
+        "device": "cpu",
+        "compute_type": "int8",
+        "cpu_threads": 4,
+        "language": "it",
+    }
+
+
+def test_archive_provenance_without_complete_cpu_asr_is_not_compaction_eligible():
+    from types import SimpleNamespace
+
+    missing_asr = DuplexSession("archive-provenance-missing-asr")
+    missing_id = missing_asr.reserve_audio_history_archive(
+        pcm=np.ones(1280, dtype=np.float32), first_frame_id=0, last_frame_id=1,
+        base_messages=[], source="post_response_asr", coverage="complete",
+    )
+    assert missing_id is not None
+    assert missing_asr.complete_audio_history_archive(missing_id, "trascrizione")
+    assert missing_asr.update_audio_history_archive_assistant(missing_id, "risposta")
+    assert missing_asr.snapshot_history_with_provenance().provenance[0].compaction_eligible is False
+
+    incomplete = DuplexSession("archive-provenance-partial")
+    partial_id = incomplete.reserve_audio_history_archive(
+        pcm=np.ones(1280, dtype=np.float32), first_frame_id=2, last_frame_id=2,
+        base_messages=[], source="post_response_asr", coverage="partial",
+    )
+    assert partial_id is not None
+    assert incomplete.complete_audio_history_archive(
+        partial_id, "trascrizione parziale", asr_provenance=_complete_cpu_asr_provenance(),
+    )
+    assert incomplete.update_audio_history_archive_assistant(partial_id, "risposta")
+    assert incomplete.snapshot_history_with_provenance().provenance[0].compaction_eligible is False
+
+    heard = DuplexSession("archive-provenance-heard-action")
+    heard_id = heard.reserve_audio_history_archive(
+        pcm=None, first_frame_id=3, last_frame_id=3, base_messages=[],
+        source="heard_action_say_v2", coverage="complete",
+    )
+    assert heard_id is not None
+    assert heard.complete_audio_history_archive(
+        heard_id, "testo sentito", asr_provenance=_complete_cpu_asr_provenance(),
+    )
+    assert heard.update_audio_history_archive_assistant(heard_id, "risposta")
+    assert heard.snapshot_history_with_provenance().provenance[0].compaction_eligible is False
+
+    missing_epoch = DuplexSession(
+        "archive-provenance-missing-epoch",
+        listener_state=SimpleNamespace(state_epoch_id=None),
+    )
+    epoch_id = missing_epoch.reserve_audio_history_archive(
+        pcm=np.ones(1280, dtype=np.float32), first_frame_id=0, last_frame_id=0,
+        base_messages=[], source="post_response_asr", coverage="complete",
+    )
+    assert epoch_id is not None
+    assert missing_epoch.complete_audio_history_archive(
+        epoch_id, "senza epoch", asr_provenance=_complete_cpu_asr_provenance(),
+    )
+    assert missing_epoch.update_audio_history_archive_assistant(epoch_id, "risposta")
+    assert missing_epoch.snapshot_history_with_provenance().provenance[0].compaction_eligible is False
+
+
+def test_history_snapshot_revision_is_atomic_and_session_owned():
+    first = DuplexSession("archive-provenance-session-one")
+    second = DuplexSession("archive-provenance-session-two")
+    archive_id = first.reserve_audio_history_archive(
+        pcm=np.ones(1280, dtype=np.float32), first_frame_id=4, last_frame_id=4,
+        base_messages=[], source="post_response_asr", coverage="complete",
+    )
+    second_archive_id = second.reserve_audio_history_archive(
+        pcm=np.ones(1280, dtype=np.float32), first_frame_id=8, last_frame_id=8,
+        base_messages=[], source="post_response_asr", coverage="complete",
+    )
+    assert archive_id == 1
+    assert second_archive_id == archive_id
+    assert first.complete_audio_history_archive(
+        archive_id, "stessa domanda", asr_provenance=_complete_cpu_asr_provenance(),
+    )
+    assert first.update_audio_history_archive_assistant(archive_id, "risposta")
+    assert second.complete_audio_history_archive(
+        second_archive_id, "altra domanda", asr_provenance=_complete_cpu_asr_provenance(),
+    )
+    assert second.update_audio_history_archive_assistant(second_archive_id, "altra risposta")
+
+    before = first.snapshot_history_with_provenance()
+    second_snapshot = second.snapshot_history_with_provenance()
+    assert before.provenance[0].history_revision == before.history_revision
+    assert before.provenance[0].history_mutation_sequence == before.history_mutation_sequence
+    assert before.provenance[0].session_id == first.session_id
+    assert second_snapshot.provenance[0].session_id == second.session_id
+    assert second_snapshot.provenance[0].archive_id == before.provenance[0].archive_id
+    assert second_snapshot.history[0]["content"] == "altra domanda"
+
+    first.update_instructions("Rispondi con una frase.")
+    after = first.snapshot_history_with_provenance()
+    assert after.history_revision > before.history_revision
+    assert after.history_mutation_sequence == before.history_mutation_sequence
+    assert after.instructions == "Rispondi con una frase."
+    assert after.provenance[0].history_revision == before.history_revision
+    assert after.provenance[0].history_item_id == after.history_item_ids[0]
+
+
+def test_archive_and_instruction_callbacks_receive_snapshots_outside_generation_lock():
+    session = DuplexSession("archive-provenance-callback")
+    callback_observations: list[tuple[bool, int, str]] = []
+
+    def callback(_session, snapshot) -> None:
+        callback_observations.append((
+            bool(session._generation_lock._is_owned()),
+            snapshot.history_revision,
+            snapshot.instructions,
+        ))
+
+    session.set_history_archive_commit_callback(callback)
+    archive_id = session.reserve_audio_history_archive(
+        pcm=np.ones(1280, dtype=np.float32), first_frame_id=5, last_frame_id=5,
+        base_messages=[], source="post_response_asr", coverage="complete",
+    )
+    assert archive_id is not None
+    assert session.complete_audio_history_archive(
+        archive_id, "testo", asr_provenance=_complete_cpu_asr_provenance(),
+    )
+    assert session.update_audio_history_archive_assistant(archive_id, "risposta")
+    session.update_instructions("Istruzioni aggiornate.")
+
+    assert len(callback_observations) == 2
+    assert callback_observations[0][0] is False
+    assert callback_observations[0][2] != "Istruzioni aggiornate."
+    assert callback_observations[1] == (
+        False,
+        session.semantic_context_revision,
+        "Istruzioni aggiornate.",
+    )
+
+
+def test_mutated_history_row_loses_its_old_archive_identity():
+    session = DuplexSession("archive-provenance-mutated-row")
+    archive_id = session.reserve_audio_history_archive(
+        pcm=np.ones(1280, dtype=np.float32), first_frame_id=0, last_frame_id=0,
+        base_messages=[], source="post_response_asr", coverage="complete",
+    )
+    assert archive_id is not None
+    assert session.complete_audio_history_archive(
+        archive_id, "verified words", asr_provenance=_complete_cpu_asr_provenance(),
+    )
+    assert session.update_audio_history_archive_assistant(archive_id, "reply")
+    original = session.snapshot_history_with_provenance()
+    session.history[0]["content"] = "edited words"
+
+    changed = session.snapshot_history_with_provenance()
+
+    assert changed.history[0]["content"] == "edited words"
+    assert changed.history_item_ids[0] != original.history_item_ids[0]
+    assert changed.provenance == original.provenance
+    assert changed.provenance[0].history_item_id not in changed.history_item_ids
+
+
+def test_audio_timeline_id_tracks_frame_clock_not_response_generation():
+    session = DuplexSession("archive-timeline-identity")
+    first_timeline = session.timeline_id
+    assert session.snapshot_history_with_provenance().timeline_id == first_timeline
+
+    session.invalidate_generation("response_cancelled")
+    session.reset_turn()
+    assert session.timeline_id == first_timeline
+
+    first_archive = session.reserve_audio_history_archive(
+        pcm=np.ones(1280, dtype=np.float32), first_frame_id=0, last_frame_id=0,
+        base_messages=[], source="post_response_asr", coverage="complete",
+    )
+    assert first_archive is not None
+    assert session.complete_audio_history_archive(
+        first_archive, "prima frase", asr_provenance=_complete_cpu_asr_provenance(),
+    )
+    assert session.update_audio_history_archive_assistant(first_archive, "risposta")
+    assert session.snapshot_history_with_provenance().provenance[0].timeline_id == first_timeline
+
+    callback_rows = []
+    session.set_history_archive_commit_callback(
+        lambda current, snapshot: callback_rows.append((
+            current._generation_lock._is_owned(), snapshot.timeline_id,
+        ))
+    )
+    second_timeline = session.reset_audio_timeline()
+    assert second_timeline != first_timeline
+    assert callback_rows == [(False, second_timeline)]
+    second_archive = session.reserve_audio_history_archive(
+        pcm=np.ones(1280, dtype=np.float32), first_frame_id=0, last_frame_id=0,
+        base_messages=[], source="post_response_asr", coverage="complete",
+    )
+    assert second_archive is not None
+    assert session.complete_audio_history_archive(
+        second_archive, "seconda timeline", asr_provenance=_complete_cpu_asr_provenance(),
+    )
+    assert session.update_audio_history_archive_assistant(second_archive, "risposta")
+    snapshot = session.snapshot_history_with_provenance()
+    assert snapshot.timeline_id == second_timeline
+    assert [row.timeline_id for row in snapshot.provenance] == [
+        first_timeline,
+        second_timeline,
+    ]

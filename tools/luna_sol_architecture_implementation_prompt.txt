@@ -1,0 +1,53 @@
+# Specifica Esecutiva per GPT-6 Luna (max reasoning effort)
+## Attuazione della Diagnosi e Soluzione Architetturale di GPT-6.1 Sol
+
+Fai riferimento diretto a `docs/ARCHITECTURE.md` (Sezione 5.6) redatta da GPT-6.1 Sol.
+Il tuo compito è implementare le modifiche architetturali richieste per risolvere i due gap di continuità microfonica osservati:
+- Gap 1: 1567.4ms su frame 1100 (stallo sincrono Control6)
+- Gap 2: 164.2ms su frame 1724 (salto di griglia nel dispatcher per frame arrivato 1.5ms dopo lo snapshot)
+
+---
+
+## 1. Modifica A: Dispatcher Condiviso Reattivo su Frame Pronto (Risoluzione Gap 2)
+In `duplex_kernel/scheduler.py` e `duplex_kernel/shared_listener_scheduler.py`:
+1. In `AudioIngressQueue`:
+   - Aggiungere il supporto per registrare una notifica di callback/evento `on_frame_ready` (senza consumare il frame e senza acquisire lock del dispatcher mentre è detenuto il lock di ingress).
+   - Quando un frame PCM completo (1280 campioni) viene accodato in `push_pcm`, invocare `on_frame_ready()` se configurato.
+2. In `SharedListenerTickDispatcher`:
+   - Aggiungere il metodo `notify_input_ready(session_id: str)`.
+   - Modificare `_wait_until(deadline_ns)` in `shared_listener_scheduler.py` in modo che l'attesa del prossimo tick nominale utilizzi un `threading.Event` (es. `self._wake_event.wait(timeout)`) anziché un rigido `time.sleep()`.
+   - Se un frame pronto arriva prima del deadline (o appena dopo una griglia mancata), il dispatcher si risveglia immediatamente, esegue `_snapshot_ready_rows()` e dispatcha il batch senza attendere l'intero intervallo di 80ms!
+   - Preservare: massimo una Future batch in-flight, al massimo una riga per sessione pronta per batch, e la misurazione del deadline nominale per la latenza.
+3. In `duplex_kernel/server.py`:
+   - Nel lifecycle di registrazione della sessione shared (`register_session`), collegare la callback `on_frame_ready` di `AudioIngressQueue` a `dispatcher.notify_input_ready(session_id)`.
+   - Scollegare la callback prima di unregister/chiusura.
+
+---
+
+## 2. Modifica B: Fairness Comandi dell'Owner (Prevenzione Starvation)
+In `duplex_kernel/listener_microbatch_worker.py`:
+- In `_drain_commands()`:
+  - Non eseguire un ciclo `while True` potenzialmente illimitato che svuota l'intera coda comandi prima di tornare ai tick.
+  - Limitare ogni iterazione a un massimo di 1 comando eseguibile per giro, tornando subito a controllare se vi è un batch di tick pronto (`submit_tick`).
+  - Preservare l'ordine FIFO dei comandi, le epoch di chiusura e la gestione corretta di Future/cancellazioni.
+
+---
+
+## 3. Modifica C: Abilitazione Fused Readback per Control6 (Risoluzione Gap 1)
+- Verificare in `duplex_kernel/config.py` e `duplex_kernel/server.py` che `GEMMA4_OMNI_NATIVE_CONTROL6_FUSED_READBACK` sia abilitabile tramite variabile d'ambiente (default a `"1"` in produzione se non specificato altrimenti).
+- In `duplex_kernel/gemma_native_control6_policy.py`:
+  - Verificare che quando `GEMMA4_OMNI_NATIVE_CONTROL6_FUSED_READBACK=1`, i readback scalari multipli (`.item()`) siano raggruppati in un'unica operazione efficiente senza sincornizzazioni GPU intermedie superflue.
+
+---
+
+## 4. Modifica D: Preservazione Metriche Diagnostiche nel Simulatore
+In `tools/real_dialogue_simulator.py`:
+- In `_long_response_input_window_metrics`:
+  - Prima di sollevare `EvidenceError` in caso di `max_ack_gap_ms >= float(max_input_gap_ms)`, costruire e salvare comunque il dizionario completo delle metriche nella sessione / report (includendo la coppia di frame incriminata e i loro timestamp), in modo che `long_response_input_window` non rimanga `null` in caso di fallimento.
+
+---
+
+## 5. Verifica Unit Test
+Esegui la suite dei test di regressione:
+`python -m pytest tests/kernel/test_shared_listener_tick_dispatcher.py tests/kernel/test_client_consumed_pcm_ack.py tests/kernel/test_gemma_native_control6_policy.py`
+Tutti i test devono passare al 100%.

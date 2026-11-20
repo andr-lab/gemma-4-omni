@@ -22,8 +22,8 @@ logger = logging.getLogger("duplex_kernel.scheduler")
 
 DEFAULT_SAMPLE_RATE = 16_000
 DEFAULT_FRAME_DURATION_MS = 80
-REALTIME_INGRESS_QUEUE_FRAMES = 3  # 240 ms queued PCM at the 80 ms server frame rate.
-DIRECT_V2_INGRESS_QUEUE_FRAMES = 6  # 480 ms bounded direct-audio v2 burst buffer.
+REALTIME_INGRESS_QUEUE_FRAMES = 16  # 1.28 s queued PCM at the 80 ms server frame rate.
+DIRECT_V2_INGRESS_QUEUE_FRAMES = 16  # 1.28 s bounded direct-audio v2 burst buffer.
 NANOSECONDS = 1_000_000_000
 
 
@@ -67,7 +67,11 @@ class DuplexTick:
     listener_batch_started_ns: int | None = None
     listener_batch_finished_ns: int | None = None
     microbatch_queue_wait_ms: float | None = None
+    microbatch_service_ms: float | None = None
     microbatch_compute_ms: float | None = None
+    microbatch_worker_queue_wait_ms: float | None = None
+    microbatch_worker_wall_ms: float | None = None
+    microbatch_unified_transition_lock_wait_ms: float | None = None
     microbatch_model_lock_wait_ms: float | None = None
     microbatch_model_lock_hold_ms: float | None = None
     microbatch_capacity_growth_ms: float | None = None
@@ -235,6 +239,7 @@ class AudioIngressQueue:
         self._transport_buffer = bytearray()
         self._transport_serialization: str | None = None
         self._closed = False
+        self._on_frame_ready: Callable[[], None] | None = None
         self._speaking_prebuffer_active = False
         self._prebuffer_max_frames = 0
         self._prebuffer_frames: list[AudioFrame] = []
@@ -262,6 +267,13 @@ class AudioIngressQueue:
     def max_frames(self) -> int:
         """Configured queue capacity; zero means unbounded."""
         return self._queue.maxsize
+
+    def set_on_frame_ready(self, callback: Callable[[], None] | None) -> None:
+        """Install the non-consuming notification for complete queued frames."""
+        if callback is not None and not callable(callback):
+            raise TypeError("on_frame_ready must be callable or None")
+        with self._lock:
+            self._on_frame_ready = callback
 
     def _validate_pcm(self, pcm: np.ndarray) -> np.ndarray:
         array = np.asarray(pcm, dtype=np.float32).reshape(-1)
@@ -361,6 +373,7 @@ class AudioIngressQueue:
         array = self._validate_pcm(pcm)
         if array.size != self.frame_samples:
             raise ValueError(f"un frame deve contenere esattamente {self.frame_samples} sample")
+        callback: Callable[[], None] | None = None
         with self._lock:
             self._ensure_open()
             if self._buffer.size:
@@ -393,7 +406,10 @@ class AudioIngressQueue:
                 transport_serialization=serialization,
             )
             self._stats["input_samples_received"] += self.frame_samples
-            return frame
+            callback = self._on_frame_ready
+        if callback is not None:
+            callback()
+        return frame
 
     def begin_speaking_prebuffer(self, max_frames: int | None = None) -> None:
         """Hold microphone frames in an elastic prebuffer while the model speaks."""
@@ -414,6 +430,7 @@ class AudioIngressQueue:
 
     def end_speaking_prebuffer(self) -> dict[str, Any]:
         """Release the retained frames, reindexing them contiguously into ingress."""
+        callback: Callable[[], None] | None = None
         with self._lock:
             if not self._speaking_prebuffer_active:
                 return {
@@ -452,6 +469,8 @@ class AudioIngressQueue:
             self._next_frame_id = start_frame_id + len(self._prebuffer_frames)
             replayed_count = len(replayed_frames)
             replayed_samples = replayed_count * self.frame_samples + pending
+            if replayed_count:
+                callback = self._on_frame_ready
 
             metrics = {
                 "limit_frames": limit_frames,
@@ -463,7 +482,9 @@ class AudioIngressQueue:
             self._speaking_prebuffer_active = False
             self._prebuffer_frames = []
             self._frame_condition.notify_all()
-            return metrics
+        if callback is not None:
+            callback()
+        return metrics
 
     def append(
         self,
@@ -475,6 +496,7 @@ class AudioIngressQueue:
         """Append arbitrary PCM and enqueue every newly completed 80 ms frame."""
         array = self._validate_pcm(pcm)
         raw_transport, serialization, bytes_per_sample = self._normalize_transport(transport_bytes, array)
+        callback: Callable[[], None] | None = None
         with self._lock:
             self._ensure_open()
             if self._buffer.size:
@@ -533,6 +555,8 @@ class AudioIngressQueue:
                         transport_bytes=frame_transport,
                         transport_serialization=serialization,
                     ))
+                if frames:
+                    callback = self._on_frame_ready
             remainder_offset = int(full_count) * self.frame_samples
             self._buffer = np.array(combined[remainder_offset:], dtype=np.float32, copy=True)
             remainder_transport_offset = remainder_offset * bytes_per_sample
@@ -541,7 +565,9 @@ class AudioIngressQueue:
             self._buffer_start_ns = (
                 start + self._sample_time_ns(remainder_offset) if self._buffer.size else None
             )
-            return frames
+        if callback is not None:
+            callback()
+        return frames
 
     def get(self, timeout: float | None = None) -> AudioFrame:
         frame = self._queue.get(timeout=timeout)

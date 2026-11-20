@@ -1,0 +1,54 @@
+You are GPT-6 Luna operating with max reasoning effort as Senior Systems Engineer for the Gemma 4 Full-Duplex Omni Pipeline.
+
+### ARCHITECTURAL MANDATE (FROM PRINCIPAL ARCHITECT GPT 6.1 SOL)
+In our end-to-end acceptance run on RTX 3090 (`mondaini`), all dialogue behaviors passed (Turn 1 long response 122.88s continuous speech, Turn 2 contextual followup, Turn 3 barge-in with 89ms YIELD, Turn 4 closure).
+However, `report.finalized.json` reported `runtime_evidence.telemetry.status: "FAIL"` because:
+`alloc_drain_growth: 445.26 MiB > 256.0 MiB budget (vram_post_drain_growth_budget_mib)`.
+
+Sol's forensic diagnosis discovered the root cause:
+- Before the first WebSocket session connects, `post_warmup_baseline` is measured at 14,675.84 MiB.
+- When the first WebSocket connection arrives, `_register_shared_listener_session()` in `duplex_kernel/server.py` creates and starts the shared listener microbatch worker (`worker.start()`), which allocates ~384 MiB of GPU VRAM for the shared listener batch capacity.
+- During the session, the worker remains alive, so each turn's post-drain memory is ~15,086 MiB (+410 MiB over baseline).
+- Across the entire multi-turn session after Turn 1, cumulative growth was only 34.78 MiB (no progressive memory leak).
+- When the WebSocket disconnects at scenario end, `_unregister_shared_listener_session()` destroys the shared worker (`worker.stop(drain=False)`), dropping memory back to baseline (+12.46 MiB).
+- The baseline was measured BEFORE the shared worker existed, while post-drain was measured WITH the shared worker resident!
+
+### OPERATIONAL SPECIFICATION FOR GPT-6 LUNA
+Do NOT modify `acceptance_budget_config.json`.
+Do NOT modify model checkpoints.
+Do NOT modify simulator finalizer criteria.
+
+Implement the lifecycle fix in `duplex_kernel/server.py`:
+1. **Extract Shared Listener Runtime Initialization**:
+   - In `duplex_kernel/server.py`, extract the creation of `worker` and `dispatcher` from `_register_shared_listener_session()` into an idempotent helper:
+     `async def _ensure_shared_listener_runtime() -> tuple[Any, Any]`
+   - It must acquire `shared_listener_lifecycle_lock`.
+   - If `worker` and `dispatcher` already exist and are running, return them immediately.
+   - If not, create `worker = make_listener_microbatch_worker(...)` using `engine.listener` and the policy (`_make_policy("gemma_native_control6")` or existing engine turn policy), and start it via `worker.start()`. Log allocator counters (allocated/reserved bytes) before and after `worker.start()`.
+   - Create `dispatcher = SharedListenerTickDispatcher(worker, ...)` and start it.
+   - Store them in `shared_listener_worker_holder` and `shared_listener_dispatcher_holder`.
+
+2. **Service Startup & Readiness**:
+   - In `create_app(...)`, ensure that `_ensure_shared_listener_runtime()` is invoked during app startup (e.g. via FastAPI `lifespan` or startup handler), so that the shared listener worker and dispatcher are started and resident BEFORE the service declares readiness.
+   - Ensure the `/health` endpoint declares `listener_microbatch.runtime_ready: true` (or engine ready) only after the shared runtime is started. If startup fails, health must reflect the error.
+
+3. **Session Registration & Unregistration**:
+   - In `_register_shared_listener_session()`, call `_ensure_shared_listener_runtime()` to obtain the resident worker and dispatcher, then perform ONLY session-specific registration (initial prefix import, session binding, registering session with dispatcher and worker).
+   - In `_unregister_shared_listener_session()`, unregister the session from dispatcher, close the session slot on the worker (`worker.close_session(sess.session_id)`), and remove session bindings.
+   - **CRITICAL CHANGE**: Remove the teardown code that stops `dispatcher` and `worker` when `active_session_ids` becomes empty! The shared listener worker and dispatcher MUST REMAIN RESIDENT between sessions.
+
+4. **Service Shutdown**:
+   - Wire a shutdown handler (lifespan or shutdown event) in `create_app` that cleanly stops `dispatcher` and `worker` when the FastAPI application shuts down.
+
+5. **Telemetry Metadata Alignment**:
+   - In `duplex_kernel/server.py` and `tools/run_acceptance_suite.py`, ensure telemetry sampling interval metadata matches the actual sampling interval (e.g. `int(SAMPLE_INTERVAL_SECONDS * 1000)` instead of hardcoded 100).
+
+6. **Documentation**:
+   - Update `docs/ARCHITECTURE.md` to document the resident shared listener worker lifecycle (resident service-level resource vs per-session ephemeral slots).
+
+7. **Verification**:
+   - Run existing unit tests:
+     `pytest tests/kernel/test_shared_listener_tick_dispatcher.py tests/kernel/test_listener_microbatch_worker.py tests/test_duplex_kernel_contract.py`
+   - Verify syntax of modified files with `python -m py_compile`.
+
+Output a concise summary of all changes made and test execution results.

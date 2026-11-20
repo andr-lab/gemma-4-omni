@@ -1,0 +1,44 @@
+{
+  "status": "COMPLETED",
+  "stop_reason": "response_terminal",
+  "scenario_id": "gpu_short_smoke_initial_milano",
+  "ingress_frames_sent": 136,
+  "logical_pcm_samples_consumed": 130560,
+  "responses": [
+    {
+      "response_id": "resp_7e8ef57aa29e",
+      "generation_id": null,
+      "action": null,
+      "text": "",
+      "audio_samples": null,
+      "terminal_status": null,
+      "error": null
+    },
+    {
+      "response_id": "resp_1590f71772b7",
+      "generation_id": null,
+      "action": null,
+      "text": "Certamente! Ecco un itinerario di tre giorni a Milano.",
+      "audio_samples": null,
+      "terminal_status": null,
+      "error": null
+    }
+  ],
+  "server_errors": [],
+  "events_jsonl": "/workspace/artifacts/test/service_audit_20261026/smoke/dialogue_events.jsonl",
+  "report_json": "/workspace/artifacts/test/service_audit_20261026/smoke/streaming_dialogue_report.json",
+  "timing": {
+    "scenario_started_ns": 5816475393351569,
+    "first_response_created_ns": 5816477647575225,
+    "first_response_created_after_commit_ms": 1893.034833,
+    "first_audio_delta_ns": 5816480852169934,
+    "first_audio_delta_after_response_created_ms": 3204.594709,
+    "first_client_pcm_consumed_ns": 5816480915444994,
+    "policy_speak_to_first_client_pcm_consumed_ms": null,
+    "correction_timing": null,
+    "first_client_consumed_pcm_ack_sent_ns": 5816486347136106,
+    "last_response_terminal_ns": 5816484857331326,
+    "stop_ns": 5816486373114581,
+    "client_consumption_semantics": "logical_client_device_buffer"
+  }
+}

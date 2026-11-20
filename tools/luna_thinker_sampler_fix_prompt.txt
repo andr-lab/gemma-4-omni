@@ -1,0 +1,45 @@
+# TASK SPECIFICATION FOR GPT-6 LUNA (MAX REASONING EFFORT)
+
+You are tasked with fixing a contract and runtime failure in `duplex_kernel/engine.py` and aligning `tests/test_duplex_kernel_contract.py`.
+
+## 1. Background & Exact Error
+In `duplex_kernel/server_unified_thinker.py:790`, `engine.build_thinker_sampler()` is called with:
+`on_decoded_text_flush=think_kwargs.get("on_decoded_text_flush")`
+At runtime, this currently fails with:
+`TypeError: PipelineEngine.build_thinker_sampler() got an unexpected keyword argument 'on_decoded_text_flush'`
+
+Furthermore, `duplex_kernel/engine.py` currently contains a duplicate, stale inline definition of `class ThinkerSampler` (lines 908-1289), whereas the canonical implementation is in `duplex_kernel/thinker_sampler.py`.
+Contract test `test_thinker_sampler_is_reexported_by_identity` requires:
+`assert getattr(engine, "ThinkerSampler") is getattr(thinker_sampler, "ThinkerSampler")`
+
+## 2. Invariants & Strict Constraints (DO NOT VIOLATE)
+- DO NOT attempt to refactor, split, or modularize `duplex_kernel/engine.py` into `engine_loader.py` or other files. `engine.py` is the live GPU pipeline engine. Keep all existing methods and classes intact.
+- Keep modifications minimal and focused strictly on the exact requirements.
+- Maintain formatting and typing.
+
+## 3. Required Modifications
+
+### A. `duplex_kernel/engine.py`
+1. Remove the line `_NO_FORCED_TOKEN_OVERRIDE = object()` at line ~126.
+2. In place of the duplicate `class ThinkerSampler` (lines ~908 to ~1289), replace it with:
+```python
+from duplex_kernel.thinker_sampler import (
+    CandidateFallbackPool,
+    ThinkerSampler,
+    _NO_FORCED_TOKEN_OVERRIDE,
+)
+```
+3. In `PipelineEngine.build_thinker_sampler()` (line ~3401):
+   - Add parameter:
+     `on_decoded_text_flush: Callable[[str, int, int, torch.Tensor | None], Any] | None = None,`
+   - In the `ThinkerSampler(...)` instantiation, pass:
+     `on_decoded_text_flush=on_decoded_text_flush,`
+
+### B. `tests/test_duplex_kernel_contract.py`
+- Remove or delete `test_engine_split_modules_reexport_symbols_with_identity` and `test_engine_loader_and_talker_step_forwarding_contract` (which were erroneously added during an aborted refactor of `engine.py`).
+- Keep all other 25 tests intact.
+
+## 4. Verification
+Execute:
+`python -m pytest tests/test_duplex_kernel_contract.py`
+All 25 tests must pass (100% green).

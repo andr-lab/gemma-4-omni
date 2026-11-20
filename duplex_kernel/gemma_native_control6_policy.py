@@ -69,6 +69,7 @@ class GemmaNativeControl6Policy:
         fused_readback: bool = False,
         high_confidence_single_tick_threshold: float = 0.85,
         minimum_transition_confidence: float = 0.70,
+        minimum_backchannel_confidence: float = 0.70,
         early_speak_confidence_threshold: float = 0.80,
         hysteresis_required_ticks: int = 2,
         speech_rms_floor: float = 0.001,
@@ -97,6 +98,13 @@ class GemmaNativeControl6Policy:
                 "minimum_transition_confidence must be finite and between 0 and "
                 "high_confidence_single_tick_threshold"
             )
+        if (
+            isinstance(minimum_backchannel_confidence, bool)
+            or not isinstance(minimum_backchannel_confidence, numbers.Real)
+            or not math.isfinite(float(minimum_backchannel_confidence))
+            or not 0.0 <= float(minimum_backchannel_confidence) <= 1.0
+        ):
+            raise ValueError("minimum_backchannel_confidence must be finite in [0, 1]")
         if (
             isinstance(early_speak_confidence_threshold, bool)
             or not isinstance(early_speak_confidence_threshold, numbers.Real)
@@ -137,6 +145,7 @@ class GemmaNativeControl6Policy:
             high_confidence_single_tick_threshold
         )
         self.minimum_transition_confidence = float(minimum_transition_confidence)
+        self.minimum_backchannel_confidence = float(minimum_backchannel_confidence)
         self.early_speak_confidence_threshold = float(early_speak_confidence_threshold)
         self.hysteresis_required_ticks = hysteresis_required_ticks
         self.speech_rms_floor = float(speech_rms_floor)
@@ -146,12 +155,11 @@ class GemmaNativeControl6Policy:
         self._hysteresis_frame_id: int | None = None
         self._hysteresis_candidate: str | None = None
         self._hysteresis_count = 0
-        self._endpoint_speak_session_id: str | None = None
-        self._endpoint_speak_turn_id: int | None = None
-        self._endpoint_speak_frame_id: int | None = None
-        self._endpoint_speak_evidence_count = 0
-        self._endpoint_speak_quiet_count = 0
-        self._endpoint_speak_pending = False
+        self._early_speak_session_id: str | None = None
+        self._early_speak_generation_id: int | None = None
+        self._early_speak_speaker_active: bool | None = None
+        self._early_speak_frame_id: int | None = None
+        self._early_speak_streak_count = 0
         self._last_microbatch_tick_id: tuple[str, int, int] | None = None
         self._last_microbatch_listener_tick: tuple[str, int, int] | None = None
 
@@ -161,15 +169,14 @@ class GemmaNativeControl6Policy:
     def step_with_logits(
         self,
         state: PolicyInput,
-        logits: torch.Tensor | None,
+        logits: torch.Tensor,
         *,
         tick_id: tuple[str, int, int],
     ) -> PolicyDecision:
         """Apply this session's normal mask/hysteresis to one batched row.
 
-        ``logits=None`` is reserved for the existing exact-zero no-input safety
-        path, which does not run the learned head. A provided tensor must be
-        the result of the shared adapter forward for this tick.
+        The logits must come from the shared adapter forward for this tick,
+        including silent PCM frames.
         """
         if not isinstance(tick_id, tuple) or len(tick_id) != 3:
             raise ValueError("microbatch policy tick ID must be (session_id, generation_id, frame_id)")
@@ -203,10 +210,8 @@ class GemmaNativeControl6Policy:
             and listener_tick[2] <= last_listener_tick[2]
         ):
             raise RuntimeError("stale listener frame cannot update a newer policy turn")
-        if logits is None and not state.native_control_no_input_tick:
-            raise ValueError("precomputed Control6 logits are required for an input tick")
-        if logits is not None and state.native_control_no_input_tick:
-            raise ValueError("exact-zero no-input safety tick must not score listener logits")
+        if logits is None:
+            raise ValueError("precomputed Control6 logits are required for every tick")
         decision = self._step_impl(state, precomputed_logits=logits)
         self._last_microbatch_tick_id = tick_id
         self._last_microbatch_listener_tick = listener_tick
@@ -229,24 +234,6 @@ class GemmaNativeControl6Policy:
             raise RuntimeError("native Control6 requires a non-empty legal-action mask")
         if hidden is None:
             self.reset()
-            if state.native_control_no_input_tick:
-                if ControlAction.SPEAK.value in legal:
-                    raise RuntimeError(
-                        "native Control6 requires a fresh listener hidden for a pending user turn"
-                    )
-                action = ControlAction.CONTINUE if state.speaker_active else ControlAction.LISTEN
-                if action.value not in legal:
-                    raise RuntimeError(f"native Control6 no-input safety action {action.value} is not legal")
-                return PolicyDecision(
-                    action=action, frame_id=int(state.frame_id), confidence=1.0,
-                    reason="native_control_exact_zero_no_input_tick",
-                    generation_id=int(state.generation_id),
-                    listener_frame_id=int(state.frame_id),
-                    source="scheduler_verified_exact_zero_user_and_self_pcm",
-                    session=str(state.session_id),
-                    diagnostics={"policy_id": self.policy_id, "selected_action": action.value,
-                                 "no_input_tick": True, "response_lora_applied": False},
-                )
             raise RuntimeError("native Control6 requires fresh Gemma listener hidden state")
         if isinstance(source_frame, bool) or not isinstance(source_frame, int):
             self.reset()
@@ -347,7 +334,14 @@ class GemmaNativeControl6Policy:
                     device=parameter.device,
                 )
             else:
-                logits = self.adapter(native_hidden, phase_t=phase_tensor).reshape(-1).float()
+                adapter_kwargs = {}
+                if self.fused_readback and native_hidden.is_cuda:
+                    adapter_kwargs["defer_cuda_input_finite_check"] = True
+                logits = self.adapter(
+                    native_hidden,
+                    phase_t=phase_tensor,
+                    **adapter_kwargs,
+                ).reshape(-1).float()
             if tuple(logits.shape) != (len(ACTIONS),):
                 raise RuntimeError("native Control6 produced invalid six-way logits")
             if not self.fused_readback and not bool(torch.isfinite(logits).all()):
@@ -509,9 +503,10 @@ class GemmaNativeControl6Policy:
                 state,
                 candidate_action_value,
                 selected_effective_probability,
+                user_activity_detected=user_activity_detected,
             )
             current_user_voiced = current_user_rms >= self.speech_rms_floor
-            early_speak_activity_active = bool(
+            activity_active = bool(
                 state.peer_turn_active or current_user_voiced
             )
             quiet_peer_endpoint_window = bool(
@@ -519,9 +514,7 @@ class GemmaNativeControl6Policy:
             )
             early_speak_confidence: float | None = None
             early_speak_confidence_source = None
-            early_speak_gate_active = bool(
-                state.peer_turn_active or current_user_voiced
-            )
+            early_speak_gate_active = activity_active
             if early_speak_gate_active or self.trace_scores:
                 early_speak_confidence_source = "legal_normalized_raw_speak_member"
                 early_speak_confidence = (
@@ -533,13 +526,23 @@ class GemmaNativeControl6Policy:
                 early_speak_confidence
                 if early_speak_gate_active else None
             )
+            early_speak_qualifying = bool(
+                candidate_action_value == ControlAction.SPEAK.value
+                and selected_effective_probability >= self.minimum_transition_confidence
+                and early_speak_gate_confidence is not None
+                and early_speak_gate_confidence >= self.early_speak_confidence_threshold
+            )
+            early_speak_streak_count = self._update_early_speak_streak(
+                state,
+                qualifying=bool(activity_active and early_speak_qualifying),
+            )
             early_speak_gated = (
                 candidate_action_value == ControlAction.SPEAK.value
                 and early_speak_gate_confidence is not None
                 and early_speak_gate_confidence < self.early_speak_confidence_threshold
             )
             action_value = hysteresis_action_value
-            if early_speak_gated:
+            if candidate_action_value == ControlAction.SPEAK.value and activity_active:
                 hold_action = (
                     ControlAction.CONTINUE.value
                     if state.speaker_active else ControlAction.LISTEN.value
@@ -548,35 +551,34 @@ class GemmaNativeControl6Policy:
                     raise RuntimeError(
                         f"native Control6 early SPEAK hold action {hold_action} is not legal"
                     )
-                action_value = hold_action
-            (
-                endpoint_speak_pending,
-                endpoint_speak_evidence_count,
-                endpoint_speak_quiet_count,
-                endpoint_speak_ready,
-            ) = self._update_endpoint_speak_memory(
-                state,
-                current_user_voiced=current_user_voiced,
-                physical_speak_candidate=(
-                    candidate_action_value == ControlAction.SPEAK.value
-                ),
-                physical_speak_probability=selected_effective_probability,
+                action_value = (
+                    ControlAction.SPEAK.value
+                    if early_speak_streak_count >= 2
+                    else hold_action
+                )
+            endpoint_speak_pending, endpoint_speak_ready = (
+                self._endpoint_speak_status(state)
             )
             endpoint_speak_released = bool(
-                endpoint_speak_ready
-                and ControlAction.SPEAK.value in legal
-                and not state.speaker_active
+                endpoint_speak_ready and action_value == ControlAction.SPEAK.value
             )
             if endpoint_speak_released:
-                action_value = ControlAction.SPEAK.value
                 endpoint_speak_pending = False
-                self._clear_endpoint_speak_memory()
+            is_backchannel_candidate = (
+                candidate_action_value == ControlAction.BACKCHANNEL.value
+            )
+            candidate_minimum_confidence = (
+                self.minimum_backchannel_confidence
+                if is_backchannel_candidate
+                else self.minimum_transition_confidence
+            )
             transition_below_minimum = (
                 candidate_action_value in {
                     ControlAction.SPEAK.value,
                     ControlAction.YIELD.value,
+                    ControlAction.BACKCHANNEL.value,
                 }
-                and selected_effective_probability < self.minimum_transition_confidence
+                and selected_effective_probability < candidate_minimum_confidence
             )
             action = ControlAction(action_value)
             selected_index = action_indices[candidate_action_value]
@@ -586,7 +588,7 @@ class GemmaNativeControl6Policy:
                 else "native_control6_early_speak_user_active_hold"
             )
             fallback_reason = (
-                "native_control6_endpoint_speak_memory_release"
+                "native_control6_causal_endpoint_release"
                 if endpoint_speak_released
                 else early_speak_fallback_reason
                 if early_speak_gated
@@ -625,26 +627,36 @@ class GemmaNativeControl6Policy:
                 selected_effective_pre_normalization_probability
             ),
             "native_control6_hysteresis_count": hysteresis_count,
-            "native_control6_hysteresis_pending": hysteresis_pending,
+            "native_control6_hysteresis_pending": (
+                early_speak_streak_count < 2
+                if candidate_action_value == ControlAction.SPEAK.value
+                and activity_active
+                else hysteresis_pending
+            ),
             "native_control6_hysteresis_applied_action": hysteresis_action_value,
             "native_control6_decision_action": action.value,
             "native_control6_early_speak_gated": early_speak_gated,
+            "native_control6_early_speak_qualifying": early_speak_qualifying,
+            "native_control6_early_speak_streak_count": early_speak_streak_count,
             "native_control6_early_speak_confidence": early_speak_confidence,
-            "native_control6_early_speak_activity_active": early_speak_activity_active,
+            "native_control6_early_speak_activity_active": activity_active,
             "native_control6_early_speak_confidence_source": early_speak_confidence_source,
             "native_control6_early_speak_confidence_threshold": (
                 self.early_speak_confidence_threshold
             ),
             "native_control6_endpoint_speak_pending": endpoint_speak_pending,
-            "native_control6_endpoint_speak_evidence_count": endpoint_speak_evidence_count,
-            "native_control6_endpoint_speak_quiet_count": endpoint_speak_quiet_count,
             "native_control6_endpoint_speak_ready": endpoint_speak_ready,
             "native_control6_endpoint_speak_released": endpoint_speak_released,
             "native_control6_endpoint_speak_turn_onset_frame_id": (
                 state.user_turn_onset_frame_id
             ),
             "native_control6_hysteresis_required_ticks": (
-                1
+                max(2, self.hysteresis_required_ticks)
+                if is_backchannel_candidate
+                else 2
+                if candidate_action_value == ControlAction.SPEAK.value
+                and activity_active
+                else 1
                 if candidate_action_value in {
                     ControlAction.SPEAK.value,
                     ControlAction.YIELD.value,
@@ -654,14 +666,17 @@ class GemmaNativeControl6Policy:
             ),
             "native_control6_high_confidence_single_tick_threshold": self.high_confidence_single_tick_threshold,
             "native_control6_minimum_transition_confidence": self.minimum_transition_confidence,
+            "native_control6_minimum_backchannel_confidence": self.minimum_backchannel_confidence,
             "native_control6_transition_confidence_eligible": not (
                 candidate_action_value in {
                     ControlAction.SPEAK.value,
                     ControlAction.YIELD.value,
+                    ControlAction.BACKCHANNEL.value,
                 }
-                and selected_effective_probability < self.minimum_transition_confidence
+                and selected_effective_probability < candidate_minimum_confidence
             ),
             "native_control6_user_rms": current_user_rms,
+            "native_control6_current_user_voiced": current_user_voiced,
             "native_control6_ratio_activity_valid": ratio_activity_valid,
             "native_control6_user_assistant_log_ratio": (
                 user_assistant_log_ratio if ratio_activity_valid else None
@@ -728,7 +743,9 @@ class GemmaNativeControl6Policy:
             frame_id=int(state.frame_id),
             confidence=confidence,
             reason=(
-                "gemma_native_control6_early_speak_peer_quiet_hold"
+                "native_control6_causal_endpoint_release"
+                if endpoint_speak_released
+                else "gemma_native_control6_early_speak_peer_quiet_hold"
                 if early_speak_gated and quiet_peer_endpoint_window
                 else "gemma_native_control6_early_speak_user_active_hold"
                 if early_speak_gated
@@ -809,103 +826,104 @@ class GemmaNativeControl6Policy:
         self._hysteresis_frame_id = None
         self._hysteresis_candidate = None
         self._hysteresis_count = 0
-        self._clear_endpoint_speak_memory()
+        self._early_speak_session_id = None
+        self._early_speak_generation_id = None
+        self._early_speak_speaker_active = None
+        self._early_speak_frame_id = None
+        self._early_speak_streak_count = 0
 
-    def _clear_endpoint_speak_memory(self) -> None:
-        self._endpoint_speak_session_id = None
-        self._endpoint_speak_turn_id = None
-        self._endpoint_speak_frame_id = None
-        self._endpoint_speak_evidence_count = 0
-        self._endpoint_speak_quiet_count = 0
-        self._endpoint_speak_pending = False
-
-    def _update_endpoint_speak_memory(
+    def _update_early_speak_streak(
         self,
         state: PolicyInput,
         *,
-        current_user_voiced: bool,
-        physical_speak_candidate: bool,
-        physical_speak_probability: float,
-    ) -> tuple[bool, int, int, bool]:
-        """Remember strong voiced SPEAK intent until a same-turn endpoint."""
-        turn_id = state.user_turn_onset_frame_id
-        if (
-            self.early_speak_confidence_threshold <= 0.0
-            or turn_id is None
-            or state.speaker_active
-        ):
-            self._clear_endpoint_speak_memory()
-            return False, 0, 0, False
-
+        qualifying: bool,
+    ) -> int:
+        """Count fresh, adjacent early-SPEAK evidence within one turn context."""
         session_id = str(state.session_id)
+        generation_id = int(state.generation_id)
+        speaker_active = bool(state.speaker_active)
         frame_id = int(state.frame_id)
-        if (
-            self._endpoint_speak_session_id != session_id
-            or self._endpoint_speak_turn_id != int(turn_id)
-        ):
-            self._clear_endpoint_speak_memory()
-            self._endpoint_speak_session_id = session_id
-            self._endpoint_speak_turn_id = int(turn_id)
+        context_changed = (
+            self._early_speak_session_id != session_id
+            or self._early_speak_generation_id != generation_id
+            or self._early_speak_speaker_active != speaker_active
+        )
+        last_frame_id = self._early_speak_frame_id
+        if context_changed:
+            self._early_speak_streak_count = 0
+            last_frame_id = None
 
-        last_frame_id = self._endpoint_speak_frame_id
         if last_frame_id == frame_id:
-            ready = (
-                self._endpoint_speak_pending
-                and self._endpoint_speak_quiet_count >= 2
-            )
-            return (
-                self._endpoint_speak_pending,
-                self._endpoint_speak_evidence_count,
-                self._endpoint_speak_quiet_count,
-                ready,
-            )
-        if last_frame_id is not None and frame_id != last_frame_id + 1:
-            self._endpoint_speak_evidence_count = 0
-            self._endpoint_speak_quiet_count = 0
-
-        if current_user_voiced:
-            self._endpoint_speak_quiet_count = 0
-            if not self._endpoint_speak_pending:
-                qualifies = (
-                    physical_speak_candidate
-                    and physical_speak_probability
-                    >= self.early_speak_confidence_threshold
-                )
-                self._endpoint_speak_evidence_count = (
-                    self._endpoint_speak_evidence_count + 1 if qualifies else 0
-                )
-                if self._endpoint_speak_evidence_count >= 2:
-                    self._endpoint_speak_pending = True
-        elif self._endpoint_speak_pending:
-            self._endpoint_speak_quiet_count += 1
+            # A repeated frame is never fresh evidence. A duplicate that no
+            # longer qualifies still breaks the consecutive-evidence streak.
+            if not qualifying:
+                self._early_speak_streak_count = 0
         else:
-            self._endpoint_speak_evidence_count = 0
-            self._endpoint_speak_quiet_count = 0
+            if last_frame_id is not None and frame_id != last_frame_id + 1:
+                self._early_speak_streak_count = 0
+            self._early_speak_streak_count = (
+                min(2, self._early_speak_streak_count + 1)
+                if qualifying else 0
+            )
+            self._early_speak_frame_id = frame_id
 
-        self._endpoint_speak_frame_id = frame_id
-        ready = (
-            self._endpoint_speak_pending
-            and self._endpoint_speak_quiet_count >= 2
+        self._early_speak_session_id = session_id
+        self._early_speak_generation_id = generation_id
+        self._early_speak_speaker_active = speaker_active
+        return self._early_speak_streak_count
+
+    def _endpoint_speak_status(
+        self,
+        state: PolicyInput,
+    ) -> tuple[bool, bool]:
+        pending = bool(
+            state.user_turn_onset_frame_id is not None
+            and state.user_endpoint_onset_frame_id is not None
+            and state.user_endpoint_onset_frame_id == state.user_turn_onset_frame_id
+            and state.user_endpoint_frame_id is not None
+            and state.user_endpoint_frame_id <= state.frame_id
         )
-        return (
-            self._endpoint_speak_pending,
-            self._endpoint_speak_evidence_count,
-            self._endpoint_speak_quiet_count,
-            ready,
+        ready = bool(
+            pending
+            and not state.speaker_active
+            and ControlAction.SPEAK.value in tuple(state.legal_actions or ())
         )
+        return pending, ready
 
     def _apply_hysteresis(
-        self, state: PolicyInput, candidate: str, effective_probability: float
+        self,
+        state: PolicyInput,
+        candidate: str,
+        effective_probability: float,
+        *,
+        user_activity_detected: bool = False,
     ) -> tuple[str, int, bool]:
-        """Use one fresh frame only for high-confidence physical SPEAK/YIELD."""
-        required_ticks = self.hysteresis_required_ticks
+        """Apply transition confidence and fresh-frame hysteresis by action."""
+        is_backchannel = candidate == ControlAction.BACKCHANNEL.value
+        minimum_confidence = (
+            self.minimum_backchannel_confidence
+            if is_backchannel
+            else self.minimum_transition_confidence
+        )
+        required_ticks = (
+            max(2, self.hysteresis_required_ticks)
+            if is_backchannel
+            else self.hysteresis_required_ticks
+        )
+        speaker_active = bool(state.speaker_active)
         if (
             candidate in {ControlAction.SPEAK.value, ControlAction.YIELD.value}
             and effective_probability >= self.high_confidence_single_tick_threshold
         ):
             required_ticks = 1
+        elif (
+            candidate == ControlAction.YIELD.value
+            and speaker_active
+            and user_activity_detected
+            and effective_probability >= self.minimum_transition_confidence
+        ):
+            required_ticks = 1
         session_id = str(state.session_id)
-        speaker_active = bool(state.speaker_active)
         frame_id = int(state.frame_id)
         if (
             self._hysteresis_session_id != session_id
@@ -915,13 +933,17 @@ class GemmaNativeControl6Policy:
             self._hysteresis_session_id = session_id
             self._hysteresis_speaker_active = speaker_active
 
-        if candidate not in {ControlAction.SPEAK.value, ControlAction.YIELD.value}:
+        if candidate not in {
+            ControlAction.SPEAK.value,
+            ControlAction.YIELD.value,
+            ControlAction.BACKCHANNEL.value,
+        }:
             self._hysteresis_frame_id = frame_id
             self._hysteresis_candidate = None
             self._hysteresis_count = 0
             return candidate, 0, False
 
-        if effective_probability < self.minimum_transition_confidence:
+        if effective_probability < minimum_confidence:
             hold_action = (
                 ControlAction.CONTINUE.value if speaker_active else ControlAction.LISTEN.value
             )

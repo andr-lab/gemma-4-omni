@@ -29,6 +29,7 @@ from client.duplex_dialogue_harness import (
     float_to_pcm16_bytes,
     _conditioning_ack_matches_frame,
     FRAME_SAMPLES_16K,
+    FRAME_SAMPLES_24K,
 )
 
 
@@ -1158,6 +1159,20 @@ async def test_streaming_scenario_schedules_correction_from_consumed_pcm_and_ack
         .read_text(encoding="utf-8")
         .splitlines()
     ]
+    playback_clock_events = [
+        event for event in events
+        if event["event_type"] == "client_pcm_consumed"
+        and "playback_clock_sample_position" in event["details"]
+    ]
+    assert playback_clock_events
+    assert all(
+        event["details"]["playback_clock_sample_position"] % FRAME_SAMPLES_24K == 0
+        and event["details"]["playback_clock_observed_ns"]
+        >= event["details"]["playback_clock_deadline_ns"]
+        for event in playback_clock_events
+    )
+    assert result["playback_clock_samples"] >= FRAME_SAMPLES_24K
+    assert result["playback_clock_max_lateness_ms"] >= 0.0
     first_pcm = next(event for event in events if event["event_type"] == "client_pcm_consumed")
     correction_started = next(
         event for event in events
@@ -1174,10 +1189,19 @@ async def test_streaming_scenario_schedules_correction_from_consumed_pcm_and_ack
     else:
         assert result["last_consumed_pcm_ns_by_response"]["stream_resp_1"] <= correction_timing["first_sample_sent_ns"]
 
-    ack = next(message for message, _sent_ns in ws.sent if message.get("type") == "client_consumed_pcm")
+    acknowledgements = [
+        message for message, _sent_ns in ws.sent
+        if message.get("type") == "client_consumed_pcm"
+    ]
+    ack = next(message for message in acknowledgements if message.get("final") is True)
     assert ack["consumption_semantics"] == "logical_client_device_buffer"
+    assert ack["ack_version"] == 2
     assert ack["start_sample"] == 0
     assert ack["end_sample"] == tone_24k.size
+    assert any(
+        message.get("final") is False and 0 < message["end_sample"] < tone_24k.size
+        for message in acknowledgements
+    )
     assert ack["speaker_segment_id"] == "seg_001"
     full_segment_consumed = next(
         event for event in events
@@ -1195,6 +1219,7 @@ async def test_streaming_scenario_schedules_correction_from_consumed_pcm_and_ack
     ack_sent = next(
         event for event in events
         if event["event_type"] == "client_consumed_pcm_sent"
+        and event["details"].get("final") is True
     )
     assert ack_sent["timestamp_ns"] >= full_segment_consumed["timestamp_ns"]
     policy = next(event for event in events if event["event_type"] == "policy_diagnostics")
@@ -1345,6 +1370,135 @@ async def test_streaming_scenario_keeps_pending_turn_alive_until_max_duration_wi
     sent_frames = [event for event in events if event["event_type"] == "input_audio_frame_sent"]
     assert len(sent_frames) > 1
     assert any(event["details"]["source"] == "committed_turn_silence" for event in sent_frames)
+
+
+@pytest.mark.anyio
+async def test_streaming_scenario_fails_bounded_when_terminal_covers_only_input_prefix(
+    tmp_path: Path,
+) -> None:
+    from client.duplex_dialogue_harness import StreamingDialogueScenario, StreamingDialogueStep
+
+    class PrefixResponseWebSocket:
+        def __init__(self) -> None:
+            import asyncio
+
+            self.queue = asyncio.Queue()
+            self.queue.put_nowait(json.dumps({"type": "session.created"}))
+            self.sent: list[dict] = []
+            self.prefix_published = False
+            self.input_frame_id = 0
+
+        async def recv(self) -> str:
+            item = await self.queue.get()
+            if item is None:
+                raise EOFError("websocket closed")
+            return item
+
+        async def send(self, data: str) -> None:
+            message = json.loads(data)
+            self.sent.append(message)
+            if message.get("type") == "session.update":
+                self.queue.put_nowait(json.dumps({"type": "session.updated"}))
+            elif message.get("type") == "input_audio_buffer.append" and not self.prefix_published:
+                self.prefix_published = True
+                response_id = "precommit_prefix"
+                self.queue.put_nowait(json.dumps({
+                    "type": "response.created",
+                    "response_id": response_id,
+                    "input_first_frame_id": 0,
+                    "input_last_frame_id": 0,
+                }))
+                self.queue.put_nowait(_make_mock_wav_delta(
+                    response_id,
+                    np.sin(2 * np.pi * 220.0 * np.linspace(0, 0.16, 3840, dtype=np.float32)),
+                ))
+                self.queue.put_nowait(json.dumps({
+                    "type": "response.audio.segment_done",
+                    "response_id": response_id,
+                    "generation_id": 1,
+                    "speaker_segment_id": "seg_001",
+                    "start_sample": 0,
+                    "end_sample": 3840,
+                    "sample_rate": 24000,
+                }))
+                self.queue.put_nowait(json.dumps({
+                    "type": "response.done",
+                    "response_id": response_id,
+                }))
+                self.queue.put_nowait(json.dumps({
+                    "type": "input_audio_buffer.consumed",
+                    "frame_id": self.input_frame_id,
+                }))
+                self.input_frame_id += 1
+            elif message.get("type") == "input_audio_buffer.append":
+                self.queue.put_nowait(json.dumps({
+                    "type": "input_audio_buffer.consumed",
+                    "frame_id": self.input_frame_id,
+                }))
+                self.input_frame_id += 1
+            elif message.get("type") == "input_audio_buffer.commit":
+                self.queue.put_nowait(json.dumps({
+                    "type": "input_audio_buffer.committed",
+                    "item_id": "committed_prefix_input",
+                }))
+
+        async def close(self) -> None:
+            self.queue.put_nowait(None)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            await self.close()
+
+    ws = PrefixResponseWebSocket()
+
+    async def connector(url: str, **kwargs):
+        return ws
+
+    orchestrator = DialogueOrchestrator(
+        config=DialogueConfig(
+            max_duration_s=1.0,
+            silence_timeout_s=0.03,
+            frame_pacing_s=0.005,
+        ),
+        output_dir=tmp_path / "precommit_prefix_response",
+        ws_connect_fn=connector,
+    )
+    scenario = StreamingDialogueScenario(
+        scenario_id="precommit_prefix_response",
+        system_prompt="Rispondi in italiano.",
+        steps=[StreamingDialogueStep(
+            "correction",
+            np.full(FRAME_SAMPLES_16K * 3, 0.2, dtype=np.float32),
+            "Torino",
+        )],
+    )
+
+    result = await orchestrator.run_streaming_scenario(scenario)
+
+    assert result["status"] == "FAILED"
+    assert result["stop_reason"] == "incomplete_input_coverage"
+    assert result["input_steps"]["correction"]["last_speech_ingress_frame_id"] == 2
+    response = next(item for item in result["responses"] if item["response_id"] == "precommit_prefix")
+    assert response["input_step_id"] == "correction"
+    assert response["input_last_frame_id"] == 0
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "precommit_prefix_response" / "dialogue_events.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    commit_ns = next(
+        event["details"]["timestamp_ns"] for event in events
+        if event["event_type"] == "input_audio_buffer_commit_sent"
+    )
+    sent_after_commit = [
+        event for event in events
+        if event["event_type"] == "input_audio_frame_sent"
+        and event["details"]["sent_ns"] > commit_ns
+    ]
+    assert len(sent_after_commit) <= 2
 
 
 def test_streaming_cli_passes_voice_profile_override(monkeypatch, tmp_path: Path) -> None:

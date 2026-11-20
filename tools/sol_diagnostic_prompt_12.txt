@@ -1,0 +1,129 @@
+# RICHIESTA DIAGNOSI ARCHITETTURALE E CONTRATTI: GPT 6.1 SOL (MEDIUM EFFORT)
+
+## 1. Stato del Sistema e Contesto di Esecuzione
+Siamo nella pipeline full-duplex omni per Gemma 4 su host Mondaini (NVIDIA GeForce RTX 3090 24GB VRAM, Docker container `gemma4-speech-s2s-readyframes-20261102`).
+Abbiamo implementato la tua precedente architettura di ammissione cooperativa a quanti (`compute_quantum` con condition `_dispatch_idle`, `_inflight_sessions` e `admit_listener` distribuito per ogni singolo step GPU in `engine.py`), unitamente alle tue correzioni sul ciclo di vita del controller nativo e replay terminale in `unified_native_decoder.py`, `server_unified_thinker.py` e `server_response_runtime.py`.
+
+Tutti i 129 test unitari passano sia su Windows che nel container Docker su Mondaini.
+
+Abbiamo eseguito la suite di accettazione a 3 run consecutive (`python3 tools/run_acceptance_suite.py --runs 3 --container gemma4-speech-s2s-readyframes-20261102 --execution docker` nell'artifact `artifacts/acceptance_suite_20261102T234523994806Z`).
+
+### Risultato Clave:
+1. **L'Errore 1 (`RuntimeError: native generation session failed; close it before reuse`) è COMPLETAMENTE SCOMPARSO da tutte e 3 le run!** Le tue modifiche sul lifecycle e adozione validata hanno risolto definitivamente il crash.
+2. **Run 2 è PASSATA AL 100% (`overall_status: PASS`, `errors: []`, `evidence_gaps: []`):**
+   - Tutti i 4 turni completati regolarmente (risposta lunga da ~55s, barge-in / YIELD con rollback causale, memory follow-up, closure).
+   - Telemetria VRAM post-drain verificata e bounded (crescita VRAM allocated e reserved rigorosamente entro i budget).
+   - Tutti gli ACK gap e TTFT entro le soglie di accettazione!
+3. **Run 1 e Run 3 sono fallite per un unico picco isolato di ACK gap sull'ULTIMO frame della risposta lunga (`long_request`):**
+   - Run 1: `EvidenceError: long response microphone ACK gap 173.5ms reached the 160.0ms limit` (Frame 1135 -> Frame 1136: 173.53 ms)
+   - Run 3: `EvidenceError: long response microphone ACK gap 178.1ms reached the 160.0ms limit` (Frame 1173 -> Frame 1174: 178.14 ms)
+
+Il nostro obiettivo è ottenere **3 esecuzioni consecutive con `overall_status: PASS`** senza alcuna regressione.
+
+---
+
+## 2. Telemetria di Precisione sull'Anomalia dell'ACK Gap Finale
+
+Durante la risposta lunga (~55s di streaming continuo a 80 ms per frame):
+- Su oltre 1100 frame consecutivi inviati dal client, gli ACK gap sono stabili tra 60 ms e 145 ms (ad es. Frame 664 è stabilizzato a ~134 ms).
+- Il picco oltre 160.0 ms si presenta **esclusivamente sull'ultimo frame audio inviato dal client prima di `playout_completed`** (Frame 1136 in Run 1, Frame 1174 in Run 3).
+- Subito dopo il frame anomalo, il frame successivo (1137 in Run 1, 1175 in Run 3) arriva con un ACK gap minuscolo (19.7 ms in Run 1, 27.1 ms in Run 3).
+
+### 2.1 Numeri Dettagliati da Run 1 (Frame 1135, 1136, 1137):
+```
+2026-11-02T23:46:57.762878+00:00 | input_frame_sent               | fid=1135 | monotonic_ns=6447134426167412
+2026-11-02T23:46:57.822434+00:00 | input_audio_buffer.consumed    | fid=1135 | monotonic_ns=6447134485707679
+   server_listener_queue_ms: 54.76
+   server_listener_step_ms: 48.425
+   listener_batch_compute_ms: 48.425
+   listener_batch_native_cuda_ms: 23.666
+   scheduler_commit_state_lock_hold_ms: 5.671
+   server_ack_queue_ms: 2.6
+   server_ack_lock_wait_ms: 0.06
+2026-11-02T23:46:57.824526+00:00 | input_frame_ack_received       | fid=1135 | monotonic_ns=6447134485707679
+
+2026-11-02T23:46:57.843993+00:00 | input_frame_sent               | fid=1136 | monotonic_ns=6447134507279858
+   [EVENTI CONCORRENTI SERVER]:
+   2026-11-02T23:46:57.871492 | response.audio.segment_done
+   2026-11-02T23:46:57.892634 | response.done
+   2026-11-02T23:46:57.939884 | playout_completed
+   2026-11-02T23:46:57.971433 | response.unified_native_finalized
+2026-11-02T23:46:57.995960+00:00 | input_audio_buffer.consumed    | fid=1136 | monotonic_ns=6447134659235209
+   server_listener_queue_ms: 121.111
+   server_listener_step_ms: 95.849
+   listener_batch_compute_ms: 95.849
+   listener_batch_native_cuda_ms: 27.118
+   scheduler_commit_state_lock_hold_ms: 24.512
+   server_ack_queue_ms: 2.608
+   server_ack_lock_wait_ms: 0.062
+2026-11-02T23:46:57.998094+00:00 | input_frame_ack_received       | fid=1136 | monotonic_ns=6447134659235209 (Delta da ACK 1135 = 173.53 ms)
+
+2026-11-02T23:46:57.925846+00:00 | input_frame_sent               | fid=1137 | monotonic_ns=6447134589132549
+2026-11-02T23:46:58.015681+00:00 | input_audio_buffer.consumed    | fid=1137 | monotonic_ns=6447134678918234
+2026-11-02T23:46:58.017861+00:00 | input_frame_ack_received       | fid=1137 | monotonic_ns=6447134678918234 (Delta da ACK 1136 = 19.70 ms)
+```
+
+### 2.2 Numeri Dettagliati da Run 3 (Frame 1173, 1174, 1175):
+```
+Frame 1173:
+   server_listener_queue_ms: 54.96
+   server_listener_step_ms: 48.318
+   listener_batch_compute_ms: 48.318
+   listener_batch_native_cuda_ms: 23.17
+   scheduler_commit_state_lock_hold_ms: 5.867
+   ACK ricevuto a: 6447524560717193
+
+Frame 1174:
+   server_listener_queue_ms: 114.438
+   server_listener_step_ms: 77.808
+   listener_batch_compute_ms: 77.808
+   listener_batch_native_cuda_ms: 25.242
+   scheduler_commit_state_lock_hold_ms: 26.123
+   ACK ricevuto a: 6447524738858562 (Delta da ACK 1173 = 178.14 ms)
+
+Frame 1175:
+   server_listener_queue_ms: 95.018
+   server_listener_step_ms: 45.928
+   listener_batch_compute_ms: 45.928
+   listener_batch_native_cuda_ms: 26.487
+   scheduler_commit_state_lock_hold_ms: 3.137
+   ACK ricevuto a: 6447524765973060 (Delta da ACK 1174 = 27.11 ms)
+```
+
+---
+
+## 3. Analisi del Meccanismo di Blocco
+
+Dall'ispezione della telemetria emergono due componenti di rallentamento simultanee su quel singolo frame:
+
+1. **`listener_batch_compute_ms` raddoppia (da ~48 ms a 78-96 ms, +30-48 ms):**
+   - `listener_batch_native_cuda_ms` rimane normale (~25-27 ms).
+   - In `listener_batch_host_lock_timeline`, si osserva che un altro thread (il thread di finalizzazione Talker/risposta) acquisisce il model lock o esegue lavoro GPU durante la chiusura del ramo nativo (`hold_ns: 30558030` = ~30.5 ms).
+   - In `shared_listener_scheduler.py:747`, `self.wait_for_compute_quanta()` o `_acquire_shared_transition_lock_with_timing(lock)` in `server.py:1425` trattiene o rallenta l'ingresso della batch listener mentre il ramo di risposta viene finalizzato via `_finalize_unified_native_cache_branch()` (`submit_transition_mutation`, `_queue_worker_close_epoch`, drain pcm, commit deferred acoustic history).
+
+2. **`scheduler_commit_state_lock_hold_ms` quintuplica (da ~3-5 ms a 24.5-26.1 ms, +20 ms):**
+   - In `duplex_kernel/listener.py:3365`, `commit_microbatch_output()` acquisisce `state._lock` (`state_lock_context`).
+   - All'interno del lock esegue:
+     - Aggiornamento della storia PCM e mel (`np.array(..., copy=True)` su tutti i buffer).
+     - `_commit_listener_input_cursors()`.
+     - Manipolazione di `gemma_lm_source_frame_ids`, `semantic_context_revision`, `cache_epoch_id`.
+   - In `server.py:5126`, `commit_timing` misura il tempo di tenuta di `state._lock`, registrando 24.5 - 26.1 ms sul frame di confine.
+
+3. **Effetto Cumulativo:**
+   - La somma dei due rallentamenti (+48 ms sul listener batch + +20 ms sul commit lock hold) fa slittare la generazione dell'evento `input_audio_buffer.consumed` di ~68-70 ms.
+   - Poiché il frame precedente (1135/1173) era stato completato velocemente (in 48 ms), la distanza tra la ricezione dell'ACK 1135 e l'ACK 1136 passa da ~80-100 ms a **173.5 - 178.1 ms**, infrangendo la soglia massima consentita di 160.0 ms.
+
+---
+
+## 4. Domande Architetturali per GPT 6.1 Sol
+
+1. **Disaccoppiamento del Ciclo di Vita di Finalizzazione Risposta dal Listener:**
+   - Perché la chiusura della risposta (`response.audio.segment_done` -> `response.done` -> `_finalize_unified_native_cache_branch`) contende risorse o lock con il dispatcher listener proprio nel momento del confine di turno?
+   - Come dobbiamo strutturare la transizione di fine risposta affinché la finalizzazione del Talker/cache non blocchi o ritardi mai un tick di ascolto del microfono (rispettando il principio cardine di PLAN.md: *"Lo scheduler dà precedenza ai frame listener pronti. Decode, replay delle continuazioni e compattazione procedono a quanti; le attese di rete, FIFO e ACK restano fuori dai lock GPU"*).
+
+2. **Bonifica del `scheduler_commit_state_lock_hold_ms`:**
+   - Perché `commit_microbatch_output` trattiene `state._lock` per oltre 24 ms sul frame di fine turno rispetto ai 3-5 ms dei frame ordinari?
+   - Qual è il contratto minimo necessario all'interno della sezione critica di `state._lock`? Possiamo spostare le operazioni differibili (es. copie array numpy o sincronizzazioni secondarie) fuori dal lock, o accodare l'ACK immediatamente al commit del cursore essenziale prima di completare il resto?
+
+3. **Specifiche Operative per GPT-6 Luna:**
+   - Definisci un piano di bonifica architetturale chirurgico e deterministico, con i file esatti da modificare (`duplex_kernel/server.py`, `duplex_kernel/shared_listener_scheduler.py`, `duplex_kernel/listener.py`, `duplex_kernel/server_unified_cache.py`), le invarianti da preservare, e le verifiche necessarie affinché l'ACK gap rimanga stabilmente sotto i 140 ms su tutti i 3 run consecutivi.

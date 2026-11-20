@@ -23,6 +23,8 @@ from tools.train_native_control6_lora import (
 from training.duplex_qlora.native_control6 import (
     ACTION_TO_TOKEN_ID,
     ACTIONS,
+    HIDDEN_WIDTH,
+    NativeControl6LoRA,
     load_native_control6_adapter,
 )
 
@@ -58,6 +60,21 @@ def test_native_output_row_lora_cpu_smoke_preserves_base_logits() -> None:
     assert result["ordinary_vocabulary_rows_modified"] is False
     assert ACTION_TO_TOKEN_ID["LISTEN"] == 256001
     assert 256000 not in ACTION_TO_TOKEN_ID.values()
+
+
+def test_deferred_cuda_finite_check_keeps_cpu_input_validation() -> None:
+    adapter = NativeControl6LoRA(torch.zeros((len(ACTIONS), HIDDEN_WIDTH)))
+    hidden = torch.zeros((HIDDEN_WIDTH,))
+    hidden[0] = float("nan")
+
+    with pytest.raises(ValueError, match="normalized_hidden contains non-finite"):
+        adapter(hidden, defer_cuda_input_finite_check=True)
+
+    finite_hidden = torch.zeros((HIDDEN_WIDTH,))
+    phase = torch.zeros((4,))
+    phase[0] = float("nan")
+    with pytest.raises(ValueError, match="phase_t contains non-finite"):
+        adapter(finite_hidden, phase_t=phase, defer_cuda_input_finite_check=True)
 
 
 def test_prepare_targets_preserves_template_grouped_train_validation_split(tmp_path) -> None:

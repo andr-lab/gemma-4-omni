@@ -1,0 +1,7 @@
+{
+  "schema": "duplex_server_log_window_v1",
+  "session_id": "f9d146d440c54801867a4a995a496ad3",
+  "since_utc": "2026-10-26T16:37:23.565675+00:00",
+  "until_utc": "2026-10-26T16:38:09.725711+00:00",
+  "source": "docker logs --since/--until"
+}

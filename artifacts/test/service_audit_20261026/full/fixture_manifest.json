@@ -1,0 +1,50 @@
+{
+  "fixtures": {
+    "interruption": {
+      "path": "bargein_stop.wav",
+      "asr_model": "Systran/faster-whisper-small",
+      "transcript_verified": true,
+      "language": "it",
+      "asr_file": "bargein_stop.asr_small_cpu.json",
+      "transcript": "Aspetta, fermati un momento.",
+      "asr_device": "cpu"
+    },
+    "closure": {
+      "path": "closure.wav",
+      "asr_model": "Systran/faster-whisper-small",
+      "transcript_verified": true,
+      "language": "it",
+      "asr_file": "closure.asr_small_cpu.json",
+      "transcript": "Grazie, basta così.",
+      "asr_device": "cpu"
+    },
+    "memory_followup": {
+      "path": "memory_followup.wav",
+      "asr_model": "Systran/faster-whisper-small",
+      "transcript_verified": true,
+      "language": "it",
+      "asr_file": "memory_followup.asr_small_cpu.json",
+      "transcript": "Ricapitolando nel tuo esempio sulla backpressure quali erano i due problemi da distinguere e quali misure o acknowledgement li aiutano a riconoscere usando i dettagli che hai appena dato e senza aggiungere altri esempi.",
+      "asr_device": "cpu"
+    },
+    "long_request": {
+      "path": "long_backpressure_prompt.wav",
+      "asr_model": "Systran/faster-whisper-small",
+      "transcript_verified": true,
+      "language": "it",
+      "asr_file": "long_backpressure_prompt.asr_small_cpu.json",
+      "transcript": "Spiegami in modo dettagliato la backpressure nello streaming audio, cosa accade quando il server produce 60 mili secondi di audio ogni 40 mili secondi riprodotti dal client, fai vedere come cresce la coda e il ritardo, distingui il ritardo accumulato dalla perdita dei pacchetti, indica quali metriche e acknowledgement rivelano ciascun problema e proponi strategie pratiche per limitare la coda e rallentare il produttore senza tagliare l'audio.",
+      "asr_device": "cpu"
+    }
+  },
+  "asr_verification": {
+    "language": "it",
+    "offline": true,
+    "device": "cpu",
+    "compute_type": "int8",
+    "model": "Systran/faster-whisper-small"
+  },
+  "schema": "real_dialogue_simulator_fixture_manifest_v1",
+  "source": "Synthetic Windows SAPI speech generated offline, Microsoft Cosimo it-IT; all source samples retained and only final 80ms frame receives deterministic floor padding during simulator preparation",
+  "manifest_path": "/workspace/work/gpu_forensics/fixtures_16k_final/fixture_manifest_verified.json"
+}

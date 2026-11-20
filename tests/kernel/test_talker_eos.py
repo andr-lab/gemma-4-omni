@@ -375,6 +375,51 @@ def test_eos_flushes_previously_generated_streaming_audio() -> None:
     assert metrics["terminated_by_budget"] is False
 
 
+def test_streaming_talk_skips_postprocess_without_quality_diagnostic() -> None:
+    talker = _CountingLegacyTalker()
+    engine = _engine_for_termination(talker)
+    sampled = iter([42, EOS_ID])
+    engine._cb0_sample = lambda logits, temperature=0.6, **kwargs: next(sampled)
+    postprocess_calls = []
+    engine._postprocess = lambda wav: (postprocess_calls.append(wav.copy()), wav)[1]
+    callbacks: list[np.ndarray] = []
+
+    output = engine.talk(
+        "ciao",
+        torch.zeros((1, 1, HIDDEN_SIZE)),
+        n_words=1,
+        min_frames=1,
+        on_audio_chunk=callbacks.append,
+    )
+
+    assert output.size == 1920
+    assert len(callbacks) == 1
+    assert postprocess_calls == []
+
+
+def test_streaming_talk_keeps_postprocess_for_quality_diagnostic() -> None:
+    talker = _CountingLegacyTalker()
+    engine = _engine_for_termination(talker)
+    sampled = iter([42, EOS_ID])
+    engine._cb0_sample = lambda logits, temperature=0.6, **kwargs: next(sampled)
+    postprocess_calls = []
+    engine._postprocess = lambda wav: (postprocess_calls.append(wav.copy()), wav)[1]
+    captures = []
+
+    output = engine.talk(
+        "ciao",
+        torch.zeros((1, 1, HIDDEN_SIZE)),
+        n_words=1,
+        min_frames=1,
+        on_audio_chunk=lambda _pcm: None,
+        quality_diagnostic={"capture": captures.append},
+    )
+
+    assert output.size == 1920
+    assert len(postprocess_calls) == 1
+    assert len(captures) == 1
+
+
 def test_pipeline_talker_releases_thinker_priority_lock_before_waiting_for_live_text() -> None:
     engine = _engine_for_termination(_LiveTextCountingTalker())
     engine.runtime_backend = "native"
@@ -389,8 +434,9 @@ def test_pipeline_talker_releases_thinker_priority_lock_before_waiting_for_live_
         def __init__(self):
             self.waits = 0
 
-        def take_trailing_token(self, *, stop_check=None):
+        def take_trailing_token(self, *, stop_check=None, q1_index=None):
             del stop_check
+            assert q1_index == self.waits
             assert not engine._thinker_lock.locked(), (
                 "PipelineEngine.talk must release the actual Thinker/GPU priority lock "
                 "before waiting for live text"
@@ -566,8 +612,9 @@ def test_pipeline_talker_releases_thinker_priority_lock_before_waiting_for_live_
         def __init__(self):
             self.waits = 0
 
-        def take_trailing_token(self, *, stop_check=None):
+        def take_trailing_token(self, *, stop_check=None, q1_index=None):
             del stop_check
+            assert q1_index == self.waits
             assert not engine._thinker_lock.locked(), (
                 "PipelineEngine.talk must release the actual Thinker/GPU priority lock "
                 "before waiting for live text"

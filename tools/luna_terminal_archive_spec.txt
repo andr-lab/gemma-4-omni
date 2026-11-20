@@ -1,0 +1,129 @@
+# SPECIFICA TECNICA PER GPT-6 LUNA (MAX EFFORT): TERMINAL RESPONSE RECORD ARCHIVE
+
+## 1. Obiettivo e Contratto Architetturale
+Risolvere il race condition di telemetria VRAM post-drain (identificato nell'acceptance run della pipeline full-duplex omni per Gemma 4 su RTX 3090) implementando l'architettura approvata da GPT 6.1 Sol:
+**Separazione netta tra il registro operativo ACK (`playback_ack_branches`) e lo Storico Terminale dei Branch (`TerminalResponseArchive`).**
+
+### Contratto del Sistema:
+1. **Branch Operativo (`sess._playback_ack_branches`)**: gestisce il ciclo di vita attivo (ACK di frame PCM, calcolo cursori, rollback dello spoken prefix e watermark di cancellazione). La sua deadline di grazia (2.0s) per gli ACK rimane inalterata.
+2. **Storico Terminale (`TerminalResponseArchive`)**: archivia in memoria a livello di applicazione FastAPI (`app.state.terminal_response_archive`) i metadati leggeri post-drain delle risposte finalizzate (`finalized: True`, `ended_response: True`, `finalizer_task_status: "completed"`).
+   - È un buffer circolare FIFO limitato a **64 record massimi**.
+   - Sopravvive alla chiusura/disconnessione del WebSocket.
+   - Non trattiene mai tensori PyTorch, array NumPy PCM, future/task asincroni, code o ledger completi (solo metadati scalari).
+   - Registra le letture dell'allocator CUDA del processo misurate alla finalizzazione (`allocated_bytes`, `reserved_bytes`, `peak_*`).
+3. **Esposizione in `GET /debug/runtime-telemetry`**:
+   - L'endpoint unisce i branch attivi della sessione con i record archiviati in `TerminalResponseArchive` (deduplicando per `response_id`).
+   - Se una sessione si è già disconnessa ma ha record terminali nell'archivio, l'endpoint espone comunque la sessione con i suoi branch terminali.
+   - I filtri di query `session_id` e `response_id` vengono rispettati.
+4. **Consumo in `tools/acceptance_telemetry.py`**:
+   - In `_observe()`: accetta il branch post-drain solo se `finalizer_task_status == "completed"` e `finalized is True` (eliminando la scorciatoia che accettava finalizer pending su risposte cancellate).
+   - Usa le letture allocator salvate nel branch (`branch["allocator"]`) se presenti, altrimenti ricorre all'allocator del polling.
+   - In `stop()`: esegue `_observe()` anche sul campione finale post-run (`self.postrun_raw`) prima di uscire.
+5. **Documentazione**:
+   - Aggiorna `docs/ARCHITECTURE.md` descrivendo il contratto del Terminal Response Record Archive.
+6. **Test di Regressione**:
+   - Aggiungi `tests/kernel/test_terminal_response_archive.py` con test mirati per:
+     a) Pubblicazione idempotente alla fine del task di finalizzazione.
+     b) Visibilità via `/debug/runtime-telemetry` dopo che il branch operativo è stato evitto da `playback_ack_branches`.
+     c) Bounded FIFO: l'inserimento del 65° record scarta il più vecchio senza toccare i branch operativi.
+     d) Conservazione dei record anche per sessioni chiuse.
+     e) Acquisizione corretta in `RuntimeTelemetrySampler._observe()` e `stop()`.
+
+---
+
+## 2. File da Modificare
+
+### 2.1 `duplex_kernel/server.py`
+1. **Definire `TerminalResponseArchive`**:
+   ```python
+   class TerminalResponseArchive:
+       """Thread-safe FIFO archive bounded to 64 lightweight finalized response records."""
+       def __init__(self, capacity: int = 64) -> None:
+           self.capacity = max(1, int(capacity))
+           self._lock = threading.RLock()
+           self._records: collections.OrderedDict[tuple[str, str], dict[str, Any]] = collections.OrderedDict()
+           self.eviction_count: int = 0
+       
+       def record_finalized(self, session_id: str, response_id: str, data: dict[str, Any]) -> None:
+           ...
+       def get_for_session(self, session_id: str) -> list[dict[str, Any]]:
+           ...
+       def get_all(self) -> list[dict[str, Any]]:
+           ...
+   ```
+2. **In `create_app`**:
+   Inizializzare `app.state.terminal_response_archive = TerminalResponseArchive(capacity=64)`.
+3. **Punto comune di pubblicazione dei finalizer**:
+   Nel server, i task di finalizzazione (`deferred_playback_finalizer`) vengono creati in `finalize_unified_native_cache_after_playback` e `launch_policy_response` / cleanup.
+   Aggiungi un callback o wrapper di completamento (es. `finalize_task.add_done_callback(...)` o blocco `try/finally` dentro il task) che:
+   - Determina `status`:
+     ```python
+     if task.cancelled():
+         task_status = "cancelled"
+     elif task.exception() is not None:
+         task_status = "failed"
+     else:
+         task_status = "completed"
+     ```
+   - Cattura i contatori correnti di `torch.cuda` (se CUDA è inizializzato):
+     `memory_allocated`, `memory_reserved`, `max_memory_allocated`, `max_memory_reserved`.
+   - Costruisce un record leggero con SOLO campi scalari (nessun tensore o array PCM):
+     `session_id`, `response_id`, `generation_id`, `speaker_segment_id`, `finalized: True`, `ended_response: True`, `finalizer_task_status: task_status`, `playback_cancelled: bool`, `playback_drained: bool`, `playback_drain_failure`, `playback_pending: False`, `client_consumed_pcm_sequence`, `client_consumed_segments`, `spoken_prefix_exclusive_cursor`, `kv_cache_position`, `kv_cache_source`, `playback_segments` (scalari), `allocator: {...}`, `finalized_at_utc`.
+   - Inserisce in `app.state.terminal_response_archive`.
+4. **In `/debug/runtime-telemetry`**:
+   - Integrare `app.state.terminal_response_archive`:
+     Per ogni sessione attiva, arricchire/mergiare `branch_snapshots` con i record archiviati per quella sessione (se un branch è già in `branch_snapshots`, aggiornare i campi di finalizzazione dal record archiviato; se il branch operativo è già stato rimosso, aggiungere il record archiviato).
+     Per le sessioni presenti nell'archivio ma non più in `sessions.all()`, creare un `session_snapshot` sintetico contenente i branch archiviati.
+     Rispettare i parametri `session_id` e `response_id`.
+
+### 2.2 `tools/acceptance_telemetry.py`
+1. In `_observe(self, row: dict[str, Any])`:
+   - Sostituire la logica di filtro post-drain:
+     ```python
+     for branch in branches:
+         response_id = branch.get("response_id")
+         if (
+             not response_id
+             or response_id in self.post_drain
+             or branch.get("finalized") is not True
+             or branch.get("ended_response") is not True
+             or branch.get("playback_pending") is not False
+             or branch.get("finalizer_task_status") != "completed"
+         ):
+             continue
+         branch_allocator = branch.get("allocator") or {}
+         branch_allocated_mib = _to_mib(branch_allocator.get("allocated_bytes")) or allocated_mib
+         branch_reserved_mib = _to_mib(branch_allocator.get("reserved_bytes")) or reserved_mib
+         self.post_drain[str(response_id)] = {
+             "sampled_at_utc": branch.get("finalized_at_utc") or row.get("sampled_at_utc"),
+             "allocated_mib": branch_allocated_mib,
+             "reserved_mib": branch_reserved_mib,
+             "session_id": session.get("session_id"),
+             **{
+                 key: branch.get(key)
+                 for key in (
+                     "response_id", "generation_id", "speaker_segment_id",
+                     "playback_cancelled", "client_consumed_segments",
+                     "spoken_prefix_exclusive_cursor", "kv_cache_position",
+                     "kv_cache_source",
+                 )
+             },
+         }
+     ```
+2. In `compact_sample(payload, sampled_at_utc)`:
+   - Assicurarsi che nel dizionario di ciascun branch siano preservati anche `allocator` e `finalized_at_utc` se presenti.
+3. In `stop()`:
+   - Quando viene salvato `self.postrun_raw`, estrarre `row = compact_sample(self.postrun_raw, utc_now())` e invocare `self._observe(row)` prima di uscire.
+
+### 2.3 `docs/ARCHITECTURE.md`
+- Aggiungere una sezione chiara e concisa che documenti il `TerminalResponseArchive`, il contratto FIFO a 64 posizioni, e la separazione rispetto al registro operativo `playback_ack_branches`.
+
+### 2.4 `tests/kernel/test_terminal_response_archive.py`
+- Scrivere la suite di test unitari con pytest a copertura dei casi prescritti da Sol.
+
+---
+
+## 3. Vincoli e Non-Negoziabili
+- Zero burocrazia, zero SHA manifest.
+- Non alterare le costanti di pacing, la soglia ACK gap (160 ms), il budget di primo audio (800 ms) né i budget di memoria VRAM.
+- Eseguire i test locali con pytest per garantire che 100% dei test passino senza regressioni.

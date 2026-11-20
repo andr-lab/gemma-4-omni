@@ -5,12 +5,14 @@ import asyncio
 import os
 from pathlib import Path
 import time
-from typing import Any
+from typing import Any, Callable, Sequence
 
 import numpy as np
 import torch
 
 from duplex_kernel.listener_microbatch_worker import (
+    CacheIdentityCommitter,
+    CompactionRequestBuilder,
     InitialPrefixAdmission,
     ListenerMicrobatchRuntime,
     ListenerMicrobatchWorker,
@@ -202,6 +204,9 @@ def make_listener_microbatch_worker(
     native_control6_policy: Any | None = None,
     semantic_prefix_enabled: bool = True,
     unified_kv_enabled: bool = False,
+    compaction_request_builder: CompactionRequestBuilder | None = None,
+    on_cache_identity_commit: CacheIdentityCommitter | None = None,
+    gc_pause_snapshot_provider: Callable[[], Sequence[Any]] | None = None,
 ) -> ListenerMicrobatchWorker:
     """Create a single-owner worker from the already loaded serving listener.
 
@@ -221,6 +226,9 @@ def make_listener_microbatch_worker(
     )
     if type(unified_kv_enabled) is not bool:
         raise TypeError("unified_kv_enabled must be a bool")
+    if compaction_request_builder is not None and not callable(compaction_request_builder):
+        raise TypeError("compaction_request_builder must be callable or None")
+    compaction_shadow_enabled = compaction_request_builder is not None
     semantic_shadow_enabled = (
         False if unified_kv_enabled else _strict_env_flag(SEMANTIC_SHADOW_ENV)
     )
@@ -234,10 +242,12 @@ def make_listener_microbatch_worker(
         native_control6_policy is not None
         and semantic_prefix_enabled
         and not semantic_shadow_enabled
+        and not compaction_shadow_enabled
     ):
         raise RuntimeError(
             "shared listener batching with semantic Control6 requires semantic shadow staging; "
-            "set DUPLEX_LISTENER_MICROBATCH=0 for the inline compatibility path or enable "
+            "provide a compaction shadow builder, set DUPLEX_LISTENER_MICROBATCH=0 for the "
+            "inline compatibility path, or enable "
             f"{SEMANTIC_SHADOW_ENV}=1"
         )
 
@@ -359,7 +369,7 @@ def make_listener_microbatch_worker(
             listener_stream=stream,
             max_batch_size=4,
             enable_gemm_graphs=gemm_graphs_enabled,
-            enable_variable_q_gemm_graphs=unified_kv_enabled,
+            enable_variable_q_gemm_graphs=bool(gemm_graphs_enabled and unified_kv_enabled),
         )
         with torch.cuda.stream(stream):
             primary_capacity = native.ensure_capacity(4)
@@ -439,6 +449,8 @@ def make_listener_microbatch_worker(
             ),
             "semantic_shadow_enabled": semantic_shadow_enabled,
             "semantic_shadow_ready": False,
+            "compaction_shadow_enabled": compaction_shadow_enabled,
+            "compaction_shadow_ready": False,
         }
 
         import_prefix = None
@@ -457,7 +469,7 @@ def make_listener_microbatch_worker(
 
         shadow_factory = None
         shadow_prefix_builder = None
-        if semantic_shadow_enabled:
+        if semantic_shadow_enabled or compaction_shadow_enabled:
             def create_shadow_runtime():
                 shadow_stream = torch.cuda.Stream(device=device, priority=0)
                 shadow_provider = NativeGemmaListenerLM(
@@ -482,7 +494,8 @@ def make_listener_microbatch_worker(
                 if shadow_native.max_batch_size < 1:
                     raise RuntimeError("semantic shadow capacity prewarm returned less than one")
                 backend._listener_microbatch_runtime_info.update({
-                    "semantic_shadow_ready": True,
+                    "semantic_shadow_ready": semantic_shadow_enabled,
+                    "compaction_shadow_ready": compaction_shadow_enabled,
                     "semantic_shadow_capacity": shadow_native.max_batch_size,
                     "semantic_shadow_gemm_graphs_enabled": shadow_native.gemm_graphs_enabled,
                     "semantic_shadow_gemm_graph_count": shadow_native.gemm_graph_count,
@@ -494,10 +507,14 @@ def make_listener_microbatch_worker(
                 )
 
             def build_shadow_prefix(request: Any, shadow_stream: Any) -> PrefixCacheImport:
-                from duplex_kernel.native_control6_runtime import NativeControl6SemanticPrefixRequest
-
-                if not isinstance(request, NativeControl6SemanticPrefixRequest):
-                    raise TypeError("shadow staging requires a frozen native Control6 prefix request")
+                prefix_token_ids = tuple(getattr(request, "prefix_token_ids", ()))
+                prefix_len = int(getattr(request, "prefix_len", 0))
+                revision = int(getattr(request, "semantic_context_revision", 0))
+                replay_frame_ids = tuple(
+                    int(value) for value in getattr(request, "replay_frame_ids", ())
+                )
+                if not prefix_token_ids or len(prefix_token_ids) != prefix_len:
+                    raise TypeError("shadow staging requires an exact bounded text-prefix token sequence")
                 acquire_fair = getattr(model_lock, "acquire_fair", None)
                 if not callable(acquire_fair):
                     raise RuntimeError("semantic shadow builder requires the shared fair model lock")
@@ -515,11 +532,13 @@ def make_listener_microbatch_worker(
                     with torch.cuda.stream(shadow_stream), torch.inference_mode():
                         teacher_prefix_started_ns = time.perf_counter_ns()
                         cache = backend.build_semantic_prefix_cache(
-                            request.prefix_token_ids,
+                            prefix_token_ids,
+                            replay_q2=(),
+                            replay_frame_ids=(),
                         )
                         if (
-                            int(cache["prefix_len"]) != int(request.prefix_len)
-                            or int(cache["cache_position"]) != int(request.prefix_len)
+                            int(cache["prefix_len"]) != prefix_len
+                            or int(cache["cache_position"]) != prefix_len
                             or tuple(cache["replay_frame_ids"])
                         ):
                             raise RuntimeError("shadow teacher builder did not return a text-only prefix cache")
@@ -539,16 +558,17 @@ def make_listener_microbatch_worker(
                 return PrefixCacheImport(
                     past_key_values=cache["past_key_values"],
                     prefix_attention=cache["prefix_attention"],
-                    prefix_len=int(cache["prefix_len"]),
-                    cache_position=int(request.prefix_len),
-                    semantic_context_revision=int(request.semantic_context_revision),
-                    semantic_replay_fallback_reason=request.fallback_reason,
+                    prefix_len=prefix_len,
+                    cache_position=prefix_len,
+                    semantic_context_revision=revision,
+                    semantic_replay_fallback_reason=getattr(request, "fallback_reason", None),
                     prefix_build_ms=float(cache["prefix_build_ms"]),
                     replay_ms=None,
                     ready_event=ready_event,
-                    replay_frame_ids=tuple(int(value) for value in request.replay_frame_ids),
+                    replay_frame_ids=replay_frame_ids,
                     fair_lock_wait_ms=fair_lock_wait_ms,
                     teacher_prefix_fenced_wall_ms=teacher_prefix_fenced_wall_ms,
+                    applied_history_revision=getattr(request, "history_revision", None),
                 )
 
             shadow_factory = create_shadow_runtime
@@ -566,6 +586,7 @@ def make_listener_microbatch_worker(
             shadow_factory=shadow_factory,
             shadow_prefix_builder=shadow_prefix_builder,
             token_adapter=token_adapter,
+            compaction_request_builder=compaction_request_builder,
             close_resources=frontend.close,
         )
 
@@ -573,23 +594,36 @@ def make_listener_microbatch_worker(
         None,
         runtime_factory=runtime_factory,
         stable_turn_policy_q2_context=stable_turn_policy_q2_context,
+        on_cache_identity_commit=on_cache_identity_commit,
+        gc_pause_snapshot_provider=gc_pause_snapshot_provider,
     )
 
 
 def make_unified_prefix_import(
     backend: Any,
     prefix_token_ids: tuple[int, ...] | list[int],
+    *,
+    semantic_context_revision: int = 0,
 ) -> Any:
     """Build and cache one real chat-prefix KV for a unified listener session.
 
     ``prefix_token_ids`` must be the exact system + opening user-header + BOA
     sequence produced from the active Thinker chat template.  In particular,
     it must not contain the legacy BOS/PAD audio prefix or audio placeholders.
+    ``semantic_context_revision`` identifies the history/instruction snapshot
+    represented by that prefix; it is zero for a fresh session and advances
+    when the pre-audio instruction prefix is refreshed.
     The returned owner-thread importer runs a single text-only ShapeStable
     prefill, then returns the same immutable cache for native import.  All
     later audio and generated-text appends use the native session cache.
     """
     token_ids = tuple(int(token) for token in prefix_token_ids)
+    if (
+        isinstance(semantic_context_revision, bool)
+        or not isinstance(semantic_context_revision, int)
+        or semantic_context_revision < 0
+    ):
+        raise ValueError("unified prefix semantic revision must be a non-negative integer")
     if not token_ids:
         raise ValueError("unified prefix token IDs must not be empty")
     if any(isinstance(token, bool) for token in prefix_token_ids):
@@ -659,8 +693,12 @@ def make_unified_prefix_import(
                 prefix_attention=cache["prefix_attention"],
                 prefix_len=prefix_len,
                 cache_position=cache_position,
+                # Keep the prefix revision explicit so response forks match
+                # the owner cache after the initial import and every refresh.
+                semantic_context_revision=semantic_context_revision,
                 prefix_build_ms=float(cache["prefix_build_ms"]),
                 replay_ms=0.0,
+                applied_history_revision=semantic_context_revision,
             )
         return cached_prefix
 
@@ -696,6 +734,9 @@ def initial_listener_session_state(
             or state.gemma_lm_native is not None
             or state.gemma_lm_text_context
             or state.semantic_context_revision is not None
+            or state.cache_epoch_id != 0
+            or state.native_semantic_context_revision is not None
+            or state.applied_history_revision is not None
             or bool(state.semantic_audio_soft_history)
             or bool(state.text_token_ids)
             or bool(getattr(listener_backend, "text_token_ids", ()))
@@ -771,6 +812,7 @@ def semantic_prefix_importer(
             prefix_build_ms=cache["prefix_build_ms"],
             replay_ms=cache["replay_ms"],
             replay_frame_ids=tuple(int(value) for value in request.replay_frame_ids),
+            applied_history_revision=request.semantic_context_revision,
         )
 
     # The semantic builder runs ShapeStable against the serving model's shared
@@ -861,6 +903,7 @@ def prepare_initial_semantic_prefix(
         frame_id=0,
         state_version=request.listener_state_version,
         sequence_position=0,
+        applied_history_revision=request.semantic_context_revision,
     )
 
 
@@ -907,6 +950,9 @@ def commit_initial_semantic_prefix_state(
             ):
                 return False
             state.semantic_context_revision = request.semantic_context_revision
+            state.cache_epoch_id = 0
+            state.native_semantic_context_revision = request.semantic_context_revision
+            state.applied_history_revision = request.semantic_context_revision
             state.semantic_replay_fallback_reason = request.fallback_reason
             state.gemma_lm_prefix_len = request.prefix_len
             state.gemma_lm_prefix_attention = prepared.prefix.prefix_attention.detach()

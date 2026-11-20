@@ -1,0 +1,120 @@
+# SPECIFICA OPERATIVA PER GPT-6 LUNA (MAX EFFORT): BONIFICA LATENZA FINALE LISTENER ED EVENTO COMPATTO FINALIZER
+
+## 1. Contesto e Diagnosi Architetturale di GPT 6.1 Sol
+La diagnosi di GPT 6.1 Sol (`tools/sol_diagnosis_output_6.md`) ha identificato con precisione le cause del picco di latenza ACK sui frame di confine (Frame 1136 in Run 1 e Frame 1174 in Run 3) dell'acceptance suite su Mondaini:
+1. **Payload gigantesco sull'evento `response.unified_native_finalized`:**
+   In `server_metrics.py:640-642`, `_send_unified_native_finalizer_event` sovrascriveva `event["runtime_metrics"] = dict(runtime_metrics)`, inviando oltre 153 KB di JSON non filtrato (contenente tutte le timeline e le trace diagnostiche storiche) tramite WebSocket sincrono sotto `ws_send_lock`. Questo causava serializzazione JSON sincrona sul server e parsing sincrono `json.loads` nel receiver loop del client (`real_dialogue_simulator.py`), introducendo decine di millisecondi di GIL contention e delay proprio mentre arrivava il pacchetto WebSocket `input_audio_buffer.consumed` del frame di confine!
+   Esiste già una funzione dedicata `_filter_unified_native_event_metrics` in `server_metrics.py:142` progettata per estrarre solo il set compatto di campi numerici e stringhe (rollback tokens, drain ms, ecc.).
+2. **Tempo di tenuta eccessivo di `state._lock` in `commit_microbatch_output`:**
+   In `listener.py:3365-3520`, tutte le validazioni, copie numpy (`np.array(..., copy=True)` su PCM, mel history e tail), detach dei tensori PyTorch e costruzione dell'oggetto `ListenerOutput` venivano eseguite *all'interno* del context manager `with state_lock_context:` (`state._lock`). Sul frame di confine, questo blocco tratteneva `state._lock` per oltre 24-26 ms (`scheduler_commit_state_lock_hold_ms`).
+   Separando la preparazione fallibile (allocazioni, conversioni numpy, detach, validazioni) *fuori* dal lock e mantenendo all'interno di `with state_lock_context:` solo la verifica atomica dei cursori e l'assegnazione rapida dei puntatori già preparati, il tempo di tenuta di `state._lock` scende a valori sub-millisecondo (< 1 ms), eliminando la contesa host.
+
+---
+
+## 2. File da Modificare e Contratti Esatti
+
+### 2.1 `duplex_kernel/server_metrics.py`
+In `_send_unified_native_finalizer_event(send, response_id, *, status, rollback_metrics=None, drain_metrics=None, runtime_metrics=None, error=None)`:
+- NON sovrascrivere `event["runtime_metrics"] = dict(runtime_metrics)`.
+- `event` viene creato da `_unified_native_finalizer_event(...)` che include già le fasi compatte `unified_native_rollback` e `unified_native_finalizer`.
+- Se `runtime_metrics` è passato come `Mapping`:
+  Filtrare `runtime_metrics` usando `_filter_unified_native_event_metrics(runtime_metrics)`.
+  Aggiornare `event["runtime_metrics"]` unicamente con questo delta compatto e tipizzato (se non vuoto), o preservare le fasi compatte.
+  In questo modo l'evento inviato via WebSocket rimane piccolo (~1-2 KB al massimo) invece di 153 KB.
+- Assicurarsi che i test esistenti in `tests/kernel/test_unified_kv_server_gate.py` (es. righe 3661-3664) continuino a passare al 100%.
+
+### 2.2 `duplex_kernel/listener.py`
+In `commit_microbatch_output(self, user_pcm_t, assistant_reference_t, state, row_output, *, source_available_at_ns, timing_sink=None)`:
+Riorganizzare l'esecuzione in 3 fasi rigorose:
+1. **Fase 1: Preparazione e Validazione FUORI DA `state._lock`**:
+   - Validare argomenti base: `isinstance(state, GemmaListenerState)`, `source_available_at_ns`.
+   - Se `hasattr(self.backend, "_tick_started_event")` e non None, settarlo.
+   - Validare `user_pcm_t`: `user = self._validate_user_pcm(user_pcm_t, self.frame_samples)`.
+   - Pre-convertire PCM utente: `prepared_user_pcm = np.array(user, dtype=np.float32, copy=True)`.
+   - Pre-convertire reference: `reference = self._coerce_reference(assistant_reference_t, frame_id=int(getattr(row_output, "frame_id", getattr(state, "next_frame_id", 0))))`.
+   - Pre-convertire PCM assistant: `prepared_asst_pcm = (np.zeros(self.frame_samples, dtype=np.float32) if reference is None else np.array(reference.pcm, dtype=np.float32, copy=True))`.
+   - Verificare forme tensori `hidden`, `queries`, `tower`:
+     `hidden_size = int(getattr(self.backend, "hidden_size", 1536))`
+     `[1, hidden_size]`, `[AUDIO_FEATURES_PER_FRAME, hidden_size]`, `[AUDIO_FEATURES_PER_FRAME, hidden_size]`.
+   - Pre-detach dei tensori: `detached_hidden = hidden.detach()`, `detached_queries = queries.detach()`.
+   - Validare `snapshot = getattr(row_output, "state_snapshot", None)`: sollevare `RuntimeError("microbatch row lacks its committed frontend-state snapshot")` se None.
+   - Pre-convertire mel histories:
+     `user_mel_values = getattr(snapshot, "user_mel_history", None)`
+     `asst_mel_values = getattr(snapshot, "assistant_mel_history", None)`
+     Se uno di essi è None, sollevare `RuntimeError(...)`.
+     `prepared_user_mel = [np.array(v, dtype=np.float32, copy=True) for v in user_mel_values]`
+     `prepared_asst_mel = [np.array(v, dtype=np.float32, copy=True) for v in asst_mel_values]`
+   - Pre-convertire tails:
+     `prepared_user_tail = (None if snapshot.user_pcm_tail is None else np.array(snapshot.user_pcm_tail, dtype=np.float32, copy=True))`
+     `prepared_asst_tail = (None if snapshot.assistant_pcm_tail is None else np.array(snapshot.assistant_pcm_tail, dtype=np.float32, copy=True))`
+   - Se una qualsiasi eccezione si verifica in questa fase, lo stato non è stato minimamente alterato.
+
+2. **Fase 2: Commit Atomico DENTRO `state._lock` (`with state_lock_context`)**:
+   - `state.last_frontend_wall_ms = None`
+   - `state.last_audio_tower_call_wall_ms = None`
+   - All'ingresso di `with state_lock_context:`:
+     - Verificare `if state._closed: raise RuntimeError("GemmaListenerState chiuso")`
+     - Verificare `state.sample_rate == self.sample_rate` e `state.frame_duration_ms == self.frame_duration_ms`.
+     - `frame_id = int(state.next_frame_id)`
+     - Verificare `int(getattr(row_output, "frame_id", -1)) == frame_id`.
+     - Verificare `str(getattr(row_output, "state_epoch_id", "")) == state.state_epoch_id`.
+     - `expected_version = int(state.listener_state_version) + 1`
+     - Verificare `int(getattr(row_output, "listener_state_version", -1)) == expected_version`.
+     - Applicare le strutture già preparate:
+       `state.user_pcm_history.append(prepared_user_pcm)`
+       `state.assistant_pcm_history.append(prepared_asst_pcm)`
+       `state.user_mel_history.clear(); state.user_mel_history.extend(prepared_user_mel)`
+       `state.assistant_mel_history.clear(); state.assistant_mel_history.extend(prepared_asst_mel)`
+       `state.user_pcm_tail = prepared_user_tail`
+       `state.assistant_pcm_tail = prepared_asst_tail`
+     - Aggiornare i cursori con `_commit_listener_input_cursors(state, user_pcm=user, reference=reference, frame_id=frame_id, frame_samples=self.frame_samples, frame_duration_ms=self.frame_duration_ms)`
+     - Verificare `state.listener_state_version == expected_version`.
+     - Assegnare `state.native_last_hidden = detached_hidden`, `state.last_hidden = detached_hidden`, `state.last_audio_queries = detached_queries`.
+     - Assegnare `last_lock_wait_ms`, `last_lock_hold_ms`, `last_hidden_source_frame_id = frame_id`, `last_hidden_at_ns = int(source_available_at_ns)`.
+     - Aggiornare `gemma_lm_audio_frames`, `gemma_lm_source_frame_ids`, `gemma_lm_context_start_frame`, `gemma_lm_last_source_frame_id`.
+     - Resettare `state.gemma_lm_text_context = ()`, cache, native, ecc.
+     - Aggiornare `semantic_context_revision`, `cache_epoch_id`, `applied_history_revision` secondo i contratti esistenti.
+     - Settare `_frame_done_event` e incrementare `_frame_counter` se presenti in `self.backend`.
+     - Catturare i valori necessari per l'output: `audio_timestamp = state.last_audio_timestamp`, `listener_state_version = state.listener_state_version`, `ref_frame_id = state.last_reference_frame_id`.
+
+3. **Fase 3: Costruzione e Ritorno di `ListenerOutput` FUORI DA `state._lock`**:
+   - `state_lock_context` viene rilasciato immediatamente.
+   - Costruire e restituire `ListenerOutput`:
+     ```python
+     return ListenerOutput(
+         gemma_hidden_t=detached_hidden,
+         audio_timestamp=audio_timestamp,
+         listener_state_version=listener_state_version,
+         finite=True,
+         frame_id=frame_id,
+         reference_frame_id=ref_frame_id,
+         audio_tower_hidden=tower,
+         gemma_audio_queries_t=detached_queries,
+         source_frame_id=frame_id,
+         source_available_at_ns=int(source_available_at_ns),
+         fresh=True,
+         silence_skipped=False,
+     )
+     ```
+
+### 2.3 `duplex_kernel/server_realtime_scheduler.py`
+In `_record_listener_commit_timing(tick: Any, commit_timing: dict[str, int]) -> None`:
+- Preservare tutti i campi esistenti: `tick.microbatch_commit_end_ns`, `tick.microbatch_commit_state_lock_wait_ms`, `tick.microbatch_commit_state_lock_hold_ms`, `tick.microbatch_commit_state_lock_acquired_ns`, `tick.microbatch_commit_state_lock_released_ns`.
+- Se `commit_timing` contiene `prepare_ms` o `prepare_ns`, registrarlo come `tick.microbatch_commit_prepare_ms` per trasparenza telemetrica.
+
+### 2.4 Nuovi Test di Regressione Unitaria
+In `tests/kernel/test_listener_commit_atomic.py`:
+1. **`test_commit_microbatch_output_prepare_error_leaves_state_unmodified`**:
+   Verificare che se `row_output` ha un formato non valido (es. shape errata o `state_snapshot` mancante), l'eccezione viene sollevata e `state.user_pcm_history`, `state.next_frame_id`, `state.listener_state_version` rimangono invariati.
+2. **`test_commit_microbatch_output_minimal_lock_hold_and_valid_output`**:
+   Verificare che `commit_microbatch_output` esegua con successo, aggiorni atomicamente tutti i campi di `GemmaListenerState`, e restituisca un `ListenerOutput` valido e conforme.
+3. **`test_send_unified_native_finalizer_event_payload_is_compact`**:
+   Verificare che `_send_unified_native_finalizer_event` produca un payload compatto contenente solo i campi essenziali (`unified_native_rollback`, `unified_native_finalizer`, `status`, `response_id`) anche quando gli viene passato un dizionario `runtime_metrics` di grandi dimensioni (ad es. contenente tracce o timeline lock).
+
+---
+
+## 3. Criteri di Accettazione e Verifica
+1. I 129 test esistenti devono continuare a passare al 100% senza alcuna regressione (`pytest -q`).
+2. I nuovi test in `tests/kernel/test_listener_commit_atomic.py` devono passare al 100%.
+3. Nessun manifest o burocrazia introdotta.
+4. Codice pulito, privo di commenti descrittivi o logica difensiva superflua.

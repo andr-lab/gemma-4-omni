@@ -799,18 +799,22 @@ def _commit_listener_input_cursors(
     frame_id: int,
     frame_samples: int,
     frame_duration_ms: int,
+    lineage_digests: tuple[str, str | None] | None = None,
 ) -> None:
     """Commit shared counters and input lineage while state._lock is held."""
+    if lineage_digests is None:
+        user_digest = hashlib.sha256(
+            np.ascontiguousarray(user_pcm, dtype="<f4").tobytes()
+        ).hexdigest()
+        reference_digest = None if reference is None else hashlib.sha256(
+            np.ascontiguousarray(reference.pcm, dtype="<f4").tobytes()
+        ).hexdigest()
+    else:
+        user_digest, reference_digest = lineage_digests
     state.listener_input_frames += 1
     state.total_samples += int(frame_samples)
     state.next_frame_id += 1
     state.listener_state_version += 1
-    user_digest = hashlib.sha256(
-        np.ascontiguousarray(user_pcm, dtype="<f4").tobytes()
-    ).hexdigest()
-    reference_digest = None if reference is None else hashlib.sha256(
-        np.ascontiguousarray(reference.pcm, dtype="<f4").tobytes()
-    ).hexdigest()
     state.state_lineage_digest = state_lineage_digest(
         state.state_lineage_digest,
         state_epoch_id=state.state_epoch_id,
@@ -889,6 +893,13 @@ class GemmaListenerState:
         default_factory=lambda: deque(maxlen=DEFAULT_CONTEXT_FRAMES), repr=False, compare=False
     )
     semantic_context_revision: int | None = field(default=None, repr=False, compare=False)
+    cache_epoch_id: int = field(default=0, repr=False, compare=False)
+    native_semantic_context_revision: int | None = field(
+        default=None, repr=False, compare=False
+    )
+    applied_history_revision: str | int | None = field(
+        default=None, repr=False, compare=False
+    )
     semantic_replay_fallback_reason: str | None = field(default=None, repr=False, compare=False)
     gemma_lm_terminal_error: str | None = field(default=None, repr=False, compare=False)
     native_last_hidden: Any | None = field(default=None, repr=False, compare=False)
@@ -989,6 +1000,9 @@ class GemmaListenerState:
             self.gemma_lm_prefix_len = 34
             self.gemma_lm_prefix_attention = None
             self.semantic_context_revision = None
+            self.cache_epoch_id = 0
+            self.native_semantic_context_revision = None
+            self.applied_history_revision = None
 
     def close(self) -> None:
         with self._lock:
@@ -1016,6 +1030,9 @@ class GemmaListenerState:
                 self.semantic_audio_soft_history.clear()
                 self.gemma_lm_audio_soft_history.clear()
                 self.semantic_context_revision = None
+                self.cache_epoch_id = 0
+                self.native_semantic_context_revision = None
+                self.applied_history_revision = None
                 self.semantic_replay_fallback_reason = None
             self.gemma_lm_audio_frames = 0
             self.gemma_lm_context_start_frame = 0
@@ -1078,6 +1095,9 @@ class GemmaListenerState:
             self.gemma_lm_prefix_len = 34
             self.gemma_lm_prefix_attention = None
             self.semantic_context_revision = None
+            self.cache_epoch_id = 0
+            self.native_semantic_context_revision = None
+            self.applied_history_revision = None
             self.semantic_replay_fallback_reason = None
             self.last_hidden = None
             self.last_audio_queries = None
@@ -3334,17 +3354,156 @@ class GemmaListener:
         lineage, and output history as ``_step_registered`` before the normal
         per-session policy/V9 callback continues.
         """
+        prepare_started_ns = time.monotonic_ns()
         if not isinstance(state, GemmaListenerState):
             raise TypeError("state deve essere GemmaListenerState")
         if isinstance(source_available_at_ns, bool) or not isinstance(source_available_at_ns, int):
             raise ValueError("source_available_at_ns must be an integer monotonic timestamp")
         if hasattr(self.backend, "_tick_started_event") and self.backend._tick_started_event is not None:
             self.backend._tick_started_event.set()
-        state.last_frontend_wall_ms = None
-        state.last_audio_tower_call_wall_ms = None
+        user = self._validate_user_pcm(user_pcm_t, self.frame_samples)
+        prepared_user_pcm = np.array(user, dtype=np.float32, copy=True)
+        row_frame_id = int(
+            getattr(row_output, "frame_id", getattr(state, "next_frame_id", 0))
+        )
+        reference = self._coerce_reference(
+            assistant_reference_t,
+            frame_id=row_frame_id,
+        )
+        prepared_asst_pcm = (
+            np.zeros(self.frame_samples, dtype=np.float32)
+            if reference is None
+            else np.array(reference.pcm, dtype=np.float32, copy=True)
+        )
+        hidden = getattr(row_output, "gemma_hidden_t", None)
+        queries = getattr(row_output, "gemma_audio_queries_t", None)
+        tower = getattr(row_output, "audio_tower_hidden", None)
+        hidden_size = int(getattr(self.backend, "hidden_size", 1536))
+        if tuple(getattr(hidden, "shape", ())) != (1, hidden_size):
+            raise RuntimeError(f"microbatch row hidden must have shape [1,{hidden_size}]")
+        if tuple(getattr(queries, "shape", ())) != (
+            AUDIO_FEATURES_PER_FRAME,
+            hidden_size,
+        ):
+            raise RuntimeError(
+                f"microbatch row Q2 queries must have shape "
+                f"[{AUDIO_FEATURES_PER_FRAME},{hidden_size}]"
+            )
+        if tuple(getattr(tower, "shape", ())) != (
+            AUDIO_FEATURES_PER_FRAME,
+            hidden_size,
+        ):
+            raise RuntimeError(
+                f"microbatch row audio tower output must have shape "
+                f"[{AUDIO_FEATURES_PER_FRAME},{hidden_size}]"
+            )
+        detached_hidden = hidden.detach()
+        detached_queries = queries.detach()
+
+        snapshot = getattr(row_output, "state_snapshot", None)
+        if snapshot is None:
+            raise RuntimeError("microbatch row lacks its committed frontend-state snapshot")
+        user_mel_values = getattr(snapshot, "user_mel_history", None)
+        asst_mel_values = getattr(snapshot, "assistant_mel_history", None)
+        if user_mel_values is None:
+            raise RuntimeError("microbatch state snapshot lacks user_mel_history")
+        if asst_mel_values is None:
+            raise RuntimeError("microbatch state snapshot lacks assistant_mel_history")
+        prepared_user_mel = [
+            np.array(value, dtype=np.float32, copy=True) for value in user_mel_values
+        ]
+        prepared_asst_mel = [
+            np.array(value, dtype=np.float32, copy=True) for value in asst_mel_values
+        ]
+        user_pcm_tail = getattr(snapshot, "user_pcm_tail", None)
+        assistant_pcm_tail = getattr(snapshot, "assistant_pcm_tail", None)
+        prepared_user_tail = (
+            None
+            if user_pcm_tail is None
+            else np.array(user_pcm_tail, dtype=np.float32, copy=True)
+        )
+        prepared_asst_tail = (
+            None
+            if assistant_pcm_tail is None
+            else np.array(assistant_pcm_tail, dtype=np.float32, copy=True)
+        )
+        lineage_digests = (
+            hashlib.sha256(np.ascontiguousarray(user, dtype="<f4").tobytes()).hexdigest(),
+            None
+            if reference is None
+            else hashlib.sha256(
+                np.ascontiguousarray(reference.pcm, dtype="<f4").tobytes()
+            ).hexdigest(),
+        )
+
+        row_state_epoch_id = str(getattr(row_output, "state_epoch_id", ""))
+        row_listener_state_version = int(getattr(row_output, "listener_state_version", -1))
+        native_state = getattr(row_output, "native_state", None)
+        current_position = getattr(native_state, "current_position", None)
+        prefix_len = getattr(native_state, "prefix_len", None)
+        native_audio_frames = (
+            max(
+                0,
+                (int(current_position) - int(prefix_len)) // AUDIO_FEATURES_PER_FRAME,
+            )
+            if isinstance(current_position, int) and isinstance(prefix_len, int)
+            else None
+        )
+        row_prefix_revision = getattr(row_output, "semantic_context_revision", None)
+        incoming_native_revision = (
+            None if row_prefix_revision is None else int(row_prefix_revision)
+        )
+        semantic_fallback_reason = getattr(
+            row_output, "semantic_replay_fallback_reason", None
+        )
+        prefix_length = getattr(row_output, "semantic_prefix_len", None)
+        row_cache_epoch = getattr(row_output, "cache_epoch_id", None)
+        applied_history_revision = getattr(
+            row_output, "applied_history_revision", None
+        )
+        applied_history_revision_is_int = (
+            isinstance(applied_history_revision, int)
+            and not isinstance(applied_history_revision, bool)
+        )
+        last_lock_wait_ms = getattr(row_output, "listener_model_lock_wait_ms", None)
+        last_lock_hold_ms = getattr(row_output, "listener_model_lock_hold_ms", None)
+        native_output_health = getattr(row_output, "native_output_health", None)
+        native_control6_raw_scores = getattr(
+            row_output, "native_control6_raw_scores", None
+        )
+        listener_generation_id = int(getattr(row_output, "generation_id"))
+        listener_sequence_position = int(getattr(row_output, "sequence_position"))
+        listener_cache_position = int(getattr(row_output, "cache_position"))
+        logical_q_len = int(getattr(row_output, "logical_q_len"))
+        ephemeral_reason = getattr(row_output, "ephemeral_reason", None)
+        queue_audio_for_next_turn = bool(
+            getattr(row_output, "queue_audio_for_next_turn", False)
+        )
+        kv_rollback_tokens = int(getattr(row_output, "kv_rollback_tokens", 0))
+        kv_rollback_enqueue_ms = float(
+            getattr(row_output, "kv_rollback_enqueue_ms", 0.0)
+        )
+        listener_valid_history_tokens = int(
+            getattr(row_output, "valid_history_tokens")
+        )
+        native_cache_current_position_after = (
+            int(current_position) if current_position is not None else None
+        )
+        native_cache_valid_kv_len = getattr(native_state, "valid_kv_len", None)
+        native_cache_valid_kv_len_after = (
+            int(native_cache_valid_kv_len)
+            if native_cache_valid_kv_len is not None
+            else None
+        )
+        if timing_sink is not None:
+            timing_sink["prepare_ns"] = max(
+                0, time.monotonic_ns() - prepare_started_ns
+            )
+
         state_lock_context = (
             _timed_lock(state._lock, timing_sink, name="state_lock")
-            if timing_sink is not None else state._lock
+            if timing_sink is not None
+            else state._lock
         )
         with state_lock_context:
             if state._closed:
@@ -3352,50 +3511,42 @@ class GemmaListener:
             if state.sample_rate != self.sample_rate or state.frame_duration_ms != self.frame_duration_ms:
                 raise ValueError("state e listener hanno sample-rate/frame-duration diversi")
             frame_id = int(state.next_frame_id)
-            if int(getattr(row_output, "frame_id", -1)) != frame_id:
+            if row_frame_id != frame_id:
                 raise RuntimeError("microbatch row frame does not match the listener cursor")
-            if str(getattr(row_output, "state_epoch_id", "")) != state.state_epoch_id:
+            if row_state_epoch_id != state.state_epoch_id:
                 raise RuntimeError("microbatch row state epoch does not match the listener")
             expected_version = int(state.listener_state_version) + 1
-            if int(getattr(row_output, "listener_state_version", -1)) != expected_version:
+            if row_listener_state_version != expected_version:
                 raise RuntimeError("microbatch row state version does not follow the listener cursor")
-            user = self._validate_user_pcm(user_pcm_t, self.frame_samples)
-            reference = self._coerce_reference(assistant_reference_t, frame_id=frame_id)
-            hidden = getattr(row_output, "gemma_hidden_t", None)
-            queries = getattr(row_output, "gemma_audio_queries_t", None)
-            tower = getattr(row_output, "audio_tower_hidden", None)
-            hidden_size = int(getattr(self.backend, "hidden_size", 1536))
-            if tuple(getattr(hidden, "shape", ())) != (1, hidden_size):
-                raise RuntimeError("microbatch row hidden must have shape [1,1536]")
-            if tuple(getattr(queries, "shape", ())) != (AUDIO_FEATURES_PER_FRAME, hidden_size):
-                raise RuntimeError("microbatch row Q2 queries must have shape [2,1536]")
-            if tuple(getattr(tower, "shape", ())) != (AUDIO_FEATURES_PER_FRAME, hidden_size):
-                raise RuntimeError("microbatch row audio tower output must have shape [2,1536]")
+            current_history_revision = state.applied_history_revision
+            should_update_history = applied_history_revision is not None and (
+                current_history_revision is None
+            )
+            if applied_history_revision_is_int:
+                should_update_history = (
+                    current_history_revision is None
+                    or (
+                        isinstance(current_history_revision, int)
+                        and not isinstance(current_history_revision, bool)
+                        and applied_history_revision >= current_history_revision
+                    )
+                )
+            elif (
+                applied_history_revision is not None
+                and current_history_revision == applied_history_revision
+            ):
+                should_update_history = True
 
-            state.user_pcm_history.append(np.array(user, dtype=np.float32, copy=True))
-            state.assistant_pcm_history.append(
-                np.zeros(self.frame_samples, dtype=np.float32)
-                if reference is None else np.array(reference.pcm, dtype=np.float32, copy=True)
-            )
-            snapshot = getattr(row_output, "state_snapshot", None)
-            if snapshot is None:
-                raise RuntimeError("microbatch row lacks its committed frontend-state snapshot")
-            for name in ("user_mel_history", "assistant_mel_history"):
-                values = getattr(snapshot, name, None)
-                if values is None:
-                    raise RuntimeError(f"microbatch state snapshot lacks {name}")
-                history = getattr(state, name)
-                history.clear()
-                history.extend(np.array(value, dtype=np.float32, copy=True) for value in values)
-            state.user_pcm_tail = (
-                None if snapshot.user_pcm_tail is None
-                else np.array(snapshot.user_pcm_tail, dtype=np.float32, copy=True)
-            )
-            state.assistant_pcm_tail = (
-                None if snapshot.assistant_pcm_tail is None
-                else np.array(snapshot.assistant_pcm_tail, dtype=np.float32, copy=True)
-            )
-
+            state.last_frontend_wall_ms = None
+            state.last_audio_tower_call_wall_ms = None
+            state.user_pcm_history.append(prepared_user_pcm)
+            state.assistant_pcm_history.append(prepared_asst_pcm)
+            state.user_mel_history.clear()
+            state.user_mel_history.extend(prepared_user_mel)
+            state.assistant_mel_history.clear()
+            state.assistant_mel_history.extend(prepared_asst_mel)
+            state.user_pcm_tail = prepared_user_tail
+            state.assistant_pcm_tail = prepared_asst_tail
             _commit_listener_input_cursors(
                 state,
                 user_pcm=user,
@@ -3403,29 +3554,21 @@ class GemmaListener:
                 frame_id=frame_id,
                 frame_samples=self.frame_samples,
                 frame_duration_ms=self.frame_duration_ms,
+                lineage_digests=lineage_digests,
             )
             if state.listener_state_version != expected_version:
                 raise RuntimeError("listener cursor commit changed an unexpected state version")
-            state.native_last_hidden = hidden.detach()
-            state.last_hidden = state.native_last_hidden
-            state.last_audio_queries = queries.detach()
-            state.last_lock_wait_ms = getattr(
-                row_output, "listener_model_lock_wait_ms", None
-            )
-            state.last_lock_hold_ms = getattr(
-                row_output, "listener_model_lock_hold_ms", None
-            )
+            state.native_last_hidden = detached_hidden
+            state.last_hidden = detached_hidden
+            state.last_audio_queries = detached_queries
+            state.last_lock_wait_ms = last_lock_wait_ms
+            state.last_lock_hold_ms = last_lock_hold_ms
             state.last_hidden_source_frame_id = frame_id
             state.last_hidden_at_ns = int(source_available_at_ns)
-            native_state = getattr(row_output, "native_state", None)
-            current_position = getattr(native_state, "current_position", None)
-            prefix_len = getattr(native_state, "prefix_len", None)
-            if isinstance(current_position, int) and isinstance(prefix_len, int):
-                state.gemma_lm_audio_frames = max(
-                    0, (int(current_position) - int(prefix_len)) // AUDIO_FEATURES_PER_FRAME
-                )
-            else:
+            if native_audio_frames is None:
                 state.gemma_lm_audio_frames += 1
+            else:
+                state.gemma_lm_audio_frames = native_audio_frames
             state.gemma_lm_source_frame_ids.append(frame_id)
             retained = max(1, int(state.gemma_lm_audio_frames))
             if len(state.gemma_lm_source_frame_ids) > retained:
@@ -3438,67 +3581,63 @@ class GemmaListener:
             state.gemma_lm_shared_kv_states = None
             state.gemma_lm_native = None
             state.gemma_lm_terminal_error = None
-            row_prefix_revision = getattr(row_output, "semantic_context_revision", None)
-            if row_prefix_revision is not None:
-                state.semantic_context_revision = int(row_prefix_revision)
-                state.semantic_replay_fallback_reason = getattr(
-                    row_output, "semantic_replay_fallback_reason", None
-                )
-                prefix_length = getattr(row_output, "semantic_prefix_len", None)
+            if incoming_native_revision is not None:
+                if (
+                    state.native_semantic_context_revision is None
+                    or incoming_native_revision >= state.native_semantic_context_revision
+                ):
+                    state.native_semantic_context_revision = incoming_native_revision
+                state.semantic_replay_fallback_reason = semantic_fallback_reason
                 if isinstance(prefix_length, int) and not isinstance(prefix_length, bool):
                     state.gemma_lm_prefix_len = prefix_length
+
+            if (
+                isinstance(row_cache_epoch, int)
+                and not isinstance(row_cache_epoch, bool)
+                and row_cache_epoch >= state.cache_epoch_id
+            ):
+                state.cache_epoch_id = row_cache_epoch
+            if should_update_history:
+                state.applied_history_revision = applied_history_revision
+                if applied_history_revision_is_int:
+                    state.semantic_context_revision = applied_history_revision
 
             if hasattr(self.backend, "_frame_done_event") and self.backend._frame_done_event is not None:
                 self.backend._frame_done_event.set()
             if hasattr(self.backend, "_frame_counter") and self.backend._frame_counter is not None:
                 self.backend._frame_counter += 1
+            audio_timestamp = state.last_audio_timestamp
+            listener_state_version = state.listener_state_version
+            ref_frame_id = state.last_reference_frame_id
 
-            return ListenerOutput(
-                gemma_hidden_t=hidden,
-                audio_timestamp=state.last_audio_timestamp,
-                listener_state_version=state.listener_state_version,
-                finite=True,
-                frame_id=frame_id,
-                reference_frame_id=state.last_reference_frame_id,
-                audio_tower_hidden=tower,
-                gemma_audio_queries_t=queries,
-                source_frame_id=frame_id,
-                source_available_at_ns=int(source_available_at_ns),
-                fresh=True,
-                silence_skipped=False,
-                native_output_health=getattr(row_output, "native_output_health", None),
-                native_control6_raw_scores=getattr(
-                    row_output, "native_control6_raw_scores", None
-                ),
-                listener_generation_id=int(getattr(row_output, "generation_id")),
-                listener_state_epoch_id=str(getattr(row_output, "state_epoch_id")),
-                listener_sequence_position=int(getattr(row_output, "sequence_position")),
-                listener_cache_position=int(getattr(row_output, "cache_position")),
-                logical_q_len=int(getattr(row_output, "logical_q_len")),
-                ephemeral_reason=getattr(row_output, "ephemeral_reason", None),
-                queue_audio_for_next_turn=bool(
-                    getattr(row_output, "queue_audio_for_next_turn", False)
-                ),
-                kv_rollback_tokens=int(getattr(row_output, "kv_rollback_tokens", 0)),
-                kv_rollback_enqueue_ms=float(
-                    getattr(row_output, "kv_rollback_enqueue_ms", 0.0)
-                ),
-                listener_valid_history_tokens=int(
-                    getattr(row_output, "valid_history_tokens")
-                ),
-                native_cache_current_position_after=(
-                    int(getattr(getattr(row_output, "native_state", None), "current_position"))
-                    if getattr(getattr(row_output, "native_state", None), "current_position", None)
-                    is not None
-                    else None
-                ),
-                native_cache_valid_kv_len_after=(
-                    int(getattr(getattr(row_output, "native_state", None), "valid_kv_len"))
-                    if getattr(getattr(row_output, "native_state", None), "valid_kv_len", None)
-                    is not None
-                    else None
-                ),
-            )
+        return ListenerOutput(
+            gemma_hidden_t=detached_hidden,
+            audio_timestamp=audio_timestamp,
+            listener_state_version=listener_state_version,
+            finite=True,
+            frame_id=frame_id,
+            reference_frame_id=ref_frame_id,
+            audio_tower_hidden=tower,
+            gemma_audio_queries_t=detached_queries,
+            source_frame_id=frame_id,
+            source_available_at_ns=int(source_available_at_ns),
+            fresh=True,
+            silence_skipped=False,
+            native_output_health=native_output_health,
+            native_control6_raw_scores=native_control6_raw_scores,
+            listener_generation_id=listener_generation_id,
+            listener_state_epoch_id=row_state_epoch_id,
+            listener_sequence_position=listener_sequence_position,
+            listener_cache_position=listener_cache_position,
+            logical_q_len=logical_q_len,
+            ephemeral_reason=ephemeral_reason,
+            queue_audio_for_next_turn=queue_audio_for_next_turn,
+            kv_rollback_tokens=kv_rollback_tokens,
+            kv_rollback_enqueue_ms=kv_rollback_enqueue_ms,
+            listener_valid_history_tokens=listener_valid_history_tokens,
+            native_cache_current_position_after=native_cache_current_position_after,
+            native_cache_valid_kv_len_after=native_cache_valid_kv_len_after,
+        )
 
     def prime_steady_state(self, state: GemmaListenerState) -> None:
         if hasattr(self.backend, "prime_steady_state"):

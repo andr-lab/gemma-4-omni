@@ -49,7 +49,6 @@ if [[ "$UNIFIED_KV" == "1" ]]; then
 fi
 readonly LISTENER_MICROBATCH_SEMANTIC_SHADOW
 readonly LISTENER_MICROBATCH_GEMM_GRAPHS="${DUPLEX_LISTENER_MICROBATCH_GEMM_GRAPHS:-0}"
-readonly LISTENER_SOURCE_ROOT_RELATIVE="${DUPLEX_LISTENER_MICROBATCH_SOURCE_ROOT:-artifacts/runtime/control6_runtime_pendingpcm_phaseonly_q2cachemeta_build14_stableturn_q2_context_h3000_eos_20261021}"
 readonly NATIVE_CONTROL6_TRACE="${DUPLEX_NATIVE_CONTROL6_TRACE:-0}"
 readonly NATIVE_CONTROL6_DEBUG_INPUT_DIRECTORY="${DUPLEX_NATIVE_CONTROL6_DEBUG_INPUT_DIRECTORY:-}"
 readonly STABLE_TURN_POLICY_Q2_CONTEXT="${DUPLEX_NATIVE_CONTROL6_STABLE_TURN_POLICY_Q2_CONTEXT:-1}"
@@ -60,6 +59,25 @@ readonly SPLITK_LAYER_MASK="${GEMMA4_SPLITK_LAYER_MASK:-STATE_SAFE_HYBRID}"
 readonly INPUT_STREAM_PRIORITY="${GEMMA4_DUPLEX_INPUT_STREAM_PRIORITY:-default}"
 readonly CUDA_TIMING="${GEMMA4_DUPLEX_CUDA_TIMING:-0}"
 readonly NATIVE_Q4_GEMV4="${GEMMA4_NATIVE_Q4_GEMV4:-0}"
+readonly RESPONSE_TALK_CONTEXT_CAPACITY="${DUPLEX_RESPONSE_TALK_CONTEXT_CAPACITY:-1}"
+if [[ ! "$RESPONSE_TALK_CONTEXT_CAPACITY" =~ ^[1-9][0-9]*$ ]]; then
+  echo "speech service: DUPLEX_RESPONSE_TALK_CONTEXT_CAPACITY must be a positive integer" >&2
+  exit 1
+fi
+readonly GPU_ADMISSION_CAPACITY="${DUPLEX_GPU_ADMISSION_CAPACITY:-1}"
+if [[ ! "$GPU_ADMISSION_CAPACITY" =~ ^[1-9][0-9]*$ ]]; then
+  echo "speech service: DUPLEX_GPU_ADMISSION_CAPACITY must be a positive integer" >&2
+  exit 1
+fi
+readonly READY_FRAME_SCHEDULER_DISPATCH="${GEMMA4_OMNI_READY_FRAME_SCHEDULER_DISPATCH:-1}"
+case "$READY_FRAME_SCHEDULER_DISPATCH" in
+  0|1) ;;
+  *) echo "speech service: GEMMA4_OMNI_READY_FRAME_SCHEDULER_DISPATCH must be 0 or 1" >&2; exit 1 ;;
+esac
+if [[ "$GPU_ADMISSION_CAPACITY" -gt "$RESPONSE_TALK_CONTEXT_CAPACITY" ]]; then
+  echo "speech service: GPU admission capacity cannot exceed response talk context capacity" >&2
+  exit 1
+fi
 case "$LISTENER_MICROBATCH" in
   0|1) ;;
   *) echo "speech service: DUPLEX_LISTENER_MICROBATCH must be 0 or 1" >&2; exit 1 ;;
@@ -139,9 +157,8 @@ readonly ENABLE_NATIVE_CONTROL6="${DUPLEX_ENABLE_GEMMA_NATIVE_CONTROL6:-1}"
 readonly NATIVE_CONTROL6_ADAPTER_RELATIVE_PATH="${DUPLEX_NATIVE_CONTROL6_ADAPTER_RELATIVE_PATH:-$DEFAULT_NATIVE_CONTROL6_ADAPTER_RELATIVE_PATH}"
 readonly NATIVE_CONTROL6_ADAPTER_HOST="$REPO_ROOT/$NATIVE_CONTROL6_ADAPTER_RELATIVE_PATH"
 readonly QWEN_LIB_CONTAINER="/workspace/artifacts/runtime/libqwen_talker_abi4.so"
-readonly LISTENER_SOURCE_ROOT_HOST="$REPO_ROOT/$LISTENER_SOURCE_ROOT_RELATIVE"
-readonly LISTENER_SOURCE_ROOT_CONTAINER="/workspace/$LISTENER_SOURCE_ROOT_RELATIVE"
-readonly LISTENER_PYTHONPATH="$LISTENER_SOURCE_ROOT_CONTAINER:$LISTENER_SOURCE_ROOT_CONTAINER/runtimepackages_original:/workspace"
+readonly LISTENER_VENDOR_PACKAGES_CONTAINER="/workspace/artifacts/runtime/listener_microbatch_source/runtimepackages_original"
+readonly LISTENER_PYTHONPATH="/workspace:$LISTENER_VENDOR_PACKAGES_CONTAINER"
 readonly ADAPTER_CONTAINER="/workspace/checkpoints/frame_residual_adapter_emovo_query_film_v2_candidate.pt"
 readonly NATIVE_CONTROL6_ADAPTER_CONTAINER="/workspace/$NATIVE_CONTROL6_ADAPTER_RELATIVE_PATH"
 
@@ -178,11 +195,6 @@ fi
 [[ "$LISTENER_LIB_RELATIVE_PATH" != /* ]] || fail "GEMMA4_NATIVE_LISTENER_LIBRARY_RELATIVE_PATH must be repository-relative"
 [[ "$LISTENER_LIB_RELATIVE_PATH" == artifacts/runtime/* ]] || fail "listener library must be under artifacts/runtime/"
 [[ "/$LISTENER_LIB_RELATIVE_PATH/" != *"/../"* ]] || fail "listener library path must not traverse outside artifacts/runtime/"
-[[ "$LISTENER_SOURCE_ROOT_RELATIVE" != /* ]] || fail "DUPLEX_LISTENER_MICROBATCH_SOURCE_ROOT must be repository-relative"
-[[ "$LISTENER_SOURCE_ROOT_RELATIVE" == artifacts/runtime/* ]] || fail "listener source root must be under artifacts/runtime/"
-[[ "/$LISTENER_SOURCE_ROOT_RELATIVE/" != *"/../"* ]] || fail "listener source root must not traverse outside artifacts/runtime/"
-[[ "$LISTENER_SOURCE_ROOT_RELATIVE" != *\\* ]] || fail "listener source root must use repository-relative POSIX separators"
-[[ "$LISTENER_SOURCE_ROOT_RELATIVE" != *:* ]] || fail "listener source root must not contain PYTHONPATH separators"
 
 [[ "$UNIFIED_KV" == "1" || "$NATIVE_CONTROL6_SEMANTIC_PREFIX" != "1" || "$LISTENER_MICROBATCH" != "1" || "$LISTENER_MICROBATCH_SEMANTIC_SHADOW" == "1" ]] || \
   fail "semantic-prefix Control6 microbatch requires DUPLEX_LISTENER_MICROBATCH_SEMANTIC_SHADOW=1"
@@ -197,30 +209,6 @@ done
 RUNTIME_HOST_REAL="$(realpath -e "$REPO_ROOT/artifacts/runtime")" || fail "artifacts/runtime is missing"
 LISTENER_LIB_REAL="$(realpath -e "$LISTENER_LIB_HOST")" || fail "listener library does not resolve inside artifacts/runtime"
 [[ "$LISTENER_LIB_REAL" == "$RUNTIME_HOST_REAL/"* ]] || fail "listener library resolves outside artifacts/runtime"
-[[ -d "$LISTENER_SOURCE_ROOT_HOST" ]] || fail "persistent listener source root is missing: $LISTENER_SOURCE_ROOT_HOST"
-LISTENER_SOURCE_ROOT_REAL="$(realpath -e "$LISTENER_SOURCE_ROOT_HOST")" || fail "persistent listener source root does not resolve"
-[[ "$LISTENER_SOURCE_ROOT_REAL" == "$RUNTIME_HOST_REAL/"* ]] || fail "listener source root resolves outside artifacts/runtime"
-for relative_module in \
-  duplex_kernel/__init__.py \
-  duplex_kernel/launch.py \
-  duplex_kernel/server.py \
-  duplex_kernel/gemma_representation.py \
-  duplex_kernel/gemma_native_control6_batch_policy.py \
-  duplex_kernel/gemma_native_control6_policy.py \
-  duplex_kernel/listener.py \
-  duplex_kernel/listener_microbatch.py \
-  duplex_kernel/listener_microbatch_serving.py \
-  duplex_kernel/listener_microbatch_worker.py \
-  duplex_kernel/listener_microbatch_frontend.py \
-  duplex_kernel/native_listener.py \
-  duplex_kernel/native_listener_microbatch.py \
-  duplex_kernel/microbatch_contract.py \
-  duplex_kernel/shared_listener_scheduler.py \
-  duplex_kernel/native_control6_runtime.py \
-  duplex_kernel/turn_policy.py \
-  runtimepackages_original/qwen_tts/__init__.py; do
-  [[ -f "$LISTENER_SOURCE_ROOT_HOST/$relative_module" ]] || fail "required persistent listener source module is missing: $LISTENER_SOURCE_ROOT_HOST/$relative_module"
-done
 cmp -s "$ADAPTER_HOST" "$ADAPTER_RUNTIME_HOST" || fail "runtime adapter copy differs from the approved Query FiLM v2 checkpoint"
 if [[ "$ENABLE_NATIVE_CONTROL6" == "1" ]]; then
   [[ -f "$NATIVE_CONTROL6_ADAPTER_HOST" ]] || fail "native Control6 adapter is missing: $NATIVE_CONTROL6_ADAPTER_HOST"
@@ -279,11 +267,13 @@ check_existing_container() {
   [[ "$image" == "$IMAGE" ]] || fail "existing $CONTAINER uses a different image; refusing to mutate it"
   [[ "$user" == "1000:1000" && "$ipc" == "host" && "$port" == "8000" ]] || fail "existing $CONTAINER does not match uid/ipc/port contract"
   [[ "$mounts" == *"$REPO_ROOT => /workspace"* && "$mounts" == *"/usr/local/cuda-13.1 => /usr/local/cuda"* ]] || fail "existing $CONTAINER mounts do not match this checkout/CUDA runtime"
-  [[ "$workdir" == "$LISTENER_SOURCE_ROOT_CONTAINER" ]] || fail "existing $CONTAINER does not use the persistent listener source as its working directory"
-  [[ "$cmd" == *"$LISTENER_SOURCE_ROOT_CONTAINER/duplex_kernel/launch.py"* ]] || fail "existing $CONTAINER does not use the persistent listener source entrypoint"
+  [[ "$workdir" == "/workspace" ]] || fail "existing $CONTAINER has workdir '$workdir' and uses stale speech-service source; replace it or set DUPLEX_SERVICE_CONTAINER to a new name for the changed container (free port 8000 first). The existing container is untouched for rollback."
+  [[ "$cmd" == *"/workspace/duplex_kernel/launch.py"* ]] || fail "existing $CONTAINER does not use /workspace/duplex_kernel/launch.py; replace it or set DUPLEX_SERVICE_CONTAINER to a new name for the changed container (free port 8000 first). The existing container is untouched for rollback."
   for arg in "$ADAPTER_CONTAINER" --frame-residual-adapter-checkpoint --ablate-response-lora --controller-guided-talk-context-pool --enforce-v9-training-voice; do
     [[ "$cmd" == *"$arg"* ]] || fail "existing $CONTAINER is missing launch argument: $arg"
   done
+  [[ "$cmd" == *"--response-talk-context-capacity"* && "$cmd" == *"$RESPONSE_TALK_CONTEXT_CAPACITY"* ]] || \
+    fail "existing $CONTAINER has stale Talker pool startup arguments; replace it or set DUPLEX_SERVICE_CONTAINER to a new name for the changed container (free port 8000 first). The existing container is untouched for rollback."
   if [[ "$ENABLE_NATIVE_CONTROL6" == "1" ]]; then
     for arg in --enable-gemma-native-control6 --native-control6-adapter "$NATIVE_CONTROL6_ADAPTER_CONTAINER"; do
       [[ "$cmd" == *"$arg"* ]] || fail "existing $CONTAINER is missing launch argument: $arg"
@@ -292,10 +282,14 @@ check_existing_container() {
     fail "existing $CONTAINER enables native Control6 but this launch requested it disabled"
   fi
   check_env DUPLEX_ENABLE_GEMMA_NATIVE_CONTROL6 "$ENABLE_NATIVE_CONTROL6"
+  check_env DUPLEX_RESPONSE_TALK_CONTEXT_CAPACITY "$RESPONSE_TALK_CONTEXT_CAPACITY"
+  check_env DUPLEX_GPU_ADMISSION_CAPACITY "$GPU_ADMISSION_CAPACITY"
   if [[ "$NATIVE_CONTROL6_TRACE" == "1" ]]; then
     check_env DUPLEX_NATIVE_CONTROL6_TRACE 1
   fi
   check_env DUPLEX_NATIVE_CONTROL6_STABLE_TURN_POLICY_Q2_CONTEXT "$STABLE_TURN_POLICY_Q2_CONTEXT"
+  check_env GEMMA4_OMNI_FIRST_INPUT_SCHEDULER_ANCHOR 0
+  check_env GEMMA4_OMNI_READY_FRAME_SCHEDULER_DISPATCH "$READY_FRAME_SCHEDULER_DISPATCH"
   check_env GEMMA4_OMNI_LISTENER_SILENCE_SKIP "$LISTENER_SILENCE_SKIP"
   check_env GEMMA4_OMNI_FRAME_RESIDUAL_ADAPTER_CKPT "$ADAPTER_CONTAINER"
   check_env GEMMA4_OMNI_DEFAULT_VOICE gemma
@@ -320,7 +314,6 @@ check_existing_container() {
   check_env DUPLEX_LISTENER_MICROBATCH "$LISTENER_MICROBATCH"
   check_env DUPLEX_LISTENER_MICROBATCH_SEMANTIC_SHADOW "$LISTENER_MICROBATCH_SEMANTIC_SHADOW"
   check_env DUPLEX_LISTENER_MICROBATCH_GEMM_GRAPHS "$LISTENER_MICROBATCH_GEMM_GRAPHS"
-  check_env DUPLEX_LISTENER_MICROBATCH_SOURCE_ROOT "$LISTENER_SOURCE_ROOT_RELATIVE"
   check_env PYTHONPATH "$LISTENER_PYTHONPATH"
   check_env GEMMA4_ATTENTION_BACKEND "$ATTENTION_BACKEND"
   check_env GEMMA4_SPLITK_LAYER_MASK "$SPLITK_LAYER_MASK"
@@ -355,10 +348,13 @@ else
     --publish 8000:8000 \
     --volume "$REPO_ROOT:/workspace" \
     --volume /usr/local/cuda-13.1:/usr/local/cuda:ro \
-    --workdir "$LISTENER_SOURCE_ROOT_CONTAINER" \
+    --workdir /workspace \
     --env DUPLEX_DIRECT_AUDIO_CANDIDATE=1 \
     --env DUPLEX_UNIFIED_KV="$UNIFIED_KV" \
     --env DUPLEX_AUDIO_RESPONSE_PROTOCOL="$RESPONSE_PROTOCOL" \
+    --env DUPLEX_RUNTIME_TELEMETRY="${DUPLEX_RUNTIME_TELEMETRY:-1}" \
+    --env GEMMA4_OMNI_FIRST_INPUT_SCHEDULER_ANCHOR=0 \
+    --env GEMMA4_OMNI_READY_FRAME_SCHEDULER_DISPATCH="$READY_FRAME_SCHEDULER_DISPATCH" \
     --env GEMMA4_OMNI_FRAME_RESIDUAL_ADAPTER_CKPT="$ADAPTER_CONTAINER" \
     --env GEMMA4_OMNI_DEFAULT_VOICE=gemma \
     --env GEMMA4_OMNI_CUSTOM_VOICE_DIR=/workspace/custom_voices \
@@ -366,6 +362,8 @@ else
     --env GEMMA4_OMNI_SPEAKER_REFERENCE_WAV=/workspace/artifacts/voices/reference.wav \
     --env GEMMA4_OMNI_SPEAKER_REFERENCE_SHA256=480f55f41c71c3d79c2a9acc48f0bfb3c5a46222e6e9ebf3e2888e93501a6b5c \
     --env DUPLEX_ENABLE_GEMMA_NATIVE_CONTROL6="$ENABLE_NATIVE_CONTROL6" \
+    --env DUPLEX_RESPONSE_TALK_CONTEXT_CAPACITY="$RESPONSE_TALK_CONTEXT_CAPACITY" \
+    --env DUPLEX_GPU_ADMISSION_CAPACITY="$GPU_ADMISSION_CAPACITY" \
     --env DUPLEX_NATIVE_CONTROL6_TRACE="$NATIVE_CONTROL6_TRACE" \
     --env DUPLEX_NATIVE_CONTROL6_DEBUG_INPUT_DIRECTORY="$NATIVE_CONTROL6_DEBUG_INPUT_DIRECTORY" \
     --env DUPLEX_NATIVE_CONTROL6_STABLE_TURN_POLICY_Q2_CONTEXT="$STABLE_TURN_POLICY_Q2_CONTEXT" \
@@ -384,7 +382,6 @@ else
     --env DUPLEX_LISTENER_MICROBATCH="$LISTENER_MICROBATCH" \
     --env DUPLEX_LISTENER_MICROBATCH_SEMANTIC_SHADOW="$LISTENER_MICROBATCH_SEMANTIC_SHADOW" \
     --env DUPLEX_LISTENER_MICROBATCH_GEMM_GRAPHS="$LISTENER_MICROBATCH_GEMM_GRAPHS" \
-    --env DUPLEX_LISTENER_MICROBATCH_SOURCE_ROOT="$LISTENER_SOURCE_ROOT_RELATIVE" \
     --env PYTHONPATH="$LISTENER_PYTHONPATH" \
     --env GEMMA4_ATTENTION_BACKEND="$ATTENTION_BACKEND" \
     --env GEMMA4_SPLITK_LAYER_MASK="$SPLITK_LAYER_MASK" \
@@ -393,7 +390,7 @@ else
     --env GEMMA4_DUPLEX_CUDA_TIMING="$CUDA_TIMING" \
     --env GEMMA4_NATIVE_Q4_GEMV4="$NATIVE_Q4_GEMV4" \
     "$IMAGE" \
-    "$PYTHON" "$LISTENER_SOURCE_ROOT_CONTAINER/duplex_kernel/launch.py" \
+    "$PYTHON" /workspace/duplex_kernel/launch.py \
     --workspace /workspace --host 0.0.0.0 --port 8000 \
     --thinker-prefill-chunk-tokens 16 --thinker-compile-mode default \
     --duplex-response-bundle-dir /workspace/checkpoints/experimental-v5-repair200-fphase-20261003 \
@@ -401,6 +398,7 @@ else
     --frame-residual-adapter-checkpoint "$ADAPTER_CONTAINER" \
     --ablate-response-lora \
     --controller-guided-talk-context-pool \
+    --response-talk-context-capacity "$RESPONSE_TALK_CONTEXT_CAPACITY" \
     --enforce-v9-training-voice \
     "${NATIVE_CONTROL6_ARGS[@]}"
 fi
@@ -414,6 +412,8 @@ requested = sys.argv[1] == "1"
 response_protocol = sys.argv[2]
 unified_kv = sys.argv[3] == "1"
 microbatch = d.get("listener_microbatch")
+talk_pool = d.get("controller_guided_talk_context_pool")
+expected_talk_capacity = int(sys.argv[4])
 ok = (
     d.get("status") == "ok"
     and d.get("engine_loaded") is True
@@ -423,12 +423,14 @@ ok = (
     and d.get("unified_kv_enabled") is unified_kv
     and isinstance(microbatch, dict)
     and microbatch.get("enabled") is requested
+    and isinstance(talk_pool, dict)
+    and talk_pool.get("capacity") == expected_talk_capacity
 )
 if requested:
     ok = ok and microbatch.get("semantic_shadow_setting") == ("0" if unified_kv else "1")
     ok = ok and microbatch.get("gemm_graphs_setting") == "0"
 sys.exit(0 if ok else 1)
-' "$LISTENER_MICROBATCH" "$RESPONSE_PROTOCOL" "$UNIFIED_KV" 2>/dev/null; then
+' "$LISTENER_MICROBATCH" "$RESPONSE_PROTOCOL" "$UNIFIED_KV" "$RESPONSE_TALK_CONTEXT_CAPACITY" 2>/dev/null; then
       printf '%s\n' "$body"
       exit 0
     fi

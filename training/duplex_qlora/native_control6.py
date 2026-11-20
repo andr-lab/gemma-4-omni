@@ -159,7 +159,10 @@ class NativeControl6LoRA(nn.Module):
         normalized_hidden: torch.Tensor,
         *,
         phase_t: torch.Tensor | None = None,
+        defer_cuda_input_finite_check: bool = False,
     ) -> torch.Tensor:
+        if type(defer_cuda_input_finite_check) is not bool:
+            raise TypeError("defer_cuda_input_finite_check must be a bool")
         if not isinstance(normalized_hidden, torch.Tensor) or normalized_hidden.ndim < 1:
             raise TypeError("normalized_hidden must be a tensor with a feature dimension")
         if normalized_hidden.shape[-1] != HIDDEN_WIDTH:
@@ -167,8 +170,9 @@ class NativeControl6LoRA(nn.Module):
                 f"Gemma final-normalized hidden width must be {HIDDEN_WIDTH}, "
                 f"got {tuple(normalized_hidden.shape)}"
             )
-        if not torch.isfinite(normalized_hidden).all():
-            raise ValueError("normalized_hidden contains non-finite values")
+        if not (defer_cuda_input_finite_check and normalized_hidden.is_cuda):
+            if not torch.isfinite(normalized_hidden).all():
+                raise ValueError("normalized_hidden contains non-finite values")
         hidden = normalized_hidden.to(dtype=torch.float32)
         if phase_t is None:
             phase = torch.zeros(
@@ -183,8 +187,9 @@ class NativeControl6LoRA(nn.Module):
                 raise ValueError(
                     f"phase_t shape must be {(*hidden.shape[:-1], PHASE_T_WIDTH)}"
                 )
-            if not torch.isfinite(phase_t).all():
-                raise ValueError("phase_t contains non-finite values")
+            if not (defer_cuda_input_finite_check and phase_t.is_cuda):
+                if not torch.isfinite(phase_t).all():
+                    raise ValueError("phase_t contains non-finite values")
             phase = phase_t.to(device=hidden.device, dtype=torch.float32)
         # PyTorch documents F.linear as y = x A^T + b:
         # https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.linear.html

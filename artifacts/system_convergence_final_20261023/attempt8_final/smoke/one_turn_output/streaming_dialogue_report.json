@@ -1,0 +1,828 @@
+{
+  "status": "COMPLETED",
+  "mode": "single_session_streaming",
+  "scenario_id": "A_milano_correction_torino",
+  "stop_reason": "response_terminal",
+  "input_steps": {
+    "initial_milano": {
+      "reference": "scenario_start",
+      "target_offset_s": 0.0,
+      "actual_start_ns": 5619127555423796,
+      "commit_ns": 5619131534389288
+    }
+  },
+  "input_transcripts": {
+    "initial_milano": {
+      "expected_text": "Consigliami un itinerario di tre giorni a Milano",
+      "asr_transcript": "",
+      "asr_available": false,
+      "sample_rate": 16000,
+      "sample_count": 64000,
+      "source_sample_start": 0,
+      "source_sample_end": 64000
+    }
+  },
+  "responses": [
+    {
+      "response_id": "resp_247ce7fa6fc1",
+      "created_ns": 5619128846399231,
+      "created_after_commit_ns": null,
+      "text": "",
+      "audio_packets": []
+    },
+    {
+      "response_id": "resp_33e536aa926e",
+      "created_ns": 5619130934414636,
+      "created_after_commit_ns": null,
+      "text": "Certamente! Ecco un itinerario di tre giorni a Milano.",
+      "audio_packets": [
+        {
+          "packet_id": 0,
+          "generation_id": 2,
+          "speaker_segment_id": "seg_31b5030a7909",
+          "start_sample": 0,
+          "end_sample": 3840,
+          "sample_rate": 24000
+        },
+        {
+          "packet_id": 1,
+          "generation_id": 2,
+          "speaker_segment_id": "seg_31b5030a7909",
+          "start_sample": 3840,
+          "end_sample": 7680,
+          "sample_rate": 24000
+        },
+        {
+          "packet_id": 2,
+          "generation_id": 2,
+          "speaker_segment_id": "seg_31b5030a7909",
+          "start_sample": 7680,
+          "end_sample": 11520,
+          "sample_rate": 24000
+        },
+        {
+          "packet_id": 3,
+          "generation_id": 2,
+          "speaker_segment_id": "seg_31b5030a7909",
+          "start_sample": 11520,
+          "end_sample": 15360,
+          "sample_rate": 24000
+        },
+        {
+          "packet_id": 4,
+          "generation_id": 2,
+          "speaker_segment_id": "seg_31b5030a7909",
+          "start_sample": 15360,
+          "end_sample": 19200,
+          "sample_rate": 24000
+        },
+        {
+          "packet_id": 5,
+          "generation_id": 2,
+          "speaker_segment_id": "seg_31b5030a7909",
+          "start_sample": 19200,
+          "end_sample": 23040,
+          "sample_rate": 24000
+        },
+        {
+          "packet_id": 6,
+          "generation_id": 2,
+          "speaker_segment_id": "seg_31b5030a7909",
+          "start_sample": 23040,
+          "end_sample": 26880,
+          "sample_rate": 24000
+        },
+        {
+          "packet_id": 7,
+          "generation_id": 2,
+          "speaker_segment_id": "seg_31b5030a7909",
+          "start_sample": 26880,
+          "end_sample": 30720,
+          "sample_rate": 24000
+        },
+        {
+          "packet_id": 8,
+          "generation_id": 2,
+          "speaker_segment_id": "seg_31b5030a7909",
+          "start_sample": 30720,
+          "end_sample": 34560,
+          "sample_rate": 24000
+        },
+        {
+          "packet_id": 9,
+          "generation_id": 2,
+          "speaker_segment_id": "seg_31b5030a7909",
+          "start_sample": 34560,
+          "end_sample": 38400,
+          "sample_rate": 24000
+        },
+        {
+          "packet_id": 10,
+          "generation_id": 2,
+          "speaker_segment_id": "seg_31b5030a7909",
+          "start_sample": 38400,
+          "end_sample": 42240,
+          "sample_rate": 24000
+        },
+        {
+          "packet_id": 11,
+          "generation_id": 2,
+          "speaker_segment_id": "seg_31b5030a7909",
+          "start_sample": 42240,
+          "end_sample": 46080,
+          "sample_rate": 24000
+        },
+        {
+          "packet_id": 12,
+          "generation_id": 2,
+          "speaker_segment_id": "seg_31b5030a7909",
+          "start_sample": 46080,
+          "end_sample": 49920,
+          "sample_rate": 24000
+        },
+        {
+          "packet_id": 13,
+          "generation_id": 2,
+          "speaker_segment_id": "seg_31b5030a7909",
+          "start_sample": 49920,
+          "end_sample": 53760,
+          "sample_rate": 24000
+        },
+        {
+          "packet_id": 14,
+          "generation_id": 2,
+          "speaker_segment_id": "seg_31b5030a7909",
+          "start_sample": 53760,
+          "end_sample": 57600,
+          "sample_rate": 24000
+        },
+        {
+          "packet_id": 15,
+          "generation_id": 2,
+          "speaker_segment_id": "seg_31b5030a7909",
+          "start_sample": 57600,
+          "end_sample": 61440,
+          "sample_rate": 24000
+        },
+        {
+          "packet_id": 16,
+          "generation_id": 2,
+          "speaker_segment_id": "seg_31b5030a7909",
+          "start_sample": 61440,
+          "end_sample": 65280,
+          "sample_rate": 24000
+        },
+        {
+          "packet_id": 17,
+          "generation_id": 2,
+          "speaker_segment_id": "seg_31b5030a7909",
+          "start_sample": 65280,
+          "end_sample": 69120,
+          "sample_rate": 24000
+        },
+        {
+          "packet_id": 18,
+          "generation_id": 2,
+          "speaker_segment_id": "seg_31b5030a7909",
+          "start_sample": 69120,
+          "end_sample": 72960,
+          "sample_rate": 24000
+        },
+        {
+          "packet_id": 19,
+          "generation_id": 2,
+          "speaker_segment_id": "seg_31b5030a7909",
+          "start_sample": 72960,
+          "end_sample": 76800,
+          "sample_rate": 24000
+        },
+        {
+          "packet_id": 20,
+          "generation_id": 2,
+          "speaker_segment_id": "seg_31b5030a7909",
+          "start_sample": 76800,
+          "end_sample": 80640,
+          "sample_rate": 24000
+        },
+        {
+          "packet_id": 21,
+          "generation_id": 2,
+          "speaker_segment_id": "seg_31b5030a7909",
+          "start_sample": 80640,
+          "end_sample": 84480,
+          "sample_rate": 24000
+        },
+        {
+          "packet_id": 22,
+          "generation_id": 2,
+          "speaker_segment_id": "seg_31b5030a7909",
+          "start_sample": 84480,
+          "end_sample": 88320,
+          "sample_rate": 24000
+        },
+        {
+          "packet_id": 23,
+          "generation_id": 2,
+          "speaker_segment_id": "seg_31b5030a7909",
+          "start_sample": 88320,
+          "end_sample": 92160,
+          "sample_rate": 24000
+        },
+        {
+          "packet_id": 24,
+          "generation_id": 2,
+          "speaker_segment_id": "seg_31b5030a7909",
+          "start_sample": 92160,
+          "end_sample": 96000,
+          "sample_rate": 24000
+        },
+        {
+          "packet_id": 25,
+          "generation_id": 2,
+          "speaker_segment_id": "seg_31b5030a7909",
+          "start_sample": 96000,
+          "end_sample": 99840,
+          "sample_rate": 24000
+        },
+        {
+          "packet_id": 26,
+          "generation_id": 2,
+          "speaker_segment_id": "seg_31b5030a7909",
+          "start_sample": 99840,
+          "end_sample": 103680,
+          "sample_rate": 24000
+        },
+        {
+          "packet_id": 27,
+          "generation_id": 2,
+          "speaker_segment_id": "seg_31b5030a7909",
+          "start_sample": 103680,
+          "end_sample": 107520,
+          "sample_rate": 24000
+        }
+      ],
+      "first_audio_delta_ns": 5619131594675755
+    }
+  ],
+  "consumed_acknowledgements": [
+    {
+      "type": "client_consumed_pcm",
+      "response_id": "resp_33e536aa926e",
+      "generation_id": 2,
+      "speaker_segment_id": "seg_31b5030a7909",
+      "start_sample": 0,
+      "end_sample": 107520,
+      "sample_rate": 24000,
+      "sequence": 1,
+      "client_monotonic_ns": 5619136058467641,
+      "consumption_semantics": "logical_client_device_buffer",
+      "sent_ns": 5619136058818797
+    }
+  ],
+  "policy_diagnostics": [
+    {
+      "timestamp_ns": 5619127751443571,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5619127772267435,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5619127791406172,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5619127867528583,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5619127951808344,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5619128032297705,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5619128122212956,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5619128203287747,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5619128282589869,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5619128362502870,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5619128442191318,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5619128523250828,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5619128602697471,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5619128683077941,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5619128762891231,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5619128843630386,
+      "response_id": null,
+      "selected_action": "BACKCHANNEL"
+    },
+    {
+      "timestamp_ns": 5619128925484359,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619128994101529,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5619129069354306,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5619129154109806,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5619129233277645,
+      "response_id": null,
+      "selected_action": "BACKCHANNEL"
+    },
+    {
+      "timestamp_ns": 5619129314193292,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5619129394692483,
+      "response_id": null,
+      "selected_action": "SPEAK"
+    },
+    {
+      "timestamp_ns": 5619129485557011,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5619129565427822,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5619129645827261,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5619129726376813,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5619129806164203,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5619129887049330,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5619129966904330,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5619130047019425,
+      "response_id": null,
+      "selected_action": "SPEAK"
+    },
+    {
+      "timestamp_ns": 5619130126656373,
+      "response_id": null,
+      "selected_action": "SPEAK"
+    },
+    {
+      "timestamp_ns": 5619130206732117,
+      "response_id": null,
+      "selected_action": "SPEAK"
+    },
+    {
+      "timestamp_ns": 5619130286927852,
+      "response_id": null,
+      "selected_action": "SPEAK"
+    },
+    {
+      "timestamp_ns": 5619130366190994,
+      "response_id": null,
+      "selected_action": "BACKCHANNEL"
+    },
+    {
+      "timestamp_ns": 5619130446358769,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5619130525787232,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5619130605967829,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5619130685999063,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5619130766809568,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5619130846460686,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5619130928748136,
+      "response_id": null,
+      "selected_action": "LISTEN"
+    },
+    {
+      "timestamp_ns": 5619131203553423,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619131257718091,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619131340685612,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619131425613354,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619131522361765,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619131577991298,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619131661642549,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619131715643175,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619131814289387,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619131887073094,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619131967763518,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619132041376589,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619132123770240,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619132201729500,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619132362387707,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619132421919052,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619132465644273,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619132529519887,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619132602492227,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619132692953318,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619132761954825,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619132846313868,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619132921471293,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619133004100068,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619133081956167,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619133170182592,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619133247550882,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619133330981300,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619133402596299,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619133484654915,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619133563472259,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619133649767173,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619133723262811,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619133815862826,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619133884392505,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619133963866420,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619134041167649,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619134123221475,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619134205320122,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619134285595869,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619134369183580,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619134439039040,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619134522842404,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619134611546037,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619134688637283,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619134762516328,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619134843488076,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619134918690322,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619135007939654,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619135079864597,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619135236834954,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619135328934861,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619135404174538,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619135477668707,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619135557321804,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619135638703449,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619135717206078,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619135805833449,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619135878312162,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619135958782452,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    },
+    {
+      "timestamp_ns": 5619136037971222,
+      "response_id": null,
+      "selected_action": "CONTINUE"
+    }
+  ],
+  "server_errors": [],
+  "committed_turns_awaiting_first_audio": [],
+  "playback_shadow_tracker_errors": [],
+  "last_consumed_pcm_ns_by_response": {
+    "resp_33e536aa926e": 5619136058480071
+  },
+  "timing": {
+    "scenario_started_ns": 5619127555312115,
+    "first_response_created_ns": 5619128846399231,
+    "first_response_created_after_commit_ms": null,
+    "first_audio_delta_ns": 5619131594675755,
+    "first_audio_delta_after_response_created_ms": 2748.276524,
+    "first_client_pcm_consumed_ns": 5619131615315986,
+    "policy_speak_to_first_client_pcm_consumed_ms": null,
+    "correction_timing": null,
+    "first_client_consumed_pcm_ack_sent_ns": 5619136058818797,
+    "last_response_terminal_ns": 5619135136993243,
+    "stop_ns": 5619136089160803,
+    "client_consumption_semantics": "logical_client_device_buffer"
+  },
+  "ingress_frames_sent": 105,
+  "logical_pcm_samples_consumed": 107520,
+  "wav_files": {
+    "interlocutor_a_input": "/workspace/artifacts/system_convergence_final_20261023/attempt8_final/smoke/one_turn_output/interlocutor_a_input.wav",
+    "interlocutor_a_output": "/workspace/artifacts/system_convergence_final_20261023/attempt8_final/smoke/one_turn_output/interlocutor_a_output.wav",
+    "interlocutor_b_input": "/workspace/artifacts/system_convergence_final_20261023/attempt8_final/smoke/one_turn_output/interlocutor_b_input.wav",
+    "interlocutor_b_output": "/workspace/artifacts/system_convergence_final_20261023/attempt8_final/smoke/one_turn_output/interlocutor_b_output.wav"
+  },
+  "events_jsonl": "/workspace/artifacts/system_convergence_final_20261023/attempt8_final/smoke/one_turn_output/dialogue_events.jsonl"
+}

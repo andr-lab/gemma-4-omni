@@ -24,7 +24,7 @@ import numpy as np
 DEFAULT_INPUT = Path("/workspace/artifacts/conversation_quality_20261014/inputs/clean_initial.wav")
 DEFAULT_OUTPUT = Path("/workspace/artifacts/causal_audio_tower_benchmark/benchmark.json")
 DEFAULT_WORKSPACE = Path("/workspace")
-DEFAULT_RUNTIME_SOURCE = Path("/workspace/artifacts/runtime/listener_microbatch_source")
+DEFAULT_RUNTIME_SOURCE = Path("/workspace")
 SAMPLE_RATE = 16_000
 TICK_MS = 80
 SAMPLES_PER_TICK = SAMPLE_RATE * TICK_MS // 1000

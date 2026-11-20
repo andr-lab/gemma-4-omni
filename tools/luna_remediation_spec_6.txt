@@ -1,0 +1,68 @@
+# SPECIFICA DI IMPLEMENTAZIONE PER GPT-6 LUNA (XHIGH REASONING EFFORT)
+# Riferimento: Diagnosi architetturale di GPT 6.1 Sol (tools/sol_diagnosis_output_4.md)
+
+## 1. OBIETTIVO
+Implementare la remediation architetturale descritta da GPT 6.1 Sol in `tools/sol_diagnosis_output_4.md` per risolvere il jitter di latenza del microfono (ACK gap di 161.9 ms al frame 664, soglia 160.0 ms) garantendo un'ammissione cooperativa continua e continua visibilità della domanda del Listener durante la generazione Talker.
+
+---
+
+## 2. DIFETTI ARCHITETTURALI DA CORREGGERE (SOL SEC. 4 & 5)
+
+### Difetto 1: Visibilità a buchi della domanda Listener
+- In `duplex_kernel/server.py:4110` e `server_pcm_tracker.py:814`, `_wait_for_listener_backlog_admission` valuta solo `queue_depth` associata a `lambda: sess.audio_ingress.qsize`.
+- Appena il `SharedListenerTickDispatcher` estrae i frame da ingress (`_pull_ready_frames`), `sess.audio_ingress.qsize` diventa 0, anche se il batch è correntemente selezionato, accodato nel worker o in esecuzione sulla GPU (`_process_batch`).
+- Durante tutti i 50-150 ms del batch listener, il Talker vede `qsize == 0 <= 1`, conclude falsamente che non c'è domanda listener, e lancia continuamente kernel GPU pesanti (`next_qwen_model` 33 ms, `subtalker` 13 ms).
+- **Remediation (Sol 5.2)**: Introdurre la continuità della domanda. Lo stato di domanda listener deve essere tracciato lungo tutto il ciclo di vita del frame:
+  `ingress -> selected/in_flight_batch -> worker_processing -> gpu_completion`.
+  `listener_admission_wait` deve verificare sia i frame in `audio_ingress` sia i batch attualmente in corso di esecuzione/completamento per quella sessione/servizio (es. tramite il contatore/waiter del backend o un coordinatore della domanda shared). Finchè c'è domanda attiva, il Talker deve cedere/attendere prima di iniziare un nuovo quanto compute.
+
+### Difetto 2: Bypassing dell'ammissione in Talker
+- In `duplex_kernel/engine.py:6111`:
+  ```python
+  def admit_listener(phase: str, site: str) -> None:
+      if (
+          prioritized_v2_talker
+          and phase == "talker"
+          and site in {"subtalker", "next_qwen_model"}
+      ):
+          return
+  ```
+  Questo bypass esclude completamente `subtalker` e `next_qwen_model` dall'ammissione listener quando `prioritized_v2_talker` è true.
+- Inoltre, a riga 6974 (`engine.py`), prima di `run_talker_gpu_step("subtalker", generate_residuals)`, `admit_listener("talker", "subtalker")` NON viene neppure chiamato!
+- **Remediation (Sol 5.3)**:
+  1. Invocare `admit_listener("talker", "subtalker")` prima di `run_talker_gpu_step("subtalker", generate_residuals)`.
+  2. Rimuovere il bypass non coordinato (`and site in {"subtalker", "next_qwen_model"}`): ogni quanto compute significativo (`codec_head`, `subtalker`, `next_qwen_model`) deve verificare l'ammissione del listener prima di acquisire i lock e lanciare kernel GPU.
+  3. Il controllo deve avvenire prima di acquisire il lock (`_listener_priority_lock`), con verifica di cancellazione (`talk_stopped()` / stop_check). Se il listener è attivo, attendere cooperativamente con condition/eventi senza busy loop e senza bloccare indefinitamente in caso di abort della generazione.
+
+### Difetto 3: Separazione delle metriche temporali
+- In `listener_microbatch_worker.py` e `shared_listener_scheduler.py`, garantire che le metriche temporali distinguano chiaramente il tempo di coda worker, il wall-clock time del worker host, e il tempo di attesa completamento GPU, senza annidamenti ambigui.
+
+---
+
+## 3. FILE TARGET DELLA MODIFICA
+1. `duplex_kernel/server.py`
+2. `duplex_kernel/server_pcm_tracker.py`
+3. `duplex_kernel/shared_listener_scheduler.py`
+4. `duplex_kernel/listener_microbatch_worker.py`
+5. `duplex_kernel/engine.py`
+6. `tests/kernel/test_v2_duplex_admission.py`
+7. `tests/kernel/test_shared_listener_tick_dispatcher.py`
+
+---
+
+## 4. VINCOLI E INVARIANTI NON NEGOZIABILI
+- Nessun `torch.cuda.synchronize()` sistematico per frame.
+- Nessun `time.sleep` rigido o polling ad alto consumo CPU.
+- Nessuna alterazione delle soglie di accettazione (budget VRAM, 160.0 ms max ACK gap, TTFT <= 800 ms).
+- Playout buffer contract immutato: 4.0s / 96,000 campioni a 24 kHz.
+- Preservare `TerminalResponseArchive` e la logica di finalizzazione introdotta da Sol.
+- Tutti i test unitari in `tests/kernel/test_v2_duplex_admission.py`, `tests/kernel/test_shared_listener_tick_dispatcher.py`, `tests/kernel/test_terminal_response_archive.py` devono passare al 100%.
+
+---
+
+## 5. REQUISITI TEST-DRIVEN (TDD)
+1. Estendere `tests/kernel/test_v2_duplex_admission.py` per verificare:
+   - Che l'ammissione ceda il passo quando `audio_ingress.qsize == 0` MA un batch listener è correntemente in volo/in elaborazione.
+   - Che l'ammissione sia chiamata e rispettata su tutti e tre i siti del Talker (`codec_head`, `subtalker`, `next_qwen_model`).
+   - Che cancellazioni o generazioni stale non causino deadlock o blocchi.
+2. Eseguire pytest locale su questi test e verificare che passino al 100%.

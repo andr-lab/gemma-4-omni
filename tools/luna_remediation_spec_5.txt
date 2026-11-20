@@ -1,0 +1,80 @@
+Sei GPT-6 Luna Max (reasoning effort: xhigh), esecutore tecnico per il progetto Gemma 4 Full-Duplex Omni Pipeline.
+
+Il tuo compito è implementare con massima precisione le indicazioni architetturali fornite da GPT 6.1 Sol per eliminare i due difetti emersi durante la suite di accettazione a 3 run.
+
+### Obiettivo
+Risolvere in modo definitivo e verificato con test:
+1. `ValueError: Qwen [3:-5] raw text IDs do not reconstruct canonical h_txt` (slicing rigido e merge BPE con prefisso assistant).
+2. `AudioResponseProtocolError("no_legal_candidate_within_top64")` (azzeramento nucleus prima dei vincoli e fallback mancante nel ThinkerSampler).
+
+---
+
+### Specifiche di Implementazione
+
+#### 1. Qwen Text Offsets & Talker Decoupling
+**File bersaglio:**
+- `duplex_kernel/response_intent_local.py`
+- `duplex_kernel/models/talker.py`
+- `duplex_kernel/live_say.py` (se necessario per coerenza)
+
+**Istruzioni:**
+- In `duplex_kernel/response_intent_local.py`, dentro `qwen_assistant_text_offsets(text, *, tokenizer, processor)`:
+  - Tokenizzare direttamente `text` con `tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)`.
+  - Non avvolgere `text` con `QWEN_ASSISTANT_PREFIX` e `QWEN_ASSISTANT_SUFFIX` con slicing fisso `[3:-5]`.
+  - Estrarre `raw_ids` e `raw_offsets` direttamente dalla tokenizzazione di `text`.
+  - Verificare che `tokenizer.decode(raw_ids, skip_special_tokens=False, clean_up_tokenization_spaces=False) == text`.
+  - Garantire il contratto degli offset:
+    `len(raw_ids) == len(raw_offsets) > 0`
+    `0 <= start < end <= len(text)`
+    e copertura valida di `text` (consentendo sovrapposizioni byte-level su caratteri multi-byte).
+  - Gestire correttamente stringhe con newline iniziali (`\n...`), spazi o punteggiatura, senza sollevare eccezioni di disallineamento artificiale.
+- In `duplex_kernel/models/talker.py`, dentro `build_prefill_parts`:
+  - Tokenizzare il solo prefisso del ruolo (`<|im_start|>assistant\n`) per ottenere `role_ids`.
+  - Ottenere `raw_ids` direttamente dalla tokenizzazione di `text` con `add_special_tokens=False` (o da `raw_text_token_ids` se fornito).
+  - Eliminare il vecchio slicing rigido `input_ids[:, :3]` e `input_ids[:, 3:-5]`.
+
+---
+
+#### 2. Thinker Sampler Legal Candidate & Fallback Protection
+**File bersaglio:**
+- `duplex_kernel/thinker_sampler.py`
+- `duplex_kernel/audio_response_protocol.py` (se necessario per fallback immutabile)
+
+**Istruzioni:**
+- In `duplex_kernel/thinker_sampler.py`:
+  - Aggiungere il metodo interno:
+    ```python
+    def _prepare_constrained_logits(
+        self,
+        logits: torch.Tensor,
+        generated_ids: Sequence[int],
+    ) -> torch.Tensor:
+    ```
+    che applica repetition penalty, `min_new_tokens_processor`, `backchannel_trie` e maschere obbligatorie senza duplicare inutilmente tensori.
+  - Se il guard / callback `on_candidate_token` dichiara illegale `EOS` per lo stato corrente (ad es. `len(generated_ids) == 0` o testo vuoto finché non viene prodotta almeno una parola), mascherare gli ID di `EOS` a `-inf` in `constrained_logits` PRIMA di calcolare `softmax` e nucleus sampling (`top_p`), così che la massa di probabilità non collassi esclusivamente su un EOS illegale eliminando i token testuali legali.
+  - In `select_valid_candidate`:
+    - Se il candidato campionato viene rifiutato da `callback`:
+      Cercare i token alternativi nei `constrained_logits` (ordinati per logit decrescente sui token con logit finito), NON nei punteggi post-nucleus già azzerati a zero.
+    - Se viene consultato il fallback a pool (`legal_pool` non vuoto):
+      Se `best_native_logit_candidate_id` non è fornito (None), scegliere il candidato in `legal_pool` che ha il logit più alto in `source_logits` (invece di fallire).
+  - In `audio_response_protocol.py`:
+    - Assicurarsi che la proposta di fallback (`propose_fallback` o equivalente) sia priva di mutazioni di stato (nessun incremento di contatore, flag o avanzamento token finché il token non viene effettivamente accettato ed eseguito in `after_generated_token`).
+
+---
+
+### Test Obbligatori
+1. In `tests/kernel/test_response_intent_local_alignment.py`:
+   - Aggiungere test con newline iniziali (`\nCiao`, `\n\nDue`), spazi, emoji, caratteri speciali.
+   - Verificare che `qwen_assistant_text_offsets` e `build_prefill_parts` non falliscano.
+2. In `tests/kernel/test_thinker_sampler.py`:
+   - Aggiungere test dove EOS ha logit dominante ma è illegale a testo vuoto: verificare che il campionatore selezioni un token testuale valido invece di lanciare `no_legal_candidate_within_top64`.
+   - Aggiungere test con fallback a pool dove `best_native_logit_candidate_id` è None: verificare che selezioni il candidato a logit massimo nel pool.
+3. Eseguire tutti i test unitari pertinenti con `python -m pytest`:
+   - `tests/kernel/test_response_intent_local_alignment.py`
+   - `tests/kernel/test_thinker_sampler.py`
+   - `tests/kernel/test_unified_kv_server_gate.py`
+   - `tests/kernel/test_talker_voice_conditioning.py`
+   - `tests/kernel/test_controller_guided_live_say.py`
+   - `tests/kernel/test_audio_response_protocol.py`
+   Tutti i test devono risultare VERDI (passati).
+4. Aggiornare `docs/ARCHITECTURE.md` descrivendo la nuova tokenizzazione diretta di Qwen e la protezione pre-nucleus del ThinkerSampler.

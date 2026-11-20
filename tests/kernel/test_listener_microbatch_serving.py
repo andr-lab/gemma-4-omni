@@ -90,6 +90,41 @@ def test_microbatch_serving_switches_reject_ambiguous_values(monkeypatch, value:
         _strict_env_flag(GEMM_GRAPHS_ENV)
 
 
+def test_compaction_shadow_builder_allows_legacy_control6_without_semantic_shadow(monkeypatch) -> None:
+    import duplex_kernel.listener_microbatch_serving as serving
+
+    monkeypatch.setenv(SEMANTIC_SHADOW_ENV, "0")
+    captured = {}
+
+    class WorkerFactory:
+        def __init__(self, listener, **kwargs):
+            captured["listener"] = listener
+            captured.update(kwargs)
+
+    monkeypatch.setattr(serving, "ListenerMicrobatchWorker", WorkerFactory)
+    listener = SimpleNamespace(backend=SimpleNamespace(
+        _extract_single_frame=lambda *_args, **_kwargs: None,
+    ))
+    compaction_builder = lambda *_args: None
+
+    worker = serving.make_listener_microbatch_worker(
+        listener,
+        native_control6_policy=object(),
+        compaction_request_builder=compaction_builder,
+    )
+
+    assert isinstance(worker, WorkerFactory)
+    assert callable(captured["runtime_factory"])
+    closure = dict(zip(
+        captured["runtime_factory"].__code__.co_freevars,
+        (cell.cell_contents for cell in captured["runtime_factory"].__closure__ or ()),
+        strict=True,
+    ))
+    assert closure["semantic_shadow_enabled"] is False
+    assert closure["compaction_shadow_enabled"] is True
+    assert closure["compaction_request_builder"] is compaction_builder
+
+
 def test_microbatch_serving_compat_switches_default_off_and_q2_defaults_on(monkeypatch) -> None:
     monkeypatch.delenv(GEMM_GRAPHS_ENV, raising=False)
     monkeypatch.delenv(SEMANTIC_SHADOW_ENV, raising=False)
@@ -343,6 +378,8 @@ def test_unified_prefix_import_builds_one_dynamic_text_only_cache_for_frame_zero
     assert first is second
     assert first.prefix_len == first.cache_position == len(tokens)
     assert first.past_key_values.get_seq_length(0) == len(tokens)
+    assert first.semantic_context_revision == 0
+    assert first.applied_history_revision == 0
     assert calls == [(tokens, (), ())]
 
 
@@ -628,6 +665,7 @@ def _row_output(state: GemmaListenerState, *, frame_id: int = 0, version: int = 
         native_state=SimpleNamespace(current_position=36, prefix_len=34),
         native_output_health=health,
         semantic_context_revision=0,
+        applied_history_revision=0,
         semantic_replay_fallback_reason=None,
         semantic_prefix_len=44,
         listener_model_lock_wait_ms=1.25,

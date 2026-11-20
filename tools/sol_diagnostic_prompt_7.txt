@@ -1,0 +1,67 @@
+# Diagnosi per GPT 6.1 Sol (Medium Effort): Spike di latenza (179.3 ms) su ACK al frame 2392 causato da hold lock di 93 ms del thread compute
+
+## 1. Evidenze Raccolte al Frame 2391 -> 2392
+Nel run con timeout a 300s (`acceptance_suite_20261102T150518037112Z/run_01`), il Turn 1 (risposta lunga a 1536 frame) ha generato audio con successo fino alla fine (169 secondi, 768 chunk audio), ma è fallito proprio sugli ultimi frame:
+`WebSocket/runtime error: EvidenceError: long response microphone ACK gap 179.3ms reached the 160.0ms limit`
+
+I dati estratti mostrano:
+- ACK frame 2391 ricevuto dal client: `ws_received_ns = 6416032343880240`, `server_ack_queue_ms = 1.507 ms`, `server_ack_lock_wait_ms = 0.010 ms`, `compute_ms = 68.816 ms`.
+- ACK frame 2392 ricevuto dal client: `ws_received_ns = 6416032523220268`, `server_ack_queue_ms = 3.044 ms`, `server_ack_lock_wait_ms = 0.008 ms`, `compute_ms = 165.599 ms`.
+- Delta ws_received_ns: **179.34 ms** (supera il limite di 160.0 ms per 19.3 ms).
+
+## 2. Isolamento della Causa Radice
+Non è un problema di WebSocket lock (`server_ack_lock_wait_ms = 0.008 ms`) né di coda di invio (`server_ack_queue_ms = 3.044 ms`).
+Il ritardo è interamente dentro `listener_batch_compute_ms: 165.599 ms` del batch `shared-listener-23615`.
+
+Ispezionando il trace `listener_batch_host_lock_timeline` salvato nel payload di frame 2392:
+```json
+{
+  "trace_seq": 61632,
+  "event": "request",
+  "timestamp_ns": 6415382054255922,
+  "thread_id": 124452144674368,
+  "priority": "compute",
+  "ticket": 20979,
+  "pending_counts": {"listener": 0, "compute": 1}
+},
+{
+  "trace_seq": 61633,
+  "event": "acquire",
+  "timestamp_ns": 6415382054266143,
+  "thread_id": 124452144674368,
+  "priority": "compute",
+  "ticket": 20979,
+  "pending_counts": {"listener": 0, "compute": 0},
+  "wait_ns": 10221,
+  "depth": 1
+},
+{
+  "trace_seq": 61634,
+  "event": "release",
+  "timestamp_ns": 6415382147232169,
+  "thread_id": 124452144674368,
+  "priority": "compute",
+  "ticket": 20979,
+  "pending_counts": {"listener": 0, "compute": 0},
+  "fully_released": true,
+  "depth": 0,
+  "hold_ns": 92966026
+}
+```
+Il thread `compute` (thread id `124452144674368`, ovvero il worker di generazione Talker/Thinker/Code2Wav) ha acquisito `shared_model_lock` con ticket 20979 e lo ha **trattenuto per 92.96 ms** (`hold_ns: 92966026`)!
+Poiché `shared_model_lock` dà priorità a listener ma è un lock cooperativo/esclusivo, mentre compute teneva il lock per 93 ms, il listener non ha potuto procedere, portando `listener_batch_compute_ms` a 165.6 ms.
+
+Nel log del server, a quel preciso istante:
+`2026-11-02 15:08:35,944 [duplex_kernel.server] [realtime 784a28d3 resp_4e7de1ca51e6] Thinker/Talker done elapsed=169.14s`
+`2026-11-02 15:08:35,977 [duplex_kernel.server] [realtime 784a28d3 resp_4e7de1ca51e6] done total=169.17s audio_chunks=768`
+`2026-11-02 15:08:35,978 [duplex_kernel.server] [realtime 784a28d3 resp_4e7de1ca51e6] SPEAK audio cleanup owner=1 pending=None`
+
+## Domande per GPT 6.1 Sol
+
+1. **Quale operazione nel thread compute acquisisce `shared_model_lock` trattenendolo per ~93 ms alla fine della generazione (chunk 767-768, chiusura Talker, tail hold, o finalizer)?**
+   - Esamina `duplex_kernel/listener.py`, `duplex_kernel/server.py`, `duplex_kernel/engine.py`, `duplex_kernel/talker.py` o i punti in cui `priority="compute"` acquisisce il lock condiviso.
+
+2. **Perché questo hold supera gli 80 ms e viola il budget operativo del listener di 80 ms stabilito da PLAN.md (Sez. 1: "budget operativo di 80 ms per frame")?**
+   - Perché nella Run 1 questo hold non ha superato i 141 ms complessivi (o non è capitato in sincronia con il frame), mentre nella Run 2 ha causato 179.3 ms?
+
+3. **Qual è la correzione deterministica minima (senza introdurre complessità né rompere la sincronizzazione) affinché il thread compute non trattenga `shared_model_lock` per più di quanto consentito dal budget di 80 ms del listener, o ceda cooperativamente il lock tra le fasi di chiusura/tail?**

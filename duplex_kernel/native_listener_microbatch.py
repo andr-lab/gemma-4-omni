@@ -1566,11 +1566,44 @@ class NativeGemmaListenerMicrobatch:
         producer_stream: torch.cuda.Stream | None = None,
     ) -> NativeBatchOutput:
         """Append Q2-aligned replay frames in one fork forward, returning the final pair."""
+        self._assert_open()
         if not self._queued_audio_batch_api_available:
             raise RuntimeError("native DSO lacks optional variable-Q queued audio append")
+        if not isinstance(manifest, ListenerBatchManifest):
+            raise TypeError("a ListenerBatchManifest is required")
         if len(manifest.rows) != 1:
             raise ValueError("variable-Q queued replay accepts exactly one private session row")
+        row = manifest.rows[0]
+        binding = self._session_by_id.get(row.session_id)
+        if binding is None or binding.native_context_id != row.native_context_id:
+            raise ValueError("variable-Q queued replay row has no matching native slot")
+        if not binding.ephemeral_fork:
+            raise ValueError("variable-Q queued replay requires an ephemeral private slot")
+        if binding.slot < 0 or binding.slot >= self.max_batch_size:
+            raise ValueError("variable-Q queued replay slot is outside native capacity")
+        if self.gemm_graphs_enabled:
+            raise ValueError("variable-Q queued replay is unavailable while graph mode is active")
+        if self._active_output_generation is not None:
+            raise ValueError("variable-Q queued replay cannot overlap an output lease")
+        if not isinstance(audio_soft, torch.Tensor) or audio_soft.ndim != 2:
+            raise ValueError("audio_soft must be a rank-2 Q-aligned tensor")
         query_count = _validate_queued_audio_query_count(int(audio_soft.shape[0]))
+        if row.cache_position > self.capability.max_seq_len - query_count:
+            raise ValueError("variable-Q queued replay exceeds the slot's residual KV capacity")
+        # The read-only native snapshot verifies the slot's primed state and
+        # context identity before the mutating append entry point is reached.
+        try:
+            native_state = self.session_state(row)
+        except RuntimeError as exc:
+            raise ValueError(
+                "variable-Q queued replay row does not match a primed native slot"
+            ) from exc
+        if (
+            native_state.slot != binding.slot
+            or native_state.native_context_id != row.native_context_id
+            or not native_state.primed
+        ):
+            raise ValueError("variable-Q queued replay slot is not primed for this context")
         self._require_cuda_tensor(
             audio_soft, name="audio_soft", dtype=torch.bfloat16,
             shape=(query_count, GEMMA4_HIDDEN_SIZE), device=self._model_device,
@@ -1701,6 +1734,13 @@ class NativeGemmaListenerMicrobatch:
                 self._stream_ptr(),
             ))
         if status != 0:
+            if queued_query_count is not None and status == -1:
+                # The append C ABI returns -1 for rejected preconditions before
+                # touching the cache. Preserve a healthy owner when that API
+                # boundary rejects a call that escaped Python preflight.
+                raise ValueError(
+                    "native variable-Q queued append rejected its preflight; no cache mutation occurred"
+                )
             self._poisoned = True
             raise RuntimeError(f"native batched forward failed with code {status}; all rows quarantined")
 

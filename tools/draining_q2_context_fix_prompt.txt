@@ -1,0 +1,92 @@
+# Task Specification: Fix CONTROL6_CONTEXT_UNAVAILABLE on Frame Arrival During Finalizer Drain
+
+## 1. Conoscenza e Contesto del Guasto
+Durante `tools/run_acceptance_suite.py` (Turn 1: risposta lunga), il server produce 284 token e 1004 frame audio (80.32s).
+Il client simulator riceve e consuma tutti i frame PCM inviando gli ACK `client_consumed_pcm`.
+Al frame 1321 (UTC 17:58:20.252), il client invia l'ACK finale e il drain del playback si completa:
+`_wait_for_response_playback_drain()` si sblocca in `_finalize_after_playback_drain()`.
+Viene invocato `finalize_unified_native_cache(history_committed=True)`.
+In `_finalize_unified_native_cache_branch`:
+1. Vengono appesi i 4 token di chiusura turn (`<end_of_turn>`, `<start_of_turn>`, `user`, `\n`), portando la posizione cache da 1087 a 1091.
+2. Viene chiamato `await submit_transition_mutation(worker.drain_queued_audio, ..., user_turn_already_open=False, close_audio_queue=True)`.
+3. In `worker.drain_queued_audio` (`duplex_kernel/listener_microbatch_worker.py:5840`):
+   - Viene chiamato `self._release_q2_decision_cache(session_id)`.
+   - `self._release_q2_decision_cache(session_id)` esegue `self._mark_stable_q2_epoch_unusable(session_id)`, marcando l'epoch di coda inutilizzabile.
+4. Tuttavia, `drain_queued_audio` è asincrono e processa la coda a quanta. Mentre è in attesa:
+   - `sess.active_response` è ANCORA `True` (perché `sess.end_response()` è chiamato nel blocco `finally` di `finalize_unified_native_cache` solo DOPO che `_finalize_unified_native_cache_branch` ha completato).
+   - Arriva il frame microfonico client 1323 (ore 17:58:20.426).
+   - Lo scheduler vede `sess.active_response == True`, valuta `speaker_active == True` e invoca Control6.
+   - Control6 tenta di costruire la vista decisionale per il parlato (`_build_speaking_q2_decision_view`).
+   - Poiché l'epoch Q2 è già stata marcata inutilizzabile da `drain_queued_audio`, la riga 4964 solleva:
+     `_Q2DecisionViewUnavailable("stable queue-open Q2 fork is unusable; refusing canonical Q0 policy fallback")`.
+   - Il worker cattura questa eccezione ed emette:
+     `PolicyDecision(action=ControlAction.HARD_STOP, reason="stable_q2_context_unavailable_fail_closed")` con `diagnostics={"system_fail_closed_action": True}`.
+   - In `duplex_kernel/server.py:4896-4903` e `5273-5299`:
+     Il server vede `decision.action is ControlAction.HARD_STOP`, `reason == "stable_q2_context_unavailable_fail_closed"`, `policy_input.speaker_active == True`, e `active_response_for_policy == True`.
+     Conclude erroneamente che il contesto di generazione sia collassato A METÀ PARLATO ed emette via WebSocket l'errore fatale:
+     `{"code": "CONTROL6_CONTEXT_UNAVAILABLE", "message": "Control6 Q2 context was lost during SPEAK; the active response is stopping"}`
+     abortendo la conversazione dopo che il parlato era già 100% completato e consumato dal client!
+
+## 2. Modifiche Richieste
+
+### A. `duplex_kernel/server_unified_cache.py`
+In `_prepare_deferred_acoustic_history_finalization(branch, *, history_committed, commit_deferred_acoustic_history)`:
+- Spostare l'aggiornamento di `spoken_prefix_*` prima del controllo `if not isinstance(branch.get("deferred_acoustic_history_commit"), Mapping): return history_committed`.
+- In questo modo, ogni volta che `client_consumed_prefix_token_ids` è presente nel branch, `spoken_prefix_token_ids`, `spoken_prefix_exclusive_cursor`, `spoken_prefix_text_parts` e `spoken_prefix_text` vengono sincronizzati incondizionatamente con il consumo reale del client.
+
+### B. `duplex_kernel/server_response_control.py`
+In `_native_control6_speaker_active(*, active_response: bool, control_state: ControlState, pending_pcm_playback: bool = False, closing: bool = False) -> bool`:
+- Aggiungere il parametro opzionale `closing: bool = False`.
+- Se `closing is True` e `pending_pcm_playback is False`: il canale di emissione vocale non ha più audio pendente e la risposta sta chiudendo/drenando. Restituire `False`.
+- La logica deve garantire che quando la riproduzione è drenata (0 PCM pendenti) e la risposta è in fase di finalizzazione/chiusura, `speaker_active` sia `False`, consentendo ai frame successivi di essere trattati come ascolto (LISTENING / turno utente) anziché pretendere un fork Q2 di parlato attivo.
+
+### C. `duplex_kernel/server.py`
+1. **Marcare il branch come drenato e closing**:
+   - In `_finalize_after_playback_drain(branch, ...)`:
+     Dopo `await wait_for_drain(branch)` con successo:
+     `branch["playback_drained"] = True`
+     `branch["closing"] = True`
+   - In `finalize_unified_native_cache(*, history_committed: bool)`:
+     All'inizio, impostare `branch["closing"] = True`.
+     Invocare `_prepare_deferred_acoustic_history_finalization` incondizionatamente (gestendo internamente il fatto che `deferred_acoustic_history_commit` possa o meno essere un Mapping).
+     Se `branch.get("playback_drained")` o `not _response_branch_has_pending_pcm(branch)`:
+     Con `sess._generation_lock`, se `sess.control_state in {ControlState.SPEAKING, ControlState.STOPPING}`, aggiornare `sess.control_state = ControlState.LISTENING`.
+2. **Passare `closing` a `_native_control6_speaker_active`**:
+   - Intorno alla riga 4402 in `server.py`:
+     Controllare se per `sess.response_id` esiste un branch in `playback_ack_branches` che ha `closing=True` o `playback_drained=True`.
+     Passare `closing=branch_closing` a `_native_control6_speaker_active`.
+3. **Impedire `worker_fail_closed_context` se il branch sta drenando o è in chiusura**:
+   - Nelle righe 4896-4903 in `server.py`:
+     ```python
+     branch_is_draining_or_closing = False
+     with playback_ack_branches_lock:
+         resp_branch = (
+             playback_ack_branches.get(sess.response_id)
+             if sess.response_id is not None
+             else None
+         )
+         if isinstance(resp_branch, dict):
+             branch_is_draining_or_closing = bool(
+                 resp_branch.get("closing")
+                 or resp_branch.get("playback_drained")
+                 or not _response_branch_has_pending_pcm(resp_branch)
+             )
+     worker_fail_closed_context = bool(
+         isinstance(diagnostics, dict)
+         and diagnostics.get("system_fail_closed_action") is True
+         and decision.reason == "stable_q2_context_unavailable_fail_closed"
+         and decision.action is ControlAction.HARD_STOP
+         and policy_input.speaker_active
+         and active_response_for_policy
+         and not branch_is_draining_or_closing
+     )
+     ```
+     In questo modo, se il branch ha già drenato il PCM o è marcato in chiusura/drenaggio, `stable_q2_context_unavailable_fail_closed` NON fa scattare l'errore `CONTROL6_CONTEXT_UNAVAILABLE`.
+
+## 3. Test di Verifica
+1. Eseguire:
+   `python -m pytest tests/kernel/test_client_consumed_pcm_ack.py tests/kernel/test_speaking_control6_context.py`
+2. Aggiungere un test in `tests/kernel/test_client_consumed_pcm_ack.py` o `tests/kernel/test_speaking_control6_context.py` che verifichi esplicitamente:
+   - Che quando una risposta ha `playback_drained=True` o `closing=True`, un evento decisionale `stable_q2_context_unavailable_fail_closed` non generi `CONTROL6_CONTEXT_UNAVAILABLE`.
+   - Che `_native_control6_speaker_active` con `closing=True` e `pending_pcm_playback=False` restituisca `False`.
+   - Che `_prepare_deferred_acoustic_history_finalization` aggiorni `spoken_prefix_*` anche quando `deferred_acoustic_history_commit` è None.

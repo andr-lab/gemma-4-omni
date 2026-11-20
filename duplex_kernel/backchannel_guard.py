@@ -11,6 +11,8 @@ _TRAILING_CONNECTORS = frozenset({
     "della", "delle", "dello", "di", "e", "ed", "fra", "in", "ma", "o",
     "od", "per", "tra", "su",
 })
+_COMPLETE_SHORT_ACKS = frozenset({"ah", "boh", "eh", "mh", "no", "ok", "oh", "sì", "va"})
+BACKCHANNEL_MAX_TEXT_TOKENS = 6
 
 
 class BackchannelAttemptLatch:
@@ -68,6 +70,16 @@ def validate_backchannel_phrase(text: str, *, max_words: int = 4) -> tuple[bool,
         return False, "too_many_words", len(words)
     if words[-1] in _TRAILING_CONNECTORS or re.search(r"[,;:…—-]\s*$", text):
         return False, "incomplete_clause", len(words)
+    # A short final piece after another word is commonly an unfinished
+    # tokenizer fragment (for example, "Mi sc"). Keep complete short Italian
+    # acknowledgements such as "Sì" and "Va" valid when they stand alone.
+    if (
+        len(words) > 1
+        and len(words[-1]) <= 2
+        and words[-1] not in _COMPLETE_SHORT_ACKS
+        and not re.search(r"[.!?]\s*$", text)
+    ):
+        return False, "truncated_subword", len(words)
     return True, "ok", len(words)
 
 

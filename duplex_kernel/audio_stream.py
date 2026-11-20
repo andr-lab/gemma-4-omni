@@ -63,6 +63,47 @@ class DecodedAudioChunk:
         return int(self.pcm.size)
 
 
+@dataclass
+class PlaybackWatermarks:
+    """Track server emission, client buffering, and device rendering separately.
+
+    The client-buffer frontier records samples copied into the output device
+    callback. The rendered frontier records samples reported complete by the
+    device clock. A logical ACK cannot advance the latter.
+    """
+
+    emitted_end_sample: int = 0
+    client_buffered_end_sample: int = 0
+    rendered_end_sample: int = 0
+
+    @staticmethod
+    def _sample(value: int, name: str) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"{name} must be a nonnegative integer")
+        return value
+
+    def record_emitted(self, start_sample: int, end_sample: int) -> None:
+        start = self._sample(start_sample, "start_sample")
+        end = self._sample(end_sample, "end_sample")
+        if start != self.emitted_end_sample or end <= start:
+            raise ValueError("emitted PCM sample range must be contiguous and nonempty")
+        self.emitted_end_sample = end
+
+    def record_client_buffered(self, end_sample: int) -> None:
+        end = self._sample(end_sample, "client_buffered_end_sample")
+        if end < self.client_buffered_end_sample or end > self.emitted_end_sample:
+            raise ValueError("client buffer watermark is stale or exceeds emitted PCM")
+        self.client_buffered_end_sample = end
+
+    def record_rendered(self, end_sample: int) -> None:
+        end = self._sample(end_sample, "rendered_end_sample")
+        if end < self.rendered_end_sample:
+            raise ValueError("rendered watermark cannot move backwards")
+        if end > self.client_buffered_end_sample:
+            raise ValueError("rendered watermark exceeds client-buffered PCM")
+        self.rendered_end_sample = end
+
+
 class PacketSequenceNumber:
     """Monotonic, thread-safe transport identity for one connection."""
 
@@ -855,5 +896,6 @@ __all__ = [
     "DecodedAudioChunk",
     "NetworkPacketizer",
     "PacketSequenceNumber",
+    "PlaybackWatermarks",
     "iter_audio_packets",
 ]

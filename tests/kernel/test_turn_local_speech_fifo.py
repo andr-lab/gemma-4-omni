@@ -104,7 +104,7 @@ def test_pcm_chunk_catches_up_token_spans_only_at_first_emitted_frame():
         on_packet_emitted=lambda cursor, text: packet_emissions.append((cursor, text)),
     )
     stream.feed_packet(_packet(5, "hello world", 501))
-    assert tuple(span.start_frame for span in fifo.span_cursor.frame_spans) == (0, 4)
+    assert tuple(span.start_frame for span in fifo.span_cursor.frame_spans) == (0, 5)
     first = stream.take_initial_token(timeout_s=0)
     assert first.token_id == 101
     stream.consume_initial_token()
@@ -119,9 +119,9 @@ def test_pcm_chunk_catches_up_token_spans_only_at_first_emitted_frame():
     # watermark while a Talker chunk is still buffered.
     assert fifo.last_vocalized_kv_position is None
     assert packet_emissions == []
-    assert tuple(span.start_frame for span in fifo.span_cursor.frame_spans) == (0, 4, 8)
+    assert tuple(span.start_frame for span in fifo.span_cursor.frame_spans) == (0, 5, 11)
 
-    # One PCM chunk contains ten 80 ms frames. The emitter reports each frame
+    # One PCM chunk contains thirteen 80 ms frames. The emitter reports each frame
     # in order so every token is ACKed at its first emitted frame, and packet
     # cursors advance only once all packet tokens have started.
     emitted = [
@@ -130,11 +130,11 @@ def test_pcm_chunk_catches_up_token_spans_only_at_first_emitted_frame():
             generation_id=52,
             segment_id=0,
         ))
-        for frame_id in range(10)
+        for frame_id in range(13)
     ]
     assert [(frame_id, cursor) for frame_id, cursor in emitted if cursor is not None] == [
-        (4, 501),
-        (8, 502),
+        (5, 501),
+        (11, 502),
     ]
     assert packet_emissions == [
         (501, "hello world"),

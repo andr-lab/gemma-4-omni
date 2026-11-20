@@ -1,0 +1,15 @@
+{
+  "status": "ok",
+  "process_id": 1,
+  "sampled_at_monotonic_ns": 5816848135639723,
+  "cuda_allocator": {
+    "status": "available",
+    "device": "cuda:0",
+    "allocated_bytes": 15431889408,
+    "reserved_bytes": 17781751808,
+    "peak_allocated_bytes": 16150105600,
+    "peak_reserved_bytes": 17781751808,
+    "sampled_at_monotonic_ns": 5816848135639723
+  },
+  "sessions": []
+}

@@ -1,0 +1,167 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="2" skipped="0" tests="2" time="5.698" timestamp="2026-10-26T16:47:28.474705+00:00" hostname="2b0cfea4b341"><testcase classname="tests.kernel.test_realtime_control_plane" name="test_audio_ingress_overload_fails_closed_without_playing_stale_frames" time="0.153"><failure message="RuntimeError: unified listener prefix requires tokenizer.encode">/opt/conda/lib/python3.11/site-packages/starlette/testclient.py:122: in __enter__
+    message = self.receive()
+              ^^^^^^^^^^^^^^
+/opt/conda/lib/python3.11/site-packages/starlette/testclient.py:185: in receive
+    return self.portal.call(self._send_rx.receive)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/conda/lib/python3.11/site-packages/anyio/from_thread.py:338: in call
+    return cast(T_Retval, self.start_task_soon(func, *args).result())
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/conda/lib/python3.11/concurrent/futures/_base.py:449: in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+/opt/conda/lib/python3.11/concurrent/futures/_base.py:401: in __get_result
+    raise self._exception
+/opt/conda/lib/python3.11/site-packages/anyio/from_thread.py:263: in _call_func
+    retval = await retval_or_awaitable
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/conda/lib/python3.11/site-packages/anyio/streams/memory.py:118: in receive
+    return self.receive_nowait()
+           ^^^^^^^^^^^^^^^^^^^^^
+/opt/conda/lib/python3.11/site-packages/anyio/streams/memory.py:100: in receive_nowait
+    raise ClosedResourceError
+E   anyio.ClosedResourceError
+
+During handling of the above exception, another exception occurred:
+tests/kernel/test_realtime_control_plane.py:1205: in test_audio_ingress_overload_fails_closed_without_playing_stale_frames
+    with client.websocket_connect("/v1/realtime?duplex=1") as ws:
+/opt/conda/lib/python3.11/site-packages/starlette/testclient.py:116: in __enter__
+    with contextlib.ExitStack() as stack:
+/opt/conda/lib/python3.11/contextlib.py:601: in __exit__
+    raise exc_details[1]
+/opt/conda/lib/python3.11/contextlib.py:586: in __exit__
+    if cb(*exc_details):
+       ^^^^^^^^^^^^^^^^
+/opt/conda/lib/python3.11/contextlib.py:469: in _exit_wrapper
+    callback(*args, **kwds)
+/opt/conda/lib/python3.11/concurrent/futures/_base.py:449: in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+/opt/conda/lib/python3.11/concurrent/futures/_base.py:401: in __get_result
+    raise self._exception
+/opt/conda/lib/python3.11/site-packages/anyio/from_thread.py:263: in _call_func
+    retval = await retval_or_awaitable
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/conda/lib/python3.11/site-packages/starlette/testclient.py:145: in _run
+    await self.app(self.scope, receive_rx.receive, send_tx.send)
+/opt/conda/lib/python3.11/site-packages/fastapi/applications.py:1163: in __call__
+    await super().__call__(scope, receive, send)
+/opt/conda/lib/python3.11/site-packages/starlette/applications.py:96: in __call__
+    await self.middleware_stack(scope, receive, send)
+/opt/conda/lib/python3.11/site-packages/starlette/middleware/errors.py:151: in __call__
+    await self.app(scope, receive, send)
+/opt/conda/lib/python3.11/site-packages/starlette/middleware/exceptions.py:63: in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+/opt/conda/lib/python3.11/site-packages/starlette/_exception_handler.py:53: in wrapped_app
+    raise exc
+/opt/conda/lib/python3.11/site-packages/starlette/_exception_handler.py:42: in wrapped_app
+    await app(scope, receive, sender)
+/opt/conda/lib/python3.11/site-packages/fastapi/middleware/asyncexitstack.py:18: in __call__
+    await self.app(scope, receive, send)
+/opt/conda/lib/python3.11/site-packages/starlette/routing.py:670: in __call__
+    await self.middleware_stack(scope, receive, send)
+/opt/conda/lib/python3.11/site-packages/fastapi/routing.py:2734: in app
+    await route.handle(scope, receive, send)
+/opt/conda/lib/python3.11/site-packages/starlette/routing.py:354: in handle
+    await self.app(scope, receive, send)
+/opt/conda/lib/python3.11/site-packages/fastapi/routing.py:184: in app
+    await wrap_app_handling_exceptions(app, session)(scope, receive, send)
+/opt/conda/lib/python3.11/site-packages/starlette/_exception_handler.py:53: in wrapped_app
+    raise exc
+/opt/conda/lib/python3.11/site-packages/starlette/_exception_handler.py:42: in wrapped_app
+    await app(scope, receive, sender)
+/opt/conda/lib/python3.11/site-packages/fastapi/routing.py:181: in app
+    await func(session)
+/opt/conda/lib/python3.11/site-packages/fastapi/routing.py:796: in app
+    await dependant.call(**solved_result.values)
+duplex_kernel/server.py:5964: in realtime
+    await _register_shared_listener_session(
+duplex_kernel/server.py:1380: in _register_shared_listener_session
+    prefix_token_ids = _build_unified_listener_prefix_token_ids(engine, sess)
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+duplex_kernel/server_silence_skip.py:47: in _build_unified_listener_prefix_token_ids
+    raise RuntimeError("unified listener prefix requires tokenizer.encode")
+E   RuntimeError: unified listener prefix requires tokenizer.encode</failure></testcase><testcase classname="tests.kernel.test_realtime_control_plane" name="test_controller_guided_vocal_actions_start_live_qwen_and_keep_plain_prefill[SPEAK-Ciao.-48-512-eos]" time="0.118"><failure message="RuntimeError: unified listener prefix requires tokenizer.encode">/opt/conda/lib/python3.11/site-packages/starlette/testclient.py:122: in __enter__
+    message = self.receive()
+              ^^^^^^^^^^^^^^
+/opt/conda/lib/python3.11/site-packages/starlette/testclient.py:185: in receive
+    return self.portal.call(self._send_rx.receive)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/conda/lib/python3.11/site-packages/anyio/from_thread.py:338: in call
+    return cast(T_Retval, self.start_task_soon(func, *args).result())
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/conda/lib/python3.11/concurrent/futures/_base.py:456: in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+/opt/conda/lib/python3.11/concurrent/futures/_base.py:401: in __get_result
+    raise self._exception
+/opt/conda/lib/python3.11/site-packages/anyio/from_thread.py:263: in _call_func
+    retval = await retval_or_awaitable
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/conda/lib/python3.11/site-packages/anyio/streams/memory.py:118: in receive
+    return self.receive_nowait()
+           ^^^^^^^^^^^^^^^^^^^^^
+/opt/conda/lib/python3.11/site-packages/anyio/streams/memory.py:100: in receive_nowait
+    raise ClosedResourceError
+E   anyio.ClosedResourceError
+
+During handling of the above exception, another exception occurred:
+tests/kernel/test_realtime_control_plane.py:2135: in test_controller_guided_vocal_actions_start_live_qwen_and_keep_plain_prefill
+    with client.websocket_connect("/v1/realtime?duplex=1") as ws:
+/opt/conda/lib/python3.11/site-packages/starlette/testclient.py:116: in __enter__
+    with contextlib.ExitStack() as stack:
+/opt/conda/lib/python3.11/contextlib.py:601: in __exit__
+    raise exc_details[1]
+/opt/conda/lib/python3.11/contextlib.py:586: in __exit__
+    if cb(*exc_details):
+       ^^^^^^^^^^^^^^^^
+/opt/conda/lib/python3.11/contextlib.py:469: in _exit_wrapper
+    callback(*args, **kwds)
+/opt/conda/lib/python3.11/concurrent/futures/_base.py:449: in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+/opt/conda/lib/python3.11/concurrent/futures/_base.py:401: in __get_result
+    raise self._exception
+/opt/conda/lib/python3.11/site-packages/anyio/from_thread.py:263: in _call_func
+    retval = await retval_or_awaitable
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/conda/lib/python3.11/site-packages/starlette/testclient.py:145: in _run
+    await self.app(self.scope, receive_rx.receive, send_tx.send)
+/opt/conda/lib/python3.11/site-packages/fastapi/applications.py:1163: in __call__
+    await super().__call__(scope, receive, send)
+/opt/conda/lib/python3.11/site-packages/starlette/applications.py:96: in __call__
+    await self.middleware_stack(scope, receive, send)
+/opt/conda/lib/python3.11/site-packages/starlette/middleware/errors.py:151: in __call__
+    await self.app(scope, receive, send)
+/opt/conda/lib/python3.11/site-packages/starlette/middleware/exceptions.py:63: in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+/opt/conda/lib/python3.11/site-packages/starlette/_exception_handler.py:53: in wrapped_app
+    raise exc
+/opt/conda/lib/python3.11/site-packages/starlette/_exception_handler.py:42: in wrapped_app
+    await app(scope, receive, sender)
+/opt/conda/lib/python3.11/site-packages/fastapi/middleware/asyncexitstack.py:18: in __call__
+    await self.app(scope, receive, send)
+/opt/conda/lib/python3.11/site-packages/starlette/routing.py:670: in __call__
+    await self.middleware_stack(scope, receive, send)
+/opt/conda/lib/python3.11/site-packages/fastapi/routing.py:2734: in app
+    await route.handle(scope, receive, send)
+/opt/conda/lib/python3.11/site-packages/starlette/routing.py:354: in handle
+    await self.app(scope, receive, send)
+/opt/conda/lib/python3.11/site-packages/fastapi/routing.py:184: in app
+    await wrap_app_handling_exceptions(app, session)(scope, receive, send)
+/opt/conda/lib/python3.11/site-packages/starlette/_exception_handler.py:53: in wrapped_app
+    raise exc
+/opt/conda/lib/python3.11/site-packages/starlette/_exception_handler.py:42: in wrapped_app
+    await app(scope, receive, sender)
+/opt/conda/lib/python3.11/site-packages/fastapi/routing.py:181: in app
+    await func(session)
+/opt/conda/lib/python3.11/site-packages/fastapi/routing.py:796: in app
+    await dependant.call(**solved_result.values)
+duplex_kernel/server.py:5964: in realtime
+    await _register_shared_listener_session(
+duplex_kernel/server.py:1380: in _register_shared_listener_session
+    prefix_token_ids = _build_unified_listener_prefix_token_ids(engine, sess)
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+duplex_kernel/server_silence_skip.py:47: in _build_unified_listener_prefix_token_ids
+    raise RuntimeError("unified listener prefix requires tokenizer.encode")
+E   RuntimeError: unified listener prefix requires tokenizer.encode</failure></testcase></testsuite></testsuites>

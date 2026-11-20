@@ -1,0 +1,104 @@
+# TASK SPECIFICATION FOR GPT-6 LUNA (MAX REASONING EFFORT)
+# REMEDIATION: ELIMINATE TURN-COMPLETION TERMINAL JITTER & ACK GAP SPIKE
+
+## Objective
+Implement the architectural solutions defined by GPT 6.1 Sol (Diagnosis 7) to eliminate the ACK gap spike at the turn-completion boundary (where `listener_batch_compute_ms` jumps due to CPU loop in `_postprocess`, uncoordinated D2H transfer in `finalize_frame_residual_metrics`, and repeated full ledger projections in `record_pcm_consumed`).
+
+---
+
+## 1. File: `duplex_kernel/engine.py`
+
+### 1.1 Vectorize `_postprocess(wav)` (around lines 7436-7443)
+In `PipelineEngine._postprocess(wav: np.ndarray) -> np.ndarray`:
+Replace the slow Python list comprehension loop:
+```python
+        frame_samples = max(1, int(round(0.020 * sample_rate)))
+        frame_rms = np.asarray(
+            [
+                np.sqrt(np.mean(np.square(signal[offset : offset + frame_samples], dtype=np.float64)))
+                for offset in range(0, signal.size, frame_samples)
+            ],
+            dtype=np.float64,
+        )
+```
+with a fully vectorized 2D NumPy reshape calculation that computes exact mathematical RMS across `axis=1`:
+```python
+        frame_samples = max(1, int(round(0.020 * sample_rate)))
+        n_full_frames = signal.size // frame_samples
+        if n_full_frames > 0:
+            full_signal = signal[: n_full_frames * frame_samples].reshape(n_full_frames, frame_samples)
+            full_rms = np.sqrt(np.mean(np.square(full_signal, dtype=np.float64), axis=1))
+            rem = signal.size % frame_samples
+            if rem > 0:
+                rem_rms = np.asarray([np.sqrt(np.mean(np.square(signal[n_full_frames * frame_samples :], dtype=np.float64)))], dtype=np.float64)
+                frame_rms = np.concatenate([full_rms, rem_rms])
+            else:
+                frame_rms = full_rms
+        elif signal.size > 0:
+            frame_rms = np.asarray([np.sqrt(np.mean(np.square(signal, dtype=np.float64)))], dtype=np.float64)
+        else:
+            frame_rms = np.zeros(0, dtype=np.float64)
+```
+Preserve all subsequent logic (noise floor, tail samples, cosine fades, target RMS normalization) exactly as-is.
+
+### 1.2 Skip redundant `_postprocess` in streaming mode when `quality_diagnostic is None` (around lines 7294-7300)
+In `talk()`:
+When `streaming_requested` is True and `quality_diagnostic is None`:
+All audio chunks have already been emitted live to the client via `emit_decoded_chunk`. The returned `output` is never sent to the WebSocket.
+Modify lines 7294-7300:
+```python
+        if streaming_requested:
+            wav = np.concatenate(streamed_audio) if streamed_audio else np.zeros(0, dtype=np.float32)
+        else:
+            wav = decode_chunk(codes) if codes else np.zeros(0, dtype=np.float32)
+        if wav.size and not np.isfinite(wav).all():
+            raise RuntimeError("Code2Wav ha prodotto audio non finito")
+        if streaming_requested and not quality_diagnostic:
+            output = wav
+        else:
+            output = self._postprocess(wav) if wav.size else wav
+```
+
+### 1.3 Wrap `finalize_frame_residual_metrics()` in `listener_compute_quantum()` (around lines 6469-6500)
+In `finalize_frame_residual_metrics()`:
+The D2H transfer of summary scalar values:
+```python
+            scalar_values = torch.stack(summary_values).detach().to(device="cpu").tolist()
+```
+transfers GPU tensors to CPU. Ensure this transfer coordinates cooperatively with the listener by wrapping it:
+```python
+            with (listener_compute_quantum() if callable(listener_compute_quantum) else nullcontext()):
+                scalar_values = torch.stack(summary_values).detach().to(device="cpu").tolist()
+```
+(Make sure `nullcontext` is available in scope or imported from `contextlib`).
+
+---
+
+## 2. File: `duplex_kernel/response_event_ledger.py`
+
+### 2.1 Avoid unnecessary `self.project()` in `record_pcm_consumed` (around line 847)
+In `ResponseEventLedger.record_pcm_consumed()`:
+Currently:
+```python
+                if on_commit is not None:
+                    on_commit(self.project())
+```
+`self.project()` rebuilds the entire projected history from source tokens on every single client PCM consumption ACK (which arrives every 10 ms). The callback in `server_pcm_tracker.py` is `commit_branch_ack(_projection: Any = None) -> None`, which completely ignores `_projection`.
+Update lines 847-848 to:
+```python
+                if on_commit is not None:
+                    try:
+                        on_commit()
+                    except TypeError:
+                        on_commit(self.project())
+```
+This ensures zero overhead when the callback does not require a projection, while maintaining 100% backward compatibility for callbacks that do.
+
+---
+
+## 3. Verification
+1. Run pytest on kernel tests:
+   `python -m pytest tests/kernel/test_response_event_ledger.py tests/kernel/test_client_consumed_pcm_ack.py -q`
+2. Run all kernel tests:
+   `python -m pytest tests/kernel/ -q`
+Ensure all tests PASS without any regression.

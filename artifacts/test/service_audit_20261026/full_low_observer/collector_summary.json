@@ -1,0 +1,37 @@
+{
+  "exit_code": 2,
+  "server_log_capture_exit_code": 0,
+  "run_started_at_utc": "2026-10-26T16:41:02.381275+00:00",
+  "run_finished_at_utc": "2026-10-26T16:42:10.288015+00:00",
+  "collector_start_utc": "2026-10-26T16:41:01.402Z",
+  "collector_finish_utc": "2026-10-26T16:42:10.545Z",
+  "session_id": "8627e54c94ea4232895c4bdc6c3af544",
+  "report_status": "INCOMPLETE",
+  "samples": 68,
+  "postdrain_snapshots": 0,
+  "postdrain_response_ids": [],
+  "response_tags": {
+    "resp_6e904fccd6f2": "long_response_completed"
+  },
+  "turns": [],
+  "baseline": {
+    "allocated_mib": 14692.27978515625,
+    "reserved_mib": 16872.0,
+    "sampled_at_monotonic_ns": 5816778098764477
+  },
+  "active": {
+    "allocated_mib": 15093.07763671875,
+    "reserved_mib": 15740.0
+  },
+  "peak": {
+    "allocated_mib": 15183.76123046875,
+    "reserved_mib": 16958.0,
+    "basis": "maximum current allocator value observed by 1000ms telemetry samples during this run",
+    "allocator_process_high_water_after_run": {
+      "allocated_mib": 15401.94091796875,
+      "reserved_mib": 16958.0
+    }
+  },
+  "server_log_bytes": 2801181,
+  "run_dir": "/home/administrator/gemma-4-omni/artifacts/test/service_audit_20261026/full_low_observer"
+}

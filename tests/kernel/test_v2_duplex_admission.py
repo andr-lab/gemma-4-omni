@@ -8,7 +8,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from duplex_kernel.audio_response_protocol import AUDIO_RESPONSE_PROTOCOL_V2
-from duplex_kernel.scheduler import AudioIngressQueue, DuplexScheduler, VirtualFrameClock
+from duplex_kernel.scheduler import (
+    AudioIngressQueue,
+    DIRECT_V2_INGRESS_QUEUE_FRAMES,
+    DuplexScheduler,
+    REALTIME_INGRESS_QUEUE_FRAMES,
+    VirtualFrameClock,
+)
 from duplex_kernel.engine import GenerationAdmissionAborted, ListenerBacklogAdmission, PipelineEngine
 from duplex_kernel.server import _wait_for_listener_backlog_admission, create_app
 from duplex_kernel.session import DuplexSession, SessionManager
@@ -18,58 +24,82 @@ from duplex_kernel.turn_policy import NoOpPolicy
 FRAME_SAMPLES = 1280
 
 
-def test_prefill_admits_at_one_queued_frame_even_while_callback_is_active() -> None:
-    now = [0.0]
+def test_prefill_admission_yields_for_queued_frame_but_ignores_callback_only_activity() -> None:
     callback_active = True
-    admitted = _wait_for_listener_backlog_admission(
+    idle = _wait_for_listener_backlog_admission(
+        lambda: 0,
+        lambda: True,
+        callbacks_active=callback_active,
+    )
+    queued = _wait_for_listener_backlog_admission(
         lambda: 1,
         lambda: True,
         callbacks_active=callback_active,
-        now=lambda: now[0],
-        sleep=lambda duration: now.__setitem__(0, now[0] + duration),
     )
     assert callback_active is True
-    assert admitted is ListenerBacklogAdmission.ADMITTED
-    assert now[0] == 0.0
+    assert idle is ListenerBacklogAdmission.ADMITTED
+    assert queued is ListenerBacklogAdmission.ABORTED
 
 
-def test_prefill_admission_waits_only_for_backlog_catchup_and_is_bounded() -> None:
-    now = [0.0]
-    depths = iter([3, 2, 1])
+def test_prefill_admission_waits_for_backlog_catchup_without_forcing_a_quantum() -> None:
+    queue_depth = [3]
+    waits: list[bool] = []
+
+    def wait_for_listener_clear(is_current):
+        waits.append(is_current())
+        queue_depth[0] = 1
+        return True
+
     admitted = _wait_for_listener_backlog_admission(
-        lambda: next(depths),
+        lambda: queue_depth[0],
         lambda: True,
         callbacks_active=True,
-        max_wait_s=0.160,
-        now=lambda: now[0],
-        sleep=lambda duration: now.__setitem__(0, now[0] + duration),
+        wait_for_listener_clear=wait_for_listener_clear,
     )
+
     assert admitted is ListenerBacklogAdmission.ADMITTED
-    assert 0.0 < now[0] <= 0.160
+    assert waits == [True]
 
 
-def test_prefill_admission_stops_on_stale_generation_or_deadline() -> None:
-    now = [0.0]
+def test_prefill_admission_waits_for_inflight_listener_when_ingress_is_empty() -> None:
+    queue_depth = lambda: 0
+    listener_inflight = True
+    wait_called = False
+
+    def wait_for_listener_clear(is_current):
+        nonlocal listener_inflight, wait_called
+        assert is_current()
+        assert queue_depth() == 0
+        assert listener_inflight
+        wait_called = True
+        listener_inflight = False
+        return True
+
+    admitted = _wait_for_listener_backlog_admission(
+        queue_depth,
+        lambda: True,
+        listener_work_pending=lambda: listener_inflight,
+        wait_for_listener_clear=wait_for_listener_clear,
+    )
+
+    assert wait_called
+    assert admitted is ListenerBacklogAdmission.ADMITTED
+
+
+def test_prefill_admission_stops_on_stale_generation_or_listener_wait_abort() -> None:
     stale = _wait_for_listener_backlog_admission(
         lambda: 5,
         lambda: False,
-        now=lambda: now[0],
-        sleep=lambda duration: now.__setitem__(0, now[0] + duration),
     )
     assert stale is ListenerBacklogAdmission.ABORTED
-    assert now[0] == 0.0
 
     deferred = _wait_for_listener_backlog_admission(
-        lambda: 1 if now[0] >= 0.20 else 2,
+        lambda: 2,
         lambda: True,
         callbacks_active=True,
-        max_wait_s=0.160,
-        poll_interval_s=0.040,
-        now=lambda: now[0],
-        sleep=lambda duration: now.__setitem__(0, now[0] + duration),
+        wait_for_listener_clear=lambda is_current: is_current() and False,
     )
-    assert deferred is ListenerBacklogAdmission.ADMITTED
-    assert now[0] == pytest.approx(0.240)
+    assert deferred is ListenerBacklogAdmission.ABORTED
 
 
 def test_stale_generation_aborts_before_thinker_audio_forward() -> None:
@@ -77,6 +107,12 @@ def test_stale_generation_aborts_before_thinker_audio_forward() -> None:
 
     class _Model:
         calls = 0
+
+        def get_audio_features(self, *_args, **_kwargs):
+            raise AssertionError("stale generation must abort before audio feature extraction")
+
+        def get_placeholder_mask(self, *_args, **_kwargs):
+            raise AssertionError("stale generation must abort before placeholder masking")
 
         def __call__(self, **_kwargs):
             self.calls += 1
@@ -93,6 +129,7 @@ def test_stale_generation_aborts_before_thinker_audio_forward() -> None:
     engine = PipelineEngine.__new__(PipelineEngine)
     engine.thinker = _Thinker()
     engine.device = "cpu"
+    engine.thinker.create_masks_for_generate = lambda *_args, **_kwargs: None
     audio_inputs = {
         "input_ids": torch.ones((1, 2), dtype=torch.long),
         "attention_mask": torch.ones((1, 2), dtype=torch.long),
@@ -150,8 +187,11 @@ class _Engine:
     default_turn_policy_factory = NoOpPolicy
 
 
-def test_direct_v2_websocket_advertises_six_frame_queue_but_legacy_stays_three(monkeypatch) -> None:
+def test_websocket_advertises_configured_direct_and_legacy_queue_capacities(monkeypatch) -> None:
+    monkeypatch.setenv("DUPLEX_UNIFIED_KV", "0")
+    monkeypatch.setenv("DUPLEX_LISTENER_MICROBATCH", "0")
     monkeypatch.setenv("DUPLEX_DIRECT_AUDIO_CANDIDATE", "1")
+    monkeypatch.setenv("DUPLEX_AUDIO_RESPONSE_PROTOCOL", AUDIO_RESPONSE_PROTOCOL_V2)
     v2_sessions = SessionManager()
     v2_client = TestClient(create_app(_Engine(), v2_sessions))
     health = v2_client.get("/health").json()
@@ -160,20 +200,21 @@ def test_direct_v2_websocket_advertises_six_frame_queue_but_legacy_stays_three(m
     assert health["thinker_audio_forward_active"] is False
     with v2_client.websocket_connect("/v1/realtime?duplex=1") as ws:
         created = ws.receive_json()
-        assert created["input_audio_buffer_capacity_frames"] == 6
+        assert created["input_audio_buffer_capacity_frames"] == DIRECT_V2_INGRESS_QUEUE_FRAMES
         session = v2_sessions.all()[0]
-        assert session.audio_ingress.max_frames == 6
+        assert session.audio_ingress.max_frames == DIRECT_V2_INGRESS_QUEUE_FRAMES
         ws.send_json({"type": "session.close"})
 
     class _LegacyEngine(_Engine):
         audio_response_protocol = None
 
+    monkeypatch.setenv("DUPLEX_DIRECT_AUDIO_CANDIDATE", "0")
     legacy_sessions = SessionManager()
     legacy_client = TestClient(create_app(_LegacyEngine(), legacy_sessions))
     with legacy_client.websocket_connect("/v1/realtime?duplex=1") as ws:
         created = ws.receive_json()
-        assert created["input_audio_buffer_capacity_frames"] == 3
-        assert legacy_sessions.all()[0].audio_ingress.max_frames == 3
+        assert created["input_audio_buffer_capacity_frames"] == REALTIME_INGRESS_QUEUE_FRAMES
+        assert legacy_sessions.all()[0].audio_ingress.max_frames == REALTIME_INGRESS_QUEUE_FRAMES
         ws.send_json({"type": "session.close"})
 
 
@@ -230,6 +271,26 @@ def test_listener_admission_callback_records_wait_without_holding_a_model_lock()
     assert metrics["listener_admission_talker_wait_max_ms"] >= 0
 
 
+def test_listener_priority_lock_returns_without_acquiring_after_cancellation() -> None:
+    class _StopAwareLock:
+        def __init__(self) -> None:
+            self.checked_stop = False
+
+        def acquire_fair(self, priority, *, stop_check):
+            assert priority == "compute"
+            self.checked_stop = bool(stop_check())
+            return not self.checked_stop
+
+    lock = _StopAwareLock()
+    engine = PipelineEngine.__new__(PipelineEngine)
+    engine._thinker_lock = lock
+
+    acquired = engine._listener_priority_lock(stop_check=lambda: True)
+
+    assert acquired is False
+    assert lock.checked_stop is True
+
+
 def test_talker_waits_for_listener_before_every_qwen_forward(monkeypatch) -> None:
     import torch
 
@@ -266,7 +327,7 @@ def test_talker_waits_for_listener_before_every_qwen_forward(monkeypatch) -> Non
     engine.talker = SimpleNamespace(
         talker=_Talker(),
         tcfg=SimpleNamespace(),
-        decode=lambda _codes: np.zeros(240, dtype=np.float32),
+        decode=lambda _codes, **_kwargs: np.zeros(240, dtype=np.float32),
     )
     engine.subtalker_graph = _Subtalker()
     engine.device = "cpu"
@@ -312,7 +373,7 @@ def test_talker_waits_for_listener_before_every_qwen_forward(monkeypatch) -> Non
         previous_forward_index = index
 
 
-def test_compiled_v2_talker_uses_priority_lock_without_per_frame_admission(monkeypatch) -> None:
+def test_compiled_v2_talker_admits_listener_before_all_compute_sites(monkeypatch) -> None:
     import threading
     import torch
 
@@ -320,7 +381,25 @@ def test_compiled_v2_talker_uses_priority_lock_without_per_frame_admission(monke
     from duplex_kernel.engine import PipelineEngine
 
     timeline: list[str] = []
+    current_site = [""]
+    recorded_sites: list[str] = []
     lock = threading.Lock()
+
+    class _ComputePermit:
+        def record_cuda_completion(self, _event, _stream) -> None:
+            if current_site[0] == "code2wav_decode":
+                assert not lock.locked(), "Code2Wav completion must not retain the Thinker lock"
+            else:
+                assert lock.locked(), "completion must be published before releasing the compute quantum"
+            recorded_sites.append(current_site[0])
+
+    class _PermitContext:
+        def __enter__(self):
+            assert not lock.locked(), "listener quantum must be acquired before the model lock"
+            return _ComputePermit()
+
+        def __exit__(self, *_args):
+            return False
 
     class _Cache:
         def __init__(self, length: int = 0) -> None:
@@ -334,6 +413,7 @@ def test_compiled_v2_talker_uses_priority_lock_without_per_frame_admission(monke
         def __call__(self, *, inputs_embeds, past_key_values=None, use_cache):
             assert use_cache is True
             assert lock.locked(), "Qwen forward must retain listener-priority serialization"
+            current_site[0] = "qwen_forward"
             timeline.append("qwen_forward")
             cache = past_key_values if past_key_values is not None else _Cache()
             cache.length += int(inputs_embeds.shape[1])
@@ -348,6 +428,7 @@ def test_compiled_v2_talker_uses_priority_lock_without_per_frame_admission(monke
 
         def codec_head(self, hidden):
             assert lock.locked(), "codec head must retain listener-priority serialization"
+            current_site[0] = "codec_head"
             timeline.append("codec_head")
             return torch.zeros((1, 1, 8), dtype=hidden.dtype)
 
@@ -361,15 +442,23 @@ def test_compiled_v2_talker_uses_priority_lock_without_per_frame_admission(monke
         def generate(self, *_args, return_tensor=False, **_kwargs):
             assert lock.locked(), "SubTalker must retain listener-priority serialization"
             assert return_tensor is True
+            current_site[0] = "subtalker"
             timeline.append("subtalker")
             return torch.ones((15,), dtype=torch.long)
 
     talker = _Talker()
+
+    def decode(_codes, **_kwargs):
+        assert not lock.locked(), "Code2Wav must not hold the shared Thinker lock"
+        current_site[0] = "code2wav_decode"
+        timeline.append("code2wav_decode")
+        return np.zeros(240, dtype=np.float32)
+
     engine = PipelineEngine.__new__(PipelineEngine)
     engine.talker = SimpleNamespace(
         talker=talker,
         tcfg=SimpleNamespace(),
-        decode=lambda _codes: np.zeros(240, dtype=np.float32),
+        decode=decode,
     )
     engine.subtalker_graph = _Subtalker()
     engine.device = "cpu"
@@ -390,6 +479,7 @@ def test_compiled_v2_talker_uses_priority_lock_without_per_frame_admission(monke
     engine._stop_event = False
     engine._postprocess = lambda wav: wav
     engine._cb0_sample = lambda _logits, **_kwargs: 2
+    engine._record_talker_cuda_completion = lambda permit: permit.record_cuda_completion(None, None)
 
     monkeypatch.setattr(engine_module, "_estimate_talker_frame_budget", lambda *_a, **_k: (2, 0, 2))
     monkeypatch.setattr(
@@ -418,6 +508,7 @@ def test_compiled_v2_talker_uses_priority_lock_without_per_frame_admission(monke
 
     def listener_admission_wait() -> None:
         admissions.append("admission")
+        timeline.append("listener_admitted")
 
     engine.talk(
         "Ciao",
@@ -425,13 +516,30 @@ def test_compiled_v2_talker_uses_priority_lock_without_per_frame_admission(monke
         n_words=1,
         min_frames=2,
         listener_admission_wait=listener_admission_wait,
+        listener_compute_quantum=lambda: _PermitContext(),
         metrics=metrics,
     )
 
-    assert admissions == ["admission", "admission"]  # eager static/dynamic prefills only
+    expected_admissions = (
+        2
+        + timeline.count("codec_head")
+        + timeline.count("subtalker")
+        + timeline.count("qwen_forward")
+        - 2
+        + timeline.count("code2wav_decode")
+    )  # two prefills, then each codec, SubTalker, and generated Qwen step
+    assert admissions == ["admission"] * expected_admissions
     assert timeline.count("qwen_forward") == 3  # two eager prefills, one compiled Q1
     assert timeline.count("codec_head") == 2
     assert timeline.count("subtalker") == 2
+    assert recorded_sites.count("qwen_forward") == 3
+    assert recorded_sites.count("codec_head") == 2
+    assert recorded_sites.count("subtalker") == 2
+    assert recorded_sites.count("code2wav_decode") == timeline.count("code2wav_decode")
+    assert timeline.count("listener_admitted") == expected_admissions
+    for index, event in enumerate(timeline):
+        if event in {"codec_head", "subtalker", "qwen_forward", "code2wav_decode"}:
+            assert timeline[index - 1] == "listener_admitted"
     assert metrics["compiled_talker_q1_calls"] == 1
     assert metrics["talker_q1_backend"] == "torch_compile_dynamic"
     assert metrics["listener_priority_dynamic_prefill_lock_hold_ms"] >= 0
@@ -499,6 +607,9 @@ def test_direct_v2_startup_warmup_uses_validated_say_text_and_only_say_hiddens(m
     engine._compiled_talker_q1 = None
     engine.talker_q1_compile_status = "disabled"
     engine.talker_q1_backend = "eager"
+    engine._talker_native_audio_q1_graph_requested = False
+    engine._talker_native_audio_q1_requested = False
+    engine._talker_compiled_decode_requested = False
 
     def _think(_prompt_ids, **kwargs):
         observed["think_kwargs"] = kwargs
@@ -540,6 +651,7 @@ def test_direct_v2_startup_warmup_uses_validated_say_text_and_only_say_hiddens(m
         assert kwargs["on_candidate_token"](0, "", True)
         return {
             "text": target,
+            "protocol_text": target,
             "hidden": torch.full((1, len(pieces), 1536), -99.0),
             "hidden_prompt_len": 4,
             "gen_ids": [tokenizer.encode(piece, add_special_tokens=False)[0] for piece in pieces],
@@ -586,6 +698,8 @@ def test_direct_v2_startup_warmup_uses_validated_say_text_and_only_say_hiddens(m
             "n_words": 1,
             "voice_conditioning": voice_profile,
             "min_frames": 4,
+                "frame_residual_response_hidden": None,
+                "frame_residual_response_texts": None,
         },
     )
     assert engine.direct_v2_audio_warmup_status == "complete"

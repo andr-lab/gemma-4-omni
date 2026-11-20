@@ -7,6 +7,7 @@ word/frame alignment or append text while a segment is running.
 """
 from __future__ import annotations
 
+from numbers import Integral
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -19,10 +20,6 @@ from duplex_kernel.response_intent import (
     RESPONSE_INTENT_PREFIX_CAPACITY,
     ResponseIntentProjector,
 )
-
-
-QWEN_ASSISTANT_PREFIX = "<|im_start|>assistant\n"
-QWEN_ASSISTANT_SUFFIX = "<|im_end|>\n<|im_start|>assistant\n"
 
 
 def build_token_char_spans(
@@ -79,55 +76,89 @@ def qwen_assistant_text_offsets(
     text: str,
     *,
     tokenizer: Any,
-    processor: Any,
+    processor: Any | None = None,
 ) -> tuple[list[int], list[tuple[int, int]]]:
-    """Return the exact ``[3:-5]`` Qwen raw-text IDs/offsets used in prefill."""
+    """Return direct Qwen text token IDs and character offsets for ``text``.
+
+    ``processor`` remains accepted for callers that already pass it, but the
+    text tokenization contract comes from the tokenizer call on ``text`` only.
+    """
     if not isinstance(text, str) or not text:
         raise ValueError("Qwen response text must be nonempty")
-    assistant_text = QWEN_ASSISTANT_PREFIX + text + QWEN_ASSISTANT_SUFFIX
-    encoded = tokenizer(assistant_text, return_offsets_mapping=True)
+
+    encoded = tokenizer(
+        text,
+        add_special_tokens=False,
+        return_offsets_mapping=True,
+    )
     input_ids = encoded.get("input_ids")
     offsets = encoded.get("offset_mapping")
     if input_ids is None or offsets is None:
-        raise ValueError("Qwen tokenizer must return input_ids and character offsets")
-    if input_ids and isinstance(input_ids[0], (list, tuple)):
-        if len(input_ids) != 1 or len(offsets) != 1:
-            raise ValueError("Qwen assistant text tokenization must be unbatched")
-        input_ids, offsets = input_ids[0], offsets[0]
-    ids = [int(value) for value in input_ids]
-    char_offsets = [(int(start), int(end)) for start, end in offsets]
-    if len(ids) != len(char_offsets) or len(ids) <= 8:
-        raise ValueError("Qwen assistant framing does not satisfy the pinned [3:-5] layout")
+        raise ValueError("Qwen tokenizer must return direct input_ids and character offsets")
 
-    # This is the same processor call used by TalkerModel.build_prefill_parts.
-    processor_result = processor(text=assistant_text, return_tensors="pt")
-    processor_ids = processor_result.get("input_ids")
-    if not isinstance(processor_ids, torch.Tensor) or processor_ids.ndim != 2 or processor_ids.shape[0] != 1:
-        raise ValueError("Qwen processor did not return one framed input_ids row")
-    if processor_ids[0].detach().cpu().tolist() != ids:
-        raise ValueError("Qwen offset tokenizer IDs differ from the live processor prefill IDs")
+    def to_python(value: Any) -> Any:
+        if isinstance(value, torch.Tensor):
+            return value.detach().cpu().tolist()
+        tolist = getattr(value, "tolist", None)
+        return tolist() if callable(tolist) else value
 
-    raw_ids = ids[3:-5]
-    raw_full_offsets = char_offsets[3:-5]
-    text_start = len(QWEN_ASSISTANT_PREFIX)
-    text_end = text_start + len(text)
-    raw_offsets: list[tuple[int, int]] = []
-    for start, end in raw_full_offsets:
-        clipped_start = max(start, text_start)
-        clipped_end = min(end, text_end)
-        if clipped_end <= clipped_start:
-            raise ValueError("Qwen raw-text token has no character overlap with h_txt")
-        raw_offsets.append((clipped_start - text_start, clipped_end - text_start))
-    if not raw_ids or len(raw_ids) != len(raw_offsets):
-        raise ValueError("Qwen raw-text token IDs and offsets are empty or misaligned")
+    raw_ids = to_python(input_ids)
+    raw_offsets = to_python(offsets)
+    if not isinstance(raw_ids, (list, tuple)) or not isinstance(raw_offsets, (list, tuple)):
+        raise ValueError("Qwen tokenizer input_ids and offsets must be sequences")
+    if raw_ids and isinstance(raw_ids[0], (list, tuple)):
+        if len(raw_ids) != 1:
+            raise ValueError("Qwen direct text tokenization must contain one sequence")
+        raw_ids = raw_ids[0]
+    if raw_offsets and isinstance(raw_offsets[0], (list, tuple)) and raw_offsets[0] and isinstance(
+        raw_offsets[0][0], (list, tuple)
+    ):
+        if len(raw_offsets) != 1:
+            raise ValueError("Qwen direct text offsets must contain one sequence")
+        raw_offsets = raw_offsets[0]
+
+    ids: list[int] = []
+    for value in raw_ids:
+        if isinstance(value, bool) or not isinstance(value, Integral):
+            raise ValueError("Qwen tokenizer returned a non-integer token ID")
+        ids.append(int(value))
+    char_offsets: list[tuple[int, int]] = []
+    for pair in raw_offsets:
+        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+            raise ValueError("Qwen tokenizer returned a malformed character offset")
+        start, end = pair
+        if (
+            isinstance(start, bool)
+            or isinstance(end, bool)
+            or not isinstance(start, Integral)
+            or not isinstance(end, Integral)
+        ):
+            raise ValueError("Qwen tokenizer character offsets must be integers")
+        start, end = int(start), int(end)
+        if not 0 <= start < end <= len(text):
+            raise ValueError("Qwen tokenizer returned a character offset outside direct text")
+        char_offsets.append((start, end))
+    if not ids or len(ids) != len(char_offsets):
+        raise ValueError("Qwen direct text token IDs and offsets are empty or misaligned")
+
+    # Byte-level tokenizers can assign the same character span to multiple
+    # tokens. Merge intervals to prove coverage without requiring disjoint spans.
+    cursor = 0
+    for start, end in sorted(char_offsets):
+        if start > cursor:
+            raise ValueError("Qwen direct text offsets do not cover every character")
+        cursor = max(cursor, end)
+    if cursor != len(text):
+        raise ValueError("Qwen direct text offsets do not cover every character")
+
     decoded = tokenizer.decode(
-        raw_ids,
+        ids,
         skip_special_tokens=False,
         clean_up_tokenization_spaces=False,
     )
     if decoded != text:
-        raise ValueError("Qwen [3:-5] raw text IDs do not reconstruct canonical h_txt")
-    return raw_ids, raw_offsets
+        raise ValueError("Qwen direct text token IDs do not reconstruct canonical h_txt")
+    return ids, char_offsets
 
 
 def align_hidden_states_by_char_overlap(
